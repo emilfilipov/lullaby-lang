@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt};
+use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -212,7 +212,29 @@ impl<'a> Runtime<'a> {
             ExprKind::Bool(value) => Ok(Value::Bool(*value)),
             ExprKind::String(value) => Ok(Value::String(value.clone())),
             ExprKind::Variable(name) => env.get(name),
+            ExprKind::Unary { op, expr } => {
+                let value = self.eval_expr(expr, env)?;
+                match op {
+                    UnaryOp::Not => Ok(Value::Bool(!value.as_bool()?)),
+                }
+            }
             ExprKind::Binary { left, op, right } => {
+                if *op == BinaryOp::And {
+                    let left = self.eval_expr(left, env)?.as_bool()?;
+                    if !left {
+                        return Ok(Value::Bool(false));
+                    }
+                    let right = self.eval_expr(right, env)?.as_bool()?;
+                    return Ok(Value::Bool(right));
+                }
+                if *op == BinaryOp::Or {
+                    let left = self.eval_expr(left, env)?.as_bool()?;
+                    if left {
+                        return Ok(Value::Bool(true));
+                    }
+                    let right = self.eval_expr(right, env)?.as_bool()?;
+                    return Ok(Value::Bool(right));
+                }
                 let left = self.eval_expr(left, env)?;
                 let right = self.eval_expr(right, env)?;
                 self.eval_binary(left, *op, right)
@@ -246,6 +268,7 @@ impl<'a> Runtime<'a> {
             BinaryOp::LessEqual => Ok(Value::Bool(left.as_i64()? <= right.as_i64()?)),
             BinaryOp::Greater => Ok(Value::Bool(left.as_i64()? > right.as_i64()?)),
             BinaryOp::GreaterEqual => Ok(Value::Bool(left.as_i64()? >= right.as_i64()?)),
+            BinaryOp::And | BinaryOp::Or => unreachable!("logical ops short-circuit in eval_expr"),
         }
     }
 
@@ -421,6 +444,18 @@ mod tests {
     fn runs_loop_break_and_continue() {
         let source = "fn main -> i64\n    let x i64 = 0\n    loop\n        x += 1\n        if x < 3\n            continue\n        break\n    x\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(3));
+    }
+
+    #[test]
+    fn runs_logical_expressions() {
+        let source = "fn main -> bool\n    not false and true or false\n";
+        assert_eq!(run_source(source).expect("run"), Value::Bool(true));
+    }
+
+    #[test]
+    fn short_circuits_logical_expressions() {
+        let source = "fn main -> bool\n    false and (1 / 0 == 0) or true\n";
+        assert_eq!(run_source(source).expect("run"), Value::Bool(true));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, TypeRef};
+use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, TypeRef, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticDiagnostic {
@@ -323,6 +323,23 @@ impl<'a> Checker<'a> {
                     None
                 }
             },
+            ExprKind::Unary { op, expr } => {
+                let expr_type = self.check_expr(expr, scope, function);
+                match op {
+                    UnaryOp::Not => {
+                        if expr_type.as_ref() == Some(&TypeRef::new("bool")) {
+                            Some(TypeRef::new("bool"))
+                        } else {
+                            self.diagnostics.push(SemanticDiagnostic::new(
+                                "N0319",
+                                "`not` operand must be bool",
+                                Some(function.name.clone()),
+                            ));
+                            None
+                        }
+                    }
+                }
+            }
             ExprKind::Binary { left, op, right } => {
                 let left_type = self.check_expr(left, scope, function);
                 let right_type = self.check_expr(right, scope, function);
@@ -353,6 +370,20 @@ impl<'a> Checker<'a> {
                             self.diagnostics.push(SemanticDiagnostic::new(
                                 "N0308",
                                 "comparison operands must have the same type",
+                                Some(function.name.clone()),
+                            ));
+                            None
+                        }
+                    }
+                    BinaryOp::And | BinaryOp::Or => {
+                        if left_type.as_ref() == Some(&TypeRef::new("bool"))
+                            && right_type.as_ref() == Some(&TypeRef::new("bool"))
+                        {
+                            Some(TypeRef::new("bool"))
+                        } else {
+                            self.diagnostics.push(SemanticDiagnostic::new(
+                                "N0320",
+                                "logical operands must both be bool",
                                 Some(function.name.clone()),
                             ));
                             None
@@ -526,6 +557,12 @@ mod tests {
     }
 
     #[test]
+    fn validates_logical_expressions() {
+        let source = "fn main -> bool\n    not false and true or false\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
     fn non_void_function_rejects_empty_return() {
         let diagnostics = validate_source("fn bad -> i64\n    return\n").expect_err("semantic");
         assert_eq!(diagnostics[0].code, "N0304");
@@ -573,6 +610,17 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "N0317")
+        );
+    }
+
+    #[test]
+    fn catches_invalid_logical_operand() {
+        let diagnostics =
+            validate_source("fn bad -> bool\n    1 and true\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0320")
         );
     }
 }

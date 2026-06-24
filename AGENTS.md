@@ -71,6 +71,7 @@ Once Rust code exists:
 - Keep fixture-based tests for lexer/parser/type-checker/diagnostics deterministic.
 - Add integration tests for end-to-end `.nl` source through parse, semantic validation, runtime/backend execution, stdout/stderr capture, and exit code.
 - Do not call work complete until relevant tests and documentation checks have run or the reason they could not run is documented.
+- Run `python offline_docs/verify_offline_docs.py` when the offline browser docs exist and user-facing language behavior, examples, CLI usage, diagnostics, installer docs, or the offline docs artifact changes.
 
 ## Git And GitHub Rules
 

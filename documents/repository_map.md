@@ -11,6 +11,7 @@ This file maps the repository layout and explains where to find core information
 - `crates/`: Rust implementation crates.
 - `tests/`: shared `.nl` fixtures used by crate and CLI tests.
 - `documents/`: core language documents and planning material.
+- `offline_docs/`: self-contained browser documentation bundle that can be opened directly from disk.
 
 ## Documents
 
@@ -26,15 +27,20 @@ This file maps the repository layout and explains where to find core information
 - `documents/nous_lang_compilation_architecture.md`: compiler architecture from tokenization through semantic analysis, IR, optimization, code generation, linking, and binary verification.
 - `documents/repository_map.md`: this file. Use it as the first navigation aid and update it with repository changes.
 
+## Offline Browser Docs
+
+- `offline_docs/index.html`: local browser entry point for alpha user documentation. It must remain self-contained with no server, CDN, remote fonts, or internet dependency.
+- `offline_docs/verify_offline_docs.py`: deterministic verifier for the offline docs entry point, required sections, required alpha topics, local anchors, and lack of remote dependencies.
+
 ## Source Layout
 
 The implementation is a Rust workspace. Unless changed by an explicit architecture decision, keep this layout:
 
 - `crates/nous_lexer/`: source extension validation, tokenization, indentation scanning, forbidden brace/semicolon diagnostics, core keyword recognition, and lexical tests.
-- `crates/nous_parser/`: AST model and parser for function declarations, typed parameters, return types, indentation blocks, `let`, assignment, `return`, `break`, `continue`, if/elif/else, while/loop, calls, literals, variables, arithmetic, and comparison expressions.
-- `crates/nous_semantics/`: static validation for duplicate declarations, local binding types, assignment targets/types, function call arity/types, return behavior, bool conditions, loop-control placement, expression operand types, and interim pointer-style memory builtins.
+- `crates/nous_parser/`: AST model and parser for function declarations, typed parameters, return types, indentation blocks, `let`, assignment, `return`, `break`, `continue`, if/elif/else, while/loop, calls, literals, variables, arithmetic, comparison, and logical expressions.
+- `crates/nous_semantics/`: static validation for duplicate declarations, local binding types, assignment targets/types, function call arity/types, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical expression operand types, and interim pointer-style memory builtins.
 - `crates/nous_ir/`: placeholder IR lowering crate for the future semantic IR schema.
-- `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop execution, break/continue, arithmetic/comparison expressions, and `alloc`/`load`/`dealloc` heap-slot memory builtins.
+- `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop execution, break/continue, arithmetic/comparison/logical expressions with short-circuiting, and `alloc`/`load`/`dealloc` heap-slot memory builtins.
 - `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check <file.nl>` and `run <file.nl>`.
 - `crates/nous_cli/tests/`: binary-level integration tests for the CLI pipeline, including valid checks, runtime execution, lexical errors, and semantic errors.
 - `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend and CLI.
@@ -50,10 +56,13 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_memory.nl`: run the current memory builtin fixture through `alloc`, `load`, and `dealloc`.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_while.nl`: run assignment plus while-loop execution.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_loop.nl`: run infinite-loop execution with break/continue.
+- `cargo run -p nous_cli -- run tests/fixtures/valid/run_logic.nl`: run boolean logic with `and`, `or`, and `not`.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/brace.nl`: verify forbidden block delimiter diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/type_mismatch.nl`: verify semantic type mismatch diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/assignment_type_mismatch.nl`: verify assignment type mismatch diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/break_outside_loop.nl`: verify loop-control placement diagnostics.
+- `cargo run -p nous_cli -- check tests/fixtures/invalid/logical_type_mismatch.nl`: verify logical operand type diagnostics.
+- `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point.
 
 ## Planning And Tracking
 

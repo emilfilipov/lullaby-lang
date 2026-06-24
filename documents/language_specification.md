@@ -24,7 +24,7 @@ The current Rust toolchain implements a small executable subset while the wider 
 - Existing local bindings can be updated with `name = expression` or numeric compound assignments `+=`, `-=`, `*=`, and `/=`.
 - Implemented scalar types are `i64`, `bool`, `string`, and `void`.
 - The current pointer spelling is an interim concrete type name such as `ptr_i64`.
-- Implemented expressions include literals, variables, function calls with parentheses, arithmetic, comparisons, and grouped expressions.
+- Implemented expressions include literals, variables, function calls with parentheses, arithmetic, comparisons, logical operators `and`/`or`/`not`, and grouped expressions.
 - Implemented control flow is `if`/`elif`/`else`, `while`, `loop`, `break`, and `continue` with indentation-only bodies.
 - Implemented memory builtins are `alloc(value)`, `load(ptr)`, and `dealloc(ptr)`.
 - CLI commands are `nlang check <file.nl>` and `nlang run <file.nl>` through the Rust workspace.
@@ -171,7 +171,7 @@ none  // Represents absence of value
 
 **Arithmetic**: `+ - * / % ^ //`
 **Comparison**: `== != < > <= >= is_none is_defined`
-**Logical**: `and or not xor`
+**Logical**: `and or not`; `xor` is planned.
 **Assignment**: `+= -= *= /= ^= +=` (compound operators)
 **Bitwise**: `& | ^ << >> inv(x)`
 **Functional**: `map reduce fold select min max avg sum mode`
@@ -381,6 +381,12 @@ fn main -> i64
     while value < 4
         value += 1
     value
+```
+
+### Boolean Logic
+```nlang
+fn main -> bool
+    not false and true or false
 ```
 
 ```nlang

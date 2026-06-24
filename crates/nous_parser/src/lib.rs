@@ -96,6 +96,10 @@ pub enum ExprKind {
     Bool(bool),
     String(String),
     Variable(String),
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
     Binary {
         left: Box<Expr>,
         op: BinaryOp,
@@ -105,6 +109,11 @@ pub enum ExprKind {
         name: String,
         args: Vec<Expr>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +128,8 @@ pub enum BinaryOp {
     LessEqual,
     Greater,
     GreaterEqual,
+    And,
+    Or,
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
@@ -604,6 +615,16 @@ impl<'a> ExprParser<'a> {
                 kind: ExprKind::Bool(false),
                 span: token.span,
             }),
+            TokenKind::Keyword(Keyword::Not) => {
+                let expr = self.parse_primary()?;
+                Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(expr),
+                    },
+                    span: token.span,
+                })
+            }
             TokenKind::Identifier(name) => {
                 if self.eat_symbol("(") {
                     let mut args = Vec::new();
@@ -655,22 +676,24 @@ impl<'a> ExprParser<'a> {
     }
 
     fn peek_binary_op(&self) -> Option<(BinaryOp, u8)> {
-        let TokenKind::Symbol(symbol) = &self.peek()?.kind else {
-            return None;
-        };
-        Some(match symbol.as_str() {
-            "==" => (BinaryOp::Equal, 1),
-            "!=" => (BinaryOp::NotEqual, 1),
-            "<" => (BinaryOp::Less, 1),
-            "<=" => (BinaryOp::LessEqual, 1),
-            ">" => (BinaryOp::Greater, 1),
-            ">=" => (BinaryOp::GreaterEqual, 1),
-            "+" => (BinaryOp::Add, 2),
-            "-" => (BinaryOp::Subtract, 2),
-            "*" => (BinaryOp::Multiply, 3),
-            "/" => (BinaryOp::Divide, 3),
-            _ => return None,
-        })
+        match &self.peek()?.kind {
+            TokenKind::Keyword(Keyword::Or) => Some((BinaryOp::Or, 1)),
+            TokenKind::Keyword(Keyword::And) => Some((BinaryOp::And, 2)),
+            TokenKind::Symbol(symbol) => Some(match symbol.as_str() {
+                "==" => (BinaryOp::Equal, 3),
+                "!=" => (BinaryOp::NotEqual, 3),
+                "<" => (BinaryOp::Less, 3),
+                "<=" => (BinaryOp::LessEqual, 3),
+                ">" => (BinaryOp::Greater, 3),
+                ">=" => (BinaryOp::GreaterEqual, 3),
+                "+" => (BinaryOp::Add, 4),
+                "-" => (BinaryOp::Subtract, 4),
+                "*" => (BinaryOp::Multiply, 5),
+                "/" => (BinaryOp::Divide, 5),
+                _ => return None,
+            }),
+            _ => None,
+        }
     }
 
     fn eat_symbol(&mut self, symbol: &str) -> bool {
@@ -751,6 +774,14 @@ mod tests {
         let tokens = lex(source).expect("lex");
         let program = parse(&tokens).expect("parse");
         assert!(matches!(program.functions[0].body[0], Stmt::Loop { .. }));
+    }
+
+    #[test]
+    fn parses_logical_expressions() {
+        let source = "fn main -> bool\n    not false and true or false\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert!(matches!(program.functions[0].body[0], Stmt::Expr(_)));
     }
 
     #[test]

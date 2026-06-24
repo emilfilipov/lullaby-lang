@@ -45,6 +45,7 @@ Current rules:
 - `let` bindings introduced inside an indented block are scoped to that block.
 - Assignments update an existing binding in the nearest enclosing scope.
 - Numeric compound assignment supports `+=`, `-=`, `*=`, and `/=` for `i64`.
+- Boolean logic supports `and`, `or`, and unary `not`. `and` and `or` short-circuit during runtime execution.
 
 ## Control Structure Keywords
 

@@ -11,13 +11,14 @@ Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 The repository now contains the first executable alpha slice:
 
 - `nous_lexer`: validates `.nl` source paths, tokenizes source text, emits indentation/dedent tokens, recognizes the current core keywords, and rejects curly braces and semicolon terminators.
-- `nous_parser`: parses function declarations, typed parameters, return types, indentation-based bodies, `let` bindings, assignment, `return`, `break`, `continue`, expression statements, calls, arithmetic/comparison expressions, `if`/`elif`/`else`, `while`, and `loop` blocks into a structured AST.
-- `nous_semantics`: performs static checks for duplicate declarations, binding initializer types, assignment target/type validity, function call argument counts/types, return values, bool conditions, loop-control placement, arithmetic/comparison operands, and the first pointer-style memory builtins.
-- `nous_runtime`: executes the validated AST in-process, including `main`, function calls, scoped locals, assignment, if/else branch values, while/infinite loops, break/continue, arithmetic/comparison expressions, and `alloc`/`load`/`dealloc` heap slots.
+- `nous_parser`: parses function declarations, typed parameters, return types, indentation-based bodies, `let` bindings, assignment, `return`, `break`, `continue`, expression statements, calls, arithmetic/comparison/logical expressions, `if`/`elif`/`else`, `while`, and `loop` blocks into a structured AST.
+- `nous_semantics`: performs static checks for duplicate declarations, binding initializer types, assignment target/type validity, function call argument counts/types, return values, bool conditions, loop-control placement, arithmetic/comparison/logical operands, and the first pointer-style memory builtins.
+- `nous_runtime`: executes the validated AST in-process, including `main`, function calls, scoped locals, assignment, if/else branch values, while/infinite loops, break/continue, arithmetic/comparison/logical expressions, and `alloc`/`load`/`dealloc` heap slots.
 - `nous_cli`: exposes `nlang check <file.nl>` and `nlang run <file.nl>` through Cargo.
 - `nous_ir`: placeholder crate for the future semantic IR schema and lowering pipeline.
 - `tests/fixtures`: valid and invalid `.nl` fixtures for frontend, semantic, runtime, and CLI smoke checks.
 - `crates/nous_cli/tests`: integration tests that run the compiled CLI binary end to end.
+- `offline_docs`: first self-contained offline browser documentation entry point plus a verifier for required alpha sections and local-only links/assets.
 
 ## Epic 1: Core Toolchain Implementation (Compiler & Runtime)
 *Objective: Implement the core components defined by our design docs to parse, analyze, and execute nlang code.*
@@ -25,7 +26,7 @@ The repository now contains the first executable alpha slice:
 | Story | Description | Dependencies | Estimated Effort | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **1.1** | **Lexer & Parser Implementation:** Implement the core components to read raw nlang source code and convert it into an Abstract Syntax Tree (AST). | `nous_lang_syntax_design.md` | High | Alpha functions/expressions/conditionals/loops done; ongoing for full language |
-| **1.2** | **Type System Integration:** Implement the type checker based on `nous_lang_type_system.md`. Ensure all AST nodes are correctly typed and checked before execution. | `nous_lang_type_system.md` | High | Alpha scalar/call/assignment/control-flow checks done; ongoing for full language |
+| **1.2** | **Type System Integration:** Implement the type checker based on `nous_lang_type_system.md`. Ensure all AST nodes are correctly typed and checked before execution. | `nous_lang_type_system.md` | High | Alpha scalar/call/assignment/control-flow/logical checks done; ongoing for full language |
 | **1.3** | **Memory System Implementation:** Implement the memory allocator/deallocator based on `nous_lang_memory_management.md`. Ensure ARC and explicit allocation work correctly in the runtime environment. | `nous_lang_memory_management.md` | High | Initial heap-slot builtins done; ARC/regions pending |
 | **1.4** | **Runtime Execution Engine:** Implement the core execution loop that traverses the AST, manages memory, resolves types, and executes nlang instructions. | All previous steps | Critical | Alpha AST runtime with loops done; native backend pending |
 
@@ -34,11 +35,11 @@ The repository now contains the first executable alpha slice:
 
 | Story | Description | Dependencies | Estimated Effort | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **1.5.1** | **Documentation Information Architecture:** Define the offline documentation structure, navigation, entry page, and content ownership for overview, quick start, installation/setup, syntax reference, type system, memory model, control flow, examples, CLI usage, diagnostics, current limitations, and roadmap. | `language_specification.md`, `repository_map.md` | Medium | To Do |
-| **1.5.2** | **Static HTML Documentation Generator:** Create a local build path that turns canonical Markdown/source documentation into a self-contained HTML bundle with no required network access, CDN, external fonts, or development server. | 1.5.1 | High | To Do |
-| **1.5.3** | **Offline Documentation Content Pass:** Bring the offline docs up to parity with the current language alpha: `.nl`, indentation-only blocks, functions, returns, `let`, assignment, control flow, memory builtins, CLI `check`/`run`, examples, and diagnostics. | 1.5.1, 1.5.2, Epic 1 | High | To Do |
+| **1.5.1** | **Documentation Information Architecture:** Define the offline documentation structure, navigation, entry page, and content ownership for overview, quick start, installation/setup, syntax reference, type system, memory model, control flow, examples, CLI usage, diagnostics, current limitations, and roadmap. | `language_specification.md`, `repository_map.md` | Medium | Initial local entry structure done; ongoing |
+| **1.5.2** | **Static HTML Documentation Generator:** Create a local build path that turns canonical Markdown/source documentation into a self-contained HTML bundle with no required network access, CDN, external fonts, or development server. | 1.5.1 | High | Manual self-contained HTML v0 done; generator pending |
+| **1.5.3** | **Offline Documentation Content Pass:** Bring the offline docs up to parity with the current language alpha: `.nl`, indentation-only blocks, functions, returns, `let`, assignment, control flow, memory builtins, CLI `check`/`run`, examples, and diagnostics. | 1.5.1, 1.5.2, Epic 1 | High | Alpha content v0 done; keep synchronized with Epic 1 |
 | **1.5.4** | **Executable Example Sync:** Ensure examples shown in the offline docs are backed by fixtures or tests when they claim to work, and clearly mark future/planned syntax that is not yet accepted by the compiler. | 1.5.3, Epic 5 | High | To Do |
-| **1.5.5** | **Offline Docs Verification:** Add checks that verify the generated HTML entry point exists, local links resolve, required sections are present, and the bundle can be opened from disk without missing assets. | 1.5.2, 1.5.3 | Medium | To Do |
+| **1.5.5** | **Offline Docs Verification:** Add checks that verify the generated HTML entry point exists, local links resolve, required sections are present, and the bundle can be opened from disk without missing assets. | 1.5.2, 1.5.3 | Medium | Initial verifier done |
 | **1.5.6** | **Installer Bundle Integration:** Prepare the offline docs output for packaging with the future toolchain installer and document where the installer should place the local entry page. | Epic 3, Epic 4 | Medium | To Do |
 
 ## Epic 2: System Integration & I/O Layer
