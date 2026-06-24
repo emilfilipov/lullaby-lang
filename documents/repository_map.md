@@ -5,7 +5,11 @@ This file maps the repository layout and explains where to find core information
 ## Root
 
 - [AGENTS.md](../AGENTS.md): operating guide for agents and contributors. Defines workflow, documentation rules, MCP/ClickUp/GitHub usage, testing expectations, Git rules, and where to find core language information.
+- `Cargo.toml`: Rust workspace manifest for the Nous Lang compiler/toolchain crates.
 - `.gitignore`: ignores local build outputs, caches, editor state, and generated artifacts once implementation begins.
+- `.gitattributes`: normalizes repository text files to LF line endings.
+- `crates/`: Rust implementation crates.
+- `tests/`: shared `.nl` fixtures and future integration tests.
 - `documents/`: core language documents and planning material.
 
 ## Documents
@@ -22,18 +26,26 @@ This file maps the repository layout and explains where to find core information
 - `documents/nous_lang_compilation_architecture.md`: compiler architecture from tokenization through semantic analysis, IR, optimization, code generation, linking, and binary verification.
 - `documents/repository_map.md`: this file. Use it as the first navigation aid and update it with repository changes.
 
-## Planned Source Layout
+## Source Layout
 
-The implementation has not been created yet. Unless changed by an explicit architecture decision, use this layout when starting Rust implementation work:
+The implementation is a Rust workspace. Unless changed by an explicit architecture decision, keep this layout:
 
-- `crates/nous_lexer/`: source loading, tokenization, indentation scanning, and lexical diagnostics.
-- `crates/nous_parser/`: AST model and parser for declarations, expressions, statements, and control flow.
-- `crates/nous_semantics/`: symbol tables, type checking, memory analysis, and semantic diagnostics.
-- `crates/nous_ir/`: semantic IR schema, lowering, validation, and debug serialization.
-- `crates/nous_runtime/`: runtime execution prototype, memory APIs, I/O adapters, and error propagation.
-- `crates/nous_cli/`: `nlang` command-line interface for `check`, `run`, `build`, `fmt`, `test`, and version reporting.
-- `tests/fixtures/`: `.nl` source fixtures and expected outputs/diagnostics.
-- `tests/integration/`: end-to-end tests from source through parse, semantic validation, runtime/backend execution, and output capture.
+- `crates/nous_lexer/`: source extension validation, tokenization, indentation scanning, forbidden brace/semicolon diagnostics, and lexical tests.
+- `crates/nous_parser/`: AST model and parser for the first supported declarations, statements, indentation blocks, and expression lines.
+- `crates/nous_semantics/`: early semantic validation, currently including non-void function return-path checks.
+- `crates/nous_ir/`: placeholder IR lowering crate for the future semantic IR schema.
+- `crates/nous_runtime/`: placeholder runtime planning crate for the future execution engine.
+- `crates/nous_cli/`: `nlang` command-line interface. Current command: `check <file.nl>`.
+- `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend and CLI.
+- `tests/fixtures/invalid/`: invalid source fixtures for diagnostics and negative tests.
+- `tests/integration/`: reserved for end-to-end tests from source through parse, semantic validation, runtime/backend execution, and output capture.
+
+## Current Commands
+
+- `cargo fmt --check`: formatting check.
+- `cargo test --all`: unit tests for all crates.
+- `cargo run -p nous_cli -- check tests/fixtures/valid/add.nl`: check a valid fixture through source validation, lexing, parsing, and semantic validation.
+- `cargo run -p nous_cli -- check tests/fixtures/invalid/brace.nl`: verify forbidden block delimiter diagnostics.
 
 ## Planning And Tracking
 

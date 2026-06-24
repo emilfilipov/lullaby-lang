@@ -1,4 +1,4 @@
-﻿# Nous Lang Error Handling Documentation
+# Nous Lang Error Handling Documentation
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 

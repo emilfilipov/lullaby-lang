@@ -1,4 +1,4 @@
-﻿# Control Structures and Operators for Nous Lang (nlang)
+# Control Structures and Operators for Nous Lang (nlang)
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
@@ -23,7 +23,6 @@ Nous Lang uses:
 ```nlang
 # Basic conditional with indentation-based blocks
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 if condition_true:
     execute_if_true()
 else:
@@ -31,7 +30,6 @@ else:
 
 # Multiple conditions without nesting braces
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 if cond1:
     action_a()
 elif cond2:
@@ -55,26 +53,22 @@ else:
 ```nlang
 # Simple range iteration
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 for i from start to end:
     process_item(i)
 
 # Step control (default step is 1)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 for i from 0 to 100 by 5:
     step(i, 5)
 
 # While-style loop with explicit condition
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 while condition_active:
     perform_action()
     update_state()
 
 # Infinite loop with break/continue
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 loop:
     check_state()
     if is_done:

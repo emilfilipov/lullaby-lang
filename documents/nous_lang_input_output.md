@@ -1,4 +1,4 @@
-﻿# Input/Output and Concurrency for Nous Lang (nlang)
+# Input/Output and Concurrency for Nous Lang (nlang)
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
@@ -16,17 +16,14 @@ Nous Lang uses a simplified file I/O model that eliminates unnecessary boilerpla
 ```nlang
 # Read entire file into string
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 content = io.read("path/to/file.txt")
 
 # Read file with specified line limit
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 lines = io.readlines("path/to/file.txt", max_lines=100)
 
 # Stream reading (chunked processing)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 stream = io.open("path/to/file.bin", mode="r")
 while stream.has_more():
     chunk = stream.read_chunk(size=4096)
@@ -35,7 +32,6 @@ end_stream
 
 # Read file with type inference
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 data = io.read_type("config.dat", target_type=config_struct)
 ```
 
@@ -43,22 +39,18 @@ data = io.read_type("config.dat", target_type=config_struct)
 ```nlang
 # Write string to file
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io.write("output.txt", "Hello, World!")
 
 # Append to existing file
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io.append("log.txt", "Entry at [timestamp]")
 
 # Write binary data
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io.write_binary("image.bin", raw_bytes)
 
 # Atomic write (write then replace safely)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io.atomic_write("config.json", new_config_data)
 ```
 
@@ -66,21 +58,17 @@ io.atomic_write("config.json", new_config_data)
 ```nlang
 # Get file metadata
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 meta = io.stat("path/to/file")
 # Returns: size, modified_time, created_time, permissions, owner
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 # Check if file exists
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 if io.exists("config.ini"):
     load_default_settings()
 
 # Read directory contents
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 files = io.list_dir("data/", recursive=true)
 for file in files:
     process_file(file.name)
@@ -91,7 +79,6 @@ for file in files:
 ```nlang
 # Input stream (keyboard/stdin)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 input_stream = io.stdin
 while input_stream.has_more():
     line = input_stream.readline()
@@ -99,7 +86,6 @@ while input_stream.has_more():
 
 # Output stream (terminal/stdout)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io.stdout.print("Processing...")
 io.stderr.warn("Warning: low memory")
 io.println(message)  # Line terminator included
@@ -111,7 +97,6 @@ For large file processing without loading entirely into memory:
 ```nlang
 # Create memory-mapped region for file access
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 mm_file = io.memory_map("large_dataset.dat", size=1024*1024)
 
 region mm_processing allocate
@@ -137,17 +122,14 @@ Nous Lang provides lightweight concurrency primitives optimized for both perform
 ```nlang
 # Create new thread with function reference
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 thread worker = spawn_thread(worker_function, arguments)
 
 # Wait for thread completion
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 result = wait(thread)
 
 # Thread synchronization
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 thread sync = create_mutex_sync()
 lock(sync)
     shared_resource.modify()
@@ -156,7 +138,6 @@ end_lock
 
 # Multiple threads coordination
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 sync_pool = create_thread_pool(size=4)
 for i from 0 to num_tasks:
     task_data[i] = submit_task(sync_pool, task_function, params[i])
@@ -168,24 +149,20 @@ results = collect_task_results(sync_pool)
 ```nlang
 # Spawn subprocess with command
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 process child = spawn_command("make", args=["clean"])
 status = wait_process(child)
 
 # Capture subprocess output
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 child_output = read_stream(process.stdout)
 error_output = read_stream(process.stderr)
 
 # Forward process output to file
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 pipe_to_file(process.stdout, "output.log")
 
 # Check process exit code
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 if status.exit_code == 0:
     success_report()
 else:
@@ -199,7 +176,6 @@ Simple await/async pattern without complexity:
 ```nlang
 # Define async function
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 async def fetch_data(url):
     response = await http_get(url)
     if response.status == 200:
@@ -210,7 +186,6 @@ async def fetch_data(url):
 
 # Use async function with await keyword
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 async def main():
     results = []
 
@@ -236,12 +211,10 @@ Efficient handling of multiple I/O operations:
 ```nlang
 # Create I/O event set
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io_events = create_io_multiplexer(file_handles, socket_handles)
 
 # Process events with timeout
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 while io_events.has_pending():
     ready_events = io_events.wait(timeout_ms=100)
 
@@ -264,13 +237,11 @@ end_while
 ```nlang
 # Create shared memory region
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 shared_mem = create_shared_memory(size=1MB, name="data_pool")
 shared_data = shared_mem.data_view()
 
 # Multiple processes can access same memory safely
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 region process_a allocate
     local_ptr = get_pointer(shared_mem, offset)
     process_a_access(local_ptr)
@@ -286,19 +257,16 @@ end_region
 ```nlang
 # Create message queue
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 msg_queue = create_message_channel(name="task_messages")
 max_size = 1024
 
 # Send message to queue
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 message = create_message(type=TASK, payload=data)
 send_to_queue(msg_queue, message)
 
 # Receive messages from queue
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 received = receive_from_queue(msg_queue, timeout_ms=500)
 if received:
     process_message(received.content)
@@ -308,18 +276,15 @@ if received:
 ```nlang
 # Create TCP socket
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 socket client = io.socket_create(AF_INET, SOCK_STREAM)
 status = connect(client, server_ip, port)
 
 # Send data through socket
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 sent_bytes = send(client, request_data)
 
 # Receive response from socket
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 response = receive(client, max_size=4096)
 if is_valid(response):
     result = parse_response(response)
@@ -327,7 +292,6 @@ end_if
 
 # Close socket properly
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 client.close()
 ```
 
@@ -336,17 +300,14 @@ client.close()
 ```nlang
 # Thread-local message passing
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 thread_local_queue = create_thread_channel(thread_a, thread_b)
 
 # Send from one thread to another
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 send_to_peer(thread_a.queue, data_message)
 
 # Receive in receiving thread
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 received_msg = receive_from_peer(thread_b.queue, timeout_ms=100)
 process_message(received_msg)
 ```
@@ -357,7 +318,6 @@ process_message(received_msg)
 ```nlang
 # Automatic buffering for sequential operations
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 stream_buffered = io.open("large_file.dat", buffered=true)
 
 region large_processing allocate
@@ -386,7 +346,6 @@ end_region
 ```nlang
 # Divide work among multiple threads
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 task_distribution = partition_work(total_data, num_workers=4)
 
 parallel_threads(4):
@@ -401,7 +360,6 @@ final_result = merge_results(results)
 ```nlang
 # Create processing pipeline stages
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 pipeline = create_pipeline(
     stage1=input_validator,
     stage2=data_transformer,
@@ -410,7 +368,6 @@ pipeline = create_pipeline(
 
 # Execute pipeline with streaming I/O
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 stream input_data from source:
     validated = pipeline.process(input_data)
 
@@ -428,7 +385,6 @@ end_stream
 ```nlang
 # Load only necessary data portions
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 lazy_loader = create_lazy_file_loader("large_dataset.dat")
 
 region streaming_processing allocate

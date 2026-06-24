@@ -1,4 +1,4 @@
-﻿# Nous Lang (nlang) - Type System
+# Nous Lang (nlang) - Type System
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
@@ -146,13 +146,11 @@ Functions treated as first-class types with explicit signatures:
 ```nlang
 # Basic function type signature
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 fn<int32, int32> -> int32             # takes two ints, returns int
 fn(string) -> bool                   # string input, boolean output
 
 # With named parameters
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 fn ProcessImage(
     image: ref<Text>,
     quality: float64 = 0.8,
@@ -234,7 +232,6 @@ Type synonyms without memory overhead:
 type struct pixel r: uint8, g: uint8, b: uint8
 # 'pixel' becomes alias for the full Point RGB structure
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 use_pixel(p)          # treated as use_Point() semantically
 ```
@@ -261,28 +258,24 @@ Errors detected before runtime execution:
 let x: int32 = "text"
 # ERROR: Cannot assign string to integer type
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 // Uninitialized reference error
 var ptr: ptr<int32>*
 use ptr.load()
 # ERROR: ptr not allocated (null pointer)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 // Struct field access error
 struct Point  x: float64; y: float64
 p.invalid_field = 1.0
 # ERROR: Field 'invalid_field' not in struct 'Point'
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 // Array bounds violation
 arr: array(5)
 unsafe_read(arr, 10)
 # ERROR: Index 10 >= array length 5 (in unchecked mode only)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```
 
 ### Runtime Safety

@@ -1,0 +1,7 @@
+[package]
+name = "nous_ir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nous_parser = { path = "../nous_parser" }

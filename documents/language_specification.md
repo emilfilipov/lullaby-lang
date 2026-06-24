@@ -1,4 +1,4 @@
-﻿# Nous Lang (nlang) - Complete Language Specification
+# Nous Lang (nlang) - Complete Language Specification
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
@@ -36,12 +36,16 @@ name               // Type inferred from context
 
 **Functions**:
 ```nlang
-def function_name(params):
-    return statement
-end_function
+fn add x i64 y i64 -> i64
+    x + y
+
+fn log message string -> void
+    io.println message
 ```
 
 **Indentation-based Scoping**: Blocks defined by indentation levels only, no braces needed.
+
+**Return Rule**: A non-void function returns the last reachable expression unless an explicit `return` exits earlier. A `void` function returns no value and may use bare `return` for early exit.
 
 ### 2. Memory Management (See: `nous_lang_memory_management.md`)
 
@@ -129,25 +133,21 @@ Efficient systems programming primitives:
 ```nlang
 # Boolean values
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 false, true
 
 # Numeric literals
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 integer: 0, -123, +456
 float: 3.14159, 2.71828
 
 # String literals
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 "hello world"
 'single quotes also supported'
 """multi-line strings"""
 
 # None/null (no pointer dereferencing needed)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 none  // Represents absence of value
 ```
 
@@ -176,16 +176,18 @@ end_switch
 
 ### Functions
 ```nlang
-def function_name(params):
-    # Code statements
-    return result_value
+fn function_name param Type -> ReturnType
+    # final expression is returned
+    result_value
 
-end_function
-# or simply:
+fn function_with_early_return value i64 -> i64
+    if value < 0
+        return 0
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
-function_name(params) -> result_type:
-    # Code statements
+    value
+
+fn side_effect message string -> void
+    io.println message
 ```
 
 ### Structs and Objects
@@ -234,7 +236,6 @@ io.write(path, data)  // Write to file
 
 # Memory-mapped files
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 io.memory_map(path, size)
 mm_data = mm_file.data_pointer
 ```

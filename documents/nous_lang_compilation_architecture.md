@@ -1,4 +1,4 @@
-﻿# Nous Lang Compilation Architecture Documentation
+# Nous Lang Compilation Architecture Documentation
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 

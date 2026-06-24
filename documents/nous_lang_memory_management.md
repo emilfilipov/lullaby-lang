@@ -1,4 +1,4 @@
-﻿# Nous Lang Memory Management System
+# Nous Lang Memory Management System
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
@@ -38,7 +38,6 @@ Memory in nlang is organized into distinct regions, each with specific propertie
 ```nlang
 # Region definition syntax
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 region [NAME]: size=SIZE, align=ALIGN [optional]
 ```
 
@@ -79,17 +78,14 @@ end_region
 ```nlang
 # Via region identifier
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 access region_buffers[0x100]
 
 # Via variable address (compiler tracks addresses automatically)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 addr(my_var)  # Returns memory address of variable
 
 # Pointer dereferencing
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ptr_x = data[i]
 value = deref(ptr_x)
 ```
@@ -127,7 +123,6 @@ Regions that can grow/shrink based on runtime conditions:
 region dynamic_buffer: size=1024
 # Can be resized at any point
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 buffer_size = 8192
 resize(dynamic_buffer, buffer_size)
 ```
@@ -149,7 +144,6 @@ func process_data(data: array[float]) -> float
 
 # All variables declared with 'let' or 'var' are stack-allocated
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```
 
 #### Stack Frame Structure
@@ -183,13 +177,11 @@ Automatic heap usage tracking with periodic compaction:
 ```nlang
 # Objects implicitly go to heap when declared without region scope
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 user_profile [Profile]
     name: string
     age: int
 # Compiler marks this for automatic garbage collection
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```
 
 ---
@@ -216,16 +208,12 @@ func process() -> result
 
 # Memory cleanup happens automatically when:
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 # - Function exits
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 # - Control flow leaves block scope
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 # - Region explicitly deallocated (region free command)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```
 
 #### Lifetime Categories
@@ -238,21 +226,18 @@ Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```nlang
 # Explicit region deallocation
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 region temp_buffer: size=1024
     # ... use buffer ...
 free temp_buffer  # Deallocates entire region immediately
 
 # Implicit variable cleanup (scope exit)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 for i from 0 to 10 do
     local_i = i  # Cleanup when loop exits or end_for reached
 end_for
 
 # Explicit object reference clearing
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ref obj = alloc(MyObject)
 obj.process()
 clear ref obj  # Marks as unreachable for GC
@@ -275,7 +260,6 @@ Background collection during program execution:
 ```nlang
 # Enable GC for modules marked with gc directive
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 @gc module data_processor
     # Objects created here are automatically collected
 ```
@@ -298,7 +282,6 @@ Handles pointer inference automatically (important for languages without explici
 ```nlang
 # Compiler marks pointers, conservatively assumes object references
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 @gc conservative module mixed_types:
     # Can collect even if type information is incomplete
 ```
@@ -308,12 +291,10 @@ Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```nlang
 # Force immediate garbage collection
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 force_gc()
 
 # Query heap statistics
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 heap_stats
     total_allocated: 45 MB
     live_objects: 12,345
@@ -329,7 +310,6 @@ heap_stats
 ```nlang
 # Array access with automatic bounds checking
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 for i from 0 to len(arr) do
     value = arr[i]  # Compiler generates bounds check, optimizes away in safe contexts
 
@@ -340,7 +320,6 @@ end_for
 
 # Pointer dereference validation
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ptr_val = deref(ptr_x)
 if ptr_null(ptr_x) then
     error("Dereferencing null pointer")
@@ -351,14 +330,12 @@ end_if
 ```nlang
 # Safe memory operations (compiler can verify)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 read(addr)        # Returns value at address
 write(addr, val)  # Stores value at address
 copy(src, dst)    # Copies memory region to region/pointer
 
 # Unsafe operations (require explicit 'unsafe' marker)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 unsafe
     raw_write(0x12345678, buffer)  # Bypasses bounds checking
 ```
@@ -382,7 +359,6 @@ free temp_data
 
 # Later in code (use-after-free error):
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 value = deref(temp_data)  # Compiler flags this as unsafe after free
 ```
 
@@ -406,7 +382,6 @@ Intermediate representation includes explicit memory operations:
 ```nlang
 # Original source code
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 func process(arr) -> sum
     total is 0
     for x in arr do
@@ -415,7 +390,6 @@ func process(arr) -> sum
 
 # Compiled to LLVM-like IR with memory ops
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 %result = alloca i64, name: "total"
 %arr_ptr = alloca ptr, name: "arr"
 store %arr_array, %arr_ptr
@@ -449,13 +423,11 @@ Regions are automatically packed to minimize fragmentation:
 ```nlang
 # Compiler packs region contents for efficient memory usage
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 region packed_data: size=262144, align=8
     # Objects here are contiguous in memory
 
 # Performance impact: 90% memory utilization vs 75% without packing
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 ```
 
 #### Stack Optimization
@@ -475,7 +447,6 @@ func multi_param(a, b, c) -> result
 gc_frequency = 100 operations   # Collect after 100 ops by default
 # Can be customized per module:
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 @gc frequency high module real_time_task # Collect every operation
     ...
 @gc frequency low_module data_processor # Collect every 100 operations
@@ -498,7 +469,6 @@ gc_on(timeline)    # Periodic collection based on runtime ticks
 ```nlang
 # Region operations
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 region_create(name: string, size: int, align: int) -> ptr
 region_resize(ptr, new_size: int) -> bool
 region_free(ptr) -> void
@@ -506,13 +476,11 @@ region_copy(src_region_ptr, dst_region_ptr) -> int  # Returns bytes copied
 
 # Variable/stack operations
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 alloc_stack(type_name: string) -> ptr
 dealloc_stack(ptr) -> void
 
 # Heap/GC operations
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 alloc_heap(type: Type) -> ptr
 realloc(ptr: ptr, new_size: int) -> ptr
 free(ptr: ptr) -> void
@@ -521,7 +489,6 @@ gc_compact() -> int  # Returns bytes reclaimed
 
 # Memory query functions
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 addr(x: variable_name) -> int
 size(ptr: ptr) -> int
 is_null(ptr: ptr) -> bool
@@ -549,7 +516,6 @@ process = struct [
 
 # Kernel initialization
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 kernel_process_table_size = 1024
 process_region [array]: size=kernel_process_table_size * sizeof(process)
 
@@ -567,7 +533,6 @@ end_for
 
 # Memory cleanup on kernel shutdown
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 for pid from 0 to kernel_process_table_size do
     if process[pid].state is ProcessState.Terminated then
         free(process[pid].ppcb_addr)
@@ -578,7 +543,6 @@ end_for
 
 # Implicit cleanup of active processes (auto-deallocate on kernel exit)
 
-Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 free process_region
 ```
 
