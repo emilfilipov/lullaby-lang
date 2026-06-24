@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "nous_lexer",
  "nous_parser",
+ "nous_runtime",
  "nous_semantics",
 ]
 
@@ -33,7 +34,9 @@ dependencies = [
 name = "nous_runtime"
 version = "0.1.0"
 dependencies = [
+ "nous_lexer",
  "nous_parser",
+ "nous_semantics",
 ]
 
 [[package]]

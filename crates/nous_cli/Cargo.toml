@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 nous_lexer = { path = "../nous_lexer" }
 nous_parser = { path = "../nous_parser" }
+nous_runtime = { path = "../nous_runtime" }
 nous_semantics = { path = "../nous_semantics" }

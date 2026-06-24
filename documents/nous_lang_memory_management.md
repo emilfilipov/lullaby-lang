@@ -8,6 +8,27 @@ This document covers the memory management architecture for **Nous Lang** (nlang
 
 ---
 
+## Current Alpha Runtime Slice
+
+The first executable runtime implements a deliberately small memory model so the language can be tested end to end before the full region/ARC design lands:
+
+- `alloc(value)` stores a runtime value in an internal heap slot and returns an interim pointer value.
+- `load(ptr)` reads a cloned value from a valid heap slot.
+- `dealloc(ptr)` clears a heap slot and reports a runtime error on invalid or double deallocation.
+- Static semantic checking models pointer types with concrete names such as `ptr_i64`.
+- Region allocation, ARC/reference counting, GC policy, raw address access, and compile-time lifetime analysis remain planned work.
+
+Example:
+```nlang
+fn main -> i64
+    let ptr ptr_i64 = alloc(41)
+    let value i64 = load(ptr)
+    dealloc(ptr)
+    value + 1
+```
+
+---
+
 ## Design Philosophy
 
 ### Core Principles

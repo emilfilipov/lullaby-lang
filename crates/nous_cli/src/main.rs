@@ -1,7 +1,8 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use nous_lexer::{Diagnostic, lex, validate_source_path};
-use nous_parser::parse;
+use nous_parser::{Program, parse};
+use nous_runtime::{Value, run_main};
 use nous_semantics::validate;
 
 fn main() -> ExitCode {
@@ -28,6 +29,12 @@ fn run() -> Result<(), String> {
             };
             check(PathBuf::from(path))
         }
+        "run" => {
+            let Some(path) = args.next() else {
+                return Err("usage: nlang run <file.nl>".to_string());
+            };
+            run_file(PathBuf::from(path))
+        }
         "--version" | "-V" => {
             println!("nlang {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -41,35 +48,34 @@ fn run() -> Result<(), String> {
 }
 
 fn check(path: PathBuf) -> Result<(), String> {
-    validate_source_path(&path).map_err(format_lex_diagnostic)?;
-    let source = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-
-    let tokens = lex(&source).map_err(format_lex_diagnostics)?;
-    let program = parse(&tokens).map_err(format_lex_diagnostics)?;
-    validate(&program).map_err(|diagnostics| {
-        diagnostics
-            .into_iter()
-            .map(|diagnostic| match diagnostic.function {
-                Some(function) => {
-                    format!(
-                        "{} in `{function}`: {}",
-                        diagnostic.code, diagnostic.message
-                    )
-                }
-                None => format!("{}: {}", diagnostic.code, diagnostic.message),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
-
+    compile(&path)?;
     println!("ok: {}", path.display());
     Ok(())
 }
 
+fn run_file(path: PathBuf) -> Result<(), String> {
+    let program = compile(&path)?;
+    let value = run_main(&program).map_err(|error| format!("{}: {}", error.code, error.message))?;
+    if value != Value::Void {
+        println!("{value}");
+    }
+    Ok(())
+}
+
+fn compile(path: &PathBuf) -> Result<Program, String> {
+    validate_source_path(path).map_err(format_lex_diagnostic)?;
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+
+    let tokens = lex(&source).map_err(format_lex_diagnostics)?;
+    let program = parse(&tokens).map_err(format_lex_diagnostics)?;
+    validate(&program).map_err(format_semantic_diagnostics)?;
+    Ok(program)
+}
+
 fn print_help() {
     println!(
-        "nlang {}\n\nusage:\n  nlang check <file.nl>\n  nlang --version",
+        "nlang {}\n\nusage:\n  nlang check <file.nl>\n  nlang run <file.nl>\n  nlang --version",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -87,4 +93,20 @@ fn format_lex_diagnostic(diagnostic: Diagnostic) -> String {
         "{} at {}:{}: {}",
         diagnostic.code, diagnostic.span.line, diagnostic.span.column, diagnostic.message
     )
+}
+
+fn format_semantic_diagnostics(diagnostics: Vec<nous_semantics::SemanticDiagnostic>) -> String {
+    diagnostics
+        .into_iter()
+        .map(|diagnostic| match diagnostic.function {
+            Some(function) => {
+                format!(
+                    "{} in `{function}`: {}",
+                    diagnostic.code, diagnostic.message
+                )
+            }
+            None => format!("{}: {}", diagnostic.code, diagnostic.message),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

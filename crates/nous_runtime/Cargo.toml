@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 nous_parser = { path = "../nous_parser" }
+
+[dev-dependencies]
+nous_lexer = { path = "../nous_lexer" }
+nous_semantics = { path = "../nous_semantics" }

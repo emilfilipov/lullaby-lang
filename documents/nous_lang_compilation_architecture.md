@@ -12,6 +12,18 @@ Nous Lang implements a novel multi-phase compilation pipeline specifically optim
 
 ## Compilation Pipeline Stages
 
+## Current Alpha Pipeline
+
+The current Rust workspace implements a frontend and in-process execution pipeline:
+
+1. `nous_lexer` validates `.nl` paths, emits tokens, emits indentation/dedent structure, and rejects forbidden block delimiters.
+2. `nous_parser` builds an AST for functions, typed parameters, `let`, returns, if/elif/else, calls, literals, variables, arithmetic, and comparisons.
+3. `nous_semantics` validates static types, local bindings, function calls, return behavior, bool conditions, and the interim pointer-style memory builtins.
+4. `nous_runtime` executes the validated AST directly, including `main`, calls, branch result values, arithmetic/comparisons, and heap-slot memory operations.
+5. `nous_cli` exposes the current pipeline as `nlang check <file.nl>` and `nlang run <file.nl>`.
+
+IR lowering, optimization, native code generation, linking, and binary output remain planned architecture stages.
+
 ### Stage 1: Lexical Analysis (Tokenizer)
 
 Converts raw source text into a stream of tokens optimized for compact representation.

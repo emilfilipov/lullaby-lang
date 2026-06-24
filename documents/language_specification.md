@@ -12,6 +12,22 @@ Nous Lang is a next-generation compiled systems programming language designed wi
 
 **Target Use Case**: Systems programming for operating system development and other low-level applications requiring type safety, performance optimization, and memory efficiency.
 
+## Current Alpha Implementation
+
+The current Rust toolchain implements a small executable subset while the wider systems-language design remains in progress:
+
+- Source files use the `.nl` extension.
+- Blocks are indentation-only. Curly braces and semicolon terminators are compile errors.
+- Functions use `fn name param Type -> ReturnType` and return the last reachable expression unless an explicit `return` exits earlier.
+- Void functions use `-> void` and may use bare `return`.
+- Local bindings use `let name Type = expression`.
+- Implemented scalar types are `i64`, `bool`, `string`, and `void`.
+- The current pointer spelling is an interim concrete type name such as `ptr_i64`.
+- Implemented expressions include literals, variables, function calls with parentheses, arithmetic, comparisons, and grouped expressions.
+- Implemented control flow is `if`/`elif`/`else` with indentation-only bodies.
+- Implemented memory builtins are `alloc(value)`, `load(ptr)`, and `dealloc(ptr)`.
+- CLI commands are `nlang check <file.nl>` and `nlang run <file.nl>` through the Rust workspace.
+
 ## Language Philosophy
 
 Nous Lang rejects traditional design patterns that prioritize compiler convenience over code clarity:
@@ -70,13 +86,12 @@ Flat control flow without nesting complexity:
 
 **Conditionals**:
 ```nlang
-if condition:
+if condition
     then_statements
-elif other_condition:
+elif other_condition
     else_statements
-else:
+else
     final_statements
-end_if
 ```
 
 **Loops**:
@@ -227,6 +242,15 @@ swap(a, b)           // Exchange values
 duplicate(value)     // Deep copy
 ```
 
+Current alpha memory form:
+```nlang
+fn main -> i64
+    let ptr ptr_i64 = alloc(41)
+    let value i64 = load(ptr)
+    dealloc(ptr)
+    value + 1
+```
+
 ### I/O Operations
 ```nlang
 io.read(path)         // Read entire file
@@ -326,60 +350,27 @@ results = await_all(tasks)
 
 ### Hello World
 ```nlang
-def main():
-    print("Hello, Nous Lang!")
-
-end_function
-
-main()
+fn main -> string
+    "Hello, Nous Lang!"
 ```
 
 ### Simple Calculator
 ```nlang
-num a = 10
-num b = 25
+fn add x i64 y i64 -> i64
+    x + y
 
-sum_result = a + b
-diff_result = a - b
-prod_result = a * b
-quotient = b // a if b >= a else (a / b)
-
-print("Sum:", sum_result)
-print("Difference:", diff_result)
-print("Product:", prod_result)
-print("Quotient:", quotient)
-end_if
-
-def main():
-    calculate_numbers()
-
-end_function
-
-main()
+fn main -> i64
+    let value i64 = add(40, 2)
+    value
 ```
 
-### Array Processing
+### Branching
 ```nlang
-array numbers[5] = [1, 2, 3, 4, 5]
-
-sum = 0
-for i from 0 to 4:
-    sum += numbers[i]
-
-avg_value = num(sum / len(numbers))
-
-print("Array:", numbers)
-print("Sum:", sum)
-print("Average:", avg_value)
-
-end_for
-
-def main():
-    process_numbers()
-
-end_function
-
-main()
+fn main -> i64
+    if true
+        42
+    else
+        0
 ```
 
 ## Future Extensions (Planned Features)

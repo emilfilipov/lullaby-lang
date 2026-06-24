@@ -25,8 +25,24 @@ pub struct TypeRef {
     pub name: String,
 }
 
+impl TypeRef {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    pub fn is_void(&self) -> bool {
+        self.name == "void"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
+    Let {
+        name: String,
+        ty: TypeRef,
+        value: Expr,
+        span: Span,
+    },
     Return(Option<Expr>),
     Expr(Expr),
     If {
@@ -44,17 +60,39 @@ pub struct IfBranch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr {
-    pub text: String,
+    pub kind: ExprKind,
     pub span: Span,
 }
 
-impl Expr {
-    fn new(parts: Vec<String>, span: Span) -> Self {
-        Self {
-            text: parts.join(" "),
-            span,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprKind {
+    Integer(i64),
+    Bool(bool),
+    String(String),
+    Variable(String),
+    Binary {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
+    },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
@@ -164,12 +202,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Stmt> {
+        if self.eat_keyword(Keyword::Let).is_some() {
+            return self.parse_let();
+        }
+
         if self.eat_keyword(Keyword::Return).is_some() {
             let span = self.previous().span;
             let expr = if self.at(TokenKindRef::Newline) {
                 None
             } else {
-                Some(self.parse_expr_until_newline(span))
+                Some(self.parse_expr_line(span)?)
             };
             self.expect_newline("expected newline after return statement");
             return Some(Stmt::Return(expr));
@@ -180,14 +222,32 @@ impl<'a> Parser<'a> {
         }
 
         let span = self.peek().span;
-        let expr = self.parse_expr_until_newline(span);
+        let expr = self.parse_expr_line(span)?;
         self.expect_newline("expected newline after expression");
         Some(Stmt::Expr(expr))
     }
 
+    fn parse_let(&mut self) -> Option<Stmt> {
+        let span = self.previous().span;
+        let name = self.expect_identifier("expected binding name after `let`")?;
+        let ty = self.expect_type("expected binding type")?;
+        if !self.eat_symbol("=") {
+            self.error("N0206", "expected `=` in let binding", self.peek().span);
+            return None;
+        }
+        let value = self.parse_expr_line(span)?;
+        self.expect_newline("expected newline after let binding");
+        Some(Stmt::Let {
+            name,
+            ty,
+            value,
+            span,
+        })
+    }
+
     fn parse_if(&mut self) -> Option<Stmt> {
         let span = self.previous().span;
-        let first_condition = self.parse_expr_until_newline(span);
+        let first_condition = self.parse_expr_line(span)?;
         self.expect_newline("expected newline after if condition");
         self.expect(TokenKindRef::Indent, "expected indented if body")?;
         let first_body = self.parse_block(&[BlockEnd::Dedent]);
@@ -203,7 +263,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             if self.eat_keyword(Keyword::Elif).is_some() {
                 let branch_span = self.previous().span;
-                let condition = self.parse_expr_until_newline(branch_span);
+                let condition = self.parse_expr_line(branch_span)?;
                 self.expect_newline("expected newline after elif condition");
                 self.expect(TokenKindRef::Indent, "expected indented elif body")?;
                 let body = self.parse_block(&[BlockEnd::Dedent]);
@@ -228,17 +288,24 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_expr_until_newline(&mut self, span: Span) -> Expr {
-        let mut parts = Vec::new();
+    fn parse_expr_line(&mut self, fallback_span: Span) -> Option<Expr> {
+        let start = self.cursor;
         while !self.at(TokenKindRef::Newline)
             && !self.at(TokenKindRef::Indent)
             && !self.at(TokenKindRef::Dedent)
             && !self.at(TokenKindRef::Eof)
         {
-            parts.push(token_text(&self.peek().kind));
             self.advance();
         }
-        Expr::new(parts, span)
+
+        let mut expr_parser = ExprParser::new(&self.tokens[start..self.cursor]);
+        match expr_parser.parse() {
+            Ok(expr) => Some(expr),
+            Err(message) => {
+                self.error("N0207", message, fallback_span);
+                None
+            }
+        }
     }
 
     fn expect_type(&mut self, message: &'static str) -> Option<TypeRef> {
@@ -246,13 +313,11 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                Some(TypeRef { name })
+                Some(TypeRef::new(name))
             }
             TokenKind::Keyword(Keyword::Void) => {
                 self.advance();
-                Some(TypeRef {
-                    name: "void".to_string(),
-                })
+                Some(TypeRef::new("void"))
             }
             _ => {
                 self.error("N0203", message, self.peek().span);
@@ -290,6 +355,15 @@ impl<'a> Parser<'a> {
 
     fn eat(&mut self, kind: TokenKindRef) -> bool {
         if self.at(kind) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_symbol(&mut self, symbol: &str) -> bool {
+        if matches!(&self.peek().kind, TokenKind::Symbol(actual) if actual == symbol) {
             self.advance();
             true
         } else {
@@ -348,6 +422,160 @@ impl<'a> Parser<'a> {
     }
 }
 
+struct ExprParser<'a> {
+    tokens: &'a [Token],
+    cursor: usize,
+}
+
+impl<'a> ExprParser<'a> {
+    fn new(tokens: &'a [Token]) -> Self {
+        Self { tokens, cursor: 0 }
+    }
+
+    fn parse(&mut self) -> Result<Expr, String> {
+        let expr = self.parse_binary(0)?;
+        if !self.is_at_end() {
+            return Err("unexpected token in expression".to_string());
+        }
+        Ok(expr)
+    }
+
+    fn parse_binary(&mut self, min_precedence: u8) -> Result<Expr, String> {
+        let mut left = self.parse_primary()?;
+
+        while let Some((op, precedence)) = self.peek_binary_op() {
+            if precedence < min_precedence {
+                break;
+            }
+            self.cursor += 1;
+            let right = self.parse_binary(precedence + 1)?;
+            let span = left.span;
+            left = Expr {
+                kind: ExprKind::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                },
+                span,
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, String> {
+        let token = self.peek().ok_or("expected expression")?.clone();
+        self.cursor += 1;
+        match token.kind {
+            TokenKind::Number(value) => {
+                let parsed = value
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid integer literal `{value}`"))?;
+                Ok(Expr {
+                    kind: ExprKind::Integer(parsed),
+                    span: token.span,
+                })
+            }
+            TokenKind::String(value) => Ok(Expr {
+                kind: ExprKind::String(value),
+                span: token.span,
+            }),
+            TokenKind::Keyword(Keyword::True) => Ok(Expr {
+                kind: ExprKind::Bool(true),
+                span: token.span,
+            }),
+            TokenKind::Keyword(Keyword::False) => Ok(Expr {
+                kind: ExprKind::Bool(false),
+                span: token.span,
+            }),
+            TokenKind::Identifier(name) => {
+                if self.eat_symbol("(") {
+                    let mut args = Vec::new();
+                    if !self.eat_symbol(")") {
+                        loop {
+                            args.push(self.parse_binary(0)?);
+                            if self.eat_symbol(")") {
+                                break;
+                            }
+                            if !self.eat_symbol(",") {
+                                return Err("expected `,` or `)` in call expression".to_string());
+                            }
+                        }
+                    }
+                    Ok(Expr {
+                        kind: ExprKind::Call { name, args },
+                        span: token.span,
+                    })
+                } else {
+                    Ok(Expr {
+                        kind: ExprKind::Variable(name),
+                        span: token.span,
+                    })
+                }
+            }
+            TokenKind::Symbol(symbol) if symbol == "(" => {
+                let expr = self.parse_binary(0)?;
+                if !self.eat_symbol(")") {
+                    return Err("expected `)` after grouped expression".to_string());
+                }
+                Ok(expr)
+            }
+            TokenKind::Symbol(symbol) if symbol == "-" => {
+                let value = self.parse_primary()?;
+                Ok(Expr {
+                    kind: ExprKind::Binary {
+                        left: Box::new(Expr {
+                            kind: ExprKind::Integer(0),
+                            span: token.span,
+                        }),
+                        op: BinaryOp::Subtract,
+                        right: Box::new(value),
+                    },
+                    span: token.span,
+                })
+            }
+            _ => Err("expected expression".to_string()),
+        }
+    }
+
+    fn peek_binary_op(&self) -> Option<(BinaryOp, u8)> {
+        let TokenKind::Symbol(symbol) = &self.peek()?.kind else {
+            return None;
+        };
+        Some(match symbol.as_str() {
+            "==" => (BinaryOp::Equal, 1),
+            "!=" => (BinaryOp::NotEqual, 1),
+            "<" => (BinaryOp::Less, 1),
+            "<=" => (BinaryOp::LessEqual, 1),
+            ">" => (BinaryOp::Greater, 1),
+            ">=" => (BinaryOp::GreaterEqual, 1),
+            "+" => (BinaryOp::Add, 2),
+            "-" => (BinaryOp::Subtract, 2),
+            "*" => (BinaryOp::Multiply, 3),
+            "/" => (BinaryOp::Divide, 3),
+            _ => return None,
+        })
+    }
+
+    fn eat_symbol(&mut self, symbol: &str) -> bool {
+        if matches!(self.peek().map(|token| &token.kind), Some(TokenKind::Symbol(actual)) if actual == symbol)
+        {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.cursor >= self.tokens.len()
+    }
+
+    fn peek(&self) -> Option<&'a Token> {
+        self.tokens.get(self.cursor)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum TokenKindRef {
     Arrow,
@@ -360,39 +588,6 @@ enum TokenKindRef {
 #[derive(Debug, Clone, Copy)]
 enum BlockEnd {
     Dedent,
-}
-
-fn token_text(kind: &TokenKind) -> String {
-    match kind {
-        TokenKind::Identifier(value)
-        | TokenKind::Number(value)
-        | TokenKind::String(value)
-        | TokenKind::Symbol(value) => value.clone(),
-        TokenKind::Keyword(keyword) => keyword_text(*keyword).to_string(),
-        TokenKind::Arrow => "->".to_string(),
-        TokenKind::Newline => "\\n".to_string(),
-        TokenKind::Indent => "<indent>".to_string(),
-        TokenKind::Dedent => "<dedent>".to_string(),
-        TokenKind::Eof => "<eof>".to_string(),
-    }
-}
-
-fn keyword_text(keyword: Keyword) -> &'static str {
-    match keyword {
-        Keyword::Fn => "fn",
-        Keyword::Return => "return",
-        Keyword::If => "if",
-        Keyword::Elif => "elif",
-        Keyword::Else => "else",
-        Keyword::For => "for",
-        Keyword::While => "while",
-        Keyword::Loop => "loop",
-        Keyword::Break => "break",
-        Keyword::Continue => "continue",
-        Keyword::True => "true",
-        Keyword::False => "false",
-        Keyword::Void => "void",
-    }
 }
 
 #[cfg(test)]
@@ -415,6 +610,14 @@ mod tests {
         let tokens = lex("fn main -> void\n    return\n").expect("lex");
         let program = parse(&tokens).expect("parse");
         assert_eq!(program.functions[0].return_type.name, "void");
+    }
+
+    #[test]
+    fn parses_let_and_call_expression() {
+        let tokens =
+            lex("fn main -> i64\n    let value i64 = add(1, 2)\n    value\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert_eq!(program.functions[0].body.len(), 2);
     }
 
     #[test]
