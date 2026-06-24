@@ -35,6 +35,7 @@ This repository defines and will implement Nous Lang, a compiled systems program
 ## Development Workflow
 
 - Convert non-trivial implementation plans into ClickUp tasks before large changes. Use the existing `Nous Lang` ClickUp folder/backlog when the connector is available.
+- Keep ClickUp current as implementation work progresses. When tasks are started, completed, materially changed, or blocked, update the relevant ClickUp ticket status when the tool supports it; otherwise add a concise task comment with the commit, verification, and remaining work.
 - Work in small, reviewable increments. Each commit should describe one coherent change.
 - Keep source, tests, and docs moving together. If implementation changes behavior, update the relevant core document and `documents/repository_map.md` in the same commit.
 - Avoid broad rewrites unless they remove real duplication, resolve contradictions, or unblock implementation.
@@ -44,6 +45,7 @@ This repository defines and will implement Nous Lang, a compiled systems program
 ## MCP And Connector Usage
 
 - ClickUp: use for implementation planning and granular task tracking. Confirm hierarchy first with `clickup_get_workspace_hierarchy`; the connector may require `max_depth` as string values `"0"`, `"1"`, or `"2"` even when a schema reports numbers.
+- ClickUp updates are part of delivery, not optional bookkeeping. If the connector only exposes comments and not status updates, add progress comments to the affected tickets and say that status changes could not be made through the available tool surface.
 - GitHub: use for repository creation, pushing, issue/PR inspection, and remote verification when available. If using `gh`, verify authentication with `gh auth status` without printing tokens.
 - Sequential thinking: use for broad architecture plans when available.
 - Memory/retrieval: use before broad, ambiguous, or workflow-sensitive changes.
@@ -97,3 +99,4 @@ Once Rust code exists:
 - Duplicate Markdown content has not been reintroduced.
 - Tests/checks relevant to the change have run.
 - Changes are committed with a useful message and pushed when requested or when reaching a coherent milestone.
+- Relevant ClickUp tasks are updated with status changes or comments describing progress, verification, blockers, and follow-up work.
