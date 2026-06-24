@@ -1,0 +1,28 @@
+# Build outputs
+target/
+dist/
+build/
+out/
+
+# Rust/editor tooling
+*.pdb
+*.rlib
+
+# Local caches and temporary files
+.cache/
+.tmp/
+tmp/
+*.tmp
+*.log
+
+# Editor and OS state
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# Test artifacts
+coverage/
+test-results/

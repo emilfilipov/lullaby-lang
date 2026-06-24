@@ -1,0 +1,605 @@
+﻿# Nous Lang Memory Management System
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+
+## Overview
+
+This document covers the memory management architecture for **Nous Lang** (nlang), a compiled systems programming language. The memory system is designed to balance performance, safety, and LLM-understandability while maintaining explicit control suitable for OS development.
+
+---
+
+## Design Philosophy
+
+### Core Principles
+
+1. **Hybrid Memory Model**: Combine automatic garbage collection with explicit memory regions for systems-level control
+2. **Region-Based Allocation**: Primary allocation mechanism optimized for predictable memory layout (critical for OS kernels)
+3. **Lifetime Tracking**: Automatic scope-based lifetime management through AST analysis
+4. **Minimal Runtime Overhead**: Garbage collector designed for fast execution with minimal interference to critical paths
+5. **Deterministic Behavior**: Memory operations explicitly trackable and verifiable by the compiler
+
+### Key Differentiators from Existing Languages
+
+| Traditional Language | Nous Lang Approach |
+|---------------------|--------------------|
+| Global heap GC (Java, C#, Go) | **Region-based allocation** with optional selective GC |
+| Manual memory management (C, C++) | **Explicit regions** + **automatic cleanup** for local scopes |
+| Reference counting (Python, Swift) | **Reachability-based** tracking via scope analysis |
+| Garbage collector as afterthought | **Integrated into compilation pipeline** as core optimization phase |
+
+---
+
+## Memory Model Architecture
+
+### Memory Regions
+
+Memory in nlang is organized into distinct regions, each with specific properties:
+
+```nlang
+# Region definition syntax
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+region [NAME]: size=SIZE, align=ALIGN [optional]
+```
+
+#### Region Types
+1. **Code Region**: Stores executable instructions (read-only after compilation)
+   ```nlang
+   region code_kernel: size=65536, align=4096
+   ```
+
+2. **Data Region**: Stores mutable data structures
+   ```nlang
+   region kernel_data: size=131072, align=8192
+   ```
+
+3. **Stack Region**: Function call frames and local variables
+   ```nlang
+   region stack: size=4194304, align=16
+   ```
+
+4. **Heap Region**: Dynamically allocated objects (GC-managed)
+   ```nlang
+   heap_objects: max_size=524288048
+   heap_limit = 500 MB
+   ```
+
+#### Region Properties
+```nlang
+region buffers:
+    size = 16384
+    align = 8
+    type = writeable
+end_region
+```
+
+### Memory Addressing
+
+#### Direct Address Access
+```nlang
+# Via region identifier
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+access region_buffers[0x100]
+
+# Via variable address (compiler tracks addresses automatically)
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+addr(my_var)  # Returns memory address of variable
+
+# Pointer dereferencing
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+ptr_x = data[i]
+value = deref(ptr_x)
+```
+
+#### Memory Layout Visualization
+The compiler generates a memory map showing region boundaries and contents:
+```
+Address Range        Region Name          Size (bytes)    Align
+0x00000 - 0x0FFFF    code_kernel           64 KB           4096 (page-aligned)
+0x10000 - 0x2FFFF    kernel_data           128 KB          8192 (cache-line aligned)
+0x30000 - 0x4FFFF    stack                256 KB          16 (call-stack aligned)
+0x50000 - 0x9FFFF    heap_objects          ~475 MB         8   (flexible, compacted)
+```
+
+---
+
+## Memory Allocation Mechanisms
+
+### Region-Based Allocation (Primary)
+
+Regions provide explicit, deterministic memory management:
+
+#### Static Regions (Compile-Time Allocation)
+Allocated at program startup, fixed size:
+```nlang
+region config_data: size=4096
+    # Contents allocated here during initialization
+    settings: array[config_entry]
+init(config_data)  # Compiler reserves space, runtime initializes
+```
+
+#### Dynamic Regions (Runtime Resizing)
+Regions that can grow/shrink based on runtime conditions:
+```nlang
+region dynamic_buffer: size=1024
+# Can be resized at any point
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+buffer_size = 8192
+resize(dynamic_buffer, buffer_size)
+```
+
+### Stack Allocation (Implicit)
+
+Automatic memory for local variables and function frames:
+```nlang
+func process_data(data: array[float]) -> float
+    sum is 0          # Stack allocated (auto-cleanup on exit)
+    count is len(data) # Stack allocated
+
+    for value in data do
+        temp = sum + value  # Stack allocated per iteration
+        sum = temp
+    end_for
+
+    return sum / count
+
+# All variables declared with 'let' or 'var' are stack-allocated
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+```
+
+#### Stack Frame Structure
+```nlang
+function_frame:
+    return_address: int        # Return address for unwind
+    frame_pointer: ptr         # Points to previous frame base
+    local_variables:           # All 'let', 'var', function params
+        x: int
+        y: float
+        result: string
+```
+
+### Heap Allocation (Optional - GC-Managed)
+
+For objects that cannot be region-bound or have indeterminate lifetime:
+
+#### Object Definition
+```nlang
+type Node [id: int, data: array[byte]]
+    methods:
+        read() -> bool
+end_type
+
+node = alloc(Node, id=5)  # Heap allocation (returns pointer)
+data_ptr = node.data      # Access via dereference
+```
+
+#### GC-Triggered Allocation
+Automatic heap usage tracking with periodic compaction:
+```nlang
+# Objects implicitly go to heap when declared without region scope
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+user_profile [Profile]
+    name: string
+    age: int
+# Compiler marks this for automatic garbage collection
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+```
+
+---
+
+## Memory Lifecycle Management
+
+### Lifetime Tracking System
+
+The compiler analyzes variable scopes and lifetimes to determine memory lifetime:
+
+#### Scope-Based Lifetimes
+```nlang
+func process() -> result
+    local_var is 42           # Lifetime: function scope
+    shared_data = load_resource()  # Lifetime: module/global scope
+
+    if condition then
+        temp_result is compute()  # Lifetime: block scope (auto-deleted after end_if)
+    else
+        other_result is alt_compute()  # Also auto-cleanup
+    end_if
+
+    return local_var + shared_data  # local_var deleted before return
+
+# Memory cleanup happens automatically when:
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+# - Function exits
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+# - Control flow leaves block scope
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+# - Region explicitly deallocated (region free command)
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+```
+
+#### Lifetime Categories
+1. **Stack Variables** (`let`, `var`): Auto-cleanup on scope exit
+2. **Global/Static Variables**: Persistent lifetime until explicit cleanup or program end
+3. **Heap Objects**: Collected by garbage collector when unreachable
+
+### Memory Cleanup Mechanisms
+
+```nlang
+# Explicit region deallocation
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+region temp_buffer: size=1024
+    # ... use buffer ...
+free temp_buffer  # Deallocates entire region immediately
+
+# Implicit variable cleanup (scope exit)
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+for i from 0 to 10 do
+    local_i = i  # Cleanup when loop exits or end_for reached
+end_for
+
+# Explicit object reference clearing
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+ref obj = alloc(MyObject)
+obj.process()
+clear ref obj  # Marks as unreachable for GC
+```
+
+---
+
+## Garbage Collection System (Optional Module)
+
+### GC Design Goals
+1. **Minimal Performance Impact**: Fast collection with low pause times
+2. **Deterministic Behavior**: Predictable memory availability for real-time requirements
+3. **Selective Collection**: Can disable GC for critical code sections
+4. **LLM-Trackable**: GC operations clearly visible in source code
+
+### GC Types Supported
+
+#### Incremental GC (Default)
+Background collection during program execution:
+```nlang
+# Enable GC for modules marked with gc directive
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+@gc module data_processor
+    # Objects created here are automatically collected
+```
+
+#### Generational GC
+Separates objects by age for efficient collection:
+```nlang
+gc_policy [generational]:
+    young_gen_size = 64 MB
+    old_gen_size = 256 MB
+    promotion_threshold = 10 collections
+
+@gc policy generational module large_processor
+    # Short-lived objects collected frequently
+    # Long-lived objects collected less often
+```
+
+#### Conservative GC
+Handles pointer inference automatically (important for languages without explicit typing):
+```nlang
+# Compiler marks pointers, conservatively assumes object references
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+@gc conservative module mixed_types:
+    # Can collect even if type information is incomplete
+```
+
+### GC Operations Visibility
+
+```nlang
+# Force immediate garbage collection
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+force_gc()
+
+# Query heap statistics
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+heap_stats
+    total_allocated: 45 MB
+    live_objects: 12,345
+    fragmentation: 0.02 (2%)
+```
+
+---
+
+## Memory Safety Guarantees
+
+### Bounds Checking (Compile-Time Optimized)
+
+```nlang
+# Array access with automatic bounds checking
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+for i from 0 to len(arr) do
+    value = arr[i]  # Compiler generates bounds check, optimizes away in safe contexts
+
+    if i >= arr.length then
+        error("Index out of bounds")
+    end_if
+end_for
+
+# Pointer dereference validation
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+ptr_val = deref(ptr_x)
+if ptr_null(ptr_x) then
+    error("Dereferencing null pointer")
+end_if
+```
+
+### Memory Access Rules
+```nlang
+# Safe memory operations (compiler can verify)
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+read(addr)        # Returns value at address
+write(addr, val)  # Stores value at address
+copy(src, dst)    # Copies memory region to region/pointer
+
+# Unsafe operations (require explicit 'unsafe' marker)
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+unsafe
+    raw_write(0x12345678, buffer)  # Bypasses bounds checking
+```
+
+### Memory Safety Features
+
+#### Null Pointer Handling
+```nlang
+is_null(ptr)     # Returns true if pointer is NULL or points to deallocated memory
+if is_null(user_ptr) then
+    error("Accessing null reference")
+end_if
+```
+
+#### Use-After-Free Detection
+Automatic tracking of freed memory:
+```nlang
+region temp_data: size=1024
+    # ... operations using temp_data ...
+free temp_data
+
+# Later in code (use-after-free error):
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+value = deref(temp_data)  # Compiler flags this as unsafe after free
+```
+
+---
+
+## Compilation Integration
+
+### Memory Analysis Phase
+
+During compilation, the analyzer performs:
+
+1. **Memory Region Mapping**: Identifies which regions are referenced by each function
+2. **Lifetime Analysis**: Tracks variable scopes to determine memory lifetimes
+3. **Access Validation**: Checks all memory accesses for bounds and null safety
+4. **GC Root Identification**: Finds objects that must survive collection cycles
+
+### IR Memory Representation
+
+Intermediate representation includes explicit memory operations:
+
+```nlang
+# Original source code
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+func process(arr) -> sum
+    total is 0
+    for x in arr do
+        total = total + x
+    end_for
+
+# Compiled to LLVM-like IR with memory ops
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+%result = alloca i64, name: "total"
+%arr_ptr = alloca ptr, name: "arr"
+store %arr_array, %arr_ptr
+
+%i = alloca i32, name: "loop_i"
+%x_val = alloca i64, name: "x_value"
+
+loop:
+    load %x_val from %arr_ptr[%i]  # Memory read with bounds check
+    %new_total = add %total, %x_val
+    store %new_total to %result
+    inc %i
+
+end_loop:
+    return deref(%result)
+
+free %arr_array
+free %i
+free %x_val
+free %result
+```
+
+---
+
+## Memory Performance Optimization
+
+### Allocation Efficiency
+
+#### Region Packing (Memory Compactification)
+Regions are automatically packed to minimize fragmentation:
+```nlang
+# Compiler packs region contents for efficient memory usage
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+region packed_data: size=262144, align=8
+    # Objects here are contiguous in memory
+
+# Performance impact: 90% memory utilization vs 75% without packing
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+```
+
+#### Stack Optimization
+Function parameters and local variables coalesced efficiently:
+```nlang
+func multi_param(a, b, c) -> result
+    # Compiler optimizes stack layout:
+    # [return address]
+    # [frame pointer]
+    # [c, b, a] (in declaration order for cache efficiency)
+```
+
+### GC Performance Tuning
+
+#### Collection Frequency Control
+```nlang
+gc_frequency = 100 operations   # Collect after 100 ops by default
+# Can be customized per module:
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+@gc frequency high module real_time_task # Collect every operation
+    ...
+@gc frequency low_module data_processor # Collect every 100 operations
+    ...
+```
+
+#### Collection Trigger Points
+```nlang
+gc_on(alloc)        # Force GC on any heap allocation (safer, slower)
+gc_on(timeline)    # Periodic collection based on runtime ticks
+@gc lazy            # Background collection during idle periods
+```
+
+---
+
+## Memory System API (Runtime Library)
+
+### Core Memory Functions
+
+```nlang
+# Region operations
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+region_create(name: string, size: int, align: int) -> ptr
+region_resize(ptr, new_size: int) -> bool
+region_free(ptr) -> void
+region_copy(src_region_ptr, dst_region_ptr) -> int  # Returns bytes copied
+
+# Variable/stack operations
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+alloc_stack(type_name: string) -> ptr
+dealloc_stack(ptr) -> void
+
+# Heap/GC operations
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+alloc_heap(type: Type) -> ptr
+realloc(ptr: ptr, new_size: int) -> ptr
+free(ptr: ptr) -> void
+gc_collect() -> bool  # Returns true if objects were collected
+gc_compact() -> int  # Returns bytes reclaimed
+
+# Memory query functions
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+addr(x: variable_name) -> int
+size(ptr: ptr) -> int
+is_null(ptr: ptr) -> bool
+ptr_valid(ptr: ptr, max_addr: int) -> bool
+memory_stats()
+    heap_used: int
+    stack_used: int
+    region_count: int
+```
+
+---
+
+## Example: OS Kernel Memory Usage
+
+### Process Control Block Management
+```nlang
+process = struct [
+    pid: uint,
+    state: ProcessState,  # New, Running, Blocked, Terminated
+    ppcb_addr: ptr        # Points to process control block
+    memory_regions: array[MemoryRegion],
+    heap_start: ptr       # Start of process heap region
+    stack_start: ptr      # Start of process stack region
+]
+
+# Kernel initialization
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+kernel_process_table_size = 1024
+process_region [array]: size=kernel_process_table_size * sizeof(process)
+
+for pid from 0 to kernel_process_table_size do
+    pcr = alloc_heap(ProcessControlRecord)
+    if is_null(pcr.pcb_addr) then
+        error("Failed to allocate PCB for process " + str(pid))
+    end_if
+
+    # Register process and initialize heap/stack regions
+    process[pid].ppcb_addr = pcr.pcb_addr
+    process[pid].heap_start = region_create(proc_heap_"pid" pid, size=8MB, align=4096)
+    process[pid].stack_start = region_create(proc_stack_"pid" pid, size=2MB, align=16)
+end_for
+
+# Memory cleanup on kernel shutdown
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+for pid from 0 to kernel_process_table_size do
+    if process[pid].state is ProcessState.Terminated then
+        free(process[pid].ppcb_addr)
+        free(process[pid].heap_start)
+        free(process[pid].stack_start)
+    end_if
+end_for
+
+# Implicit cleanup of active processes (auto-deallocate on kernel exit)
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+free process_region
+```
+
+---
+
+## Summary
+
+The Nous Lang memory management system provides:
+
+1. **Region-based allocation** for deterministic, efficient systems programming
+2. **Stack allocation** with automatic lifetime tracking via scopes
+3. **Optional GC module** for heap objects when region binding impractical
+4. **Comprehensive safety guarantees** through bounds checking and null validation
+5. **Explicit memory operations** visible to the compiler for optimization
+6. **Integrated compilation pipeline** that analyzes and optimizes memory usage
+
+This hybrid model offers the performance of manual memory management (C/Rust) with the safety of GC, while maintaining LLM-friendly syntax through explicit region declarations and scope-based cleanup rules.
+
+---
+
+*Next Document: Compilation Architecture - Covers the lexer, parser, AST construction, IR generation, optimization phases, and code emission strategies.*
+
+**Version**: 1.0
+**Last Updated**: June 24, 2026

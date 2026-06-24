@@ -1,0 +1,99 @@
+# Nous Lang Agent Guide
+
+This repository defines and will implement Nous Lang, a compiled systems programming language optimized for concise syntax, strong typing, memory safety, and LLM-friendly source generation.
+
+## First Moves
+
+- Read this file first.
+- Read `documents/repository_map.md` before changing code or documentation. Use it to locate the relevant subsystem and update it whenever files, directories, commands, tests, or document responsibilities change.
+- For language behavior, start with `documents/language_specification.md` and `documents/core_language_rules.md`.
+- For implementation sequencing, start with `documents/implementation_plan.md` and the ClickUp backlog.
+- Check the active tool surface before promising MCP, ClickUp, GitHub, Playwright, Context7, or other connector work. Tool availability is session-specific.
+
+## Project Direction
+
+- Implementation language: Rust, unless the owner explicitly changes this decision.
+- Initial compiler target: a clear, testable frontend and semantic pipeline before native code generation.
+- Canonical source extension: `.nl` until the language specification is intentionally changed.
+- Keep the syntax indentation-only. Curly braces are not block delimiters, and semicolons are not statement terminators.
+- Keep the implementation conservative: prefer a correct parser/type checker/runtime prototype over speculative backend complexity.
+
+## Core Documentation Map
+
+- `documents/core_language_rules.md`: canonical source extension, indentation-only scope, forbidden block delimiters, canonical block examples, and global language rules.
+- `documents/language_specification.md`: full language overview, philosophy, core language components, syntax reference, examples, and roadmap.
+- `documents/implementation_plan.md`: compiler and installer implementation epics, dependency order, and delivery plan.
+- `documents/nous_lang_syntax_design.md`: syntax philosophy, declarations, control forms, functions, data structures, operators, naming, comments, examples, and token-efficiency goals.
+- `documents/nous_lang_type_system.md`: primitive/composite/reference/function types, inference rules, type safety, generics, aliases, and OS-development type needs.
+- `documents/nous_lang_memory_management.md`: regions, stack/heap model, lifetime tracking, GC hooks, memory safety, runtime API, and kernel memory examples.
+- `documents/nous_lang_control_structures.md`: conditionals, loops, switch, error-control forms, coroutine syntax, operators, and control-flow examples.
+- `documents/nous_lang_input_output.md`: file I/O, streams, memory-mapped files, threads, processes, async operations, IPC, sockets, and I/O performance strategy.
+- `documents/nous_lang_error_handling.md`: error token model, compile-time/runtime/resource/type error families, throw/catch/recovery behavior, and diagnostic integration.
+- `documents/nous_lang_compilation_architecture.md`: tokenizer, semantic analysis, IR, optimization, code generation, linking, binary output, and compiler performance.
+- `documents/repository_map.md`: living map of the repository. Update it with every material source, docs, test, command, or layout change.
+
+## Development Workflow
+
+- Convert non-trivial implementation plans into ClickUp tasks before large changes. Use the existing `Nous Lang` ClickUp folder/backlog when the connector is available.
+- Work in small, reviewable increments. Each commit should describe one coherent change.
+- Keep source, tests, and docs moving together. If implementation changes behavior, update the relevant core document and `documents/repository_map.md` in the same commit.
+- Avoid broad rewrites unless they remove real duplication, resolve contradictions, or unblock implementation.
+- Preserve user work. If the tree is dirty, inspect changes before editing and do not revert unrelated files.
+- Prefer local repo patterns once code exists. Do not introduce new frameworks or build systems without recording the decision in docs.
+
+## MCP And Connector Usage
+
+- ClickUp: use for implementation planning and granular task tracking. Confirm hierarchy first with `clickup_get_workspace_hierarchy`; the connector may require `max_depth` as string values `"0"`, `"1"`, or `"2"` even when a schema reports numbers.
+- GitHub: use for repository creation, pushing, issue/PR inspection, and remote verification when available. If using `gh`, verify authentication with `gh auth status` without printing tokens.
+- Sequential thinking: use for broad architecture plans when available.
+- Memory/retrieval: use before broad, ambiguous, or workflow-sensitive changes.
+- Context7 or official docs: use for current library/framework/API documentation when implementation depends on external tools.
+- Playwright: use for browser-based validation only if a frontend or web tool is introduced.
+- If an MCP server is configured but not callable in the current session, say so clearly and fall back to local commands or direct APIs.
+
+## Testing Expectations
+
+Until implementation code exists:
+
+- Run documentation checks after doc/layout changes:
+  - `rg -n "DELETED|Clean start|compiled_programming_languages_overview|programming_paradigms|top_programming_languages|language_comparison_guide" documents`
+  - Verify all Markdown references point to real files.
+  - Run `git diff --check`.
+
+Once Rust code exists:
+
+- Use `cargo fmt --check` for formatting.
+- Use `cargo clippy --all-targets --all-features -- -D warnings` for linting unless a narrower documented command replaces it.
+- Use `cargo test --all` for unit and integration tests.
+- Keep fixture-based tests for lexer/parser/type-checker/diagnostics deterministic.
+- Add integration tests for end-to-end `.nl` source through parse, semantic validation, runtime/backend execution, stdout/stderr capture, and exit code.
+- Do not call work complete until relevant tests and documentation checks have run or the reason they could not run is documented.
+
+## Git And GitHub Rules
+
+- Commit regularly at meaningful checkpoints.
+- Use clear commit messages:
+  - `docs: organize language specification`
+  - `compiler: add indentation token scanner`
+  - `tests: add parser fixtures for invalid blocks`
+- Include the why in commit bodies when behavior, architecture, or workflow changes.
+- Push regularly to GitHub after coherent commits, especially after creating or updating major docs, implementation milestones, or test infrastructure.
+- Do not commit secrets, tokens, local caches, build outputs, editor state, or generated artifacts unless explicitly intended.
+
+## Documentation Rules
+
+- Documentation is part of the product. Keep it current with every implementation update, concept change, command change, test change, or layout change.
+- If code changes syntax, typing, memory behavior, diagnostics, CLI behavior, runtime semantics, or build/test commands, update the matching document under `documents/`.
+- Keep `documents/core_language_rules.md` as the single source for repeated canonical rules. Do not copy that block into every subsystem document.
+- Keep `documents/repository_map.md` current and use it as the first navigation aid.
+- If documents duplicate substantial content, consolidate it into one canonical file and replace duplicates with references.
+- Prefer concise, specific documentation over generic prose. Examples should be valid for the current language design or explicitly marked as unresolved.
+
+## Definition Of Done
+
+- The requested change is implemented or the blocker is explicit.
+- Relevant docs are updated.
+- `documents/repository_map.md` is still accurate.
+- Duplicate Markdown content has not been reintroduced.
+- Tests/checks relevant to the change have run.
+- Changes are committed with a useful message and pushed when requested or when reaching a coherent milestone.
