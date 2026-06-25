@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/nous_cli",
+    "crates/nous_diagnostics",
     "crates/nous_ir",
     "crates/nous_lexer",
     "crates/nous_parser",

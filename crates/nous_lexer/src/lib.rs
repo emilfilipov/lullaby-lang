@@ -1,18 +1,8 @@
 use std::path::Path;
 
+pub use nous_diagnostics::Span;
+
 pub const CANONICAL_EXTENSION: &str = "nl";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Span {
-    pub line: usize,
-    pub column: usize,
-}
-
-impl Span {
-    pub const fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {

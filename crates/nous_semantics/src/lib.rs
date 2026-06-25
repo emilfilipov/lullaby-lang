@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use nous_diagnostics::Span;
 use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, TypeRef, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7,6 +8,7 @@ pub struct SemanticDiagnostic {
     pub code: &'static str,
     pub message: String,
     pub function: Option<String>,
+    pub span: Option<Span>,
 }
 
 impl SemanticDiagnostic {
@@ -15,6 +17,21 @@ impl SemanticDiagnostic {
             code,
             message: message.into(),
             function,
+            span: None,
+        }
+    }
+
+    fn at(
+        code: &'static str,
+        message: impl Into<String>,
+        function: Option<String>,
+        span: Span,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            function,
+            span: Some(span),
         }
     }
 }
@@ -106,13 +123,14 @@ impl<'a> Checker<'a> {
         }
 
         if block_type.as_ref() != Some(&function.return_type) {
-            self.diagnostics.push(SemanticDiagnostic::new(
+            self.diagnostics.push(SemanticDiagnostic::at(
                 "N0301",
                 format!(
                     "function `{}` declares `{}` but has no final return value of that type",
                     function.name, function.return_type.name
                 ),
                 Some(function.name.clone()),
+                function.span,
             ));
         }
     }
@@ -148,7 +166,7 @@ impl<'a> Checker<'a> {
             } => {
                 let value_type = self.check_expr(value, scope, function);
                 if value_type.as_ref() != Some(ty) {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0303",
                         format!(
                             "binding `{name}` declares `{}` but initializer has `{}`",
@@ -159,13 +177,17 @@ impl<'a> Checker<'a> {
                                 .unwrap_or("<unknown>")
                         ),
                         Some(function.name.clone()),
+                        value.span,
                     ));
                 }
                 scope.locals.insert(name.clone(), ty.clone());
                 None
             }
             Stmt::Assign {
-                name, op, value, ..
+                name,
+                op,
+                value,
+                span,
             } => {
                 let expected = scope.locals.get(name).cloned();
                 let value_type = self.check_expr(value, scope, function);
@@ -173,7 +195,7 @@ impl<'a> Checker<'a> {
                     Some(expected) => {
                         if *op == AssignOp::Replace {
                             if value_type.as_ref() != Some(&expected) {
-                                self.diagnostics.push(SemanticDiagnostic::new(
+                                self.diagnostics.push(SemanticDiagnostic::at(
                                     "N0314",
                                     format!(
                                         "assignment to `{name}` expects `{}` but got `{}`",
@@ -184,23 +206,26 @@ impl<'a> Checker<'a> {
                                             .unwrap_or("<unknown>")
                                     ),
                                     Some(function.name.clone()),
+                                    value.span,
                                 ));
                             }
                         } else if expected != TypeRef::new("i64")
                             || value_type.as_ref() != Some(&TypeRef::new("i64"))
                         {
-                            self.diagnostics.push(SemanticDiagnostic::new(
+                            self.diagnostics.push(SemanticDiagnostic::at(
                                 "N0315",
                                 format!("compound assignment to `{name}` requires i64 operands"),
                                 Some(function.name.clone()),
+                                value.span,
                             ));
                         }
                     }
                     None => {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0316",
                             format!("assignment target `{name}` is not declared"),
                             Some(function.name.clone()),
+                            *span,
                         ));
                     }
                 }
@@ -212,7 +237,8 @@ impl<'a> Checker<'a> {
                     .map(|expr| self.check_expr(expr, scope, function))
                     .unwrap_or_else(|| Some(TypeRef::new("void")));
                 if actual.as_ref() != Some(&function.return_type) {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    let span = expr.as_ref().map(|expr| expr.span).unwrap_or(function.span);
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0304",
                         format!(
                             "return type `{}` does not match function return `{}`",
@@ -223,26 +249,29 @@ impl<'a> Checker<'a> {
                             function.return_type.name
                         ),
                         Some(function.name.clone()),
+                        span,
                     ));
                 }
                 actual
             }
-            Stmt::Break(_) => {
+            Stmt::Break(span) => {
                 if self.loop_depth == 0 {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0317",
                         "`break` can only appear inside a loop",
                         Some(function.name.clone()),
+                        *span,
                     ));
                 }
                 None
             }
-            Stmt::Continue(_) => {
+            Stmt::Continue(span) => {
                 if self.loop_depth == 0 {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0318",
                         "`continue` can only appear inside a loop",
                         Some(function.name.clone()),
+                        *span,
                     ));
                 }
                 None
@@ -257,10 +286,11 @@ impl<'a> Checker<'a> {
                 for branch in branches {
                     let condition_type = self.check_expr(&branch.condition, scope, function);
                     if condition_type.as_ref() != Some(&TypeRef::new("bool")) {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0305",
                             "if condition must be bool",
                             Some(function.name.clone()),
+                            branch.condition.span,
                         ));
                     }
                     let mut branch_scope = scope.clone();
@@ -285,10 +315,11 @@ impl<'a> Checker<'a> {
             } => {
                 let condition_type = self.check_expr(condition, scope, function);
                 if condition_type.as_ref() != Some(&TypeRef::new("bool")) {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0305",
                         "while condition must be bool",
                         Some(function.name.clone()),
+                        condition.span,
                     ));
                 }
                 let mut loop_scope = scope.clone();
@@ -308,20 +339,22 @@ impl<'a> Checker<'a> {
                 for (label, expr) in [("start", start), ("end", end)] {
                     let expr_type = self.check_expr(expr, scope, function);
                     if expr_type.as_ref() != Some(&TypeRef::new("i64")) {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0321",
                             format!("for loop {label} expression must be i64"),
                             Some(function.name.clone()),
+                            expr.span,
                         ));
                     }
                 }
                 if let Some(step) = step {
                     let step_type = self.check_expr(step, scope, function);
                     if step_type.as_ref() != Some(&TypeRef::new("i64")) {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0322",
                             "for loop step expression must be i64",
                             Some(function.name.clone()),
+                            step.span,
                         ));
                     }
                 }
@@ -351,10 +384,11 @@ impl<'a> Checker<'a> {
             ExprKind::Variable(name) => match scope.locals.get(name) {
                 Some(ty) => Some(ty.clone()),
                 None => {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0306",
                         format!("unknown variable `{name}`"),
                         Some(function.name.clone()),
+                        expr.span,
                     ));
                     None
                 }
@@ -363,20 +397,22 @@ impl<'a> Checker<'a> {
                 let target_type = self.check_expr(target, scope, function);
                 let index_type = self.check_expr(index, scope, function);
                 if index_type.as_ref() != Some(&TypeRef::new("i64")) {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0326",
                         "array index expression must be i64",
                         Some(function.name.clone()),
+                        index.span,
                     ));
                 }
 
                 match target_type.and_then(|ty| ty.array_element()) {
                     Some(element_type) => Some(element_type),
                     None => {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0325",
                             "index target must be an array",
                             Some(function.name.clone()),
+                            target.span,
                         ));
                         None
                     }
@@ -389,10 +425,11 @@ impl<'a> Checker<'a> {
                         if expr_type.as_ref() == Some(&TypeRef::new("bool")) {
                             Some(TypeRef::new("bool"))
                         } else {
-                            self.diagnostics.push(SemanticDiagnostic::new(
+                            self.diagnostics.push(SemanticDiagnostic::at(
                                 "N0319",
                                 "`not` operand must be bool",
                                 Some(function.name.clone()),
+                                expr.span,
                             ));
                             None
                         }
@@ -409,10 +446,11 @@ impl<'a> Checker<'a> {
                         {
                             Some(TypeRef::new("i64"))
                         } else {
-                            self.diagnostics.push(SemanticDiagnostic::new(
+                            self.diagnostics.push(SemanticDiagnostic::at(
                                 "N0307",
                                 "arithmetic operands must both be i64",
                                 Some(function.name.clone()),
+                                expr.span,
                             ));
                             None
                         }
@@ -421,10 +459,11 @@ impl<'a> Checker<'a> {
                         if left_type.is_some() && left_type == right_type {
                             Some(TypeRef::new("bool"))
                         } else {
-                            self.diagnostics.push(SemanticDiagnostic::new(
+                            self.diagnostics.push(SemanticDiagnostic::at(
                                 "N0308",
                                 "comparison operands must have the same type",
                                 Some(function.name.clone()),
+                                expr.span,
                             ));
                             None
                         }
@@ -438,10 +477,11 @@ impl<'a> Checker<'a> {
                         {
                             Some(TypeRef::new("bool"))
                         } else {
-                            self.diagnostics.push(SemanticDiagnostic::new(
+                            self.diagnostics.push(SemanticDiagnostic::at(
                                 "N0327",
                                 "ordering comparison operands must both be i64",
                                 Some(function.name.clone()),
+                                expr.span,
                             ));
                             None
                         }
@@ -452,17 +492,20 @@ impl<'a> Checker<'a> {
                         {
                             Some(TypeRef::new("bool"))
                         } else {
-                            self.diagnostics.push(SemanticDiagnostic::new(
+                            self.diagnostics.push(SemanticDiagnostic::at(
                                 "N0320",
                                 "logical operands must both be bool",
                                 Some(function.name.clone()),
+                                expr.span,
                             ));
                             None
                         }
                     }
                 }
             }
-            ExprKind::Call { name, args } => self.check_call(name, args, scope, function),
+            ExprKind::Call { name, args } => {
+                self.check_call(name, args, expr.span, scope, function)
+            }
         }
     }
 
@@ -485,10 +528,11 @@ impl<'a> Checker<'a> {
         for value in rest {
             let value_type = self.check_expr(value, scope, function);
             if value_type.as_ref() != Some(&element_type) {
-                self.diagnostics.push(SemanticDiagnostic::new(
+                self.diagnostics.push(SemanticDiagnostic::at(
                     "N0324",
                     "array literal values must all have the same type",
                     Some(function.name.clone()),
+                    value.span,
                 ));
             }
         }
@@ -500,6 +544,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         args: &[Expr],
+        call_span: Span,
         scope: &Scope,
         function: &Function,
     ) -> Option<TypeRef> {
@@ -517,10 +562,11 @@ impl<'a> Checker<'a> {
                     .strip_prefix("ptr_")
                     .map(TypeRef::new)
                     .or_else(|| {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0310",
                             "load expects a pointer argument",
                             Some(function.name.clone()),
+                            args[0].span,
                         ));
                         None
                     })
@@ -530,21 +576,23 @@ impl<'a> Checker<'a> {
                 let ptr_type = self.check_expr(&args[0], scope, function)?;
                 let value_type = self.check_expr(&args[1], scope, function)?;
                 let Some(expected) = ptr_type.name.strip_prefix("ptr_").map(TypeRef::new) else {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0310",
                         "store expects a pointer as its first argument",
                         Some(function.name.clone()),
+                        args[0].span,
                     ));
                     return None;
                 };
                 if value_type != expected {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0328",
                         format!(
                             "store expects value `{}` for pointer `{}` but got `{}`",
                             expected.name, ptr_type.name, value_type.name
                         ),
                         Some(function.name.clone()),
+                        args[1].span,
                     ));
                     return None;
                 }
@@ -556,10 +604,11 @@ impl<'a> Checker<'a> {
                 if ptr_type.name.starts_with("ptr_") {
                     Some(TypeRef::new("void"))
                 } else {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0311",
                         "dealloc expects a pointer argument",
                         Some(function.name.clone()),
+                        args[0].span,
                     ));
                     None
                 }
@@ -592,16 +641,17 @@ impl<'a> Checker<'a> {
             }
             _ => {
                 let Some(signature) = self.signatures.get(name).cloned() else {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0309",
                         format!("unknown function `{name}`"),
                         Some(function.name.clone()),
+                        call_span,
                     ));
                     return None;
                 };
 
                 if signature.params.len() != args.len() {
-                    self.diagnostics.push(SemanticDiagnostic::new(
+                    self.diagnostics.push(SemanticDiagnostic::at(
                         "N0312",
                         format!(
                             "function `{name}` expects {} arguments but got {}",
@@ -609,6 +659,7 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                         Some(function.name.clone()),
+                        call_span,
                     ));
                     return None;
                 }
@@ -617,7 +668,7 @@ impl<'a> Checker<'a> {
                 {
                     let actual = self.check_expr(arg, scope, function);
                     if actual.as_ref() != Some(expected) {
-                        self.diagnostics.push(SemanticDiagnostic::new(
+                        self.diagnostics.push(SemanticDiagnostic::at(
                             "N0313",
                             format!(
                                 "argument {} for `{name}` must be `{}` but got `{}`",
@@ -629,6 +680,7 @@ impl<'a> Checker<'a> {
                                     .unwrap_or("<unknown>")
                             ),
                             Some(function.name.clone()),
+                            arg.span,
                         ));
                     }
                 }
@@ -648,13 +700,14 @@ impl<'a> Checker<'a> {
         if args.len() == expected {
             Some(())
         } else {
-            self.diagnostics.push(SemanticDiagnostic::new(
+            self.diagnostics.push(SemanticDiagnostic::at(
                 "N0312",
                 format!(
                     "function `{name}` expects {expected} arguments but got {}",
                     args.len()
                 ),
                 Some(function.name.clone()),
+                args.first().map(|arg| arg.span).unwrap_or(function.span),
             ));
             None
         }
@@ -674,7 +727,7 @@ impl<'a> Checker<'a> {
         if actual.as_ref() == Some(&expected) {
             Some(())
         } else {
-            self.diagnostics.push(SemanticDiagnostic::new(
+            self.diagnostics.push(SemanticDiagnostic::at(
                 "N0313",
                 format!(
                     "argument {index} for `{name}` must be `{}` but got `{}`",
@@ -685,6 +738,7 @@ impl<'a> Checker<'a> {
                         .unwrap_or("<unknown>")
                 ),
                 Some(function.name.clone()),
+                arg.span,
             ));
             None
         }

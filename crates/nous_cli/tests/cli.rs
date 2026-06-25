@@ -13,6 +13,14 @@ fn nlang() -> Command {
     Command::new(env!("CARGO_BIN_EXE_nous_cli"))
 }
 
+fn stdout(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).to_string()
+}
+
 #[test]
 fn checks_valid_fixture() {
     let fixture = workspace_root().join("tests/fixtures/valid/add.nl");
@@ -23,6 +31,26 @@ fn checks_valid_fixture() {
 
     assert!(output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("ok:"));
+}
+
+#[test]
+fn checks_valid_fixture_as_json() {
+    let fixture = workspace_root().join("tests/fixtures/valid/add.nl");
+    let output = nlang()
+        .args([
+            "check",
+            "--format",
+            "json",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        stdout(&output).trim(),
+        "{\"status\":\"ok\",\"diagnostics\":[]}"
+    );
 }
 
 #[test]
@@ -164,7 +192,76 @@ fn rejects_forbidden_braces() {
         .expect("run cli");
 
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("N0102"));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("N0102 [lexer error]"), "{stderr}");
+    assert!(
+        stderr.contains("curly braces are not block delimiters"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn reports_forbidden_braces_with_verbose_context() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/brace.nl");
+    let output = nlang()
+        .args([
+            "check",
+            "--verbose",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("N0102 [lexer error]"), "{stderr}");
+    assert!(stderr.contains("Source:"), "{stderr}");
+    assert!(stderr.contains("Problem:"), "{stderr}");
+    assert!(stderr.contains("Root cause:"), "{stderr}");
+    assert!(stderr.contains("Suggested fix:"), "{stderr}");
+}
+
+#[test]
+fn reports_forbidden_braces_as_json() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/brace.nl");
+    let output = nlang()
+        .args([
+            "check",
+            "--diagnostic-format",
+            "json",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("\"status\":\"error\""), "{stderr}");
+    assert!(stderr.contains("\"code\":\"N0102\""), "{stderr}");
+    assert!(stderr.contains("\"phase\":\"lexer\""), "{stderr}");
+    assert!(
+        stderr.contains("\"span\":{\"line\":2,\"column\":5}"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("\"root_cause\":"), "{stderr}");
+}
+
+#[test]
+fn rejects_missing_indented_body() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/missing_indented_body.nl");
+    let output = nlang()
+        .args([
+            "check",
+            "--verbose",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("N0205 [parser error]"), "{stderr}");
+    assert!(stderr.contains("Root cause:"), "{stderr}");
 }
 
 #[test]
@@ -175,8 +272,32 @@ fn rejects_type_mismatch() {
         .output()
         .expect("run cli");
 
+    let stderr = stderr(&output);
     assert!(!output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("N0303"));
+    assert!(stderr.contains("N0303 [semantic error]"), "{stderr}");
+    assert!(stderr.contains("N0301 [semantic error]"), "{stderr}");
+}
+
+#[test]
+fn reports_type_mismatch_as_ordered_json() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/type_mismatch.nl");
+    let output = nlang()
+        .args([
+            "check",
+            "--format",
+            "json",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    let n0303 = stderr.find("\"code\":\"N0303\"").expect("N0303");
+    let n0301 = stderr.find("\"code\":\"N0301\"").expect("N0301");
+    assert!(n0303 < n0301, "{stderr}");
+    assert!(stderr.contains("\"function\":\"main\""), "{stderr}");
+    assert!(stderr.contains("\"suggested_fix\":"), "{stderr}");
 }
 
 #[test]
@@ -288,6 +409,45 @@ fn rejects_array_index_out_of_bounds_at_runtime() {
 }
 
 #[test]
+fn reports_runtime_error_with_verbose_traceback() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/array_index_out_of_bounds.nl");
+    let output = nlang()
+        .args(["run", "--verbose", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("N0413 [runtime error]"), "{stderr}");
+    assert!(stderr.contains("Traceback:"), "{stderr}");
+    assert!(stderr.contains("in `main`"), "{stderr}");
+    assert!(stderr.contains("Suggested fix:"), "{stderr}");
+}
+
+#[test]
+fn reports_runtime_error_as_json() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/array_index_out_of_bounds.nl");
+    let output = nlang()
+        .args([
+            "run",
+            "--format",
+            "json",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("\"code\":\"N0413\""), "{stderr}");
+    assert!(stderr.contains("\"phase\":\"runtime\""), "{stderr}");
+    assert!(
+        stderr.contains("\"traceback\":[{\"function\":\"main\""),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn rejects_store_type_mismatch() {
     let fixture = workspace_root().join("tests/fixtures/invalid/store_type_mismatch.nl");
     let output = nlang()
@@ -325,7 +485,44 @@ fn rejects_missing_file_with_structured_resource_error() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{output:?}");
-    assert!(stderr.contains("N0414 [resource]"), "{stderr}");
+    assert!(stderr.contains("N0414 [resource error]"), "{stderr}");
+}
+
+#[test]
+fn reports_missing_file_resource_error_as_json() {
+    let root = workspace_root();
+    let fixture = root.join("tests/fixtures/invalid/read_missing_file.nl");
+    let _ = std::fs::remove_file(root.join("target/nous_missing_file.txt"));
+
+    let output = nlang()
+        .current_dir(root)
+        .args([
+            "run",
+            "--format",
+            "json",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("\"code\":\"N0414\""), "{stderr}");
+    assert!(stderr.contains("\"phase\":\"resource\""), "{stderr}");
+    assert!(stderr.contains("\"root_cause\":"), "{stderr}");
+}
+
+#[test]
+fn rejects_extra_positionals() {
+    let fixture = workspace_root().join("tests/fixtures/valid/add.nl");
+    let output = nlang()
+        .args(["check", fixture.to_str().expect("fixture path"), "extra.nl"])
+        .output()
+        .expect("run cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("usage: nlang check"), "{stderr}");
 }
 
 #[test]

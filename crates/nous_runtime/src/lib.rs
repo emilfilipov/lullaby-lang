@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::process::Command;
 
+use nous_diagnostics::{Span, TraceFrame};
 use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,9 @@ pub struct RuntimeError {
     pub code: &'static str,
     pub category: ErrorCategory,
     pub message: String,
+    pub span: Option<Span>,
+    pub function: Option<String>,
+    pub traceback: Vec<TraceFrame>,
 }
 
 impl RuntimeError {
@@ -60,7 +64,31 @@ impl RuntimeError {
             code,
             category,
             message: message.into(),
+            span: None,
+            function: None,
+            traceback: Vec::new(),
         }
+    }
+
+    fn with_span(mut self, span: Span) -> Self {
+        if self.span.is_none() {
+            self.span = Some(span);
+        }
+        self
+    }
+
+    fn with_function(mut self, function: impl Into<String>) -> Self {
+        if self.function.is_none() {
+            self.function = Some(function.into());
+        }
+        self
+    }
+
+    fn with_traceback(mut self, traceback: Vec<TraceFrame>) -> Self {
+        if self.traceback.is_empty() {
+            self.traceback = traceback;
+        }
+        self
     }
 }
 
@@ -87,6 +115,7 @@ pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
 struct Runtime<'a> {
     functions: HashMap<&'a str, &'a Function>,
     heap: Vec<Option<Value>>,
+    call_stack: Vec<TraceFrame>,
 }
 
 impl<'a> Runtime<'a> {
@@ -104,6 +133,7 @@ impl<'a> Runtime<'a> {
         Ok(Self {
             functions,
             heap: Vec::new(),
+            call_stack: Vec::new(),
         })
     }
 
@@ -140,7 +170,15 @@ impl<'a> Runtime<'a> {
                     env.define(param.name.clone(), value);
                 }
 
-                match self.eval_block(&function.body, &mut env)? {
+                self.call_stack.push(TraceFrame {
+                    function: function.name.clone(),
+                    span: Some(function.span),
+                });
+                let result = self.eval_block(&function.body, &mut env);
+                let traceback = self.call_stack.clone();
+                self.call_stack.pop();
+
+                match result.map_err(|error| error.with_traceback(traceback))? {
                     Control::Return(value) | Control::Value(value) => Ok(value),
                     Control::Break | Control::Continue => Err(RuntimeError::new(
                         "N0410",
@@ -167,7 +205,8 @@ impl<'a> Runtime<'a> {
     }
 
     fn eval_statement(&mut self, statement: &Stmt, env: &mut Env) -> Result<Control, RuntimeError> {
-        match statement {
+        let span = statement_span(statement);
+        let result = match statement {
             Stmt::Let { name, value, .. } => {
                 let value = self.eval_expr(value, env)?;
                 env.define(name.clone(), value);
@@ -278,7 +317,8 @@ impl<'a> Runtime<'a> {
                 }
                 Ok(Control::Value(Value::Void))
             }
-        }
+        };
+        result.map_err(|error| self.annotate_error(error, span))
     }
 
     fn eval_scoped_block(
@@ -293,7 +333,7 @@ impl<'a> Runtime<'a> {
     }
 
     fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
-        match &expr.kind {
+        let result = match &expr.kind {
             ExprKind::Integer(value) => Ok(Value::I64(*value)),
             ExprKind::Bool(value) => Ok(Value::Bool(*value)),
             ExprKind::String(value) => Ok(Value::String(value.clone())),
@@ -353,6 +393,17 @@ impl<'a> Runtime<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.call_function(name, values)
             }
+        };
+        result.map_err(|error| self.annotate_error(error, expr.span))
+    }
+
+    fn annotate_error(&self, error: RuntimeError, span: Span) -> RuntimeError {
+        let error = error.with_span(span);
+        match self.call_stack.last() {
+            Some(frame) => error
+                .with_function(frame.function.clone())
+                .with_traceback(self.call_stack.clone()),
+            None => error,
         }
     }
 
@@ -534,6 +585,21 @@ enum Control {
     Break,
     Continue,
     Value(Value),
+}
+
+fn statement_span(statement: &Stmt) -> Span {
+    match statement {
+        Stmt::Let { span, .. }
+        | Stmt::Assign { span, .. }
+        | Stmt::Break(span)
+        | Stmt::Continue(span)
+        | Stmt::If { span, .. }
+        | Stmt::While { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Loop { span, .. } => *span,
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) => expr.span,
+        Stmt::Return(None) => Span::new(1, 1),
+    }
 }
 
 #[derive(Debug, Clone)]

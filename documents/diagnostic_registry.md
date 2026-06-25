@@ -1,0 +1,110 @@
+# Diagnostic Registry
+
+Canonical language rules: see [core_language_rules.md](core_language_rules.md).
+
+This registry defines the stable diagnostic codes currently emitted by the Nous Lang alpha. Diagnostics are designed for both human readers and LLM/tooling consumers.
+
+## Output Modes
+
+- Concise default: `nlang check file.nl` and `nlang run file.nl` print one line per diagnostic.
+- Verbose: `nlang check --verbose file.nl` and `nlang run --verbose file.nl` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
+- JSON: `nlang check --format json file.nl` and `nlang run --format json file.nl` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
+
+JSON failures are written to stderr and keep a non-zero exit status. JSON successes are written to stdout as:
+
+```json
+{"status":"ok","diagnostics":[]}
+```
+
+## JSON Schema
+
+Each diagnostic object uses stable field names:
+
+```json
+{
+  "code": "N0313",
+  "phase": "semantic",
+  "severity": "error",
+  "message": "argument 2 for `sys_status` must be `array<string>` but got `array<i64>`",
+  "source_path": "tests/fixtures/invalid/sys_args_type.nl",
+  "span": {"line": 2, "column": 24},
+  "function": "bad",
+  "explanation": "Function and builtin arguments are statically type checked.",
+  "root_cause": "The argument expression type does not match the parameter type.",
+  "suggested_fix": "Pass a value of the expected type or change the called function signature.",
+  "notes": [],
+  "traceback": []
+}
+```
+
+Fields that are not known for a diagnostic are `null` or an empty array. Ordering is deterministic.
+
+## Codes
+
+| Code | Phase | Meaning | Likely cause | Suggested fix |
+| :--- | :--- | :--- | :--- | :--- |
+| `N0001` | source | Unsupported source extension. | File path does not end in `.nl`. | Rename the source file or pass a `.nl` file. |
+| `N0002` | resource | CLI could not read a source file. | Missing file or unreadable path. | Check path and permissions. |
+| `N0101` | lexer | Indentation does not match an active block. | A line dedented to a column not on the indent stack. | Align with an existing block level. |
+| `N0102` | lexer | Curly braces are forbidden. | Source uses `{` or `}` as a block delimiter. | Remove braces and use indentation. |
+| `N0103` | lexer | Semicolons are forbidden. | Source uses `;` as a statement terminator. | Remove semicolons and use one statement per line. |
+| `N0104` | lexer | Unterminated string literal. | A closing quote is missing. | Add the closing quote. |
+| `N0201` | parser | Expected top-level function declaration. | Non-function syntax appears at top level. | Start top-level code with `fn`. |
+| `N0202` | parser | Missing return arrow before function return type. | Function signature lacks `->`. | Add `-> ReturnType`. |
+| `N0203` | parser | Expected type syntax. | Type annotation is missing or malformed. | Use current type spelling such as `i64`, `bool`, `string`, or `array<T>`. |
+| `N0204` | parser | Expected identifier. | A name is missing where required. | Add a valid identifier. |
+| `N0205` | parser | Expected structural token. | Missing newline, indent, or dedent. | Check indentation and required block bodies. |
+| `N0206` | parser | Expected `=` in a let binding. | A `let` statement lacks an initializer separator. | Use `let name Type = expression`. |
+| `N0207` | parser | Invalid expression. | Unsupported or malformed expression syntax. | Use supported expression forms and matching delimiters. |
+| `N0208` | parser | Expected assignment operator. | Assignment statement has malformed operator. | Use `=`, `+=`, `-=`, `*=`, or `/=`. |
+| `N0209` | parser | Expected `from` in for loop. | Range loop header is malformed. | Use `for name from start to end`. |
+| `N0210` | parser | Expected `to` in for loop. | Range loop header is missing its end marker. | Add `to end`. |
+| `N0300` | semantic | Duplicate function. | Two functions share a name. | Rename or remove one function. |
+| `N0301` | semantic | Non-void function has no final value of declared type. | Control reaches the end without the expected value. | Add a final expression or return the declared type. |
+| `N0302` | semantic | Duplicate parameter. | Function has repeated parameter names. | Rename one parameter. |
+| `N0303` | semantic | Binding initializer type mismatch. | Declared local type differs from initializer type. | Match the declared type and initializer. |
+| `N0304` | semantic | Return type mismatch. | Return expression differs from function return type. | Return the declared type or change the signature. |
+| `N0305` | semantic | Condition is not bool. | `if` or `while` condition has non-bool type. | Use a bool expression. |
+| `N0306` | semantic | Unknown variable. | Name is not visible in current scope. | Add a `let`, parameter, or fix the name. |
+| `N0307` | semantic | Arithmetic operands are not both `i64`. | Arithmetic used with non-numeric values. | Use `i64` operands. |
+| `N0308` | semantic | Equality operands have different types. | `==` or `!=` compares mismatched types. | Compare values of the same type. |
+| `N0309` | semantic | Unknown function. | Called function is not declared or builtin. | Define the function or fix the name. |
+| `N0310` | semantic | Pointer builtin expected pointer. | `load` or `store` got a non-pointer. | Pass a `ptr_*` value. |
+| `N0311` | semantic | `dealloc` expected pointer. | `dealloc` got a non-pointer. | Pass a valid pointer. |
+| `N0312` | semantic | Function argument count mismatch. | Call has too many or too few arguments. | Match the function or builtin arity. |
+| `N0313` | semantic | Function argument type mismatch. | Argument type differs from parameter type. | Pass a value with the expected type. |
+| `N0314` | semantic | Assignment type mismatch. | Assigned value differs from local type. | Assign a value of the local type. |
+| `N0315` | semantic | Compound assignment requires `i64`. | `+=`, `-=`, `*=`, or `/=` used on non-`i64`. | Use numeric locals and values. |
+| `N0316` | semantic | Assignment target not declared. | Assignment names an unknown local. | Declare the local first. |
+| `N0317` | semantic | `break` outside loop. | `break` appears outside loop context. | Move it into a loop or remove it. |
+| `N0318` | semantic | `continue` outside loop. | `continue` appears outside loop context. | Move it into a loop or remove it. |
+| `N0319` | semantic | `not` operand is not bool. | Logical negation used on non-bool. | Use a bool operand. |
+| `N0320` | semantic | Logical operands are not both bool. | `and` or `or` used on non-bool values. | Use bool operands. |
+| `N0321` | semantic | For-loop bound is not `i64`. | `from` or `to` expression is non-`i64`. | Use `i64` bounds. |
+| `N0322` | semantic | For-loop step is not `i64`. | `by` expression is non-`i64`. | Use an `i64` step. |
+| `N0323` | semantic | Empty arrays unsupported in alpha. | Array literal contains no values. | Provide at least one value. |
+| `N0324` | semantic | Array literal type mismatch. | Array values are not homogeneous. | Use values of one type. |
+| `N0325` | semantic | Index target is not an array. | Index syntax used on a non-array value. | Index only `array<T>` values. |
+| `N0326` | semantic | Array index is not `i64`. | Index expression has wrong type. | Use an `i64` index. |
+| `N0327` | semantic | Ordering operands are not both `i64`. | `<`, `<=`, `>`, or `>=` used on non-`i64`. | Use `i64` operands. |
+| `N0328` | semantic | `store` value type mismatch. | Stored value does not match pointer element type. | Store a value matching the pointer type. |
+| `N0400` | runtime | Missing `main`. | Runtime cannot find an entrypoint. | Define `fn main`. |
+| `N0401` | runtime | Unknown function at runtime. | Runtime call target was not found. | Check semantic validation and function names. |
+| `N0402` | runtime | Runtime function arity mismatch. | Runtime call has wrong argument count. | Match the function signature. |
+| `N0403` | runtime | Unknown variable at runtime. | Runtime scope lookup failed. | Check variable declaration and scope. |
+| `N0404` | runtime | Division by zero. | Divisor evaluated to zero. | Guard or change the divisor. |
+| `N0405` | runtime | Builtin arity mismatch. | Builtin received wrong argument count. | Match builtin arity. |
+| `N0406` | runtime | Invalid pointer. | Pointer was deallocated or never allocated. | Avoid use after deallocation. |
+| `N0407` | runtime | Expected `i64`. | Runtime value kind was wrong. | Fix static typing or runtime expression. |
+| `N0408` | runtime | Expected bool. | Runtime value kind was wrong. | Fix static typing or runtime expression. |
+| `N0409` | runtime | Expected pointer. | Runtime value kind was wrong. | Pass a pointer value. |
+| `N0410` | runtime | Loop control escaped function. | `break` or `continue` reached function boundary. | Keep loop control inside loops. |
+| `N0411` | runtime | For-loop step is zero. | Step expression evaluated to 0. | Use non-zero step. |
+| `N0412` | runtime | Runtime index target is not array. | Index target evaluated to non-array. | Index only arrays. |
+| `N0413` | runtime | Array index out of bounds. | Computed index is negative or too large. | Check index before indexing. |
+| `N0414` | resource | File read failed. | Missing, unreadable, or unsupported text file. | Check path, working directory, and permissions. |
+| `N0415` | resource | File write or append failed. | Destination or parent directory is unavailable. | Use a writable path. |
+| `N0416` | resource | Command launch failed. | Program not found or not executable. | Pass a valid executable and argv array. |
+| `N0417` | runtime | Expected string. | Runtime value kind was wrong. | Pass a string value. |
+| `N0418` | runtime | Expected `array<string>`. | Runtime value kind was wrong. | Pass an array of strings. |
+

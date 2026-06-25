@@ -33,6 +33,70 @@ The implemented runtime categories are:
 
 Language-level `try`, `catch`, recovery blocks, and compact `!0xXX` error tokens are planned and are not accepted by the current parser.
 
+## Epic 6 Diagnostics UX
+
+The alpha now has three CLI diagnostic modes:
+
+```text
+nlang check file.nl
+nlang check --verbose file.nl
+nlang check --format json file.nl
+```
+
+The same flags are available for `nlang run`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
+
+### Concise Output
+
+Concise output is the default. It is intended for quick terminal feedback:
+
+```text
+N0303 [semantic error] at tests/fixtures/invalid/type_mismatch.nl:2:22 in `main`: binding `value` declares `bool` but initializer has `i64`
+```
+
+### Verbose Output
+
+Verbose output is intended for humans and LLM agents that need enough context to repair the source:
+
+```text
+N0102 [lexer error] at tests/fixtures/invalid/brace.nl:2:5: curly braces are not block delimiters in Nous Lang
+
+Source:
+   2 |     {
+     |     ^
+
+Problem:
+  Nous Lang uses indentation-only blocks.
+
+Root cause:
+  The source contains a curly brace, which is not a block delimiter.
+
+Suggested fix:
+  Remove the brace and express the block with indentation.
+```
+
+Runtime failures include lightweight tracebacks when execution has entered user code:
+
+```text
+Traceback:
+  in `main` at 1:1
+```
+
+### JSON Output
+
+JSON mode is deterministic and intended for editors, CI systems, and LLM agents. Failure diagnostics are written to stderr and keep a non-zero exit status. Successful JSON runs write this to stdout:
+
+```json
+{"status":"ok","diagnostics":[]}
+```
+
+Failure JSON uses the diagnostic registry fields:
+
+```json
+{"status":"error","diagnostics":[{"code":"N0313","phase":"semantic","severity":"error","message":"argument 2 for `sys_status` must be `array<string>` but got `array<i64>`","source_path":"tests/fixtures/invalid/sys_args_type.nl","span":{"line":2,"column":24},"function":"bad","explanation":"Function and builtin arguments are statically type checked.","root_cause":"The argument expression type does not match the parameter type.","suggested_fix":"Pass a value of the expected type or change the called function signature.","notes":[],"traceback":[]}]}
+```
+
+See [diagnostic_registry.md](diagnostic_registry.md) for the full stable code registry and JSON field contract.
+
 ## Core Error Concepts
 
 ### Error Tokens

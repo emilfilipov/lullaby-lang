@@ -451,6 +451,8 @@
           <tbody>
             <tr><td><code>cargo run -p nous_cli -- check path/to/file.nl</code></td><td>Validate extension, lex, parse, and run semantic checks.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- run path/to/file.nl</code></td><td>Validate and execute <code>main</code> in the alpha runtime.</td></tr>
+            <tr><td><code>cargo run -p nous_cli -- check --verbose path/to/file.nl</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
+            <tr><td><code>cargo run -p nous_cli -- check --format json path/to/file.nl</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
           </tbody>
         </table>
       </section>
@@ -487,7 +489,21 @@ fn main -> i64
 
       <section id="diagnostics">
         <h2>Diagnostics</h2>
-        <p>Diagnostics use short codes and source spans where possible. Current examples include:</p>
+        <p>Diagnostics use stable short codes and are available in concise, verbose, and JSON output modes. The default concise mode is compact terminal feedback. The <code>--verbose</code> mode adds source excerpts, caret markers, root cause, suggested fix text, related notes, and runtime traceback frames when available. The <code>--format json</code> mode emits deterministic machine-readable diagnostics.</p>
+        <pre><code>N0102 [lexer error] at tests/fixtures/invalid/brace.nl:2:5: curly braces are not block delimiters in Nous Lang
+
+Source:
+   2 |     {
+     |     ^
+
+Root cause:
+  The source contains a curly brace, which is not a block delimiter.
+
+Suggested fix:
+  Remove the brace and express the block with indentation.</code></pre>
+        <pre><code>{"status":"error","diagnostics":[{"code":"N0313","phase":"semantic","severity":"error","span":{"line":2,"column":24},"root_cause":"The argument expression type does not match the parameter type.","suggested_fix":"Pass a value of the expected type or change the called function signature.","traceback":[]}]}</code></pre>
+        <p>The diagnostic registry in <code>documents/diagnostic_registry.md</code> defines every stable <code>N####</code> code, phase, meaning, likely cause, and suggested fix.</p>
+        <p>Current examples include:</p>
         <table>
           <thead>
             <tr><th>Code</th><th>Meaning</th></tr>
@@ -507,6 +523,7 @@ fn main -> i64
             <tr><td><code>N0416 [resource]</code></td><td>Runtime failed to invoke a system command.</td></tr>
           </tbody>
         </table>
+        <p>Runtime diagnostics can include a traceback through user-defined functions and failing builtins or expressions.</p>
       </section>
 
       <section id="limitations">

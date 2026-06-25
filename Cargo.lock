@@ -6,11 +6,16 @@ version = 4
 name = "nous_cli"
 version = "0.1.0"
 dependencies = [
+ "nous_diagnostics",
  "nous_lexer",
  "nous_parser",
  "nous_runtime",
  "nous_semantics",
 ]
+
+[[package]]
+name = "nous_diagnostics"
+version = "0.1.0"
 
 [[package]]
 name = "nous_ir"
@@ -22,6 +27,9 @@ dependencies = [
 [[package]]
 name = "nous_lexer"
 version = "0.1.0"
+dependencies = [
+ "nous_diagnostics",
+]
 
 [[package]]
 name = "nous_parser"
@@ -34,6 +42,7 @@ dependencies = [
 name = "nous_runtime"
 version = "0.1.0"
 dependencies = [
+ "nous_diagnostics",
  "nous_lexer",
  "nous_parser",
  "nous_semantics",
@@ -43,6 +52,7 @@ dependencies = [
 name = "nous_semantics"
 version = "0.1.0"
 dependencies = [
+ "nous_diagnostics",
  "nous_lexer",
  "nous_parser",
 ]

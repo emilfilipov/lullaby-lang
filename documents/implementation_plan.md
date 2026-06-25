@@ -84,10 +84,10 @@ The repository now contains the first executable alpha slice:
 
 | Story | Description | Dependencies | Estimated Effort | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **6.1** | **Unified Diagnostic Model:** Define a shared diagnostic structure with code, phase/category, severity, source path, span/range, function/context, primary message, explanation, root cause, suggested fix, and related notes. | Current lexer/parser/semantic/runtime diagnostic structs | High | To Do |
-| **6.2** | **Verbose CLI Diagnostics:** Add `--verbose` diagnostics for `check` and `run` with source excerpts, caret markers, root-cause explanation, and fix guidance. | 6.1 | High | To Do |
-| **6.3** | **Machine-Readable Diagnostics:** Add deterministic JSON output for `check` and `run`, suitable for editors, CI, and LLM agents. | 6.1 | Medium | To Do |
-| **6.4** | **Semantic Source Spans:** Extend semantic diagnostics so type, name, control-flow, and builtin argument errors point to the exact offending AST node instead of only the containing function. | 6.1, `nous_parser` spans | High | To Do |
-| **6.5** | **Runtime Tracebacks:** Track source context and lightweight call stacks through user-defined functions and failing builtins/expressions. | 6.1, `nous_runtime` | High | To Do |
-| **6.6** | **Diagnostic Registry:** Document every stable `N####` code with meaning, likely cause, example, and suggested fix; keep Markdown and offline browser docs synchronized. | 6.1 | Medium | To Do |
-| **6.7** | **Diagnostic Snapshot Tests:** Add representative CLI tests for lexer, parser, semantic, runtime, and resource diagnostics in concise, verbose, and JSON modes. | 6.2, 6.3 | High | To Do |
+| **6.1** | **Unified Diagnostic Model:** Define a shared diagnostic structure with code, phase/category, severity, source path, span/range, function/context, primary message, explanation, root cause, suggested fix, and related notes. | Current lexer/parser/semantic/runtime diagnostic structs | High | Alpha shared `nous_diagnostics` crate done |
+| **6.2** | **Verbose CLI Diagnostics:** Add `--verbose` diagnostics for `check` and `run` with source excerpts, caret markers, root-cause explanation, and fix guidance. | 6.1 | High | Alpha `--verbose` output done |
+| **6.3** | **Machine-Readable Diagnostics:** Add deterministic JSON output for `check` and `run`, suitable for editors, CI, and LLM agents. | 6.1 | Medium | Alpha `--format json` and `--diagnostic-format json` output done |
+| **6.4** | **Semantic Source Spans:** Extend semantic diagnostics so type, name, control-flow, and builtin argument errors point to the exact offending AST node instead of only the containing function. | 6.1, `nous_parser` spans | High | Alpha semantic spans done for primary error paths |
+| **6.5** | **Runtime Tracebacks:** Track source context and lightweight call stacks through user-defined functions and failing builtins/expressions. | 6.1, `nous_runtime` | High | Alpha runtime source spans and call stack tracebacks done |
+| **6.6** | **Diagnostic Registry:** Document every stable `N####` code with meaning, likely cause, example, and suggested fix; keep Markdown and offline browser docs synchronized. | 6.1 | Medium | Alpha registry done in `diagnostic_registry.md` and offline docs |
+| **6.7** | **Diagnostic Snapshot Tests:** Add representative CLI tests for lexer, parser, semantic, runtime, and resource diagnostics in concise, verbose, and JSON modes. | 6.2, 6.3 | High | Alpha CLI diagnostics coverage done |

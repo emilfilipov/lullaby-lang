@@ -18,6 +18,7 @@ This file maps the repository layout and explains where to find core information
 - `documents/core_language_rules.md`: canonical global rules for `.nl` source files, indentation-only scope, forbidden block delimiters, and no semicolon terminators.
 - `documents/language_specification.md`: top-level language specification and overview. Use this first for language behavior, philosophy, syntax reference, examples, and roadmap.
 - `documents/implementation_plan.md`: implementation plan for the compiler, runtime, offline browser documentation bundle, CLI, installer, tests, and release workflow.
+- `documents/diagnostic_registry.md`: stable diagnostic code registry and output contract for concise, verbose, and JSON diagnostics.
 - `documents/nous_lang_syntax_design.md`: syntax design details for declarations, functions, data structures, operators, naming, comments, and examples.
 - `documents/nous_lang_type_system.md`: type-system details for primitives, composites, references, functions, inference, safety, aliases, generics, and OS-specific types.
 - `documents/nous_lang_memory_management.md`: memory model covering regions, stack allocation, heap allocation, lifetime tracking, GC hooks, safety checks, runtime memory APIs, and kernel memory examples.
@@ -37,11 +38,12 @@ This file maps the repository layout and explains where to find core information
 The implementation is a Rust workspace. Unless changed by an explicit architecture decision, keep this layout:
 
 - `crates/nous_lexer/`: source extension validation, tokenization, indentation scanning, forbidden brace/semicolon diagnostics, core keyword recognition, and lexical tests.
+- `crates/nous_diagnostics/`: shared diagnostic data structures, registry metadata, concise/verbose renderers, and deterministic JSON rendering.
 - `crates/nous_parser/`: AST model and parser for function declarations, typed parameters, return types, indentation blocks, `let`, assignment, `return`, `break`, `continue`, if/elif/else, while/loop/range-for, calls, literals, array literals/indexing, variables, arithmetic, comparison, and logical expressions.
 - `crates/nous_semantics/`: static validation for duplicate declarations, local binding types, assignment targets/types, function call arity/types, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical expression operand types, homogeneous non-empty arrays, array indexing, interim pointer-style memory builtins, text file I/O builtins, and safe system command builtins.
 - `crates/nous_ir/`: placeholder IR lowering crate for the future semantic IR schema.
 - `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop/range-for execution, break/continue, array literals/indexing with runtime bounds checks, arithmetic/comparison/logical expressions with short-circuiting, `alloc`/`load`/`store`/`dealloc` heap-slot memory builtins, text file I/O builtins, direct program-plus-argv system command builtins, and categorized runtime/resource errors.
-- `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check <file.nl>` and `run <file.nl>`.
+- `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check [--verbose|--format json] <file.nl>` and `run [--verbose|--format json] <file.nl>`.
 - `crates/nous_cli/tests/`: binary-level integration tests for the CLI pipeline, including valid checks, runtime execution, lexical errors, and semantic errors.
 - `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend and CLI.
 - `tests/fixtures/invalid/`: invalid source fixtures for diagnostics and negative tests.
@@ -52,6 +54,9 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo test --all`: unit tests for all crates.
 - `cargo clippy --all-targets --all-features -- -D warnings`: lint all crates and integration tests.
 - `cargo run -p nous_cli -- check tests/fixtures/valid/add.nl`: check a valid fixture through source validation, lexing, parsing, and semantic validation.
+- `cargo run -p nous_cli -- check --verbose tests/fixtures/invalid/brace.nl`: print verbose source excerpt, root-cause, and suggested-fix diagnostics.
+- `cargo run -p nous_cli -- check --format json tests/fixtures/invalid/type_mismatch.nl`: print deterministic JSON diagnostics. `--diagnostic-format json` is also accepted.
+- `cargo run -p nous_cli -- run --verbose tests/fixtures/invalid/array_index_out_of_bounds.nl`: print runtime diagnostics with source context and traceback frames.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through source validation, lexing, parsing, semantic validation, runtime execution, and stdout output.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_memory.nl`: run the current memory builtin fixture through `alloc`, `load`, and `dealloc`.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_store.nl`: run heap-slot mutation through `alloc`, `store`, `load`, and `dealloc`.
@@ -63,6 +68,7 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_array.nl`: run homogeneous array literals and bounds-checked indexing.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_file_io.nl`: run text file write, append, and read builtins.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/brace.nl`: verify forbidden block delimiter diagnostics.
+- `cargo run -p nous_cli -- check tests/fixtures/invalid/missing_indented_body.nl`: verify parser diagnostics for missing indentation.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/type_mismatch.nl`: verify semantic type mismatch diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/assignment_type_mismatch.nl`: verify assignment type mismatch diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/break_outside_loop.nl`: verify loop-control placement diagnostics.
