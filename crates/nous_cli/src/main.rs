@@ -136,6 +136,14 @@ fn optimize_module(module: nous_ir::IrModule, optimization: OptimizationMode) ->
             let (module, _report) = optimize(&module, &OptimizationConfig::constant_folding());
             module
         }
+        OptimizationMode::DeadCode => {
+            let (module, _report) = optimize(&module, &OptimizationConfig::dead_code_elimination());
+            module
+        }
+        OptimizationMode::Alpha => {
+            let (module, _report) = optimize(&module, &OptimizationConfig::alpha_default());
+            module
+        }
     }
 }
 
@@ -354,6 +362,8 @@ impl Backend {
 enum OptimizationMode {
     None,
     ConstantFold,
+    DeadCode,
+    Alpha,
 }
 
 impl OptimizationMode {
@@ -361,6 +371,8 @@ impl OptimizationMode {
         match value {
             "none" => Some(Self::None),
             "constant-fold" => Some(Self::ConstantFold),
+            "dead-code" => Some(Self::DeadCode),
+            "alpha" => Some(Self::Alpha),
             _ => None,
         }
     }
@@ -464,7 +476,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
     }
     if backend == Backend::Ast && optimization != OptimizationMode::None {
         return Err(
-            "usage: nlang run --backend ir|bytecode --optimize none|constant-fold <file.nl>"
+            "usage: nlang run --backend ir|bytecode --optimize none|constant-fold|dead-code|alpha <file.nl>"
                 .to_string(),
         );
     }
@@ -484,14 +496,14 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
 
 fn command_usage(command: &str) -> String {
     match command {
-        "run" => "usage: nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold] [--verbose|--format json] <file.nl>".to_string(),
+        "run" => "usage: nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>".to_string(),
         _ => "usage: nlang check [--verbose|--format json] <file.nl>".to_string(),
     }
 }
 
 fn print_help() {
     println!(
-        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold] [--verbose|--format json] <file.nl>\n  nlang --version",
+        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang --version",
         env!("CARGO_PKG_VERSION")
     );
 }

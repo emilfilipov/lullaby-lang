@@ -143,8 +143,19 @@ impl OptimizationConfig {
         }
     }
 
+    pub fn dead_code_elimination() -> Self {
+        Self {
+            passes: vec![OptimizationPass::DeadCodeElimination],
+        }
+    }
+
     pub fn alpha_default() -> Self {
-        Self::constant_folding()
+        Self {
+            passes: vec![
+                OptimizationPass::ConstantFolding,
+                OptimizationPass::DeadCodeElimination,
+            ],
+        }
     }
 
     pub fn with_passes(passes: Vec<OptimizationPass>) -> Self {
@@ -165,12 +176,14 @@ impl Default for OptimizationConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptimizationPass {
     ConstantFolding,
+    DeadCodeElimination,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OptimizationReport {
     pub applied_passes: Vec<OptimizationPass>,
     pub folded_expressions: usize,
+    pub removed_dead_statements: usize,
 }
 
 pub fn optimize(module: &IrModule, config: &OptimizationConfig) -> (IrModule, OptimizationReport) {
@@ -183,6 +196,12 @@ pub fn optimize(module: &IrModule, config: &OptimizationConfig) -> (IrModule, Op
                 let mut folder = ConstantFolder::default();
                 optimized = folder.fold_module(&optimized);
                 report.folded_expressions += folder.folded_expressions;
+                report.applied_passes.push(*pass);
+            }
+            OptimizationPass::DeadCodeElimination => {
+                let mut eliminator = DeadCodeEliminator::default();
+                optimized = eliminator.eliminate_module(&optimized);
+                report.removed_dead_statements += eliminator.removed_statements;
                 report.applied_passes.push(*pass);
             }
         }
@@ -475,6 +494,112 @@ fn fold_binary(left: &IrExpr, op: BinaryOp, right: &IrExpr) -> Option<IrExprKind
         }
         _ => None,
     }
+}
+
+#[derive(Default)]
+struct DeadCodeEliminator {
+    removed_statements: usize,
+}
+
+impl DeadCodeEliminator {
+    fn eliminate_module(&mut self, module: &IrModule) -> IrModule {
+        IrModule {
+            functions: module
+                .functions
+                .iter()
+                .map(|function| self.eliminate_function(function))
+                .collect(),
+        }
+    }
+
+    fn eliminate_function(&mut self, function: &IrFunction) -> IrFunction {
+        IrFunction {
+            name: function.name.clone(),
+            params: function.params.clone(),
+            return_type: function.return_type.clone(),
+            body: self.eliminate_block(&function.body),
+            span: function.span,
+        }
+    }
+
+    fn eliminate_block(&mut self, statements: &[IrStmt]) -> Vec<IrStmt> {
+        let mut kept = Vec::new();
+        let mut terminated = false;
+
+        for statement in statements {
+            if terminated {
+                self.removed_statements += 1;
+                continue;
+            }
+
+            let statement = self.eliminate_statement(statement);
+            terminated = is_unconditional_terminator(&statement);
+            kept.push(statement);
+        }
+
+        kept
+    }
+
+    fn eliminate_statement(&mut self, statement: &IrStmt) -> IrStmt {
+        match statement {
+            IrStmt::If {
+                branches,
+                else_body,
+                span,
+            } => IrStmt::If {
+                branches: branches
+                    .iter()
+                    .map(|branch| IrIfBranch {
+                        condition: branch.condition.clone(),
+                        body: self.eliminate_block(&branch.body),
+                    })
+                    .collect(),
+                else_body: self.eliminate_block(else_body),
+                span: *span,
+            },
+            IrStmt::While {
+                condition,
+                body,
+                span,
+            } => IrStmt::While {
+                condition: condition.clone(),
+                body: self.eliminate_block(body),
+                span: *span,
+            },
+            IrStmt::For {
+                name,
+                start,
+                end,
+                step,
+                body,
+                span,
+            } => IrStmt::For {
+                name: name.clone(),
+                start: start.clone(),
+                end: end.clone(),
+                step: step.clone(),
+                body: self.eliminate_block(body),
+                span: *span,
+            },
+            IrStmt::Loop { body, span } => IrStmt::Loop {
+                body: self.eliminate_block(body),
+                span: *span,
+            },
+            IrStmt::Let { .. }
+            | IrStmt::Assign { .. }
+            | IrStmt::Return(_)
+            | IrStmt::Break(_)
+            | IrStmt::Continue(_)
+            | IrStmt::Expr(_) => statement.clone(),
+        }
+    }
+}
+
+fn is_unconditional_terminator(statement: &IrStmt) -> bool {
+    matches!(
+        statement,
+        IrStmt::Return(_) | IrStmt::Break(_) | IrStmt::Continue(_)
+    )
 }
 
 struct IrRuntime<'a> {
@@ -1454,16 +1579,79 @@ mod tests {
     }
 
     #[test]
+    fn dead_code_elimination_removes_statements_after_return() {
+        let module = lower_source("fn main -> i64\n    return 42\n    0\n");
+        let (optimized, report) = optimize(&module, &OptimizationConfig::dead_code_elimination());
+
+        assert_eq!(
+            report.applied_passes,
+            vec![OptimizationPass::DeadCodeElimination]
+        );
+        assert_eq!(report.removed_dead_statements, 1);
+        assert_eq!(optimized.functions[0].body.len(), 1);
+        assert!(matches!(optimized.functions[0].body[0], IrStmt::Return(_)));
+    }
+
+    #[test]
+    fn dead_code_elimination_rewrites_nested_blocks() {
+        let module = lower_source(
+            "fn main -> i64\n    let total i64 = 0\n    if true\n        return 1\n        total + 1\n    else\n        return 2\n        total + 2\n    loop\n        break\n        total += 1\n    total\n",
+        );
+        let (optimized, report) = optimize(&module, &OptimizationConfig::dead_code_elimination());
+
+        assert_eq!(report.removed_dead_statements, 3);
+        let IrStmt::If {
+            branches,
+            else_body,
+            ..
+        } = &optimized.functions[0].body[1]
+        else {
+            panic!("expected if statement");
+        };
+        assert_eq!(branches[0].body.len(), 1);
+        assert_eq!(else_body.len(), 1);
+
+        let IrStmt::Loop { body, .. } = &optimized.functions[0].body[2] else {
+            panic!("expected loop statement");
+        };
+        assert_eq!(body.len(), 1);
+        assert!(matches!(body[0], IrStmt::Break(_)));
+    }
+
+    #[test]
+    fn alpha_optimizer_runs_constant_folding_then_dead_code_elimination() {
+        let module =
+            lower_source("fn main -> i64\n    let value i64 = 40 + 2\n    return value\n    0\n");
+        let (optimized, report) = optimize(&module, &OptimizationConfig::alpha_default());
+
+        assert_eq!(
+            report.applied_passes,
+            vec![
+                OptimizationPass::ConstantFolding,
+                OptimizationPass::DeadCodeElimination
+            ]
+        );
+        assert_eq!(report.folded_expressions, 1);
+        assert_eq!(report.removed_dead_statements, 1);
+        let IrStmt::Let { value, .. } = &optimized.functions[0].body[0] else {
+            panic!("expected let statement");
+        };
+        assert_eq!(value.kind, IrExprKind::Integer(42));
+        assert_eq!(optimized.functions[0].body.len(), 2);
+    }
+
+    #[test]
     fn optimized_ir_and_bytecode_match_ast_execution() {
-        let source = "fn main -> i64\n    let folded i64 = (6 * 7) + (10 / 2)\n    folded - 5\n";
+        let source = "fn main -> i64\n    let folded i64 = (6 * 7) + (10 / 2)\n    return folded - 5\n    0\n";
         let tokens = lex(source).expect("lex");
         let program = parse(&tokens).expect("parse");
         let checked = validate(&program).expect("semantic");
         let ir = lower(&checked).expect("lower");
-        let (optimized, report) = optimize(&ir, &OptimizationConfig::constant_folding());
+        let (optimized, report) = optimize(&ir, &OptimizationConfig::alpha_default());
         let bytecode = lower_to_bytecode(&optimized);
 
         assert!(report.folded_expressions > 0);
+        assert_eq!(report.removed_dead_statements, 1);
         assert_eq!(
             run_main(&optimized).expect("optimized ir run"),
             run_ast_main(&program).expect("ast run")

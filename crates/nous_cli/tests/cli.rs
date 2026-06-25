@@ -138,6 +138,44 @@ fn runs_logic_fixture_with_optimized_bytecode_backend() {
 }
 
 #[test]
+fn runs_arithmetic_fixture_with_alpha_optimized_ir_backend() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_arithmetic.nl");
+    let output = nlang()
+        .args([
+            "run",
+            "--backend",
+            "ir",
+            "--optimize",
+            "alpha",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "42");
+}
+
+#[test]
+fn runs_arithmetic_fixture_with_alpha_optimized_bytecode_backend() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_arithmetic.nl");
+    let output = nlang()
+        .args([
+            "run",
+            "--backend",
+            "bytecode",
+            "--optimize",
+            "alpha",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "42");
+}
+
+#[test]
 fn rejects_optimizer_for_ast_backend() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_logic.nl");
     let output = nlang()
@@ -153,6 +191,7 @@ fn rejects_optimizer_for_ast_backend() {
     let stderr = stderr(&output);
     assert!(!output.status.success(), "{output:?}");
     assert!(stderr.contains("--backend ir|bytecode"), "{stderr}");
+    assert!(stderr.contains("dead-code|alpha"), "{stderr}");
 }
 
 #[test]

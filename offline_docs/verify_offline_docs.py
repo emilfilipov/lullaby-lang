@@ -73,6 +73,8 @@ REQUIRED_PHRASES = [
     "--backend ir",
     "--backend bytecode",
     "--optimize constant-fold",
+    "--optimize dead-code",
+    "--optimize alpha",
     "--optimize none",
     "--verbose",
     "--format json",

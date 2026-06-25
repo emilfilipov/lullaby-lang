@@ -21,9 +21,9 @@ The current Rust workspace implements a frontend and in-process execution pipeli
 3. `nous_semantics` validates static types, local bindings, assignments, function calls, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical operands, homogeneous non-empty arrays, array indexes, interim pointer-style memory builtins, text file I/O builtins, and safe system command builtins. Successful validation returns `CheckedProgram` metadata with function signatures and inferred expression types.
 4. `nous_ir` lowers a `CheckedProgram` into typed semantic IR for the current alpha subset, including typed functions, parameters, statements, control flow, calls, builtins, and expressions.
 5. `nous_runtime` executes the validated AST directly, including `main`, calls, scoped locals, assignment, branch result values, while/loop/range-for control flow, array literals/indexing with runtime bounds checks, arithmetic/comparisons, short-circuit boolean logic, heap-slot memory operations including `alloc`/`load`/`store`/`dealloc`, text file I/O, and safe system command builtins.
-6. `nous_ir` provides a deterministic optimization pass framework. The first implemented pass is constant folding for pure literal arithmetic, comparisons, boolean logic, string equality, and unary `not`; it deliberately leaves divide-by-zero expressions intact so runtime diagnostics are preserved.
+6. `nous_ir` provides a deterministic optimization pass framework. Implemented passes are constant folding for pure literal arithmetic, comparisons, boolean logic, string equality, and unary `not`, plus dead-code elimination for statements after unconditional `return`, `break`, or `continue` in the same block. Constant folding deliberately leaves divide-by-zero expressions intact so runtime diagnostics are preserved.
 7. `nous_ir` can also execute the lowered typed IR and lower it into an initial structured bytecode module with a bytecode VM entry point for the current alpha subset.
-8. `nous_cli` exposes the current pipeline as `nlang check <file.nl>` and `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold] <file.nl>`. Optimization is opt-in and applies only to the IR and bytecode backends.
+8. `nous_cli` exposes the current pipeline as `nlang check <file.nl>` and `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] <file.nl>`. Optimization is opt-in and applies only to the IR and bytecode backends.
 
 Additional optimization passes, native code generation, linking, and binary output remain planned architecture stages.
 
@@ -112,7 +112,9 @@ ir = [
 
 #### IR Optimizations Built-in
 - **Implemented now**: Opt-in constant folding through the `nous_ir` optimization framework and `nlang run --backend ir|bytecode --optimize constant-fold`.
-- **Planned**: Dead code elimination to remove unreachable code automatically.
+- **Implemented now**: Dead-code elimination for statements after explicit block terminators through `nlang run --backend ir|bytecode --optimize dead-code`.
+- **Implemented now**: The current alpha pass pipeline through `nlang run --backend ir|bytecode --optimize alpha`.
+- **Planned**: Broader dead branch and unreachable control-flow elimination.
 - **Planned**: Type propagation to infer missing types through data flow analysis.
 - **Planned**: Memory layout optimization for cache-friendly variable placement.
 
