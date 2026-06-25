@@ -29,6 +29,9 @@ The current Rust toolchain implements a small executable subset while the wider 
 - Equality comparisons require matching operand types. Ordering comparisons `<`, `<=`, `>`, and `>=` currently require `i64` operands.
 - Implemented control flow is `if`/`elif`/`else`, `while`, range `for`, `loop`, `break`, and `continue` with indentation-only bodies.
 - Implemented memory builtins are `alloc(value)`, `load(ptr)`, `store(ptr, value)`, and `dealloc(ptr)`.
+- Implemented text file I/O builtins are `read_file(path)`, `write_file(path, content)`, `append_file(path, content)`, and `file_exists(path)`.
+- Implemented system command builtins are `sys_status(program, args)` and `sys_output(program, args)`, where `args` is `array<string>`. These execute a program with an argv array directly and do not invoke a shell.
+- Runtime resource failures use structured CLI formatting such as `N0414 [resource]: failed to read ...`.
 - CLI commands are `nlang check <file.nl>` and `nlang run <file.nl>` through the Rust workspace.
 
 ## Language Philosophy
@@ -260,11 +263,25 @@ fn main -> i64
 ```
 
 ### I/O Operations
+Current alpha text file and system command form:
 ```nlang
-io.read(path)         // Read entire file
-io.readlines(path, max_lines=N)  // Read limited lines
-io.open(path, mode)   // Open stream for reading/writing
-io.write(path, data)  // Write to file
+fn main -> string
+    write_file("target/example.txt", "alpha")
+    append_file("target/example.txt", " beta")
+    read_file("target/example.txt")
+```
+
+```nlang
+fn main -> i64
+    sys_status("rustc", ["--version"])
+```
+
+Planned standard-library I/O forms:
+```nlang
+io.read(path)         # Read entire file
+io.readlines(path, max_lines=N)  # Read limited lines
+io.open(path, mode)   # Open stream for reading/writing
+io.write(path, data)  # Write to file
 
 # Memory-mapped files
 

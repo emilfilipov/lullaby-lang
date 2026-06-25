@@ -894,6 +894,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_flat_io_and_system_builtin_calls() {
+        let source = "fn main -> i64\n    write_file(\"target/parser.txt\", \"alpha\")\n    let text string = read_file(\"target/parser.txt\")\n    sys_status(\"rustc\", [\"--version\"])\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert_eq!(program.functions[0].body.len(), 3);
+        assert!(matches!(program.functions[0].body[0], Stmt::Expr(_)));
+    }
+
+    #[test]
     fn parses_assignment_and_while_loop() {
         let source = "fn main -> i64\n    let x i64 = 0\n    while x < 3\n        x += 1\n    x\n";
         let tokens = lex(source).expect("lex");

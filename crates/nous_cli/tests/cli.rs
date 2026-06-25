@@ -134,6 +134,28 @@ fn runs_array_fixture() {
 }
 
 #[test]
+fn runs_file_io_fixture() {
+    let root = workspace_root();
+    let fixture = root.join("tests/fixtures/valid/run_file_io.nl");
+    let output_path = root.join("target/nous_fixture_io.txt");
+    let _ = std::fs::remove_file(&output_path);
+
+    let output = nlang()
+        .current_dir(&root)
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "alpha beta");
+    assert_eq!(
+        std::fs::read_to_string(&output_path).expect("written fixture file"),
+        "alpha beta"
+    );
+    let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
 fn rejects_forbidden_braces() {
     let fixture = workspace_root().join("tests/fixtures/invalid/brace.nl");
     let output = nlang()
@@ -287,4 +309,57 @@ fn rejects_store_after_dealloc_at_runtime() {
 
     assert!(!output.status.success(), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("N0406"));
+}
+
+#[test]
+fn rejects_missing_file_with_structured_resource_error() {
+    let root = workspace_root();
+    let fixture = root.join("tests/fixtures/invalid/read_missing_file.nl");
+    let _ = std::fs::remove_file(root.join("target/nous_missing_file.txt"));
+
+    let output = nlang()
+        .current_dir(root)
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("N0414 [resource]"), "{stderr}");
+}
+
+#[test]
+fn rejects_file_builtin_argument_type_mismatch() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/read_file_path_type.nl");
+    let output = nlang()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("N0313"));
+}
+
+#[test]
+fn rejects_write_file_content_type_mismatch() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/write_file_content_type.nl");
+    let output = nlang()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("N0313"));
+}
+
+#[test]
+fn rejects_system_builtin_argument_type_mismatch() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/sys_args_type.nl");
+    let output = nlang()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("N0313"));
 }

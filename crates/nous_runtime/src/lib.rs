@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
+use std::process::Command;
 
 use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, UnaryOp};
 
@@ -36,14 +38,43 @@ impl fmt::Display for Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
     pub code: &'static str,
+    pub category: ErrorCategory,
     pub message: String,
 }
 
 impl RuntimeError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self::categorized(code, ErrorCategory::Runtime, message)
+    }
+
+    fn resource(code: &'static str, message: impl Into<String>) -> Self {
+        Self::categorized(code, ErrorCategory::Resource, message)
+    }
+
+    fn categorized(
+        code: &'static str,
+        category: ErrorCategory,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             code,
+            category,
             message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    Runtime,
+    Resource,
+}
+
+impl fmt::Display for ErrorCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime => write!(formatter, "runtime"),
+            Self::Resource => write!(formatter, "resource"),
         }
     }
 }
@@ -82,6 +113,12 @@ impl<'a> Runtime<'a> {
             "load" => self.builtin_load(args),
             "store" => self.builtin_store(args),
             "dealloc" => self.builtin_dealloc(args),
+            "read_file" => self.builtin_read_file(args),
+            "write_file" => self.builtin_write_file(args),
+            "append_file" => self.builtin_append_file(args),
+            "file_exists" => self.builtin_file_exists(args),
+            "sys_status" => self.builtin_sys_status(args),
+            "sys_output" => self.builtin_sys_output(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("N0401", format!("unknown function `{name}`"))
@@ -402,6 +439,88 @@ impl<'a> Runtime<'a> {
         Ok(Value::Void)
     }
 
+    fn builtin_read_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("read_file", 1, args.len()))?;
+        let path = path.as_string()?;
+        fs::read_to_string(&path)
+            .map(Value::String)
+            .map_err(|error| {
+                RuntimeError::resource("N0414", format!("failed to read `{path}`: {error}"))
+            })
+    }
+
+    fn builtin_write_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path, contents]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("write_file", 2, args.len()))?;
+        let path = path.as_string()?;
+        let contents = contents.as_string()?;
+        fs::write(&path, contents)
+            .map(|()| Value::Void)
+            .map_err(|error| {
+                RuntimeError::resource("N0415", format!("failed to write `{path}`: {error}"))
+            })
+    }
+
+    fn builtin_append_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path, contents]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("append_file", 2, args.len()))?;
+        let path = path.as_string()?;
+        let contents = contents.as_string()?;
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(contents.as_bytes()))
+            .map(|()| Value::Void)
+            .map_err(|error| {
+                RuntimeError::resource("N0415", format!("failed to append `{path}`: {error}"))
+            })
+    }
+
+    fn builtin_file_exists(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("file_exists", 1, args.len()))?;
+        Ok(Value::Bool(fs::metadata(path.as_string()?).is_ok()))
+    }
+
+    fn builtin_sys_status(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [program, command_args]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sys_status", 2, args.len()))?;
+        let program = program.as_string()?;
+        let command_args = command_args.as_string_array()?;
+        let output = Command::new(&program)
+            .args(command_args)
+            .output()
+            .map_err(|error| {
+                RuntimeError::resource("N0416", format!("failed to run `{program}`: {error}"))
+            })?;
+        Ok(Value::I64(output.status.code().unwrap_or(-1).into()))
+    }
+
+    fn builtin_sys_output(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [program, command_args]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sys_output", 2, args.len()))?;
+        let program = program.as_string()?;
+        let command_args = command_args.as_string_array()?;
+        let output = Command::new(&program)
+            .args(command_args)
+            .output()
+            .map_err(|error| {
+                RuntimeError::resource("N0416", format!("failed to run `{program}`: {error}"))
+            })?;
+        Ok(Value::String(
+            String::from_utf8_lossy(&output.stdout).to_string(),
+        ))
+    }
+
     fn wrong_arity(name: &str, expected: usize, actual: usize) -> RuntimeError {
         RuntimeError::new(
             "N0405",
@@ -488,6 +607,23 @@ impl Value {
         match self {
             Self::Ptr(value) => Ok(*value),
             _ => Err(RuntimeError::new("N0409", "expected pointer value")),
+        }
+    }
+
+    fn as_string(&self) -> Result<String, RuntimeError> {
+        match self {
+            Self::String(value) => Ok(value.clone()),
+            _ => Err(RuntimeError::new("N0417", "expected string value")),
+        }
+    }
+
+    fn as_string_array(&self) -> Result<Vec<String>, RuntimeError> {
+        match self {
+            Self::Array(values) => values
+                .iter()
+                .map(Value::as_string)
+                .collect::<Result<Vec<_>, _>>(),
+            _ => Err(RuntimeError::new("N0418", "expected array<string> value")),
         }
     }
 }
@@ -612,5 +748,45 @@ mod tests {
         let source = "fn main -> void\n    let ptr ptr_i64 = alloc(1)\n    dealloc(ptr)\n    store(ptr, 2)\n";
         let error = run_source(source).expect_err("runtime error");
         assert_eq!(error.code, "N0406");
+    }
+
+    #[test]
+    fn runs_file_io_builtins() {
+        let path = std::env::temp_dir()
+            .join(format!("nous-runtime-{}.txt", std::process::id()))
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = format!(
+            "fn main -> string\n    write_file(\"{path}\", \"alpha\")\n    append_file(\"{path}\", \" beta\")\n    read_file(\"{path}\")\n"
+        );
+        assert_eq!(
+            run_source(&source).expect("run"),
+            Value::String("alpha beta".to_string())
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reports_missing_file_as_resource_error() {
+        let path = std::env::temp_dir()
+            .join(format!("nous-missing-{}.txt", std::process::id()))
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = format!("fn main -> string\n    read_file(\"{path}\")\n");
+        let error = run_source(&source).expect_err("runtime error");
+        assert_eq!(error.code, "N0414");
+        assert_eq!(error.category, ErrorCategory::Resource);
+    }
+
+    #[test]
+    fn runs_safe_system_status_builtin() {
+        let source = "fn main -> i64\n    sys_status(\"rustc\", [\"--version\"])\n";
+        assert_eq!(run_source(source).expect("run"), Value::I64(0));
+    }
+
+    #[test]
+    fn runs_safe_system_output_builtin() {
+        let source = "fn main -> bool\n    let output string = sys_output(\"rustc\", [\"--version\"])\n    output == \"\" == false\n";
+        assert_eq!(run_source(source).expect("run"), Value::Bool(true));
     }
 }

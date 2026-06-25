@@ -6,6 +6,37 @@ Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 Input/output (I/O) and concurrency mechanisms in Nous Lang are designed to be minimal, type-safe, and highly efficient. The design prioritizes simplicity for LLM comprehension while maintaining robustness for systems programming applications like operating system development.
 
+## Current Alpha I/O And System Subset
+
+The executable Rust alpha implements a small, flat builtin surface. These names are available as ordinary function calls; dotted `io.*` syntax, stream handles, memory mapping, async, threads, sockets, and IPC remain planned design material below.
+
+| Builtin | Type | Behavior |
+| :--- | :--- | :--- |
+| `read_file(path)` | `string -> string` | Reads a UTF-8 text file into a `string`. Missing files, permission failures, and invalid paths are resource errors such as `N0414 [resource]: ...`. |
+| `write_file(path, content)` | `string, string -> void` | Writes text to a file, replacing any existing file contents. |
+| `append_file(path, content)` | `string, string -> void` | Appends text to a file, creating the file if it does not exist. |
+| `file_exists(path)` | `string -> bool` | Returns whether the host can read metadata for the path. |
+| `sys_status(program, args)` | `string, array<string> -> i64` | Runs `program` directly with an argv array and returns its exit status, or `-1` if the process terminates without a status code. |
+| `sys_output(program, args)` | `string, array<string> -> string` | Runs `program` directly with an argv array and returns stdout as a string. |
+
+System command builtins intentionally do not invoke a shell. Pass the executable name and arguments separately:
+
+```nlang
+fn main -> i64
+    sys_status("rustc", ["--version"])
+```
+
+Basic text file I/O:
+
+```nlang
+fn main -> string
+    write_file("target/example.txt", "alpha")
+    append_file("target/example.txt", " beta")
+    read_file("target/example.txt")
+```
+
+## Planned I/O System Design
+
 ## I/O System Design
 
 ### File Operations

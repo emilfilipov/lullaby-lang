@@ -2,7 +2,7 @@ use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use nous_lexer::{Diagnostic, lex, validate_source_path};
 use nous_parser::{Program, parse};
-use nous_runtime::{Value, run_main};
+use nous_runtime::{RuntimeError, Value, run_main};
 use nous_semantics::validate;
 
 fn main() -> ExitCode {
@@ -55,7 +55,7 @@ fn check(path: PathBuf) -> Result<(), String> {
 
 fn run_file(path: PathBuf) -> Result<(), String> {
     let program = compile(&path)?;
-    let value = run_main(&program).map_err(|error| format!("{}: {}", error.code, error.message))?;
+    let value = run_main(&program).map_err(format_runtime_error)?;
     if value != Value::Void {
         println!("{value}");
     }
@@ -64,8 +64,12 @@ fn run_file(path: PathBuf) -> Result<(), String> {
 
 fn compile(path: &PathBuf) -> Result<Program, String> {
     validate_source_path(path).map_err(format_lex_diagnostic)?;
-    let source = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    let source = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "N0002 [resource]: failed to read `{}`: {error}",
+            path.display()
+        )
+    })?;
 
     let tokens = lex(&source).map_err(format_lex_diagnostics)?;
     let program = parse(&tokens).map_err(format_lex_diagnostics)?;
@@ -109,4 +113,8 @@ fn format_semantic_diagnostics(diagnostics: Vec<nous_semantics::SemanticDiagnost
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_runtime_error(error: RuntimeError) -> String {
+    format!("{} [{}]: {}", error.code, error.category, error.message)
 }

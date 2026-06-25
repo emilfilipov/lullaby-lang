@@ -12,8 +12,8 @@ The repository now contains the first executable alpha slice:
 
 - `nous_lexer`: validates `.nl` source paths, tokenizes source text, emits indentation/dedent tokens, recognizes the current core keywords, and rejects curly braces and semicolon terminators.
 - `nous_parser`: parses function declarations, typed parameters, return types, indentation-based bodies, `let` bindings, assignment, `return`, `break`, `continue`, expression statements, calls, array literals/indexing, arithmetic/comparison/logical expressions, `if`/`elif`/`else`, `while`, `loop`, and range `for` blocks into a structured AST.
-- `nous_semantics`: performs static checks for duplicate declarations, binding initializer types, assignment target/type validity, function call argument counts/types, return values, bool conditions, loop-control placement, arithmetic/comparison/logical operands, homogeneous non-empty arrays, array indexes, and the first pointer-style memory builtins.
-- `nous_runtime`: executes the validated AST in-process, including `main`, function calls, scoped locals, assignment, if/else branch values, while/infinite loops, range for loops, break/continue, array literals/indexing, arithmetic/comparison/logical expressions, and `alloc`/`load`/`store`/`dealloc` heap slots.
+- `nous_semantics`: performs static checks for duplicate declarations, binding initializer types, assignment target/type validity, function call argument counts/types, return values, bool conditions, loop-control placement, arithmetic/comparison/logical operands, homogeneous non-empty arrays, array indexes, pointer-style memory builtins, text file I/O builtins, and conservative system command builtins.
+- `nous_runtime`: executes the validated AST in-process, including `main`, function calls, scoped locals, assignment, if/else branch values, while/infinite loops, range for loops, break/continue, array literals/indexing, arithmetic/comparison/logical expressions, `alloc`/`load`/`store`/`dealloc` heap slots, text file I/O, structured resource errors, and direct program-plus-argv system command calls.
 - `nous_cli`: exposes `nlang check <file.nl>` and `nlang run <file.nl>` through Cargo.
 - `nous_ir`: placeholder crate for the future semantic IR schema and lowering pipeline.
 - `tests/fixtures`: valid and invalid `.nl` fixtures for frontend, semantic, runtime, and CLI smoke checks.
@@ -47,9 +47,9 @@ The repository now contains the first executable alpha slice:
 
 | Story | Description | Dependencies | Estimated Effort | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **2.1** | **I/O System Integration:** Implement the I/O layer based on `nous_lang_input_output.md`. Focus on file system access (reading/writing) for standard library operations. | `nous_lang_input_output.md` | High | To Do |
-| **2.2** | **Error Handling Integration:** Integrate the error handling system (`nous_lang_error_handling.md`) into the runtime to ensure all compilation and runtime errors are gracefully reported in a structured format. | `nous_lang_error_handling.md` | Medium | To Do |
-| **2.3** | **System Call Abstraction:** Define the interface for executing low-level OS commands (e.g., system calls) that nlang code can invoke safely. | N/A (New Design) | High | To Do |
+| **2.1** | **I/O System Integration:** Implement the I/O layer based on `nous_lang_input_output.md`. Focus on file system access (reading/writing) for standard library operations. | `nous_lang_input_output.md` | High | Alpha text file builtins done: `read_file`, `write_file`, `append_file`, `file_exists`; streams/binary/mmap planned |
+| **2.2** | **Error Handling Integration:** Integrate the error handling system (`nous_lang_error_handling.md`) into the runtime to ensure all compilation and runtime errors are gracefully reported in a structured format. | `nous_lang_error_handling.md` | Medium | Alpha structured runtime/resource error formatting done; language-level try/catch planned |
+| **2.3** | **System Call Abstraction:** Define the interface for executing low-level OS commands (e.g., system calls) that nlang code can invoke safely. | N/A (New Design) | High | Alpha direct program-plus-argv abstraction done: `sys_status`, `sys_output`; no shell invocation |
 
 ## Epic 3: Build System & Distribution
 *Objective: Create the infrastructure to compile the source code into an executable and package it for distribution.*

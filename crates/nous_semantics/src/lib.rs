@@ -564,6 +564,32 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
+            "read_file" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
+            "write_file" | "append_file" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_arg_type(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "file_exists" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("bool"))
+            }
+            "sys_status" | "sys_output" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_arg_type(name, 2, &args[1], "array<string>", scope, function)?;
+                Some(TypeRef::new(if name == "sys_status" {
+                    "i64"
+                } else {
+                    "string"
+                }))
+            }
             _ => {
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     self.diagnostics.push(SemanticDiagnostic::new(
@@ -627,6 +653,36 @@ impl<'a> Checker<'a> {
                 format!(
                     "function `{name}` expects {expected} arguments but got {}",
                     args.len()
+                ),
+                Some(function.name.clone()),
+            ));
+            None
+        }
+    }
+
+    fn expect_arg_type(
+        &mut self,
+        name: &str,
+        index: usize,
+        arg: &Expr,
+        expected: &str,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<()> {
+        let expected = TypeRef::new(expected);
+        let actual = self.check_expr(arg, scope, function);
+        if actual.as_ref() == Some(&expected) {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::new(
+                "N0313",
+                format!(
+                    "argument {index} for `{name}` must be `{}` but got `{}`",
+                    expected.name,
+                    actual
+                        .as_ref()
+                        .map(|ty| ty.name.as_str())
+                        .unwrap_or("<unknown>")
                 ),
                 Some(function.name.clone()),
             ));
@@ -837,6 +893,34 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "N0328")
+        );
+    }
+
+    #[test]
+    fn validates_io_and_system_builtins() {
+        let source = "fn main -> bool\n    write_file(\"target/nous_semantics_io.txt\", \"alpha\")\n    append_file(\"target/nous_semantics_io.txt\", \" beta\")\n    let content string = read_file(\"target/nous_semantics_io.txt\")\n    let exists bool = file_exists(\"target/nous_semantics_io.txt\")\n    let status i64 = sys_status(\"rustc\", [\"--version\"])\n    content == \"alpha beta\" and exists and status == 0\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn catches_file_builtin_argument_type_mismatch() {
+        let diagnostics =
+            validate_source("fn bad -> string\n    read_file(1)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0313")
+        );
+    }
+
+    #[test]
+    fn catches_system_builtin_argument_type_mismatch() {
+        let diagnostics = validate_source("fn bad -> i64\n    sys_status(\"rustc\", [1])\n")
+            .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0313")
         );
     }
 }

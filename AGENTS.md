@@ -39,6 +39,7 @@ This repository defines and will implement Nous Lang, a compiled systems program
 - Keep ClickUp current as implementation work progresses. When tasks are started, completed, materially changed, or blocked, update the relevant ClickUp ticket status when the tool supports it; otherwise add a concise task comment with the commit, verification, and remaining work.
 - Work in small, reviewable increments. Each commit should describe one coherent change.
 - Keep source, tests, and docs moving together. If implementation changes behavior, update the relevant core document and `documents/repository_map.md` in the same commit.
+- Use sub agents for parallel development, documentation cleanup, and maintenance tasks when work can be split into clear, non-overlapping ownership areas. Keep ownership clear: the primary agent remains responsible for integrating sub-agent output, checking accuracy, keeping both Markdown documentation and offline browser documentation current, and running the required verification.
 - Avoid broad rewrites unless they remove real duplication, resolve contradictions, or unblock implementation.
 - Preserve user work. If the tree is dirty, inspect changes before editing and do not revert unrelated files.
 - Prefer local repo patterns once code exists. Do not introduce new frameworks or build systems without recording the decision in docs.

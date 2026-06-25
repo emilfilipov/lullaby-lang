@@ -6,6 +6,33 @@ Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 Nous Lang implements a sophisticated yet minimal error handling system designed for systems programming. Unlike traditional languages that rely on verbose try-catch blocks and exception objects, Nous Lang uses an operator-based approach optimized for both token efficiency and runtime performance.
 
+## Current Alpha Error Reporting
+
+The Rust alpha reports compiler and runtime failures with stable `N####` diagnostic codes. Lexing and parser diagnostics include source spans when available, semantic diagnostics include the function where the error was found, and runtime failures include a category label in CLI output.
+
+Current diagnostic ranges:
+
+| Range | Source | Example |
+| :--- | :--- | :--- |
+| `N0001-N0002` | Source path and host file loading | Invalid extension or unreadable source file. |
+| `N0101-N0104` | Lexer | Forbidden curly braces or semicolon terminators. |
+| `N0201-N0210` | Parser | Missing function body indentation or malformed expression. |
+| `N0300-N0328` | Semantic validation | Unknown name, type mismatch, invalid loop control, invalid builtin arguments. |
+| `N0400-N0418` | Runtime and host resources | Missing `main`, division by zero, invalid pointer, missing file, failed command invocation. |
+
+Runtime CLI output uses:
+
+```text
+N0414 [resource]: failed to read `missing.txt`: ...
+```
+
+The implemented runtime categories are:
+
+- `runtime`: execution errors such as division by zero, invalid pointer use, out-of-bounds array indexing, or wrong runtime value kind.
+- `resource`: host resource failures such as failed file reads/writes/appends or failed command invocation.
+
+Language-level `try`, `catch`, recovery blocks, and compact `!0xXX` error tokens are planned and are not accepted by the current parser.
+
 ## Core Error Concepts
 
 ### Error Tokens
@@ -20,7 +47,7 @@ Errors are represented as compact tokens rather than full exception objects:
 3. **Type Errors** (`#tpe`) - Type mismatches and violations
 4. **Resource Errors** (`#res`) - Memory, file, or I/O issues
 
-## Error Operators
+## Planned Error Operators
 
 ### The Throw Operator
 ```nlang
@@ -68,6 +95,14 @@ The compiler performs extensive static analysis to detect errors before runtime:
 
 ## Error Reporting Format
 
+Current alpha:
+```text
+N0102 at 1:9: curly braces are not block delimiters in Nous Lang
+N0313 in `main`: argument 2 for `sys_status` must be `array<string>` but got `array<i64>`
+N0414 [resource]: failed to read `missing.txt`: ...
+```
+
+Planned compact language-level representation:
 ```nlang
 !0x4c MemoryOverflow: Allocation exceeds limit of 64KB
 #tpe ExpectedInt: Got Float in integer parameter position
@@ -88,8 +123,10 @@ The compiler performs extensive static analysis to detect errors before runtime:
 
 ## Example Usage
 
+The following is planned syntax, not accepted by the current alpha parser:
+
 ```nlang
-// Memory-safe array operation with error handling
+# Memory-safe array operation with error handling
 func process_data(data: Array[int]): bool
   try
     allocate_buffer(data.size)
@@ -97,7 +134,7 @@ func process_data(data: Array[int]): bool
       load_value(i, data[i])
       store_result(i, computed_value(data[i]))
 
-    // Check memory usage before operation
+    # Check memory usage before operation
     if mem_usage > mem_limit then
       !0x41 MemoryLimitExceeded: Current usage at mem_usageKB
       fallback_to_minimal_allocation()
