@@ -218,6 +218,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Use current alpha expression syntax: literals, variables, calls, arrays, indexing, arithmetic, comparisons, and logical operators.",
     },
     DiagnosticEntry {
+        code: "N0211",
+        phase: DiagnosticPhase::Parser,
+        explanation: "The source uses syntax reserved for a planned language feature that is not implemented in Alpha 1.",
+        root_cause: "The parser recognized a future construct such as modules, imports, structs, pattern matching, or try/catch.",
+        suggested_fix: "Remove the planned construct or rewrite the program using the current Alpha 1 function, local binding, control-flow, and builtin surface.",
+    },
+    DiagnosticEntry {
         code: "N0301",
         phase: DiagnosticPhase::Semantic,
         explanation: "A non-void function must produce a final value of its declared return type.",

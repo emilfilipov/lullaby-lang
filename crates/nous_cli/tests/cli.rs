@@ -286,6 +286,36 @@ fn rejects_invalid_bytecode_artifact() {
 }
 
 #[test]
+fn rejects_planned_unsupported_syntax_with_dedicated_diagnostic() {
+    for fixture_name in [
+        "unsupported_import.nl",
+        "unsupported_module.nl",
+        "unsupported_struct.nl",
+        "unsupported_try.nl",
+        "unsupported_catch.nl",
+    ] {
+        let fixture = workspace_root()
+            .join("tests/fixtures/invalid")
+            .join(fixture_name);
+        let output = nlang()
+            .args(["check", fixture.to_str().expect("fixture path")])
+            .output()
+            .expect("check cli");
+
+        let stderr = stderr(&output);
+        assert!(!output.status.success(), "{fixture_name}: {output:?}");
+        assert!(
+            stderr.contains("N0211 [parser error]"),
+            "{fixture_name}: {stderr}"
+        );
+        assert!(
+            stderr.contains("planned beyond Alpha 1"),
+            "{fixture_name}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn reports_invalid_bytecode_artifact_with_verbose_guidance() {
     let root = workspace_root();
     let artifact = root.join("target/invalid_artifact_verbose.nbc");

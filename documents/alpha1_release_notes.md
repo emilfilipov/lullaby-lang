@@ -102,6 +102,7 @@ Alpha 1 emits stable `N####` diagnostics for source, lexer, parser, semantic, IR
 Notable codes:
 
 - `N0003`: compiled artifact write failure.
+- `N0211`: planned syntax such as imports, modules, structs, or try/catch is not supported in Alpha 1.
 - `N0501`: IR lowering failure.
 - `N0502`: optimizer mode requires IR or bytecode backend.
 - `N0601`: malformed, unsupported, or incompatible `.nbc` artifact.

@@ -93,3 +93,5 @@ The following are not implemented Alpha 1 behavior:
 - Language-level `try`/`catch`, throws, recovery blocks, and error union/control syntax.
 - A generated offline-docs pipeline from Markdown.
 - A full installer; Alpha 1 uses a Windows portable archive with optional user PATH helper scripts.
+
+When planned syntax keywords such as `import`, `module`, `struct`, `match`, or `try` appear as source syntax, the parser reports `N0211` instead of accepting a partial or ambiguous construct.

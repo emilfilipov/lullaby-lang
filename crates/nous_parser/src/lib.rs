@@ -187,6 +187,8 @@ impl<'a> Parser<'a> {
                 if let Some(function) = self.parse_function() {
                     functions.push(function);
                 }
+            } else if self.reject_planned_syntax().is_some() {
+                self.skip_planned_syntax();
             } else {
                 let token = self.peek();
                 self.error(
@@ -260,6 +262,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Stmt> {
+        if self.reject_planned_syntax().is_some() {
+            self.skip_planned_syntax();
+            return None;
+        }
+
         if self.eat_keyword(Keyword::Let).is_some() {
             return self.parse_let();
         }
@@ -581,6 +588,51 @@ impl<'a> Parser<'a> {
         Some(op)
     }
 
+    fn reject_planned_syntax(&mut self) -> Option<Token> {
+        let feature = planned_syntax_name(&self.peek().kind)?;
+        let token = self.peek().clone();
+        self.error(
+            "N0211",
+            format!(
+                "`{feature}` syntax is planned beyond Alpha 1 and is not supported by this compiler"
+            ),
+            token.span,
+        );
+        Some(token)
+    }
+
+    fn skip_planned_syntax(&mut self) {
+        while !self.at(TokenKindRef::Newline)
+            && !self.at(TokenKindRef::Dedent)
+            && !self.at(TokenKindRef::Eof)
+        {
+            self.advance();
+        }
+        if self.at(TokenKindRef::Newline) {
+            self.advance();
+        }
+
+        if self.at(TokenKindRef::Indent) {
+            let mut depth = 0usize;
+            while !self.at(TokenKindRef::Eof) {
+                if self.at(TokenKindRef::Indent) {
+                    depth += 1;
+                    self.advance();
+                    continue;
+                }
+                if self.at(TokenKindRef::Dedent) {
+                    self.advance();
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                self.advance();
+            }
+        }
+    }
+
     fn eat_keyword(&mut self, keyword: Keyword) -> Option<Token> {
         if matches!(&self.peek().kind, TokenKind::Keyword(actual) if *actual == keyword) {
             self.advance();
@@ -636,6 +688,31 @@ impl<'a> Parser<'a> {
     fn error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
         self.diagnostics.push(Diagnostic::new(code, message, span));
     }
+}
+
+fn planned_syntax_name(kind: &TokenKind) -> Option<&'static str> {
+    let TokenKind::Keyword(keyword) = kind else {
+        return None;
+    };
+    Some(match keyword {
+        Keyword::Module => "module",
+        Keyword::Import => "import",
+        Keyword::Package => "package",
+        Keyword::Struct => "struct",
+        Keyword::Union => "union",
+        Keyword::Trait => "trait",
+        Keyword::Interface => "interface",
+        Keyword::Class => "class",
+        Keyword::Match => "match",
+        Keyword::Switch => "switch",
+        Keyword::Try => "try",
+        Keyword::Catch => "catch",
+        Keyword::Throw => "throw",
+        Keyword::Async => "async",
+        Keyword::Await => "await",
+        Keyword::Coroutine => "coroutine",
+        _ => return None,
+    })
 }
 
 struct ExprParser<'a> {
@@ -960,5 +1037,21 @@ mod tests {
         let tokens = lex("fn main -> void\nreturn\n").expect("lex");
         let diagnostics = parse(&tokens).expect_err("parse should fail");
         assert_eq!(diagnostics[0].code, "N0205");
+    }
+
+    #[test]
+    fn rejects_planned_top_level_syntax() {
+        let tokens = lex("import math\nfn main -> i64\n    1\n").expect("lex");
+        let diagnostics = parse(&tokens).expect_err("parse should fail");
+        assert_eq!(diagnostics[0].code, "N0211");
+        assert!(diagnostics[0].message.contains("import"));
+    }
+
+    #[test]
+    fn rejects_planned_statement_syntax() {
+        let tokens = lex("fn main -> i64\n    struct Point\n        x i64\n    1\n").expect("lex");
+        let diagnostics = parse(&tokens).expect_err("parse should fail");
+        assert_eq!(diagnostics[0].code, "N0211");
+        assert!(diagnostics[0].message.contains("struct"));
     }
 }

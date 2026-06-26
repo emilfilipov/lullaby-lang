@@ -57,6 +57,22 @@ pub enum Keyword {
     True,
     False,
     Void,
+    Module,
+    Import,
+    Package,
+    Struct,
+    Union,
+    Trait,
+    Interface,
+    Class,
+    Match,
+    Switch,
+    Try,
+    Catch,
+    Throw,
+    Async,
+    Await,
+    Coroutine,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,6 +370,22 @@ fn keyword(text: &str) -> Option<Keyword> {
         "true" => Keyword::True,
         "false" => Keyword::False,
         "void" => Keyword::Void,
+        "module" => Keyword::Module,
+        "import" => Keyword::Import,
+        "package" => Keyword::Package,
+        "struct" => Keyword::Struct,
+        "union" => Keyword::Union,
+        "trait" => Keyword::Trait,
+        "interface" => Keyword::Interface,
+        "class" => Keyword::Class,
+        "match" => Keyword::Match,
+        "switch" => Keyword::Switch,
+        "try" => Keyword::Try,
+        "catch" => Keyword::Catch,
+        "throw" => Keyword::Throw,
+        "async" => Keyword::Async,
+        "await" => Keyword::Await,
+        "coroutine" => Keyword::Coroutine,
         _ => return None,
     })
 }
@@ -375,6 +407,36 @@ mod tests {
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].code, "N0102");
         assert_eq!(diagnostics[1].code, "N0103");
+    }
+
+    #[test]
+    fn recognizes_planned_keywords_for_parser_rejection() {
+        let tokens = lex("import math\nmodule demo\nstruct Point\ntry\ncatch\n").expect("lex");
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Import))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Module))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Struct))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Try))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Catch))
+        );
     }
 
     #[test]

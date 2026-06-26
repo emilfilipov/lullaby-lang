@@ -49,9 +49,9 @@ This file maps the repository layout and explains where to find core information
 
 The implementation is a Rust workspace. Unless changed by an explicit architecture decision, keep this layout:
 
-- `crates/nous_lexer/`: source extension validation, tokenization, indentation scanning, forbidden brace/semicolon diagnostics, core keyword recognition, and lexical tests.
+- `crates/nous_lexer/`: source extension validation, tokenization, indentation scanning, forbidden brace/semicolon diagnostics, current and planned keyword recognition, and lexical tests.
 - `crates/nous_diagnostics/`: shared diagnostic data structures, serializable span/traceback metadata, registry metadata, concise/verbose renderers, and deterministic JSON rendering.
-- `crates/nous_parser/`: AST model and parser for function declarations, typed parameters, return types, indentation blocks, `let`, assignment, `return`, `break`, `continue`, if/elif/else, while/loop/range-for, calls, literals, array literals/indexing, variables, arithmetic, comparison, and logical expressions.
+- `crates/nous_parser/`: AST model and parser for function declarations, typed parameters, return types, indentation blocks, `let`, assignment, `return`, `break`, `continue`, if/elif/else, while/loop/range-for, calls, literals, array literals/indexing, variables, arithmetic, comparison, logical expressions, and `N0211` rejection for planned syntax keywords that are not in Alpha 1.
 - `crates/nous_semantics/`: static validation for duplicate declarations, local binding types, assignment targets/types, function call arity/types, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical expression operand types, homogeneous non-empty arrays, array indexing, interim pointer-style memory builtins, text file I/O builtins, and safe system command builtins. Successful validation returns `CheckedProgram` with function signatures and inferred expression-type metadata.
 - `crates/nous_ir/`: typed semantic IR schema, lowering from `CheckedProgram`, deterministic optimization pass configuration with opt-in constant folding, block-local dead-code elimination, executable IR interpreter, AST/IR/bytecode parity tests, initial structured bytecode lowering, versioned `.nbc` artifact encoding/decoding with metadata/function-table compatibility checks, and bytecode VM entry point for the current alpha subset.
 - `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop/range-for execution, break/continue, array literals/indexing with runtime bounds checks, arithmetic/comparison/logical expressions with short-circuiting, `alloc`/`load`/`store`/`dealloc` heap-slot memory builtins, text file I/O builtins, direct program-plus-argv system command builtins, and categorized runtime/resource errors.
@@ -63,7 +63,7 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `scripts/install_windows_path.ps1` and `scripts/uninstall_windows_path.ps1`: package-root PowerShell helpers copied as `install.ps1` and `uninstall.ps1` for optional user PATH setup/cleanup.
 - `scripts/install.cmd` and `scripts/uninstall.cmd`: cmd wrappers copied to the package root for users who prefer `cmd.exe`.
 - `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend, CLI, and offline documentation example verification. Files prefixed with `docs_` back executable examples shown in `offline_docs/index.html`.
-- `tests/fixtures/invalid/`: invalid source fixtures for diagnostics and negative tests.
+- `tests/fixtures/invalid/`: invalid source fixtures for diagnostics and negative tests, including planned-but-unsupported syntax such as imports, modules, structs, try, and catch.
 
 ## Current Commands
 
@@ -116,6 +116,7 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/read_file_path_type.nl`: verify file builtin path type diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/write_file_content_type.nl`: verify file builtin content type diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/sys_args_type.nl`: verify system command builtin argv type diagnostics.
+- `cargo run -p nous_cli -- check tests/fixtures/invalid/unsupported_import.nl`: verify `N0211` planned-syntax diagnostics.
 - Running a malformed `.nbc` artifact verifies `N0601 [bytecode error]` diagnostics for unsupported bytecode artifacts.
 - `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point, including metadata, fixture content, compile/run/inspect/examples command coverage, and `nlang check`/`nlang run` execution for documented `.nl` examples.
 - `powershell -ExecutionPolicy Bypass -File scripts/package_windows_portable.ps1`: build the Windows Alpha 1 portable package, zip archive, and SHA-256 checksum under `dist/`.

@@ -564,6 +564,7 @@ Suggested fix:
           <tbody>
             <tr><td><code>N0102</code></td><td>Curly braces are forbidden as block delimiters.</td></tr>
             <tr><td><code>N0103</code></td><td>Semicolons are forbidden as statement terminators.</td></tr>
+            <tr><td><code>N0211</code></td><td>Planned syntax such as imports, modules, structs, pattern matching, or try/catch is not supported in Alpha 1.</td></tr>
             <tr><td><code>N0208</code></td><td>Parser expected an assignment operator.</td></tr>
             <tr><td><code>N0301+</code></td><td>Semantic errors such as unknown names, type mismatch, invalid returns, or invalid loop control.</td></tr>
             <tr><td><code>N0324</code></td><td>Array literal values do not all have the same type.</td></tr>
@@ -593,6 +594,7 @@ Suggested fix:
           <li>The type system currently covers the alpha scalar, array, call, local binding, assignment, control-flow, and interim pointer subset.</li>
           <li>The current I/O surface is limited to text file builtins and direct program-plus-argv command calls; streams, binary I/O, memory mapping, async, sockets, and IPC are future work.</li>
           <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive with optional user PATH helper scripts.</li>
+          <li>Planned syntax keywords such as <code>import</code>, <code>module</code>, <code>struct</code>, <code>match</code>, and <code>try</code> are rejected with <code>N0211 [parser]</code> until their feature areas are implemented.</li>
           <li>The documentation bundle is currently hand-authored HTML. A generator from canonical docs is planned in Epic 1.5.</li>
         </ul>
       </section>

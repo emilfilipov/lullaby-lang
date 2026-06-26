@@ -60,6 +60,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `N0208` | parser | Expected assignment operator. | Assignment statement has malformed operator. | Use `=`, `+=`, `-=`, `*=`, or `/=`. |
 | `N0209` | parser | Expected `from` in for loop. | Range loop header is malformed. | Use `for name from start to end`. |
 | `N0210` | parser | Expected `to` in for loop. | Range loop header is missing its end marker. | Add `to end`. |
+| `N0211` | parser | Planned syntax is not supported in Alpha 1. | Source uses future constructs such as modules, imports, structs, pattern matching, or try/catch. | Remove the planned construct or rewrite with the current Alpha 1 surface. |
 | `N0300` | semantic | Duplicate function. | Two functions share a name. | Rename or remove one function. |
 | `N0301` | semantic | Non-void function has no final value of declared type. | Control reaches the end without the expected value. | Add a final expression or return the declared type. |
 | `N0302` | semantic | Duplicate parameter. | Function has repeated parameter names. | Rename one parameter. |
