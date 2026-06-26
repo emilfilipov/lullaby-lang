@@ -19,6 +19,7 @@ The repository now contains the first executable alpha slice:
 - `tests/fixtures`: valid and invalid `.nl` fixtures for frontend, semantic, runtime, and CLI smoke checks.
 - `crates/nous_cli/tests`: integration tests that run the compiled CLI binary end to end.
 - `offline_docs`: first self-contained offline browser documentation entry point plus a verifier for required alpha sections, local-only links/assets, fixture-backed executable examples, and release package coverage.
+- `documents/alpha1_language_surface.md`: frozen installable Alpha 1 language, CLI, diagnostics, artifact, and packaging surface; broader design docs are planned unless they match this file.
 - `scripts`: Windows portable package and release verification scripts that build `bin\nlang.exe`, bundle offline docs and examples, create a zip archive, and smoke-test the unpacked toolchain.
 - `documents/alpha1_acceptance_criteria.md`: release checklist for the first reviewable alpha checkpoint, including required feature surface, docs, verification gates, evidence, non-goals, and recommended next phase.
 

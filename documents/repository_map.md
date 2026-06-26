@@ -17,6 +17,7 @@ This file maps the repository layout and explains where to find core information
 ## Documents
 
 - `documents/core_language_rules.md`: canonical global rules for `.nl` source files, indentation-only scope, forbidden block delimiters, and no semicolon terminators.
+- `documents/alpha1_language_surface.md`: frozen installable Alpha 1 feature surface for source rules, declarations, types, expressions, control flow, builtins, CLI commands, artifacts, diagnostics, packaging, and planned non-goals.
 - `documents/language_specification.md`: top-level language specification and overview. Use this first for language behavior, philosophy, syntax reference, examples, and roadmap.
 - `documents/implementation_plan.md`: implementation plan for the compiler, runtime, offline browser documentation bundle, CLI, installer, tests, and release workflow.
 - `documents/alpha1_acceptance_criteria.md`: Alpha 1 release checklist covering required toolchain surface, documentation surface, verification gates, release evidence, non-goals, and the recommended next phase.

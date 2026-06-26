@@ -14,7 +14,7 @@ Nous Lang is a next-generation compiled systems programming language designed wi
 
 ## Current Alpha Implementation
 
-The current Rust toolchain implements a small executable subset while the wider systems-language design remains in progress:
+The current Rust toolchain implements a small executable subset while the wider systems-language design remains in progress. The frozen installable Alpha 1 surface is canonical in [alpha1_language_surface.md](alpha1_language_surface.md):
 
 - Source files use the `.nl` extension.
 - Blocks are indentation-only. Curly braces and semicolon terminators are compile errors.
@@ -36,6 +36,10 @@ The current Rust toolchain implements a small executable subset while the wider 
 - IR and bytecode execution can opt into the initial deterministic optimizer with `--optimize constant-fold`, `--optimize dead-code`, or `--optimize alpha`. The default is `--optimize none`.
 - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] <file.nl>` emits a versioned `.nbc` bytecode artifact, and `nlang run <file.nbc>` executes that artifact.
 - CLI commands are `nlang check [--verbose|--format json] <file.nl>`, `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl|file.nbc>`, and `nlang docs`. During development, these are also available through `cargo run -p nous_cli -- ...`. `--diagnostic-format json` is accepted as a JSON diagnostics alias.
+
+## Planned Design Material
+
+The remaining sections describe the intended full systems language. They are design material unless a feature is explicitly listed in the current Alpha implementation above or in [alpha1_language_surface.md](alpha1_language_surface.md). Examples in those sections may use planned syntax that the Alpha 1 compiler rejects today.
 
 ## Language Philosophy
 
@@ -151,7 +155,7 @@ Efficient systems programming primitives:
 - I/O multiplexing
 - Message queues and shared memory
 
-## Complete Syntax Reference
+## Planned Syntax Reference
 
 ### Primitives
 ```nlang

@@ -34,6 +34,7 @@ REQUIRED_IDS = [
 
 REQUIRED_PHRASES = [
     ".nl",
+    "Alpha 1 language surface",
     "Indentation defines scope",
     "Last-expression return",
     "void",

@@ -2,6 +2,8 @@
 
 This file is the canonical location for global Nous Lang rules that apply across all subsystem documents and implementation work.
 
+For the installable Alpha 1 feature freeze, see [alpha1_language_surface.md](alpha1_language_surface.md). Examples in this file may mention planned scoped constructs to show that indentation remains the universal block rule; they are not automatically implemented Alpha 1 syntax.
+
 ## Canonical Source Extension
 
 Nous Lang source files use the `.nl` file extension.
