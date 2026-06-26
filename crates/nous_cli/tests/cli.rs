@@ -74,6 +74,55 @@ fn prints_examples_path() {
 }
 
 #[test]
+fn runs_user_facing_valid_examples() {
+    let root = workspace_root();
+    let examples_dir = root.join("examples/valid");
+    let mut examples = std::fs::read_dir(&examples_dir)
+        .expect("examples directory")
+        .map(|entry| entry.expect("example entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("nl"))
+        .collect::<Vec<_>>();
+    examples.sort();
+    assert!(!examples.is_empty(), "expected user-facing examples");
+
+    for example in examples {
+        let output = nlang()
+            .args(["run", example.to_str().expect("example path")])
+            .current_dir(&root)
+            .output()
+            .expect("run example");
+        assert!(output.status.success(), "{example:?}\n{output:?}");
+    }
+    let _ = std::fs::remove_file(root.join("nous_example_io.txt"));
+}
+
+#[test]
+fn rejects_user_facing_invalid_examples() {
+    let examples_dir = workspace_root().join("examples/invalid");
+    let mut examples = std::fs::read_dir(&examples_dir)
+        .expect("invalid examples directory")
+        .map(|entry| entry.expect("example entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("nl"))
+        .collect::<Vec<_>>();
+    examples.sort();
+    assert!(
+        !examples.is_empty(),
+        "expected invalid user-facing examples"
+    );
+
+    for example in examples {
+        let output = nlang()
+            .args(["check", example.to_str().expect("example path")])
+            .output()
+            .expect("check invalid example");
+        assert!(
+            !output.status.success(),
+            "expected invalid example to fail: {example:?}"
+        );
+    }
+}
+
+#[test]
 fn runs_arithmetic_fixture() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_arithmetic.nl");
     let output = nlang()

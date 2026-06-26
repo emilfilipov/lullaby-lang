@@ -4,16 +4,21 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $PackageRoot = Join-Path $RepoRoot "dist\$PackageName"
 $ArchivePath = Join-Path $RepoRoot "dist\$PackageName.zip"
+$ChecksumPath = "$ArchivePath.sha256"
 
 Push-Location $RepoRoot
 try {
     if (-not $SkipBuild) {
         cargo build --release -p nous_cli
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo release build failed"
+        }
     }
 
     $Binary = Join-Path $RepoRoot "target\release\nlang.exe"
@@ -28,7 +33,9 @@ try {
 
     Copy-Item -LiteralPath $Binary -Destination (Join-Path $PackageRoot "bin\nlang.exe")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "offline_docs\index.html") -Destination (Join-Path $PackageRoot "docs\index.html")
-    Copy-Item -LiteralPath (Join-Path $RepoRoot "tests\fixtures\valid") -Destination (Join-Path $PackageRoot "examples\valid") -Recurse
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\README.md") -Destination (Join-Path $PackageRoot "examples\README.md")
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\valid") -Destination (Join-Path $PackageRoot "examples\valid") -Recurse
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\invalid") -Destination (Join-Path $PackageRoot "examples\invalid") -Recurse
     Copy-Item -LiteralPath (Join-Path $RepoRoot "documents\alpha1_release_notes.md") -Destination (Join-Path $PackageRoot "RELEASE_NOTES.md")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\install_windows_path.ps1") -Destination (Join-Path $PackageRoot "install.ps1")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\uninstall_windows_path.ps1") -Destination (Join-Path $PackageRoot "uninstall.ps1")
@@ -60,7 +67,7 @@ $LicenseStatus
 Layout:
 - bin\nlang.exe: command-line tool
 - docs\index.html: offline documentation
-- examples\valid\: executable .nl examples
+- examples\: executable and invalid diagnostic .nl examples
 - RELEASE_NOTES.md: release notes, verification evidence, and known limitations
 - install.cmd / install.ps1: optional user PATH setup
 - uninstall.cmd / uninstall.ps1: optional user PATH cleanup
@@ -70,15 +77,20 @@ Quick start:
 2. Run: .\bin\nlang.exe --version
 3. Run: .\bin\nlang.exe docs
 4. Run: .\bin\nlang.exe examples
-5. Run: .\bin\nlang.exe check .\examples\valid\run_arithmetic.nl
-6. Run: .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\run_arithmetic.nbc .\examples\valid\run_arithmetic.nl
-7. Run: .\bin\nlang.exe inspect .\examples\valid\run_arithmetic.nbc
-8. Run: .\bin\nlang.exe run .\examples\valid\run_arithmetic.nbc
+5. Run: .\bin\nlang.exe check .\examples\valid\calculator.nl
+6. Run: .\bin\nlang.exe run .\examples\valid\calculator.nl
+7. Run: .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\calculator.nbc .\examples\valid\calculator.nl
+8. Run: .\bin\nlang.exe inspect .\examples\valid\calculator.nbc
+9. Run: .\bin\nlang.exe run .\examples\valid\calculator.nbc
 
 Optional PATH setup:
 - Run .\install.cmd from this directory to add bin\nlang.exe to your user PATH.
 - Open a new shell, then run: nlang --version
 - Run .\uninstall.cmd from this directory to remove this package from your user PATH.
+
+Checksum:
+- The release process writes $PackageName.zip.sha256 beside the zip archive.
+- Compare it with Get-FileHash before unpacking downloaded archives.
 "@ | Set-Content -Path (Join-Path $PackageRoot "README.txt") -Encoding UTF8
 
     @"
@@ -93,10 +105,14 @@ license_status=$LicenseStatus
 "@ | Set-Content -Path (Join-Path $PackageRoot "VERSION.txt") -Encoding UTF8
 
     Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ChecksumPath -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $ArchivePath -Force
+    $ArchiveHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$ArchiveHash  $PackageName.zip" | Set-Content -Path $ChecksumPath -Encoding ASCII
 
     Write-Output "package: $PackageRoot"
     Write-Output "archive: $ArchivePath"
+    Write-Output "sha256: $ChecksumPath"
 } finally {
     Pop-Location
 }

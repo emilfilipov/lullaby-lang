@@ -1,10 +1,12 @@
 # Nous Lang Alpha 1 Release Notes
 
-Release: `v0.1.0-alpha.1`
+Release: `v0.1.0-alpha.2`
 
 Functional baseline commit: `51f85b5`
 
 Package artifact: `dist\nous-lang-alpha1-windows-x64.zip`
+
+Checksum artifact: `dist\nous-lang-alpha1-windows-x64.zip.sha256`
 
 Alpha 1 is the first installable Nous Lang toolchain checkpoint. It is a minimal working language and tooling release, not the full systems language.
 
@@ -12,7 +14,7 @@ Alpha 1 is the first installable Nous Lang toolchain checkpoint. It is a minimal
 
 - `bin\nlang.exe`: release CLI binary.
 - `docs\index.html`: self-contained offline documentation.
-- `examples\valid\`: executable `.nl` examples.
+- `examples\`: executable `.nl` examples plus invalid diagnostic examples.
 - `install.cmd` / `install.ps1`: optional user PATH setup helper.
 - `uninstall.cmd` / `uninstall.ps1`: optional user PATH cleanup helper.
 - `README.txt`: package quick start and optional PATH setup.
@@ -28,11 +30,11 @@ From the unpacked package directory:
 .\bin\nlang.exe --version
 .\bin\nlang.exe docs
 .\bin\nlang.exe examples
-.\bin\nlang.exe check .\examples\valid\run_arithmetic.nl
-.\bin\nlang.exe run .\examples\valid\run_arithmetic.nl
-.\bin\nlang.exe compile --optimize alpha -o .\examples\valid\run_arithmetic.nbc .\examples\valid\run_arithmetic.nl
-.\bin\nlang.exe inspect .\examples\valid\run_arithmetic.nbc
-.\bin\nlang.exe run .\examples\valid\run_arithmetic.nbc
+.\bin\nlang.exe check .\examples\valid\calculator.nl
+.\bin\nlang.exe run .\examples\valid\calculator.nl
+.\bin\nlang.exe compile --optimize alpha -o .\examples\valid\calculator.nbc .\examples\valid\calculator.nl
+.\bin\nlang.exe inspect .\examples\valid\calculator.nbc
+.\bin\nlang.exe run .\examples\valid\calculator.nbc
 ```
 
 Optional user PATH setup from the same unpacked package directory:
@@ -41,6 +43,14 @@ Optional user PATH setup from the same unpacked package directory:
 .\install.cmd
 nlang --version
 .\uninstall.cmd
+```
+
+Verify a downloaded package checksum:
+
+```powershell
+$expected = (Get-Content .\nous-lang-alpha1-windows-x64.zip.sha256 -Raw).Split(" ")[0]
+$actual = (Get-FileHash .\nous-lang-alpha1-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "checksum mismatch" }
 ```
 
 ## Supported Language Surface
@@ -129,7 +139,15 @@ The Markdown local-reference check also passed with the repository's file-like l
 - `compile`
 - `.nbc` artifact `inspect`
 - `.nbc` artifact `run`
+- invalid example diagnostics
 - dry-run PATH setup and cleanup helpers
+- generated zip checksum
+
+GitHub prerelease publication command:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1
+```
 
 ## Known Limitations
 

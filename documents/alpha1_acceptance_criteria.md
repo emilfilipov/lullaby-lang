@@ -24,7 +24,7 @@ Alpha 1 is acceptable when the repository provides:
 - `nlang check`, `nlang compile`, `nlang inspect`, `nlang run`, `nlang docs`, and `nlang examples`, with `cargo run -p nous_cli -- ...` equivalents during development. `run --backend ast|ir|bytecode` supports source execution, `inspect file.nbc` summarizes compiled bytecode artifacts, and `run file.nbc` executes compiled bytecode artifacts.
 - A versioned `.nbc` bytecode artifact with a format marker, version, metadata, entry point, function table, compatibility checks, and bytecode module.
 - A release `nlang` binary usable outside Cargo.
-- A Windows-first installer or portable archive containing the CLI, offline docs, examples, readme/license, setup instructions, and optional PATH setup/cleanup helpers.
+- A Windows-first installer or portable archive containing the CLI, offline docs, examples, readme/license, setup instructions, optional PATH setup/cleanup helpers, and a checksum artifact.
 - Concise, verbose, and deterministic JSON diagnostics for representative source, lexer, parser, semantic, IR, bytecode artifact, runtime, and resource failures.
 
 ## Required Documentation Surface
@@ -66,6 +66,7 @@ The stale-source marker search from `AGENTS.md` should return no matches. Markdo
 - inspect the compiled `.nbc` artifact;
 - run the compiled `.nbc` artifact;
 - run dry-run PATH setup/cleanup helpers;
+- verify the generated archive checksum;
 - locate or include the offline docs bundle.
 
 ## Release Evidence
@@ -74,7 +75,7 @@ The Alpha 1 release note should include:
 
 - The commit hash being released.
 - The exact verification commands and pass/fail outcome.
-- The packaged artifact name and install/unpack instructions.
+- The packaged artifact name, checksum artifact, and install/unpack instructions.
 - A short list of supported `.nl` language features.
 - The supported CLI commands, including `check`, `compile`, `inspect file.nbc`, `run`, `run file.nbc`, `docs`, and `examples`.
 - A short list of known limitations and non-goals.

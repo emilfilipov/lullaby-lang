@@ -80,7 +80,9 @@ fn locate_examples() -> Option<PathBuf> {
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("../../examples/valid"));
     candidates.push(manifest_dir.join("../../tests/fixtures/valid"));
+    candidates.push(PathBuf::from("examples/valid"));
     candidates.push(PathBuf::from("tests/fixtures/valid"));
 
     candidates.into_iter().find(|path| path.is_dir())

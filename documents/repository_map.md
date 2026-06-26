@@ -5,10 +5,12 @@ This file maps the repository layout and explains where to find core information
 ## Root
 
 - [AGENTS.md](../AGENTS.md): operating guide for agents and contributors. Defines workflow, documentation rules, MCP/ClickUp/GitHub usage, testing expectations, Git rules, and where to find core language information.
+- [README.md](../README.md): user-facing project overview, portable package installation, checksum verification, local build commands, CLI summary, and documentation links.
 - `Cargo.toml`: Rust workspace manifest for the Nous Lang compiler/toolchain crates. The lockfile records the pinned dependency graph, including serde/serde_json for bytecode artifact serialization.
 - `.gitignore`: ignores local build outputs, caches, editor state, and generated artifacts once implementation begins.
 - `.gitattributes`: normalizes repository text files to LF line endings.
 - `crates/`: Rust implementation crates.
+- `examples/`: user-facing `.nl` examples packaged with the toolchain.
 - `scripts/`: release packaging and verification scripts.
 - `tests/`: shared `.nl` fixtures used by crate and CLI tests.
 - `documents/`: core language documents and planning material.
@@ -37,6 +39,12 @@ This file maps the repository layout and explains where to find core information
 - `offline_docs/index.html`: local browser entry point for alpha user documentation. It must remain self-contained with no server, CDN, remote fonts, or internet dependency.
 - `offline_docs/verify_offline_docs.py`: deterministic verifier for the offline docs entry point, required sections, required alpha topics, local anchors, lack of remote dependencies, and fixture-backed executable examples.
 
+## Examples
+
+- `examples/README.md`: user-facing instructions for valid and invalid example programs.
+- `examples/valid/`: executable `.nl` examples for calculator, arrays/control flow, file I/O, and Windows system command status.
+- `examples/invalid/`: intentionally invalid `.nl` examples for inspecting diagnostics.
+
 ## Source Layout
 
 The implementation is a Rust workspace. Unless changed by an explicit architecture decision, keep this layout:
@@ -49,8 +57,9 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop/range-for execution, break/continue, array literals/indexing with runtime bounds checks, arithmetic/comparison/logical expressions with short-circuiting, `alloc`/`load`/`store`/`dealloc` heap-slot memory builtins, text file I/O builtins, direct program-plus-argv system command builtins, and categorized runtime/resource errors.
 - `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check [--verbose|--format json] <file.nl>`, `compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `inspect [--verbose|--format json] <file.nbc>`, `run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`, `run [--verbose|--format json] <file.nbc>`, `docs`, `examples`, `help`, and `--version`. The crate declares an explicit `nlang` binary target for release packaging.
 - `crates/nous_cli/tests/`: binary-level integration tests for the CLI pipeline, including valid checks, backend execution, bytecode artifact inspection, lexical errors, and semantic errors.
-- `scripts/package_windows_portable.ps1`: builds the release CLI, creates `dist\nous-lang-alpha1-windows-x64\`, copies `bin\nlang.exe`, bundles `docs\index.html`, release notes, valid examples, and optional PATH install/uninstall helpers, copies a repository license file if one exists, writes package metadata/readme files, and creates a `.zip` archive.
-- `scripts/verify_release.ps1`: runs formatting, test, clippy, offline-doc verification, builds the portable package, and smoke-tests the packaged `nlang.exe` against version, docs, examples, check, run, compile, bytecode artifact inspection/execution, and dry-run PATH install/uninstall helpers.
+- `scripts/package_windows_portable.ps1`: builds the release CLI, creates `dist\nous-lang-alpha1-windows-x64\`, copies `bin\nlang.exe`, bundles `docs\index.html`, release notes, user-facing examples, and optional PATH install/uninstall helpers, copies a repository license file if one exists, writes package metadata/readme files, and creates a `.zip` archive plus `.sha256` checksum file.
+- `scripts/verify_release.ps1`: runs formatting, test, clippy, offline-doc verification, builds the portable package, and smoke-tests the packaged `nlang.exe` against version, docs, examples, check, run, compile, bytecode artifact inspection/execution, invalid example diagnostics, dry-run PATH install/uninstall helpers, and archive checksum verification.
+- `scripts/publish_github_release.ps1`: requires a clean worktree, runs release verification, creates/pushes a release tag, and creates a GitHub prerelease with the portable zip and checksum assets using `documents/alpha1_release_notes.md` as the release body.
 - `scripts/install_windows_path.ps1` and `scripts/uninstall_windows_path.ps1`: package-root PowerShell helpers copied as `install.ps1` and `uninstall.ps1` for optional user PATH setup/cleanup.
 - `scripts/install.cmd` and `scripts/uninstall.cmd`: cmd wrappers copied to the package root for users who prefer `cmd.exe`.
 - `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend, CLI, and offline documentation example verification. Files prefixed with `docs_` back executable examples shown in `offline_docs/index.html`.
@@ -71,6 +80,8 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- run target/run_arithmetic.nbc`: execute a compiled `.nbc` bytecode artifact.
 - `cargo run -p nous_cli -- docs`: print the local offline documentation entry path.
 - `cargo run -p nous_cli -- examples`: print the local example fixture directory path.
+- `cargo run -p nous_cli -- run examples/valid/calculator.nl`: run a user-facing packaged example.
+- `cargo run -p nous_cli -- check examples/invalid/type_mismatch.nl`: inspect a user-facing invalid example diagnostic.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through source validation, lexing, parsing, semantic validation, runtime execution, and stdout output.
 - `cargo run -p nous_cli -- run --backend ir tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through typed IR lowering and the IR interpreter.
 - `cargo run -p nous_cli -- run --backend bytecode tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through typed IR lowering, initial structured bytecode lowering, and the bytecode VM entry point.
@@ -107,8 +118,9 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/sys_args_type.nl`: verify system command builtin argv type diagnostics.
 - Running a malformed `.nbc` artifact verifies `N0601 [bytecode error]` diagnostics for unsupported bytecode artifacts.
 - `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point, including metadata, fixture content, compile/run/inspect/examples command coverage, and `nlang check`/`nlang run` execution for documented `.nl` examples.
-- `powershell -ExecutionPolicy Bypass -File scripts/package_windows_portable.ps1`: build the Windows Alpha 1 portable package and zip archive under `dist/`.
-- `powershell -ExecutionPolicy Bypass -File scripts/verify_release.ps1`: run the full Alpha 1 release gate and smoke-test the packaged toolchain, including dry-run install/uninstall PATH helpers.
+- `powershell -ExecutionPolicy Bypass -File scripts/package_windows_portable.ps1`: build the Windows Alpha 1 portable package, zip archive, and SHA-256 checksum under `dist/`.
+- `powershell -ExecutionPolicy Bypass -File scripts/verify_release.ps1`: run the full Alpha 1 release gate and smoke-test the packaged toolchain, including dry-run install/uninstall PATH helpers and checksum verification.
+- `powershell -ExecutionPolicy Bypass -File scripts/publish_github_release.ps1`: publish a GitHub prerelease for the clean current commit after the release gate passes.
 
 ## Planning And Tracking
 

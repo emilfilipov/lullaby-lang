@@ -296,7 +296,7 @@
         <pre><code>cargo run -p nous_cli -- compile --optimize alpha -o hello.nbc hello.nl
 cargo run -p nous_cli -- inspect hello.nbc
 cargo run -p nous_cli -- run hello.nbc</code></pre>
-        <p>During development, the CLI is available through Cargo. The Alpha 1 portable package builds a direct <code>bin\nlang.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, and supports <code>nlang docs</code> and <code>nlang examples</code> to locate local resources.</p>
+        <p>During development, the CLI is available through Cargo. The Alpha 1 portable package builds a direct <code>bin\nlang.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, ships user-facing examples such as <code>examples\valid\calculator.nl</code>, emits <code>nous-lang-alpha1-windows-x64.zip.sha256</code>, and supports <code>nlang docs</code> and <code>nlang examples</code> to locate local resources.</p>
       </section>
 
       <section id="source-files">
@@ -499,8 +499,9 @@ cargo run -p nous_cli -- run hello.nbc</code></pre>
             <tr><td><code>cargo run -p nous_cli -- examples</code></td><td>Print the local valid example directory. In the portable package, use <code>bin\nlang.exe examples</code> or <code>nlang examples</code> after adding <code>bin</code> to <code>PATH</code>.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- check --verbose path/to/file.nl</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- check --format json path/to/file.nl</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\nlang.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, and a zip archive.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain, including <code>nlang inspect</code>, <code>nlang examples</code>, and dry-run PATH helper scripts.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\nlang.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid and invalid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, a zip archive, and a SHA-256 checksum file.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain, including <code>nlang inspect</code>, <code>nlang examples</code>, invalid example diagnostics, checksum verification, and dry-run PATH helper scripts.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1</code></td><td>Verify the package, tag the current commit, and create a GitHub prerelease with the zip and checksum assets.</td></tr>
           </tbody>
         </table>
       </section>

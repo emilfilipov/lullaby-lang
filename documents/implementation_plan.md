@@ -21,7 +21,8 @@ The repository now contains the first executable alpha slice:
 - `offline_docs`: first self-contained offline browser documentation entry point plus a verifier for required alpha sections, local-only links/assets, fixture-backed executable examples, and release package coverage.
 - `documents/alpha1_language_surface.md`: frozen installable Alpha 1 language, CLI, diagnostics, artifact, and packaging surface; broader design docs are planned unless they match this file.
 - `documents/alpha1_release_notes.md`: Alpha 1 release notes with package contents, supported surface, commands, artifact contract, verification evidence, limitations, and next-phase guidance.
-- `scripts`: Windows portable package, optional PATH helper, and release verification scripts that build `bin\nlang.exe`, bundle offline docs and examples, create a zip archive, and smoke-test the unpacked toolchain.
+- `examples`: user-facing valid and invalid `.nl` programs packaged with the toolchain.
+- `scripts`: Windows portable package, optional PATH helper, GitHub release publication, and release verification scripts that build `bin\nlang.exe`, bundle offline docs and examples, create a zip archive plus checksum, and smoke-test the unpacked toolchain.
 - `documents/alpha1_acceptance_criteria.md`: release checklist for the first reviewable alpha checkpoint, including required feature surface, docs, verification gates, evidence, non-goals, and recommended next phase.
 
 ## Epic 1: Core Toolchain Implementation (Compiler & Runtime)
@@ -62,7 +63,7 @@ The repository now contains the first executable alpha slice:
 | :--- | :--- | :--- | :--- | :--- |
 | **3.1** | **Compiler Toolchain:** Implement the full compiler pipeline defined in `nous_lang_compilation_architecture.md` to handle source code compilation into machine-readable bytecode or an intermediate representation. | All Runtime Components | High | Typed semantic IR lowering, opt-in constant folding and dead-code elimination, IR interpreter, CLI backend selection, `nlang compile`, versioned `.nbc` artifacts with metadata/function-table compatibility checks, and initial structured bytecode VM done for current alpha subset; broader optimization/native backend pending |
 | **3.2** | **Build Script Generation:** Create a robust, platform-agnostic build script (e.g., using CMake or a custom script) that orchestrates the compilation of the compiler and runtime into a single binary. | 3.1 | Medium | Alpha Windows release build path done through Cargo plus `scripts/package_windows_portable.ps1`; cross-platform release orchestration pending |
-| **3.3** | **Installer Creation:** Develop the installer logic to bundle the compiled nlang executable, necessary libraries, and documentation into a single user-friendly package (e.g., .exe or system package). | 3.2 | High | Alpha Windows portable zip package done with optional user PATH install/uninstall helpers; full installer pending |
+| **3.3** | **Installer Creation:** Develop the installer logic to bundle the compiled nlang executable, necessary libraries, and documentation into a single user-friendly package (e.g., .exe or system package). | 3.2 | High | Alpha Windows portable zip package done with optional user PATH install/uninstall helpers and SHA-256 checksum; full installer pending |
 
 ## Epic 4: User Experience & Final Delivery
 *Objective: Create the final, easy-to-use installation method.*

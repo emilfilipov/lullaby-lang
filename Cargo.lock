@@ -16,7 +16,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "nous_cli"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "nous_diagnostics",
  "nous_ir",
@@ -28,14 +28,14 @@ dependencies = [
 
 [[package]]
 name = "nous_diagnostics"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "nous_ir"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "nous_diagnostics",
  "nous_lexer",
@@ -48,14 +48,14 @@ dependencies = [
 
 [[package]]
 name = "nous_lexer"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "nous_diagnostics",
 ]
 
 [[package]]
 name = "nous_parser"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "nous_lexer",
  "serde",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "nous_runtime"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "nous_diagnostics",
  "nous_lexer",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "nous_semantics"
-version = "0.1.0"
+version = "0.1.0-alpha.2"
 dependencies = [
  "nous_diagnostics",
  "nous_lexer",

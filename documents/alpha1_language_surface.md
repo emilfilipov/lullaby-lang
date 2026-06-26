@@ -77,8 +77,9 @@ This document freezes the installable Alpha 1 surface. If another design documen
 ## Packaging
 
 - `scripts/package_windows_portable.ps1` builds the Windows Alpha 1 portable package and zip archive under `dist/`.
-- The package contains `bin\nlang.exe`, `docs\index.html`, valid `.nl` examples, optional PATH setup/cleanup helpers, README/VERSION metadata, and a repository license file if one exists.
+- The package contains `bin\nlang.exe`, `docs\index.html`, valid `.nl` examples, invalid diagnostic examples, optional PATH setup/cleanup helpers, README/VERSION metadata, a zip checksum, and a repository license file if one exists.
 - `scripts/verify_release.ps1` is the Alpha 1 release gate for the packaged toolchain.
+- `scripts/publish_github_release.ps1` verifies the package, tags the current commit, and creates a GitHub prerelease with the portable zip plus checksum asset.
 
 ## Planned Beyond Alpha 1
 
