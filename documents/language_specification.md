@@ -35,7 +35,7 @@ The current Rust toolchain implements a small executable subset while the wider 
 - The default execution backend is the AST runtime. `nlang run` also supports `--backend ir` and `--backend bytecode` for the current alpha subset.
 - IR and bytecode execution can opt into the initial deterministic optimizer with `--optimize constant-fold`, `--optimize dead-code`, or `--optimize alpha`. The default is `--optimize none`.
 - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] <file.nl>` emits a versioned `.nbc` bytecode artifact, and `nlang run <file.nbc>` executes that artifact.
-- CLI commands are `nlang check [--verbose|--format json] <file.nl>`, `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, and `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl|file.nbc>` through the Rust workspace. `--diagnostic-format json` is also accepted as a JSON diagnostics alias.
+- CLI commands are `nlang check [--verbose|--format json] <file.nl>`, `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl|file.nbc>`, and `nlang docs`. During development, these are also available through `cargo run -p nous_cli -- ...`. `--diagnostic-format json` is accepted as a JSON diagnostics alias.
 
 ## Language Philosophy
 

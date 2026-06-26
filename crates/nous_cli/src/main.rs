@@ -41,6 +41,7 @@ fn run() -> Result<(), String> {
             invocation.mode,
             invocation.optimization,
         ),
+        CommandName::Docs => docs(),
         CommandName::Run => run_file(
             invocation.path,
             invocation.mode,
@@ -56,6 +57,31 @@ fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn docs() -> Result<(), String> {
+    let path = locate_docs().ok_or_else(|| {
+        "offline docs not found; expected docs/index.html near the nlang binary or offline_docs/index.html in the repository".to_string()
+    })?;
+    println!("docs: {}", path.display());
+    Ok(())
+}
+
+fn locate_docs() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(exe) = env::current_exe()
+        && let Some(bin_dir) = exe.parent()
+    {
+        candidates.push(bin_dir.join("docs/index.html"));
+        candidates.push(bin_dir.join("../docs/index.html"));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("../../offline_docs/index.html"));
+    candidates.push(PathBuf::from("offline_docs/index.html"));
+
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn compile_file(
@@ -438,6 +464,7 @@ struct Invocation {
 enum CommandName {
     Check,
     Compile,
+    Docs,
     Run,
     Version,
     Help,
@@ -520,6 +547,20 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 }))
             } else {
                 Err("usage: nlang --help".to_string())
+            }
+        }
+        "docs" => {
+            if args.len() == 1 {
+                Ok(Some(Invocation {
+                    command: CommandName::Docs,
+                    path: PathBuf::new(),
+                    output: None,
+                    mode: OutputMode::Concise,
+                    backend: Backend::Ast,
+                    optimization: OptimizationMode::None,
+                }))
+            } else {
+                Err("usage: nlang docs".to_string())
             }
         }
         "check" | "compile" | "run" => parse_file_command(command, &args[1..]),
@@ -633,7 +674,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang --version",
+        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang docs\n  nlang --version",
         env!("CARGO_PKG_VERSION")
     );
 }

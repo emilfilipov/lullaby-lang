@@ -21,7 +21,7 @@ Alpha 1 is acceptable when the repository provides:
 - Interim heap-slot memory builtins: `alloc`, `load`, `store`, and `dealloc`.
 - Text file builtins: `read_file`, `write_file`, `append_file`, and `file_exists`.
 - Conservative system command builtins: `sys_status` and `sys_output` with direct program-plus-argv execution and no shell invocation.
-- `nlang check`, `nlang compile`, and `nlang run` through `cargo run -p nous_cli -- ...` during development, with `run --backend ast|ir|bytecode` for source execution and `run file.nbc` for compiled bytecode artifacts.
+- `nlang check`, `nlang compile`, `nlang run`, and `nlang docs`, with `cargo run -p nous_cli -- ...` equivalents during development. `run --backend ast|ir|bytecode` supports source execution, and `run file.nbc` executes compiled bytecode artifacts.
 - A versioned `.nbc` bytecode artifact with a format marker, version, entry point, and bytecode module.
 - A release `nlang` binary usable outside Cargo.
 - A Windows-first installer or portable archive containing the CLI, offline docs, examples, readme/license, and setup instructions.
@@ -54,9 +54,10 @@ git diff --check -- .
 
 The stale-source marker search from `AGENTS.md` should return no matches. Markdown local-reference checks should also pass with a file-like local target filter so language examples such as `[FUNCTION_NAME]([ARGUMENTS])` are not misclassified as broken file links.
 
-Release verification must also prove the packaged or release-built `nlang` binary can:
+`scripts/verify_release.ps1` should be the release proof command for Alpha 1. It must also prove the packaged or release-built `nlang` binary can:
 
 - report `nlang --version`;
+- report the local offline documentation path through `nlang docs`;
 - check a valid `.nl` fixture;
 - run a valid `.nl` fixture;
 - compile a valid `.nl` fixture into `.nbc`;
@@ -71,7 +72,7 @@ The Alpha 1 release note should include:
 - The exact verification commands and pass/fail outcome.
 - The packaged artifact name and install/unpack instructions.
 - A short list of supported `.nl` language features.
-- The supported CLI commands, including `check`, `compile`, `run`, and `run file.nbc`.
+- The supported CLI commands, including `check`, `compile`, `run`, `run file.nbc`, and `docs`.
 - A short list of known limitations and non-goals.
 - Links or references to representative valid and invalid fixtures.
 - Confirmation that ClickUp tracking has been updated for completed, deferred, and next-phase work.

@@ -3,6 +3,10 @@ name = "nous_cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "nlang"
+path = "src/main.rs"
+
 [dependencies]
 nous_diagnostics = { path = "../nous_diagnostics" }
 nous_ir = { path = "../nous_ir" }

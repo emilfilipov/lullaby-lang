@@ -10,7 +10,7 @@ fn workspace_root() -> PathBuf {
 }
 
 fn nlang() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_nous_cli"))
+    Command::new(env!("CARGO_BIN_EXE_nlang"))
 }
 
 fn stdout(output: &std::process::Output) -> String {
@@ -51,6 +51,16 @@ fn checks_valid_fixture_as_json() {
         stdout(&output).trim(),
         "{\"status\":\"ok\",\"diagnostics\":[]}"
     );
+}
+
+#[test]
+fn prints_offline_docs_path() {
+    let output = nlang().args(["docs"]).output().expect("run cli");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = stdout(&output);
+    assert!(stdout.contains("docs:"), "{stdout}");
+    assert!(stdout.contains("index.html"), "{stdout}");
 }
 
 #[test]

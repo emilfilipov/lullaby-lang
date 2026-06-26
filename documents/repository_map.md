@@ -9,6 +9,7 @@ This file maps the repository layout and explains where to find core information
 - `.gitignore`: ignores local build outputs, caches, editor state, and generated artifacts once implementation begins.
 - `.gitattributes`: normalizes repository text files to LF line endings.
 - `crates/`: Rust implementation crates.
+- `scripts/`: release packaging and verification scripts.
 - `tests/`: shared `.nl` fixtures used by crate and CLI tests.
 - `documents/`: core language documents and planning material.
 - `offline_docs/`: self-contained browser documentation bundle that can be opened directly from disk.
@@ -44,8 +45,10 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `crates/nous_semantics/`: static validation for duplicate declarations, local binding types, assignment targets/types, function call arity/types, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical expression operand types, homogeneous non-empty arrays, array indexing, interim pointer-style memory builtins, text file I/O builtins, and safe system command builtins. Successful validation returns `CheckedProgram` with function signatures and inferred expression-type metadata.
 - `crates/nous_ir/`: typed semantic IR schema, lowering from `CheckedProgram`, deterministic optimization pass configuration with opt-in constant folding, block-local dead-code elimination, executable IR interpreter, AST/IR/bytecode parity tests, initial structured bytecode lowering, versioned `.nbc` artifact encoding/decoding, and bytecode VM entry point for the current alpha subset.
 - `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop/range-for execution, break/continue, array literals/indexing with runtime bounds checks, arithmetic/comparison/logical expressions with short-circuiting, `alloc`/`load`/`store`/`dealloc` heap-slot memory builtins, text file I/O builtins, direct program-plus-argv system command builtins, and categorized runtime/resource errors.
-- `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check [--verbose|--format json] <file.nl>`, `compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`, and `run [--verbose|--format json] <file.nbc>`.
+- `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check [--verbose|--format json] <file.nl>`, `compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`, `run [--verbose|--format json] <file.nbc>`, `docs`, and `--version`. The crate declares an explicit `nlang` binary target for release packaging.
 - `crates/nous_cli/tests/`: binary-level integration tests for the CLI pipeline, including valid checks, backend execution, lexical errors, and semantic errors.
+- `scripts/package_windows_portable.ps1`: builds the release CLI, creates `dist\nous-lang-alpha1-windows-x64\`, copies `bin\nlang.exe`, bundles `docs\index.html` and valid examples, copies a repository license file if one exists, writes package metadata/readme files, and creates a `.zip` archive.
+- `scripts/verify_release.ps1`: runs formatting, test, clippy, offline-doc verification, builds the portable package, and smoke-tests the packaged `nlang.exe` against version, docs, check, run, compile, and bytecode artifact execution.
 - `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend, CLI, and offline documentation example verification. Files prefixed with `docs_` back executable examples shown in `offline_docs/index.html`.
 - `tests/fixtures/invalid/`: invalid source fixtures for diagnostics and negative tests.
 
@@ -54,12 +57,14 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo fmt --check`: formatting check.
 - `cargo test --all`: unit tests for all crates.
 - `cargo clippy --all-targets --all-features -- -D warnings`: lint all crates and integration tests.
+- `cargo build --release -p nous_cli`: build the release `nlang.exe` binary.
 - `cargo run -p nous_cli -- check tests/fixtures/valid/add.nl`: check a valid fixture through source validation, lexing, parsing, and semantic validation.
 - `cargo run -p nous_cli -- check --verbose tests/fixtures/invalid/brace.nl`: print verbose source excerpt, root-cause, and suggested-fix diagnostics.
 - `cargo run -p nous_cli -- check --format json tests/fixtures/invalid/type_mismatch.nl`: print deterministic JSON diagnostics. `--diagnostic-format json` is also accepted.
 - `cargo run -p nous_cli -- run --verbose tests/fixtures/invalid/array_index_out_of_bounds.nl`: print runtime diagnostics with source context and traceback frames.
 - `cargo run -p nous_cli -- compile --optimize alpha -o target/run_arithmetic.nbc tests/fixtures/valid/run_arithmetic.nl`: compile a valid source fixture into a versioned `.nbc` bytecode artifact.
 - `cargo run -p nous_cli -- run target/run_arithmetic.nbc`: execute a compiled `.nbc` bytecode artifact.
+- `cargo run -p nous_cli -- docs`: print the local offline documentation entry path.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through source validation, lexing, parsing, semantic validation, runtime execution, and stdout output.
 - `cargo run -p nous_cli -- run --backend ir tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through typed IR lowering and the IR interpreter.
 - `cargo run -p nous_cli -- run --backend bytecode tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through typed IR lowering, initial structured bytecode lowering, and the bytecode VM entry point.
@@ -96,6 +101,8 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/sys_args_type.nl`: verify system command builtin argv type diagnostics.
 - Running a malformed `.nbc` artifact verifies `N0601 [bytecode error]` diagnostics for unsupported bytecode artifacts.
 - `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point, including metadata, fixture content, compile/run command coverage, and `nlang check`/`nlang run` execution for documented `.nl` examples.
+- `powershell -ExecutionPolicy Bypass -File scripts/package_windows_portable.ps1`: build the Windows Alpha 1 portable package and zip archive under `dist/`.
+- `powershell -ExecutionPolicy Bypass -File scripts/verify_release.ps1`: run the full Alpha 1 release gate and smoke-test the packaged toolchain.
 
 ## Planning And Tracking
 
