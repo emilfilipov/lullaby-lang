@@ -5,7 +5,7 @@ This file maps the repository layout and explains where to find core information
 ## Root
 
 - [AGENTS.md](../AGENTS.md): operating guide for agents and contributors. Defines workflow, documentation rules, MCP/ClickUp/GitHub usage, testing expectations, Git rules, and where to find core language information.
-- `Cargo.toml`: Rust workspace manifest for the Nous Lang compiler/toolchain crates.
+- `Cargo.toml`: Rust workspace manifest for the Nous Lang compiler/toolchain crates. The lockfile records the pinned dependency graph, including serde/serde_json for bytecode artifact serialization.
 - `.gitignore`: ignores local build outputs, caches, editor state, and generated artifacts once implementation begins.
 - `.gitattributes`: normalizes repository text files to LF line endings.
 - `crates/`: Rust implementation crates.
@@ -39,12 +39,12 @@ This file maps the repository layout and explains where to find core information
 The implementation is a Rust workspace. Unless changed by an explicit architecture decision, keep this layout:
 
 - `crates/nous_lexer/`: source extension validation, tokenization, indentation scanning, forbidden brace/semicolon diagnostics, core keyword recognition, and lexical tests.
-- `crates/nous_diagnostics/`: shared diagnostic data structures, registry metadata, concise/verbose renderers, and deterministic JSON rendering.
+- `crates/nous_diagnostics/`: shared diagnostic data structures, serializable span/traceback metadata, registry metadata, concise/verbose renderers, and deterministic JSON rendering.
 - `crates/nous_parser/`: AST model and parser for function declarations, typed parameters, return types, indentation blocks, `let`, assignment, `return`, `break`, `continue`, if/elif/else, while/loop/range-for, calls, literals, array literals/indexing, variables, arithmetic, comparison, and logical expressions.
 - `crates/nous_semantics/`: static validation for duplicate declarations, local binding types, assignment targets/types, function call arity/types, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical expression operand types, homogeneous non-empty arrays, array indexing, interim pointer-style memory builtins, text file I/O builtins, and safe system command builtins. Successful validation returns `CheckedProgram` with function signatures and inferred expression-type metadata.
-- `crates/nous_ir/`: typed semantic IR schema, lowering from `CheckedProgram`, deterministic optimization pass configuration with opt-in constant folding, block-local dead-code elimination, executable IR interpreter, AST/IR/bytecode parity tests, initial structured bytecode lowering, and bytecode VM entry point for the current alpha subset.
+- `crates/nous_ir/`: typed semantic IR schema, lowering from `CheckedProgram`, deterministic optimization pass configuration with opt-in constant folding, block-local dead-code elimination, executable IR interpreter, AST/IR/bytecode parity tests, initial structured bytecode lowering, versioned `.nbc` artifact encoding/decoding, and bytecode VM entry point for the current alpha subset.
 - `crates/nous_runtime/`: in-process AST runtime for the current alpha subset, including `main`, function calls, scoped locals, assignment, branch results, while/loop/range-for execution, break/continue, array literals/indexing with runtime bounds checks, arithmetic/comparison/logical expressions with short-circuiting, `alloc`/`load`/`store`/`dealloc` heap-slot memory builtins, text file I/O builtins, direct program-plus-argv system command builtins, and categorized runtime/resource errors.
-- `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check [--verbose|--format json] <file.nl>` and `run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`.
+- `crates/nous_cli/`: `nlang` command-line interface. Current commands: `check [--verbose|--format json] <file.nl>`, `compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`, and `run [--verbose|--format json] <file.nbc>`.
 - `crates/nous_cli/tests/`: binary-level integration tests for the CLI pipeline, including valid checks, backend execution, lexical errors, and semantic errors.
 - `tests/fixtures/valid/`: valid `.nl` smoke fixtures used by the frontend, CLI, and offline documentation example verification. Files prefixed with `docs_` back executable examples shown in `offline_docs/index.html`.
 - `tests/fixtures/invalid/`: invalid source fixtures for diagnostics and negative tests.
@@ -58,6 +58,8 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- check --verbose tests/fixtures/invalid/brace.nl`: print verbose source excerpt, root-cause, and suggested-fix diagnostics.
 - `cargo run -p nous_cli -- check --format json tests/fixtures/invalid/type_mismatch.nl`: print deterministic JSON diagnostics. `--diagnostic-format json` is also accepted.
 - `cargo run -p nous_cli -- run --verbose tests/fixtures/invalid/array_index_out_of_bounds.nl`: print runtime diagnostics with source context and traceback frames.
+- `cargo run -p nous_cli -- compile --optimize alpha -o target/run_arithmetic.nbc tests/fixtures/valid/run_arithmetic.nl`: compile a valid source fixture into a versioned `.nbc` bytecode artifact.
+- `cargo run -p nous_cli -- run target/run_arithmetic.nbc`: execute a compiled `.nbc` bytecode artifact.
 - `cargo run -p nous_cli -- run tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through source validation, lexing, parsing, semantic validation, runtime execution, and stdout output.
 - `cargo run -p nous_cli -- run --backend ir tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through typed IR lowering and the IR interpreter.
 - `cargo run -p nous_cli -- run --backend bytecode tests/fixtures/valid/run_arithmetic.nl`: run a valid fixture through typed IR lowering, initial structured bytecode lowering, and the bytecode VM entry point.
@@ -92,7 +94,8 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/read_file_path_type.nl`: verify file builtin path type diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/write_file_content_type.nl`: verify file builtin content type diagnostics.
 - `cargo run -p nous_cli -- check tests/fixtures/invalid/sys_args_type.nl`: verify system command builtin argv type diagnostics.
-- `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point, including metadata, fixture content, and `nlang check`/`nlang run` execution for documented `.nl` examples.
+- Running a malformed `.nbc` artifact verifies `N0601 [bytecode error]` diagnostics for unsupported bytecode artifacts.
+- `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point, including metadata, fixture content, compile/run command coverage, and `nlang check`/`nlang run` execution for documented `.nl` examples.
 
 ## Planning And Tracking
 

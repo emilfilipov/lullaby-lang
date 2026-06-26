@@ -14,12 +14,13 @@ Current diagnostic ranges:
 
 | Range | Source | Example |
 | :--- | :--- | :--- |
-| `N0001-N0002` | Source path and host file loading | Invalid extension or unreadable source file. |
+| `N0001-N0003` | Source path and host file loading/writing | Invalid extension, unreadable source file, or failed artifact write. |
 | `N0101-N0104` | Lexer | Forbidden curly braces or semicolon terminators. |
 | `N0201-N0210` | Parser | Missing function body indentation or malformed expression. |
 | `N0300-N0328` | Semantic validation | Unknown name, type mismatch, invalid loop control, invalid builtin arguments. |
 | `N0400-N0418` | Runtime and host resources | Missing `main`, division by zero, invalid pointer, missing file, failed command invocation. |
 | `N0501` | IR lowering | Typed IR lowering failed after semantic validation. |
+| `N0601` | Bytecode artifact | Compiled `.nbc` artifact is malformed or unsupported. |
 
 Runtime CLI output uses:
 
@@ -32,6 +33,7 @@ The implemented runtime categories are:
 - `runtime`: execution errors such as division by zero, invalid pointer use, out-of-bounds array indexing, or wrong runtime value kind.
 - `resource`: host resource failures such as failed file reads/writes/appends or failed command invocation.
 - `ir`: typed IR lowering failures reported before an IR or bytecode backend starts executing.
+- `bytecode`: compiled `.nbc` artifact loading failures before bytecode execution starts.
 
 Language-level `try`, `catch`, recovery blocks, and compact `!0xXX` error tokens are planned and are not accepted by the current parser.
 
@@ -45,7 +47,7 @@ nlang check --verbose file.nl
 nlang check --format json file.nl
 ```
 
-The same flags are available for `nlang run`. `nlang run` defaults to the AST runtime and accepts `--backend ir` and `--backend bytecode` for the current alpha subset. IR lowering failures use code `N0501` and phase `ir`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
+The same flags are available for `nlang compile` and `nlang run`. `nlang run` defaults to the AST runtime and accepts `--backend ir` and `--backend bytecode` for the current alpha subset. `nlang compile` emits a versioned `.nbc` bytecode artifact, and `nlang run file.nbc` executes that artifact. IR lowering failures use code `N0501` and phase `ir`; bytecode artifact failures use code `N0601` and phase `bytecode`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
 
 ### Concise Output
 

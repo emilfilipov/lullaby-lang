@@ -6,9 +6,9 @@ This registry defines the stable diagnostic codes currently emitted by the Nous 
 
 ## Output Modes
 
-- Concise default: `nlang check file.nl` and `nlang run file.nl` print one line per diagnostic.
-- Verbose: `nlang check --verbose file.nl` and `nlang run --verbose file.nl` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
-- JSON: `nlang check --format json file.nl` and `nlang run --format json file.nl` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
+- Concise default: `nlang check file.nl`, `nlang compile file.nl`, and `nlang run file.nl` print one line per diagnostic.
+- Verbose: `nlang check --verbose file.nl`, `nlang compile --verbose file.nl`, and `nlang run --verbose file.nl` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
+- JSON: `nlang check --format json file.nl`, `nlang compile --format json file.nl`, and `nlang run --format json file.nl` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
 
 JSON failures are written to stderr and keep a non-zero exit status. JSON successes are written to stdout as:
 
@@ -45,6 +45,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | :--- | :--- | :--- | :--- | :--- |
 | `N0001` | source | Unsupported source extension. | File path does not end in `.nl`. | Rename the source file or pass a `.nl` file. |
 | `N0002` | resource | CLI could not read a source file. | Missing file or unreadable path. | Check path and permissions. |
+| `N0003` | resource | CLI could not write a compiled artifact. | Output path is unwritable or its directory is missing. | Choose a writable `-o` path or create the parent directory. |
 | `N0101` | lexer | Indentation does not match an active block. | A line dedented to a column not on the indent stack. | Align with an existing block level. |
 | `N0102` | lexer | Curly braces are forbidden. | Source uses `{` or `}` as a block delimiter. | Remove braces and use indentation. |
 | `N0103` | lexer | Semicolons are forbidden. | Source uses `;` as a statement terminator. | Remove semicolons and use one statement per line. |
@@ -89,6 +90,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `N0327` | semantic | Ordering operands are not both `i64`. | `<`, `<=`, `>`, or `>=` used on non-`i64`. | Use `i64` operands. |
 | `N0328` | semantic | `store` value type mismatch. | Stored value does not match pointer element type. | Store a value matching the pointer type. |
 | `N0501` | ir | IR lowering failed. | A checked program did not match the current IR lowering contract. | Treat this as a compiler bug and retry with `--backend ast` as a workaround. |
+| `N0601` | bytecode | Bytecode artifact failed to load. | The `.nbc` artifact is malformed, has an unsupported format/version, or names an unsupported entry point. | Recompile the source with the current `nlang compile` command. |
 | `N0400` | runtime | Missing `main`. | Runtime cannot find an entrypoint. | Define `fn main`. |
 | `N0401` | runtime | Unknown function at runtime. | Runtime call target was not found. | Check semantic validation and function names. |
 | `N0402` | runtime | Runtime function arity mismatch. | Runtime call has wrong argument count. | Match the function signature. |

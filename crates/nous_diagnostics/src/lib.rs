@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub line: usize,
     pub column: usize,
@@ -19,6 +21,7 @@ pub enum DiagnosticPhase {
     Parser,
     Semantic,
     Ir,
+    Bytecode,
     Runtime,
     Resource,
 }
@@ -31,6 +34,7 @@ impl fmt::Display for DiagnosticPhase {
             Self::Parser => write!(formatter, "parser"),
             Self::Semantic => write!(formatter, "semantic"),
             Self::Ir => write!(formatter, "ir"),
+            Self::Bytecode => write!(formatter, "bytecode"),
             Self::Runtime => write!(formatter, "runtime"),
             Self::Resource => write!(formatter, "resource"),
         }
@@ -50,7 +54,7 @@ impl fmt::Display for Severity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceFrame {
     pub function: String,
     pub span: Option<Span>,
@@ -161,6 +165,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         explanation: "The CLI could not read the source file before lexing.",
         root_cause: "The path may be missing, inaccessible, or blocked by host permissions.",
         suggested_fix: "Check that the file exists and that the current user can read it.",
+    },
+    DiagnosticEntry {
+        code: "N0003",
+        phase: DiagnosticPhase::Resource,
+        explanation: "The CLI could not write a compiled artifact.",
+        root_cause: "The output path may be unwritable, or its parent directory may be missing.",
+        suggested_fix: "Choose a writable output path or create the parent directory before compiling.",
     },
     DiagnosticEntry {
         code: "N0101",
@@ -280,6 +291,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         explanation: "The checked source program could not be lowered into typed IR.",
         root_cause: "The semantic program and IR lowering rules disagree about a supported alpha construct.",
         suggested_fix: "Report the source as a compiler bug and try the AST backend as a temporary workaround.",
+    },
+    DiagnosticEntry {
+        code: "N0601",
+        phase: DiagnosticPhase::Bytecode,
+        explanation: "The compiled bytecode artifact could not be loaded.",
+        root_cause: "The .nbc file is malformed, has an unsupported format/version, or names an unsupported entry point.",
+        suggested_fix: "Recompile the original .nl source with the current nlang compile command.",
     },
     DiagnosticEntry {
         code: "N0404",

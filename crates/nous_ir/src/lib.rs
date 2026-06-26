@@ -6,13 +6,18 @@ use nous_diagnostics::{Span, TraceFrame};
 use nous_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, TypeRef, UnaryOp};
 use nous_runtime::{RuntimeError, Value};
 use nous_semantics::{CheckedProgram, Signature};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub const BYTECODE_ARTIFACT_FORMAT: &str = "nous-bytecode";
+pub const BYTECODE_ARTIFACT_EXTENSION: &str = "nbc";
+pub const BYTECODE_ARTIFACT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrModule {
     pub functions: Vec<IrFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrFunction {
     pub name: String,
     pub params: Vec<IrParam>,
@@ -21,13 +26,13 @@ pub struct IrFunction {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrParam {
     pub name: String,
     pub ty: TypeRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrStmt {
     Let {
         name: String,
@@ -69,20 +74,20 @@ pub enum IrStmt {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrIfBranch {
     pub condition: IrExpr,
     pub body: Vec<IrStmt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrExpr {
     pub kind: IrExprKind,
     pub ty: TypeRef,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrExprKind {
     Integer(i64),
     Bool(bool),
@@ -215,18 +220,84 @@ pub fn run_main(module: &IrModule) -> Result<Value, RuntimeError> {
     runtime.call_function("main", Vec::new())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BytecodeModule {
     pub functions: Vec<BytecodeFunction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BytecodeFunction {
     pub name: String,
     pub params: Vec<IrParam>,
     pub return_type: TypeRef,
     pub body: Vec<IrStmt>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BytecodeArtifact {
+    pub format: String,
+    pub version: u32,
+    pub entry: String,
+    pub module: BytecodeModule,
+}
+
+impl BytecodeArtifact {
+    pub fn new(module: BytecodeModule) -> Self {
+        Self {
+            format: BYTECODE_ARTIFACT_FORMAT.to_string(),
+            version: BYTECODE_ARTIFACT_VERSION,
+            entry: "main".to_string(),
+            module,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BytecodeArtifactError {
+    pub message: String,
+}
+
+impl BytecodeArtifactError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+pub fn encode_bytecode_artifact(module: &BytecodeModule) -> Result<String, BytecodeArtifactError> {
+    let artifact = BytecodeArtifact::new(module.clone());
+    serde_json::to_string_pretty(&artifact).map_err(|error| {
+        BytecodeArtifactError::new(format!("failed to encode bytecode artifact: {error}"))
+    })
+}
+
+pub fn decode_bytecode_artifact(contents: &str) -> Result<BytecodeArtifact, BytecodeArtifactError> {
+    let artifact: BytecodeArtifact = serde_json::from_str(contents).map_err(|error| {
+        BytecodeArtifactError::new(format!("failed to decode bytecode artifact: {error}"))
+    })?;
+
+    if artifact.format != BYTECODE_ARTIFACT_FORMAT {
+        return Err(BytecodeArtifactError::new(format!(
+            "unsupported bytecode artifact format `{}`",
+            artifact.format
+        )));
+    }
+    if artifact.version != BYTECODE_ARTIFACT_VERSION {
+        return Err(BytecodeArtifactError::new(format!(
+            "unsupported bytecode artifact version `{}`",
+            artifact.version
+        )));
+    }
+    if artifact.entry != "main" {
+        return Err(BytecodeArtifactError::new(format!(
+            "unsupported bytecode artifact entry `{}`",
+            artifact.entry
+        )));
+    }
+
+    Ok(artifact)
 }
 
 pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
@@ -1638,6 +1709,36 @@ mod tests {
         };
         assert_eq!(value.kind, IrExprKind::Integer(42));
         assert_eq!(optimized.functions[0].body.len(), 2);
+    }
+
+    #[test]
+    fn bytecode_artifact_round_trips_and_executes() {
+        let ir = lower_source("fn main -> i64\n    40 + 2\n");
+        let bytecode = lower_to_bytecode(&ir);
+        let encoded = encode_bytecode_artifact(&bytecode).expect("encode artifact");
+        let artifact = decode_bytecode_artifact(&encoded).expect("decode artifact");
+
+        assert_eq!(artifact.format, BYTECODE_ARTIFACT_FORMAT);
+        assert_eq!(artifact.version, BYTECODE_ARTIFACT_VERSION);
+        assert_eq!(artifact.entry, "main");
+        assert_eq!(
+            run_bytecode_main(&artifact.module).expect("run artifact bytecode"),
+            Value::I64(42)
+        );
+    }
+
+    #[test]
+    fn bytecode_artifact_rejects_wrong_version() {
+        let invalid = format!(
+            "{{\"format\":\"{BYTECODE_ARTIFACT_FORMAT}\",\"version\":999,\"entry\":\"main\",\"module\":{{\"functions\":[]}}}}"
+        );
+        let error = decode_bytecode_artifact(&invalid).expect_err("invalid version");
+
+        assert!(
+            error
+                .message
+                .contains("unsupported bytecode artifact version")
+        );
     }
 
     #[test]

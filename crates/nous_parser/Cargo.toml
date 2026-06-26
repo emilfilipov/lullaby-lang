@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 nous_lexer = { path = "../nous_lexer" }
+serde = { version = "1", features = ["derive"] }

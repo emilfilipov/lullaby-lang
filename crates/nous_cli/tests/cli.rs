@@ -100,6 +100,66 @@ fn runs_arithmetic_fixture_with_bytecode_backend() {
 }
 
 #[test]
+fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
+    let root = workspace_root();
+    let fixture = root.join("tests/fixtures/valid/run_arithmetic.nl");
+    let artifact = root.join("target/run_arithmetic.nbc");
+    let _ = std::fs::remove_file(&artifact);
+
+    let compile = nlang()
+        .args([
+            "compile",
+            "--optimize",
+            "alpha",
+            "-o",
+            artifact.to_str().expect("artifact path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("compile cli");
+
+    assert!(compile.status.success(), "{compile:?}");
+    assert!(stdout(&compile).contains("compiled:"), "{compile:?}");
+    let artifact_text = std::fs::read_to_string(&artifact).expect("artifact");
+    assert!(artifact_text.contains("\"format\": \"nous-bytecode\""));
+    assert!(artifact_text.contains("\"version\": 1"));
+
+    let run = nlang()
+        .args(["run", artifact.to_str().expect("artifact path")])
+        .output()
+        .expect("run artifact cli");
+
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(stdout(&run).trim(), "42");
+    let _ = std::fs::remove_file(artifact);
+}
+
+#[test]
+fn rejects_invalid_bytecode_artifact() {
+    let root = workspace_root();
+    let artifact = root.join("target/invalid_artifact.nbc");
+    std::fs::write(
+        &artifact,
+        "{\"format\":\"not-nous\",\"version\":1,\"entry\":\"main\",\"module\":{\"functions\":[]}}",
+    )
+    .expect("write invalid artifact");
+
+    let output = nlang()
+        .args(["run", artifact.to_str().expect("artifact path")])
+        .output()
+        .expect("run artifact cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("N0601 [bytecode error]"), "{stderr}");
+    assert!(
+        stderr.contains("unsupported bytecode artifact format"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_file(artifact);
+}
+
+#[test]
 fn runs_logic_fixture_with_optimized_ir_backend() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_logic.nl");
     let output = nlang()

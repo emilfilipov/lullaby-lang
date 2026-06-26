@@ -8,8 +8,9 @@ use nous_diagnostics::{
     DiagnosticPhase, DiagnosticReport, render_concise, render_json, render_verbose,
 };
 use nous_ir::{
-    OptimizationConfig, lower, lower_to_bytecode, optimize, run_bytecode_main,
-    run_main as run_ir_main,
+    BYTECODE_ARTIFACT_EXTENSION, BytecodeArtifactError, OptimizationConfig,
+    decode_bytecode_artifact, encode_bytecode_artifact, lower, lower_to_bytecode, optimize,
+    run_bytecode_main, run_main as run_ir_main,
 };
 use nous_lexer::{Diagnostic, lex, validate_source_path};
 use nous_parser::{Program, parse};
@@ -34,6 +35,12 @@ fn run() -> Result<(), String> {
 
     match invocation.command {
         CommandName::Check => check(invocation.path, invocation.mode),
+        CommandName::Compile => compile_file(
+            invocation.path,
+            invocation.output,
+            invocation.mode,
+            invocation.optimization,
+        ),
         CommandName::Run => run_file(
             invocation.path,
             invocation.mode,
@@ -49,6 +56,63 @@ fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn compile_file(
+    path: PathBuf,
+    output: Option<PathBuf>,
+    mode: OutputMode,
+    optimization: OptimizationMode,
+) -> Result<(), String> {
+    let compiled = match compile(&path) {
+        Ok(compiled) => compiled,
+        Err(failure) => {
+            return Err(format_reports(
+                &failure.reports,
+                mode,
+                failure.source.as_deref(),
+            ));
+        }
+    };
+
+    let module = lower(&compiled.checked).map_err(|error| {
+        format_reports(
+            &[ir_report(error, &compiled.path)],
+            mode,
+            Some(&compiled.source),
+        )
+    })?;
+    let module = optimize_module(module, optimization);
+    let bytecode = lower_to_bytecode(&module);
+    let artifact = encode_bytecode_artifact(&bytecode).map_err(|error| {
+        format_reports(
+            &[bytecode_report(error, &compiled.path)],
+            mode,
+            Some(&compiled.source),
+        )
+    })?;
+
+    let output =
+        output.unwrap_or_else(|| compiled.path.with_extension(BYTECODE_ARTIFACT_EXTENSION));
+    if let Err(error) = fs::write(&output, artifact) {
+        return Err(format_reports(
+            &[DiagnosticReport::new(
+                "N0003",
+                DiagnosticPhase::Resource,
+                format!("failed to write `{}`: {error}", output.display()),
+            )
+            .with_source_path(output.display().to_string())],
+            mode,
+            None,
+        ));
+    }
+
+    if mode == OutputMode::Json {
+        println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
+    } else {
+        println!("compiled: {}", output.display());
+    }
+    Ok(())
 }
 
 fn check(path: PathBuf, mode: OutputMode) -> Result<(), String> {
@@ -75,6 +139,13 @@ fn run_file(
     backend: Backend,
     optimization: OptimizationMode,
 ) -> Result<(), String> {
+    if path.extension().and_then(|value| value.to_str()) == Some(BYTECODE_ARTIFACT_EXTENSION) {
+        if backend != Backend::Ast || optimization != OptimizationMode::None {
+            return Err("usage: nlang run [--verbose|--format json] <file.nbc>".to_string());
+        }
+        return run_bytecode_artifact(path, mode);
+    }
+
     let compiled = match compile(&path) {
         Ok(compiled) => compiled,
         Err(failure) => {
@@ -125,6 +196,38 @@ fn run_file(
         Err(error) => {
             let report = runtime_report(error, &compiled.path);
             Err(format_reports(&[report], mode, Some(&compiled.source)))
+        }
+    }
+}
+
+fn run_bytecode_artifact(path: PathBuf, mode: OutputMode) -> Result<(), String> {
+    let contents = fs::read_to_string(&path).map_err(|error| {
+        format_reports(
+            &[DiagnosticReport::new(
+                "N0002",
+                DiagnosticPhase::Resource,
+                format!("failed to read `{}`: {error}", path.display()),
+            )
+            .with_source_path(path.display().to_string())],
+            mode,
+            None,
+        )
+    })?;
+    let artifact = decode_bytecode_artifact(&contents)
+        .map_err(|error| format_reports(&[bytecode_report(error, &path)], mode, None))?;
+
+    match run_bytecode_main(&artifact.module) {
+        Ok(value) => {
+            if mode == OutputMode::Json {
+                println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
+            } else if value != Value::Void {
+                println!("{value}");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let report = runtime_report(error, &path);
+            Err(format_reports(&[report], mode, None))
         }
     }
 }
@@ -267,6 +370,11 @@ fn ir_report(error: nous_ir::IrLoweringError, path: &Path) -> DiagnosticReport {
     report
 }
 
+fn bytecode_report(error: BytecodeArtifactError, path: &Path) -> DiagnosticReport {
+    DiagnosticReport::new("N0601", DiagnosticPhase::Bytecode, error.message)
+        .with_source_path(path.display().to_string())
+}
+
 fn format_reports(reports: &[DiagnosticReport], mode: OutputMode, source: Option<&str>) -> String {
     match mode {
         OutputMode::Concise => reports
@@ -320,6 +428,7 @@ impl CompileFailure {
 struct Invocation {
     command: CommandName,
     path: PathBuf,
+    output: Option<PathBuf>,
     mode: OutputMode,
     backend: Backend,
     optimization: OptimizationMode,
@@ -328,6 +437,7 @@ struct Invocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandName {
     Check,
+    Compile,
     Run,
     Version,
     Help,
@@ -389,6 +499,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 Ok(Some(Invocation {
                     command: CommandName::Version,
                     path: PathBuf::new(),
+                    output: None,
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
@@ -402,6 +513,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 Ok(Some(Invocation {
                     command: CommandName::Help,
                     path: PathBuf::new(),
+                    output: None,
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
@@ -410,7 +522,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 Err("usage: nlang --help".to_string())
             }
         }
-        "check" | "run" => parse_file_command(command, &args[1..]),
+        "check" | "compile" | "run" => parse_file_command(command, &args[1..]),
         other => Err(format!("unknown command `{other}`\n\nrun `nlang --help`")),
     }
 }
@@ -419,6 +531,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
     let mut mode = OutputMode::Concise;
     let mut backend = Backend::Ast;
     let mut optimization = OptimizationMode::None;
+    let mut output = None;
     let mut cursor = 0;
     let usage = command_usage(command);
 
@@ -452,7 +565,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
                 cursor += 2;
             }
             "--optimize" => {
-                if command != "run" {
+                if command != "run" && command != "compile" {
                     return Err(usage);
                 }
                 let Some(value) = args
@@ -462,6 +575,16 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
                     return Err(usage);
                 };
                 optimization = value;
+                cursor += 2;
+            }
+            "--output" | "-o" => {
+                if command != "compile" || output.is_some() {
+                    return Err(usage);
+                }
+                let Some(value) = args.get(cursor + 1) else {
+                    return Err(usage);
+                };
+                output = Some(PathBuf::from(value));
                 cursor += 2;
             }
             _ => break,
@@ -474,20 +597,26 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
     if args.get(cursor + 1).is_some() {
         return Err(usage);
     }
-    if backend == Backend::Ast && optimization != OptimizationMode::None {
+    if command == "run" && backend == Backend::Ast && optimization != OptimizationMode::None {
         return Err(
             "usage: nlang run --backend ir|bytecode --optimize none|constant-fold|dead-code|alpha <file.nl>"
                 .to_string(),
         );
     }
+    if command == "compile" && backend != Backend::Ast {
+        return Err(usage);
+    }
 
     Ok(Some(Invocation {
         command: if command == "check" {
             CommandName::Check
+        } else if command == "compile" {
+            CommandName::Compile
         } else {
             CommandName::Run
         },
         path: PathBuf::from(path),
+        output,
         mode,
         backend,
         optimization,
@@ -496,14 +625,15 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
 
 fn command_usage(command: &str) -> String {
     match command {
-        "run" => "usage: nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>".to_string(),
+        "compile" => "usage: nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>".to_string(),
+        "run" => "usage: nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n       nlang run [--verbose|--format json] <file.nbc>".to_string(),
         _ => "usage: nlang check [--verbose|--format json] <file.nl>".to_string(),
     }
 }
 
 fn print_help() {
     println!(
-        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang --version",
+        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang --version",
         env!("CARGO_PKG_VERSION")
     );
 }

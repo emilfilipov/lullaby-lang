@@ -2,7 +2,7 @@
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
-Alpha 1 is the first reviewable Nous Lang toolchain checkpoint. It is not the full systems language, native compiler, installer, or standard library. It is a validated executable alpha that proves the frontend, semantic checks, diagnostics, runtime subset, fixture discipline, and offline documentation workflow are coherent.
+Alpha 1 is the first installable Nous Lang toolchain checkpoint. It is not the full systems language, native compiler, or standard library. It is a minimal working language and tooling release that proves the frontend, semantic checks, diagnostics, runtime subset, bytecode artifact path, fixture discipline, offline documentation workflow, and Windows-first packaging are coherent.
 
 ## Required Toolchain Surface
 
@@ -21,8 +21,11 @@ Alpha 1 is acceptable when the repository provides:
 - Interim heap-slot memory builtins: `alloc`, `load`, `store`, and `dealloc`.
 - Text file builtins: `read_file`, `write_file`, `append_file`, and `file_exists`.
 - Conservative system command builtins: `sys_status` and `sys_output` with direct program-plus-argv execution and no shell invocation.
-- `nlang check` and `nlang run` through `cargo run -p nous_cli -- ...` during development, with `run --backend ast|ir|bytecode` for the current executable subset.
-- Concise, verbose, and deterministic JSON diagnostics for representative source, lexer, parser, semantic, IR, runtime, and resource failures.
+- `nlang check`, `nlang compile`, and `nlang run` through `cargo run -p nous_cli -- ...` during development, with `run --backend ast|ir|bytecode` for source execution and `run file.nbc` for compiled bytecode artifacts.
+- A versioned `.nbc` bytecode artifact with a format marker, version, entry point, and bytecode module.
+- A release `nlang` binary usable outside Cargo.
+- A Windows-first installer or portable archive containing the CLI, offline docs, examples, readme/license, and setup instructions.
+- Concise, verbose, and deterministic JSON diagnostics for representative source, lexer, parser, semantic, IR, bytecode artifact, runtime, and resource failures.
 
 ## Required Documentation Surface
 
@@ -33,6 +36,7 @@ Alpha 1 documentation is acceptable when:
 - `documents/implementation_plan.md` records which epics are alpha-complete, partially complete, or pending.
 - `documents/repository_map.md` accurately maps source layout, docs, fixtures, commands, and verification responsibilities.
 - `offline_docs/index.html` is self-contained and opens directly from disk without a server, CDN, remote font, or internet dependency.
+- Offline documentation is bundled with the release package and discoverable from the installed or unpacked toolchain.
 - Offline documentation examples that claim to work are backed by `.nl` fixtures and verified by `offline_docs/verify_offline_docs.py`.
 - Planned syntax in design documents is clearly distinguishable from implemented syntax.
 
@@ -50,13 +54,24 @@ git diff --check -- .
 
 The stale-source marker search from `AGENTS.md` should return no matches. Markdown local-reference checks should also pass with a file-like local target filter so language examples such as `[FUNCTION_NAME]([ARGUMENTS])` are not misclassified as broken file links.
 
+Release verification must also prove the packaged or release-built `nlang` binary can:
+
+- report `nlang --version`;
+- check a valid `.nl` fixture;
+- run a valid `.nl` fixture;
+- compile a valid `.nl` fixture into `.nbc`;
+- run the compiled `.nbc` artifact;
+- locate or include the offline docs bundle.
+
 ## Release Evidence
 
 The Alpha 1 release note should include:
 
 - The commit hash being released.
 - The exact verification commands and pass/fail outcome.
+- The packaged artifact name and install/unpack instructions.
 - A short list of supported `.nl` language features.
+- The supported CLI commands, including `check`, `compile`, `run`, and `run file.nbc`.
 - A short list of known limitations and non-goals.
 - Links or references to representative valid and invalid fixtures.
 - Confirmation that ClickUp tracking has been updated for completed, deferred, and next-phase work.
@@ -66,7 +81,6 @@ The Alpha 1 release note should include:
 Alpha 1 does not require:
 
 - Native code generation, linking, or binary output.
-- A packaged installer or direct installed `nlang` executable.
 - Modules, packages, structs, traits, interfaces, pattern matching, or user-defined generics beyond current `array<T>` spelling.
 - Full region memory, ARC/reference counting, lifetime analysis, or GC hooks.
 - Streams, binary I/O, memory mapping, async, sockets, IPC, or OS syscall abstractions beyond the current safe system command builtins.
@@ -74,4 +88,4 @@ Alpha 1 does not require:
 
 ## Suggested Next Phase After Alpha 1
 
-Once Alpha 1 is accepted, the next phase should harden the typed semantic IR and initial bytecode backend with optimizer passes, backend snapshot tests, and a clearer lower-level bytecode instruction format before native code generation. This keeps the project conservative: preserve the working AST runtime while proving that a lower-level contract can support later optimization and native backends.
+Once Alpha 1 is accepted, the next phase should harden the typed semantic IR and initial bytecode backend with remaining optimizer passes, backend snapshot tests, and a lower-level bytecode instruction format before native code generation. This keeps the project conservative: preserve the working AST runtime while proving that a lower-level contract can support later optimization and native backends.
