@@ -29,6 +29,9 @@ try {
     if (-not (Test-Path -LiteralPath $Example)) {
         throw "packaged example not found: $Example"
     }
+    if (-not (Test-Path -LiteralPath (Join-Path $PackageRoot "RELEASE_NOTES.md"))) {
+        throw "packaged release notes not found"
+    }
 
     & $Nlang --version
     & $Nlang docs

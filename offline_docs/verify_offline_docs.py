@@ -78,6 +78,7 @@ REQUIRED_PHRASES = [
     "docs\\index.html",
     "package_windows_portable.ps1",
     "verify_release.ps1",
+    "RELEASE_NOTES.md",
     ".nbc",
     "function table",
     "metadata",

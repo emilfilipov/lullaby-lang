@@ -495,7 +495,7 @@ cargo run -p nous_cli -- run hello.nbc</code></pre>
             <tr><td><code>cargo run -p nous_cli -- docs</code></td><td>Print the local offline documentation entry path. In the portable package, use <code>bin\nlang.exe docs</code> or <code>nlang docs</code> after adding <code>bin</code> to <code>PATH</code>.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- check --verbose path/to/file.nl</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- check --format json path/to/file.nl</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\nlang.exe</code>, <code>docs\index.html</code>, valid examples, package metadata, any repository license file, and a zip archive.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\nlang.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid examples, package metadata, any repository license file, and a zip archive.</td></tr>
             <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain.</td></tr>
           </tbody>
         </table>

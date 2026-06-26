@@ -29,6 +29,7 @@ try {
     Copy-Item -LiteralPath $Binary -Destination (Join-Path $PackageRoot "bin\nlang.exe")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "offline_docs\index.html") -Destination (Join-Path $PackageRoot "docs\index.html")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "tests\fixtures\valid") -Destination (Join-Path $PackageRoot "examples\valid") -Recurse
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "documents\alpha1_release_notes.md") -Destination (Join-Path $PackageRoot "RELEASE_NOTES.md")
 
     $LicenseStatus = "No repository license file was present when this package was created."
     foreach ($LicenseName in @("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.txt")) {
@@ -56,6 +57,7 @@ Layout:
 - bin\nlang.exe: command-line tool
 - docs\index.html: offline documentation
 - examples\valid\: executable .nl examples
+- RELEASE_NOTES.md: release notes, verification evidence, and known limitations
 
 Quick start:
 1. Open PowerShell in this directory.
@@ -74,6 +76,7 @@ package=$PackageName
 commit=$Commit
 binary=bin\nlang.exe
 docs=docs\index.html
+release_notes=RELEASE_NOTES.md
 license_status=$LicenseStatus
 "@ | Set-Content -Path (Join-Path $PackageRoot "VERSION.txt") -Encoding UTF8
 
