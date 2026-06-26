@@ -64,6 +64,16 @@ fn prints_offline_docs_path() {
 }
 
 #[test]
+fn prints_examples_path() {
+    let output = nlang().args(["examples"]).output().expect("run cli");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = stdout(&output);
+    assert!(stdout.contains("examples:"), "{stdout}");
+    assert!(stdout.contains("valid"), "{stdout}");
+}
+
+#[test]
 fn runs_arithmetic_fixture() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_arithmetic.nl");
     let output = nlang()
@@ -143,6 +153,61 @@ fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
 
     assert!(run.status.success(), "{run:?}");
     assert_eq!(stdout(&run).trim(), "42");
+    let _ = std::fs::remove_file(artifact);
+}
+
+#[test]
+fn inspects_bytecode_artifact() {
+    let root = workspace_root();
+    let fixture = root.join("tests/fixtures/valid/run_arithmetic.nl");
+    let artifact = root.join("target/inspect_arithmetic.nbc");
+    let _ = std::fs::remove_file(&artifact);
+
+    let compile = nlang()
+        .args([
+            "compile",
+            "-o",
+            artifact.to_str().expect("artifact path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("compile cli");
+
+    assert!(compile.status.success(), "{compile:?}");
+
+    let inspect = nlang()
+        .args(["inspect", artifact.to_str().expect("artifact path")])
+        .output()
+        .expect("inspect cli");
+
+    assert!(inspect.status.success(), "{inspect:?}");
+    let inspect_stdout = stdout(&inspect);
+    assert!(
+        inspect_stdout.contains("format: nous-bytecode"),
+        "{inspect_stdout}"
+    );
+    assert!(inspect_stdout.contains("version: 2"), "{inspect_stdout}");
+    assert!(inspect_stdout.contains("entry: main"), "{inspect_stdout}");
+    assert!(inspect_stdout.contains("functions:"), "{inspect_stdout}");
+
+    let json = nlang()
+        .args([
+            "inspect",
+            "--format",
+            "json",
+            artifact.to_str().expect("artifact path"),
+        ])
+        .output()
+        .expect("inspect json cli");
+
+    assert!(json.status.success(), "{json:?}");
+    let json_stdout = stdout(&json);
+    assert!(json_stdout.contains("\"status\":\"ok\""), "{json_stdout}");
+    assert!(
+        json_stdout.contains("\"format\":\"nous-bytecode\""),
+        "{json_stdout}"
+    );
+    assert!(json_stdout.contains("\"functions\""), "{json_stdout}");
     let _ = std::fs::remove_file(artifact);
 }
 

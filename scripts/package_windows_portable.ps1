@@ -30,6 +30,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $RepoRoot "offline_docs\index.html") -Destination (Join-Path $PackageRoot "docs\index.html")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "tests\fixtures\valid") -Destination (Join-Path $PackageRoot "examples\valid") -Recurse
     Copy-Item -LiteralPath (Join-Path $RepoRoot "documents\alpha1_release_notes.md") -Destination (Join-Path $PackageRoot "RELEASE_NOTES.md")
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\install_windows_path.ps1") -Destination (Join-Path $PackageRoot "install.ps1")
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\uninstall_windows_path.ps1") -Destination (Join-Path $PackageRoot "uninstall.ps1")
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\install.cmd") -Destination (Join-Path $PackageRoot "install.cmd")
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "scripts\uninstall.cmd") -Destination (Join-Path $PackageRoot "uninstall.cmd")
 
     $LicenseStatus = "No repository license file was present when this package was created."
     foreach ($LicenseName in @("LICENSE", "LICENSE.txt", "LICENSE.md", "COPYING", "COPYING.txt")) {
@@ -58,17 +62,23 @@ Layout:
 - docs\index.html: offline documentation
 - examples\valid\: executable .nl examples
 - RELEASE_NOTES.md: release notes, verification evidence, and known limitations
+- install.cmd / install.ps1: optional user PATH setup
+- uninstall.cmd / uninstall.ps1: optional user PATH cleanup
 
 Quick start:
 1. Open PowerShell in this directory.
 2. Run: .\bin\nlang.exe --version
 3. Run: .\bin\nlang.exe docs
-4. Run: .\bin\nlang.exe check .\examples\valid\run_arithmetic.nl
-5. Run: .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\run_arithmetic.nbc .\examples\valid\run_arithmetic.nl
-6. Run: .\bin\nlang.exe run .\examples\valid\run_arithmetic.nbc
+4. Run: .\bin\nlang.exe examples
+5. Run: .\bin\nlang.exe check .\examples\valid\run_arithmetic.nl
+6. Run: .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\run_arithmetic.nbc .\examples\valid\run_arithmetic.nl
+7. Run: .\bin\nlang.exe inspect .\examples\valid\run_arithmetic.nbc
+8. Run: .\bin\nlang.exe run .\examples\valid\run_arithmetic.nbc
 
 Optional PATH setup:
-- Add the package bin directory to PATH if you want to call nlang.exe from any shell.
+- Run .\install.cmd from this directory to add bin\nlang.exe to your user PATH.
+- Open a new shell, then run: nlang --version
+- Run .\uninstall.cmd from this directory to remove this package from your user PATH.
 "@ | Set-Content -Path (Join-Path $PackageRoot "README.txt") -Encoding UTF8
 
     @"
@@ -77,6 +87,8 @@ commit=$Commit
 binary=bin\nlang.exe
 docs=docs\index.html
 release_notes=RELEASE_NOTES.md
+installer=install.cmd
+uninstaller=uninstall.cmd
 license_status=$LicenseStatus
 "@ | Set-Content -Path (Join-Path $PackageRoot "VERSION.txt") -Encoding UTF8
 

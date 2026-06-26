@@ -13,6 +13,8 @@ Alpha 1 is the first installable Nous Lang toolchain checkpoint. It is a minimal
 - `bin\nlang.exe`: release CLI binary.
 - `docs\index.html`: self-contained offline documentation.
 - `examples\valid\`: executable `.nl` examples.
+- `install.cmd` / `install.ps1`: optional user PATH setup helper.
+- `uninstall.cmd` / `uninstall.ps1`: optional user PATH cleanup helper.
 - `README.txt`: package quick start and optional PATH setup.
 - `VERSION.txt`: package metadata.
 - `RELEASE_NOTES.md`: these release notes.
@@ -25,10 +27,20 @@ From the unpacked package directory:
 ```powershell
 .\bin\nlang.exe --version
 .\bin\nlang.exe docs
+.\bin\nlang.exe examples
 .\bin\nlang.exe check .\examples\valid\run_arithmetic.nl
 .\bin\nlang.exe run .\examples\valid\run_arithmetic.nl
 .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\run_arithmetic.nbc .\examples\valid\run_arithmetic.nl
+.\bin\nlang.exe inspect .\examples\valid\run_arithmetic.nbc
 .\bin\nlang.exe run .\examples\valid\run_arithmetic.nbc
+```
+
+Optional user PATH setup from the same unpacked package directory:
+
+```powershell
+.\install.cmd
+nlang --version
+.\uninstall.cmd
 ```
 
 ## Supported Language Surface
@@ -51,9 +63,11 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 
 - `nlang check [--verbose|--format json] <file.nl>`
 - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
+- `nlang inspect [--verbose|--format json] <file.nbc>`
 - `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
 - `nlang run [--verbose|--format json] <file.nbc>`
 - `nlang docs`
+- `nlang examples`
 - `nlang --version`
 
 `--diagnostic-format json` is accepted as a JSON diagnostics alias.
@@ -69,7 +83,7 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 - function table
 - structured bytecode module
 
-`nlang run file.nbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, and function-table/module compatibility before execution.
+`nlang inspect file.nbc` prints artifact metadata and function signatures without executing the program. `nlang run file.nbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, and function-table/module compatibility before execution.
 
 ## Diagnostics
 
@@ -109,10 +123,13 @@ The Markdown local-reference check also passed with the repository's file-like l
 
 - `--version`
 - `docs`
+- `examples`
 - `check`
 - source `run`
 - `compile`
+- `.nbc` artifact `inspect`
 - `.nbc` artifact `run`
+- dry-run PATH setup and cleanup helpers
 
 ## Known Limitations
 
@@ -121,7 +138,7 @@ The Markdown local-reference check also passed with the repository's file-like l
 - No region memory, ARC/reference counting, lifetime analysis, or GC hooks yet.
 - I/O is limited to text file builtins and direct program-plus-argv command calls.
 - Offline docs are hand-authored HTML; a generated docs pipeline is still planned.
-- Alpha 1 distribution is a Windows portable archive, not a full installer that mutates PATH.
+- Alpha 1 distribution is a Windows portable archive with optional user PATH helper scripts, not a full MSI/NSIS-style installer.
 - Optimizer support is intentionally conservative: constant folding and block-local dead-code elimination are implemented; copy propagation, CSE, and loop-invariant motion are deferred to the next optimizer phase.
 
 ## Next Phase

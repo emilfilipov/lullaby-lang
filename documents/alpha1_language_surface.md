@@ -58,12 +58,14 @@ This document freezes the installable Alpha 1 surface. If another design documen
 - Supported commands:
   - `nlang check [--verbose|--format json] <file.nl>`
   - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
+  - `nlang inspect [--verbose|--format json] <file.nbc>`
   - `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
   - `nlang run [--verbose|--format json] <file.nbc>`
   - `nlang docs`
+  - `nlang examples`
   - `nlang --version`
 - `--diagnostic-format json` is accepted as a JSON diagnostics alias.
-- `nlang compile` writes a versioned `.nbc` bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module.
+- `nlang compile` writes a versioned `.nbc` bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module. `nlang inspect` prints artifact metadata and function signatures without executing the program.
 
 ## Diagnostics
 
@@ -75,7 +77,7 @@ This document freezes the installable Alpha 1 surface. If another design documen
 ## Packaging
 
 - `scripts/package_windows_portable.ps1` builds the Windows Alpha 1 portable package and zip archive under `dist/`.
-- The package contains `bin\nlang.exe`, `docs\index.html`, valid `.nl` examples, README/VERSION metadata, and a repository license file if one exists.
+- The package contains `bin\nlang.exe`, `docs\index.html`, valid `.nl` examples, optional PATH setup/cleanup helpers, README/VERSION metadata, and a repository license file if one exists.
 - `scripts/verify_release.ps1` is the Alpha 1 release gate for the packaged toolchain.
 
 ## Planned Beyond Alpha 1
@@ -89,4 +91,4 @@ The following are not implemented Alpha 1 behavior:
 - Streams, binary I/O, memory mapping, async, sockets, IPC, and general syscall APIs.
 - Language-level `try`/`catch`, throws, recovery blocks, and error union/control syntax.
 - A generated offline-docs pipeline from Markdown.
-- A full installer with PATH mutation; Alpha 1 uses a Windows portable archive.
+- A full installer; Alpha 1 uses a Windows portable archive with optional user PATH helper scripts.

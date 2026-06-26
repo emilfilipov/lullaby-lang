@@ -8,7 +8,7 @@ use nous_diagnostics::{
     DiagnosticPhase, DiagnosticReport, render_concise, render_json, render_verbose,
 };
 use nous_ir::{
-    BYTECODE_ARTIFACT_EXTENSION, BytecodeArtifactError, OptimizationConfig,
+    BYTECODE_ARTIFACT_EXTENSION, BytecodeArtifact, BytecodeArtifactError, OptimizationConfig,
     decode_bytecode_artifact, encode_bytecode_artifact, lower, lower_to_bytecode, optimize,
     run_bytecode_main, run_main as run_ir_main,
 };
@@ -42,6 +42,8 @@ fn run() -> Result<(), String> {
             invocation.optimization,
         ),
         CommandName::Docs => docs(),
+        CommandName::Examples => examples(),
+        CommandName::Inspect => inspect_bytecode_artifact(invocation.path, invocation.mode),
         CommandName::Run => run_file(
             invocation.path,
             invocation.mode,
@@ -57,6 +59,31 @@ fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn examples() -> Result<(), String> {
+    let path = locate_examples().ok_or_else(|| {
+        "examples not found; expected examples/valid near the nlang binary or tests/fixtures/valid in the repository".to_string()
+    })?;
+    println!("examples: {}", path.display());
+    Ok(())
+}
+
+fn locate_examples() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(exe) = env::current_exe()
+        && let Some(bin_dir) = exe.parent()
+    {
+        candidates.push(bin_dir.join("examples/valid"));
+        candidates.push(bin_dir.join("../examples/valid"));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir.join("../../tests/fixtures/valid"));
+    candidates.push(PathBuf::from("tests/fixtures/valid"));
+
+    candidates.into_iter().find(|path| path.is_dir())
 }
 
 fn docs() -> Result<(), String> {
@@ -256,6 +283,111 @@ fn run_bytecode_artifact(path: PathBuf, mode: OutputMode) -> Result<(), String> 
             Err(format_reports(&[report], mode, None))
         }
     }
+}
+
+fn inspect_bytecode_artifact(path: PathBuf, mode: OutputMode) -> Result<(), String> {
+    let contents = fs::read_to_string(&path).map_err(|error| {
+        format_reports(
+            &[DiagnosticReport::new(
+                "N0002",
+                DiagnosticPhase::Resource,
+                format!("failed to read `{}`: {error}", path.display()),
+            )
+            .with_source_path(path.display().to_string())],
+            mode,
+            None,
+        )
+    })?;
+    let artifact = decode_bytecode_artifact(&contents)
+        .map_err(|error| format_reports(&[bytecode_report(error, &path)], mode, None))?;
+
+    match mode {
+        OutputMode::Json => println!("{}", inspect_json(&path, &artifact)),
+        OutputMode::Concise | OutputMode::Verbose => {
+            println!("artifact: {}", path.display());
+            println!("format: {}", artifact.format);
+            println!("version: {}", artifact.version);
+            println!("entry: {}", artifact.entry);
+            println!("target: {}", artifact.metadata.target);
+            println!("payload: {}", artifact.metadata.payload);
+            println!("functions: {}", artifact.function_table.len());
+            if mode == OutputMode::Verbose {
+                for signature in &artifact.function_table {
+                    println!("function: {}", format_signature(signature));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn format_signature(signature: &nous_ir::BytecodeFunctionSignature) -> String {
+    let params = signature
+        .params
+        .iter()
+        .map(|param| format!("{}: {}", param.name, param.ty.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}({}) -> {}",
+        signature.name, params, signature.return_type.name
+    )
+}
+
+fn inspect_json(path: &Path, artifact: &BytecodeArtifact) -> String {
+    let functions = artifact
+        .function_table
+        .iter()
+        .map(|signature| {
+            let params = signature
+                .params
+                .iter()
+                .map(|param| {
+                    format!(
+                        "{{\"name\":\"{}\",\"type\":\"{}\"}}",
+                        json_escape(&param.name),
+                        json_escape(&param.ty.name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"name\":\"{}\",\"params\":[{}],\"return_type\":\"{}\"}}",
+                json_escape(&signature.name),
+                params,
+                json_escape(&signature.return_type.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        "{{\"status\":\"ok\",\"artifact\":{{\"path\":\"{}\",\"format\":\"{}\",\"version\":{},\"entry\":\"{}\",\"metadata\":{{\"producer\":\"{}\",\"target\":\"{}\",\"payload\":\"{}\"}},\"functions\":[{}]}}}}",
+        json_escape(&path.display().to_string()),
+        json_escape(&artifact.format),
+        artifact.version,
+        json_escape(&artifact.entry),
+        json_escape(&artifact.metadata.producer),
+        json_escape(&artifact.metadata.target),
+        json_escape(&artifact.metadata.payload),
+        functions
+    )
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 fn optimize_module(module: nous_ir::IrModule, optimization: OptimizationMode) -> nous_ir::IrModule {
@@ -465,6 +597,8 @@ enum CommandName {
     Check,
     Compile,
     Docs,
+    Examples,
+    Inspect,
     Run,
     Version,
     Help,
@@ -563,7 +697,21 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 Err("usage: nlang docs".to_string())
             }
         }
-        "check" | "compile" | "run" => parse_file_command(command, &args[1..]),
+        "examples" => {
+            if args.len() == 1 {
+                Ok(Some(Invocation {
+                    command: CommandName::Examples,
+                    path: PathBuf::new(),
+                    output: None,
+                    mode: OutputMode::Concise,
+                    backend: Backend::Ast,
+                    optimization: OptimizationMode::None,
+                }))
+            } else {
+                Err("usage: nlang examples".to_string())
+            }
+        }
+        "check" | "compile" | "inspect" | "run" => parse_file_command(command, &args[1..]),
         other => Err(format!("unknown command `{other}`\n\nrun `nlang --help`")),
     }
 }
@@ -661,6 +809,8 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
             CommandName::Check
         } else if command == "compile" {
             CommandName::Compile
+        } else if command == "inspect" {
+            CommandName::Inspect
         } else {
             CommandName::Run
         },
@@ -675,6 +825,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
 fn command_usage(command: &str) -> String {
     match command {
         "compile" => "usage: nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>".to_string(),
+        "inspect" => "usage: nlang inspect [--verbose|--format json] <file.nbc>".to_string(),
         "run" => "usage: nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n       nlang run [--verbose|--format json] <file.nbc>".to_string(),
         _ => "usage: nlang check [--verbose|--format json] <file.nl>".to_string(),
     }
@@ -682,7 +833,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang docs\n  nlang --version",
+        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang inspect [--verbose|--format json] <file.nbc>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang docs\n  nlang examples\n  nlang --version",
         env!("CARGO_PKG_VERSION")
     );
 }

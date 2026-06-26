@@ -292,10 +292,11 @@
         <pre><code>cargo run -p nous_cli -- run --backend ir --optimize constant-fold hello.nl</code></pre>
         <p>Run it through the current alpha optimizer pipeline:</p>
         <pre><code>cargo run -p nous_cli -- run --backend ir --optimize alpha hello.nl</code></pre>
-        <p>Compile it to a bytecode artifact with metadata and a function table, then run the artifact:</p>
+        <p>Compile it to a bytecode artifact with metadata and a function table, inspect the artifact, then run it:</p>
         <pre><code>cargo run -p nous_cli -- compile --optimize alpha -o hello.nbc hello.nl
+cargo run -p nous_cli -- inspect hello.nbc
 cargo run -p nous_cli -- run hello.nbc</code></pre>
-        <p>During development, the CLI is available through Cargo. The Alpha 1 portable package builds a direct <code>bin\nlang.exe</code> command, bundles <code>docs\index.html</code>, and supports <code>nlang docs</code> to locate this local page.</p>
+        <p>During development, the CLI is available through Cargo. The Alpha 1 portable package builds a direct <code>bin\nlang.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, and supports <code>nlang docs</code> and <code>nlang examples</code> to locate local resources.</p>
       </section>
 
       <section id="source-files">
@@ -485,6 +486,8 @@ cargo run -p nous_cli -- run hello.nbc</code></pre>
           <tbody>
             <tr><td><code>cargo run -p nous_cli -- check path/to/file.nl</code></td><td>Validate extension, lex, parse, and run semantic checks.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- compile --optimize alpha -o path/to/file.nbc path/to/file.nl</code></td><td>Validate, lower through typed IR, run the current alpha optimizer pipeline, and write a versioned <code>.nbc</code> bytecode artifact with metadata and a function table.</td></tr>
+            <tr><td><code>cargo run -p nous_cli -- inspect path/to/file.nbc</code></td><td>Print artifact format, version, entry point, metadata target/payload, and function count without executing the program.</td></tr>
+            <tr><td><code>cargo run -p nous_cli -- inspect --format json path/to/file.nbc</code></td><td>Print bytecode artifact metadata and function signatures as deterministic JSON for tools.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- run path/to/file.nl</code></td><td>Validate and execute <code>main</code> in the default AST runtime.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- run path/to/file.nbc</code></td><td>Load and execute a compiled bytecode artifact.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- run --backend ir path/to/file.nl</code></td><td>Validate, lower to typed IR, and execute with the IR interpreter.</td></tr>
@@ -493,10 +496,11 @@ cargo run -p nous_cli -- run hello.nbc</code></pre>
             <tr><td><code>cargo run -p nous_cli -- run --backend bytecode --optimize dead-code path/to/file.nl</code></td><td>Run the bytecode backend with only block-local dead-code elimination.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- run --backend ir --optimize alpha path/to/file.nl</code></td><td>Run the current alpha optimizer pipeline. Use <code>--optimize none</code> to keep optimization disabled.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- docs</code></td><td>Print the local offline documentation entry path. In the portable package, use <code>bin\nlang.exe docs</code> or <code>nlang docs</code> after adding <code>bin</code> to <code>PATH</code>.</td></tr>
+            <tr><td><code>cargo run -p nous_cli -- examples</code></td><td>Print the local valid example directory. In the portable package, use <code>bin\nlang.exe examples</code> or <code>nlang examples</code> after adding <code>bin</code> to <code>PATH</code>.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- check --verbose path/to/file.nl</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
             <tr><td><code>cargo run -p nous_cli -- check --format json path/to/file.nl</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\nlang.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid examples, package metadata, any repository license file, and a zip archive.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\nlang.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, and a zip archive.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain, including <code>nlang inspect</code>, <code>nlang examples</code>, and dry-run PATH helper scripts.</td></tr>
           </tbody>
         </table>
       </section>
@@ -587,7 +591,7 @@ Suggested fix:
           <li>The full region memory model, ARC/reference counting, and lifetime analysis are pending.</li>
           <li>The type system currently covers the alpha scalar, array, call, local binding, assignment, control-flow, and interim pointer subset.</li>
           <li>The current I/O surface is limited to text file builtins and direct program-plus-argv command calls; streams, binary I/O, memory mapping, async, sockets, and IPC are future work.</li>
-          <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive.</li>
+          <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive with optional user PATH helper scripts.</li>
           <li>The documentation bundle is currently hand-authored HTML. A generator from canonical docs is planned in Epic 1.5.</li>
         </ul>
       </section>

@@ -21,7 +21,7 @@ The repository now contains the first executable alpha slice:
 - `offline_docs`: first self-contained offline browser documentation entry point plus a verifier for required alpha sections, local-only links/assets, fixture-backed executable examples, and release package coverage.
 - `documents/alpha1_language_surface.md`: frozen installable Alpha 1 language, CLI, diagnostics, artifact, and packaging surface; broader design docs are planned unless they match this file.
 - `documents/alpha1_release_notes.md`: Alpha 1 release notes with package contents, supported surface, commands, artifact contract, verification evidence, limitations, and next-phase guidance.
-- `scripts`: Windows portable package and release verification scripts that build `bin\nlang.exe`, bundle offline docs and examples, create a zip archive, and smoke-test the unpacked toolchain.
+- `scripts`: Windows portable package, optional PATH helper, and release verification scripts that build `bin\nlang.exe`, bundle offline docs and examples, create a zip archive, and smoke-test the unpacked toolchain.
 - `documents/alpha1_acceptance_criteria.md`: release checklist for the first reviewable alpha checkpoint, including required feature surface, docs, verification gates, evidence, non-goals, and recommended next phase.
 
 ## Epic 1: Core Toolchain Implementation (Compiler & Runtime)
@@ -62,15 +62,15 @@ The repository now contains the first executable alpha slice:
 | :--- | :--- | :--- | :--- | :--- |
 | **3.1** | **Compiler Toolchain:** Implement the full compiler pipeline defined in `nous_lang_compilation_architecture.md` to handle source code compilation into machine-readable bytecode or an intermediate representation. | All Runtime Components | High | Typed semantic IR lowering, opt-in constant folding and dead-code elimination, IR interpreter, CLI backend selection, `nlang compile`, versioned `.nbc` artifacts with metadata/function-table compatibility checks, and initial structured bytecode VM done for current alpha subset; broader optimization/native backend pending |
 | **3.2** | **Build Script Generation:** Create a robust, platform-agnostic build script (e.g., using CMake or a custom script) that orchestrates the compilation of the compiler and runtime into a single binary. | 3.1 | Medium | Alpha Windows release build path done through Cargo plus `scripts/package_windows_portable.ps1`; cross-platform release orchestration pending |
-| **3.3** | **Installer Creation:** Develop the installer logic to bundle the compiled nlang executable, necessary libraries, and documentation into a single user-friendly package (e.g., .exe or system package). | 3.2 | High | Alpha Windows portable zip package done; full installer pending |
+| **3.3** | **Installer Creation:** Develop the installer logic to bundle the compiled nlang executable, necessary libraries, and documentation into a single user-friendly package (e.g., .exe or system package). | 3.2 | High | Alpha Windows portable zip package done with optional user PATH install/uninstall helpers; full installer pending |
 
 ## Epic 4: User Experience & Final Delivery
 *Objective: Create the final, easy-to-use installation method.*
 
 | Story | Description | Dependencies | Estimated Effort | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **4.1** | **CLI Tool Implementation:** Implement the command-line interface (CLI) tool that allows users to invoke the compiled nlang executable (`nlang run script.nl`). | 3.3 | Medium | Initial `check`, `compile`, `run`, `docs`, and `--version` commands done; `run` supports source backends plus compiled `.nbc` artifacts, and `compile`/IR/bytecode source runs support opt-in optimization |
-| **4.2** | **Installation & Setup:** Finalize the installation process, ensuring minimal user interaction and clear setup instructions are provided upon first launch. | 3.3, 4.1 | High | Alpha portable archive setup instructions done in package README; PATH integration/full installer pending |
+| **4.1** | **CLI Tool Implementation:** Implement the command-line interface (CLI) tool that allows users to invoke the compiled nlang executable (`nlang run script.nl`). | 3.3 | Medium | Initial `check`, `compile`, `inspect`, `run`, `docs`, `examples`, `help`, and `--version` commands done; `run` supports source backends plus compiled `.nbc` artifacts, and `compile`/IR/bytecode source runs support opt-in optimization |
+| **4.2** | **Installation & Setup:** Finalize the installation process, ensuring minimal user interaction and clear setup instructions are provided upon first launch. | 3.3, 4.1 | High | Alpha portable archive setup instructions done in package README; optional user PATH integration helper done; full installer pending |
 | **4.3** | **Documentation Finalization:** Review all documentation to ensure they align with the final installed product's usage patterns. | All previous steps | Low | To Do |
 
 ## Epic 5: Testing & Verification (The Regression Shield)
