@@ -129,14 +129,16 @@ Transforms IR into efficient machine code with systems-level optimizations.
 
 #### Current Alpha Bytecode Artifact
 
-The current compiler artifact is a JSON `.nbc` file with a format marker, artifact version, entry point, and structured bytecode module:
+The current compiler artifact is a JSON `.nbc` file with a format marker, artifact version, metadata, entry point, function table, and structured bytecode module:
 
 - `format`: `nous-bytecode`
-- `version`: artifact version, currently `1`
+- `version`: artifact version, currently `2`
+- `metadata`: deterministic producer, target, and payload metadata
 - `entry`: currently `main`
+- `function_table`: declared bytecode function signatures used for compatibility checks
 - `module`: the initial structured bytecode module
 
-`nlang compile file.nl -o file.nbc` writes this artifact, and `nlang run file.nbc` executes it through the bytecode VM entry point. Unsupported artifact format, version, or entry values produce `N0601 [bytecode error]`.
+`nlang compile file.nl -o file.nbc` writes this artifact, and `nlang run file.nbc` executes it through the bytecode VM entry point. Unsupported artifact format, version, target, payload, entry values, duplicate functions, or function-table/module mismatches produce `N0601 [bytecode error]`.
 
 #### Optimization Passes
 1. **Algebraic Simplification**

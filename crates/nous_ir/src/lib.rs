@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::process::Command;
 
@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 pub const BYTECODE_ARTIFACT_FORMAT: &str = "nous-bytecode";
 pub const BYTECODE_ARTIFACT_EXTENSION: &str = "nbc";
-pub const BYTECODE_ARTIFACT_VERSION: u32 = 1;
+pub const BYTECODE_ARTIFACT_VERSION: u32 = 2;
+const BYTECODE_ARTIFACT_PAYLOAD: &str = "structured-bytecode";
+const BYTECODE_ARTIFACT_TARGET: &str = "alpha1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrModule {
@@ -238,17 +240,62 @@ pub struct BytecodeFunction {
 pub struct BytecodeArtifact {
     pub format: String,
     pub version: u32,
+    #[serde(default)]
+    pub metadata: BytecodeArtifactMetadata,
     pub entry: String,
+    #[serde(default)]
+    pub function_table: Vec<BytecodeFunctionSignature>,
     pub module: BytecodeModule,
 }
 
 impl BytecodeArtifact {
     pub fn new(module: BytecodeModule) -> Self {
+        let function_table = module
+            .functions
+            .iter()
+            .map(BytecodeFunctionSignature::from_function)
+            .collect();
         Self {
             format: BYTECODE_ARTIFACT_FORMAT.to_string(),
             version: BYTECODE_ARTIFACT_VERSION,
+            metadata: BytecodeArtifactMetadata::default(),
             entry: "main".to_string(),
+            function_table,
             module,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BytecodeArtifactMetadata {
+    pub producer: String,
+    pub target: String,
+    pub payload: String,
+}
+
+impl Default for BytecodeArtifactMetadata {
+    fn default() -> Self {
+        Self {
+            producer: format!("nous_ir {}", env!("CARGO_PKG_VERSION")),
+            target: BYTECODE_ARTIFACT_TARGET.to_string(),
+            payload: BYTECODE_ARTIFACT_PAYLOAD.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BytecodeFunctionSignature {
+    pub name: String,
+    pub params: Vec<IrParam>,
+    pub return_type: TypeRef,
+}
+
+impl BytecodeFunctionSignature {
+    fn from_function(function: &BytecodeFunction) -> Self {
+        Self {
+            name: function.name.clone(),
+            params: function.params.clone(),
+            return_type: function.return_type.clone(),
         }
     }
 }
@@ -296,8 +343,57 @@ pub fn decode_bytecode_artifact(contents: &str) -> Result<BytecodeArtifact, Byte
             artifact.entry
         )));
     }
+    if artifact.metadata.target != BYTECODE_ARTIFACT_TARGET {
+        return Err(BytecodeArtifactError::new(format!(
+            "unsupported bytecode artifact target `{}`",
+            artifact.metadata.target
+        )));
+    }
+    if artifact.metadata.payload != BYTECODE_ARTIFACT_PAYLOAD {
+        return Err(BytecodeArtifactError::new(format!(
+            "unsupported bytecode artifact payload `{}`",
+            artifact.metadata.payload
+        )));
+    }
+
+    validate_bytecode_artifact_contract(&artifact)?;
 
     Ok(artifact)
+}
+
+fn validate_bytecode_artifact_contract(
+    artifact: &BytecodeArtifact,
+) -> Result<(), BytecodeArtifactError> {
+    let mut names = HashSet::new();
+    for function in &artifact.module.functions {
+        if !names.insert(function.name.as_str()) {
+            return Err(BytecodeArtifactError::new(format!(
+                "duplicate bytecode function `{}`",
+                function.name
+            )));
+        }
+    }
+
+    if !names.contains(artifact.entry.as_str()) {
+        return Err(BytecodeArtifactError::new(format!(
+            "bytecode artifact entry `{}` is not present in the module",
+            artifact.entry
+        )));
+    }
+
+    let expected: Vec<_> = artifact
+        .module
+        .functions
+        .iter()
+        .map(BytecodeFunctionSignature::from_function)
+        .collect();
+    if artifact.function_table != expected {
+        return Err(BytecodeArtifactError::new(
+            "bytecode artifact function_table does not match module functions",
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
@@ -1720,7 +1816,11 @@ mod tests {
 
         assert_eq!(artifact.format, BYTECODE_ARTIFACT_FORMAT);
         assert_eq!(artifact.version, BYTECODE_ARTIFACT_VERSION);
+        assert_eq!(artifact.metadata.target, "alpha1");
+        assert_eq!(artifact.metadata.payload, "structured-bytecode");
         assert_eq!(artifact.entry, "main");
+        assert_eq!(artifact.function_table.len(), 1);
+        assert_eq!(artifact.function_table[0].name, "main");
         assert_eq!(
             run_bytecode_main(&artifact.module).expect("run artifact bytecode"),
             Value::I64(42)
@@ -1739,6 +1839,34 @@ mod tests {
                 .message
                 .contains("unsupported bytecode artifact version")
         );
+    }
+
+    #[test]
+    fn bytecode_artifact_rejects_missing_entry_function() {
+        let invalid = format!(
+            "{{\"format\":\"{BYTECODE_ARTIFACT_FORMAT}\",\"version\":{BYTECODE_ARTIFACT_VERSION},\"entry\":\"main\",\"metadata\":{{\"producer\":\"test\",\"target\":\"alpha1\",\"payload\":\"structured-bytecode\"}},\"function_table\":[],\"module\":{{\"functions\":[]}}}}"
+        );
+        let error = decode_bytecode_artifact(&invalid).expect_err("missing entry");
+
+        assert!(
+            error
+                .message
+                .contains("entry `main` is not present in the module")
+        );
+    }
+
+    #[test]
+    fn bytecode_artifact_rejects_function_table_mismatch() {
+        let ir = lower_source("fn main -> i64\n    42\n");
+        let bytecode = lower_to_bytecode(&ir);
+        let encoded = encode_bytecode_artifact(&bytecode).expect("encode artifact");
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).expect("json artifact");
+        value["function_table"] = serde_json::json!([]);
+        let invalid = serde_json::to_string(&value).expect("invalid json artifact");
+
+        let error = decode_bytecode_artifact(&invalid).expect_err("table mismatch");
+
+        assert!(error.message.contains("function_table does not match"));
     }
 
     #[test]

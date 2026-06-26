@@ -79,6 +79,8 @@ REQUIRED_PHRASES = [
     "package_windows_portable.ps1",
     "verify_release.ps1",
     ".nbc",
+    "function table",
+    "metadata",
     "--backend ir",
     "--backend bytecode",
     "--optimize constant-fold",

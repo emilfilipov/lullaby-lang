@@ -22,7 +22,7 @@ Alpha 1 is acceptable when the repository provides:
 - Text file builtins: `read_file`, `write_file`, `append_file`, and `file_exists`.
 - Conservative system command builtins: `sys_status` and `sys_output` with direct program-plus-argv execution and no shell invocation.
 - `nlang check`, `nlang compile`, `nlang run`, and `nlang docs`, with `cargo run -p nous_cli -- ...` equivalents during development. `run --backend ast|ir|bytecode` supports source execution, and `run file.nbc` executes compiled bytecode artifacts.
-- A versioned `.nbc` bytecode artifact with a format marker, version, entry point, and bytecode module.
+- A versioned `.nbc` bytecode artifact with a format marker, version, metadata, entry point, function table, compatibility checks, and bytecode module.
 - A release `nlang` binary usable outside Cargo.
 - A Windows-first installer or portable archive containing the CLI, offline docs, examples, readme/license, and setup instructions.
 - Concise, verbose, and deterministic JSON diagnostics for representative source, lexer, parser, semantic, IR, bytecode artifact, runtime, and resource failures.

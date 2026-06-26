@@ -63,7 +63,7 @@ This document freezes the installable Alpha 1 surface. If another design documen
   - `nlang docs`
   - `nlang --version`
 - `--diagnostic-format json` is accepted as a JSON diagnostics alias.
-- `nlang compile` writes a versioned `.nbc` bytecode artifact with a format marker, artifact version, entry point, and bytecode module.
+- `nlang compile` writes a versioned `.nbc` bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module.
 
 ## Diagnostics
 
