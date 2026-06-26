@@ -55,7 +55,11 @@ try {
         }
     }
 
-    $ExistingRelease = @(gh release list --limit 100 --json tagName --jq ".[] | select(.tagName == `"$TagName`") | .tagName")
+    $ReleaseRows = gh release list --limit 100 --json tagName | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to list GitHub releases"
+    }
+    $ExistingRelease = @($ReleaseRows | Where-Object { $_.tagName -eq $TagName })
     if ($ExistingRelease) {
         throw "GitHub release already exists for $TagName"
     }
