@@ -14,6 +14,7 @@ $Nlang = Join-Path $PackageRoot "bin\nlang.exe"
 $Example = Join-Path $PackageRoot "examples\valid\calculator.nl"
 $InvalidExample = Join-Path $PackageRoot "examples\invalid\type_mismatch.nl"
 $Artifact = Join-Path $PackageRoot "examples\valid\calculator.nbc"
+$BuildArtifact = Join-Path $PackageRoot "examples\valid\calculator-build.nbc"
 $InstallScript = Join-Path $PackageRoot "install.ps1"
 $UninstallScript = Join-Path $PackageRoot "uninstall.ps1"
 
@@ -83,6 +84,9 @@ try {
     Remove-Item -LiteralPath $Artifact -Force -ErrorAction SilentlyContinue
     & $Nlang compile --optimize alpha -o $Artifact $Example
     if ($LASTEXITCODE -ne 0) { throw "nlang compile failed: $Example" }
+    Remove-Item -LiteralPath $BuildArtifact -Force -ErrorAction SilentlyContinue
+    & $Nlang build --optimize alpha -o $BuildArtifact $Example
+    if ($LASTEXITCODE -ne 0) { throw "nlang build failed: $Example" }
     & $Nlang inspect $Artifact
     if ($LASTEXITCODE -ne 0) { throw "nlang inspect failed: $Artifact" }
     & $Nlang run $Artifact

@@ -47,7 +47,7 @@ nlang check --verbose file.nl
 nlang check --format json file.nl
 ```
 
-The same flags are available for `nlang compile`, `nlang inspect`, and `nlang run`. `nlang run` defaults to the AST runtime and accepts `--backend ir` and `--backend bytecode` for the current alpha subset. `nlang compile` emits a versioned `.nbc` bytecode artifact, `nlang inspect file.nbc` summarizes that artifact, and `nlang run file.nbc` executes it. IR lowering failures use code `N0501` and phase `ir`; bytecode artifact failures use code `N0601` and phase `bytecode`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
+The same flags are available for `nlang compile`, `nlang build`, `nlang inspect`, and `nlang run`. `nlang run` defaults to the AST runtime and accepts `--backend ir` and `--backend bytecode` for the current alpha subset. `nlang compile` emits a versioned `.nbc` bytecode artifact, `nlang build` is the same artifact-generation path under a build-oriented command name, `nlang inspect file.nbc` summarizes that artifact, and `nlang run file.nbc` executes it. IR lowering failures use code `N0501` and phase `ir`; bytecode artifact failures use code `N0601` and phase `bytecode`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
 
 ### Concise Output
 

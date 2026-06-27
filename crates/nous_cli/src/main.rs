@@ -35,7 +35,7 @@ fn run() -> Result<(), String> {
 
     match invocation.command {
         CommandName::Check => check(invocation.path, invocation.mode),
-        CommandName::Compile => compile_file(
+        CommandName::Build | CommandName::Compile => compile_file(
             invocation.path,
             invocation.output,
             invocation.mode,
@@ -605,6 +605,7 @@ struct Invocation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandName {
+    Build,
     Check,
     Compile,
     Docs,
@@ -722,7 +723,9 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 Err("usage: nlang examples".to_string())
             }
         }
-        "check" | "compile" | "inspect" | "run" => parse_file_command(command, &args[1..]),
+        "build" | "check" | "compile" | "inspect" | "run" => {
+            parse_file_command(command, &args[1..])
+        }
         other => Err(format!("unknown command `{other}`\n\nrun `nlang --help`")),
     }
 }
@@ -765,7 +768,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
                 cursor += 2;
             }
             "--optimize" => {
-                if command != "run" && command != "compile" {
+                if command != "run" && command != "compile" && command != "build" {
                     return Err(usage);
                 }
                 let Some(value) = args
@@ -778,7 +781,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
                 cursor += 2;
             }
             "--output" | "-o" => {
-                if command != "compile" || output.is_some() {
+                if (command != "compile" && command != "build") || output.is_some() {
                     return Err(usage);
                 }
                 let Some(value) = args.get(cursor + 1) else {
@@ -811,19 +814,17 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
             None,
         ));
     }
-    if command == "compile" && backend != Backend::Ast {
+    if (command == "compile" || command == "build") && backend != Backend::Ast {
         return Err(usage);
     }
 
     Ok(Some(Invocation {
-        command: if command == "check" {
-            CommandName::Check
-        } else if command == "compile" {
-            CommandName::Compile
-        } else if command == "inspect" {
-            CommandName::Inspect
-        } else {
-            CommandName::Run
+        command: match command {
+            "build" => CommandName::Build,
+            "check" => CommandName::Check,
+            "compile" => CommandName::Compile,
+            "inspect" => CommandName::Inspect,
+            _ => CommandName::Run,
         },
         path: PathBuf::from(path),
         output,
@@ -835,6 +836,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
 
 fn command_usage(command: &str) -> String {
     match command {
+        "build" => "usage: nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>".to_string(),
         "compile" => "usage: nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>".to_string(),
         "inspect" => "usage: nlang inspect [--verbose|--format json] <file.nbc>".to_string(),
         "run" => "usage: nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n       nlang run [--verbose|--format json] <file.nbc>".to_string(),
@@ -844,7 +846,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang inspect [--verbose|--format json] <file.nbc>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang docs\n  nlang examples\n  nlang --version",
+        "nlang {}\n\nusage:\n  nlang check [--verbose|--format json] <file.nl>\n  nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>\n  nlang inspect [--verbose|--format json] <file.nbc>\n  nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>\n  nlang run [--verbose|--format json] <file.nbc>\n  nlang docs\n  nlang examples\n  nlang --version",
         env!("CARGO_PKG_VERSION")
     );
 }

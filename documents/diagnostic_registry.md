@@ -6,9 +6,9 @@ This registry defines the stable diagnostic codes currently emitted by the Nous 
 
 ## Output Modes
 
-- Concise default: `nlang check file.nl`, `nlang compile file.nl`, and `nlang run file.nl` print one line per diagnostic.
-- Verbose: `nlang check --verbose file.nl`, `nlang compile --verbose file.nl`, and `nlang run --verbose file.nl` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
-- JSON: `nlang check --format json file.nl`, `nlang compile --format json file.nl`, and `nlang run --format json file.nl` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
+- Concise default: `nlang check file.nl`, `nlang compile file.nl`, `nlang build file.nl`, and `nlang run file.nl` print one line per diagnostic.
+- Verbose: `nlang check --verbose file.nl`, `nlang compile --verbose file.nl`, `nlang build --verbose file.nl`, and `nlang run --verbose file.nl` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
+- JSON: `nlang check --format json file.nl`, `nlang compile --format json file.nl`, `nlang build --format json file.nl`, and `nlang run --format json file.nl` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
 
 JSON failures are written to stderr and keep a non-zero exit status. JSON successes are written to stdout as:
 
@@ -90,10 +90,10 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `N0326` | semantic | Array index is not `i64`. | Index expression has wrong type. | Use an `i64` index. |
 | `N0327` | semantic | Ordering operands are not both `i64`. | `<`, `<=`, `>`, or `>=` used on non-`i64`. | Use `i64` operands. |
 | `N0328` | semantic | `store` value type mismatch. | Stored value does not match pointer element type. | Store a value matching the pointer type. |
-| `N0329` | semantic | Executable entry point is missing or has parameters. | Source passed to `compile` or source `run` lacks a zero-argument `main`. | Add `fn main -> Type` with no parameters and call helpers from there. |
+| `N0329` | semantic | Executable entry point is missing or has parameters. | Source passed to `compile`, `build`, or source `run` lacks a zero-argument `main`. | Add `fn main -> Type` with no parameters and call helpers from there. |
 | `N0501` | ir | IR lowering failed. | A checked program did not match the current IR lowering contract. | Treat this as a compiler bug and retry with `--backend ast` as a workaround. |
 | `N0502` | optimizer | Optimizer mode is incompatible with the selected backend. | `--optimize` was requested with the default AST backend. | Add `--backend ir` or `--backend bytecode`, or use `--optimize none`. |
-| `N0601` | bytecode | Bytecode artifact failed to load. | The `.nbc` artifact is malformed, has an unsupported format/version/metadata target or payload, names an unsupported or missing entry point, contains duplicate functions or parameters, has a mismatched function table, or contains an invalid instruction contract such as `break`/`continue` outside a loop. | Recompile the source with the current `nlang compile` command. |
+| `N0601` | bytecode | Bytecode artifact failed to load. | The `.nbc` artifact is malformed, has an unsupported format/version/metadata target or payload, names an unsupported or missing entry point, contains duplicate functions or parameters, has a mismatched function table, or contains an invalid instruction contract such as `break`/`continue` outside a loop. | Recompile the source with the current `nlang compile` or `nlang build` command. |
 | `N0400` | runtime | Missing `main`. | Runtime cannot find an entrypoint. | Define `fn main`. |
 | `N0401` | runtime | Unknown function at runtime. | Runtime call target was not found. | Check semantic validation and function names. |
 | `N0402` | runtime | Runtime function arity mismatch. | Runtime call has wrong argument count. | Match the function signature. |

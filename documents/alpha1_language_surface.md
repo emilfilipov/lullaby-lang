@@ -59,6 +59,7 @@ This document freezes the installable Alpha 1 surface. If another design documen
 - Supported commands:
   - `nlang check [--verbose|--format json] <file.nl>`
   - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
+  - `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
   - `nlang inspect [--verbose|--format json] <file.nbc>`
   - `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
   - `nlang run [--verbose|--format json] <file.nbc>`
@@ -66,8 +67,8 @@ This document freezes the installable Alpha 1 surface. If another design documen
   - `nlang examples`
   - `nlang --version`
 - `--diagnostic-format json` is accepted as a JSON diagnostics alias.
-- `nlang compile` and source `nlang run` require a zero-argument `main` entry point before lowering or execution. Invalid executable entry points report `N0329`.
-- `nlang compile` writes a versioned `.nbc` instruction-bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module instructions. `nlang inspect` prints artifact metadata and function signatures without executing the program.
+- `nlang compile`, `nlang build`, and source `nlang run` require a zero-argument `main` entry point before lowering or execution. Invalid executable entry points report `N0329`.
+- `nlang compile` and its artifact-generation alias `nlang build` write a versioned `.nbc` instruction-bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module instructions. `nlang inspect` prints artifact metadata and function signatures without executing the program.
 
 ## Diagnostics
 

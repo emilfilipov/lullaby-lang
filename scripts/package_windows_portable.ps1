@@ -80,8 +80,9 @@ Quick start:
 5. Run: .\bin\nlang.exe check .\examples\valid\calculator.nl
 6. Run: .\bin\nlang.exe run .\examples\valid\calculator.nl
 7. Run: .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\calculator.nbc .\examples\valid\calculator.nl
-8. Run: .\bin\nlang.exe inspect .\examples\valid\calculator.nbc
-9. Run: .\bin\nlang.exe run .\examples\valid\calculator.nbc
+8. Run: .\bin\nlang.exe build --optimize alpha -o .\examples\valid\calculator-build.nbc .\examples\valid\calculator.nl
+9. Run: .\bin\nlang.exe inspect .\examples\valid\calculator.nbc
+10. Run: .\bin\nlang.exe run .\examples\valid\calculator.nbc
 
 Optional PATH setup:
 - Run .\install.cmd from this directory to add bin\nlang.exe to your user PATH.

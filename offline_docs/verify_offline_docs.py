@@ -72,6 +72,7 @@ REQUIRED_PHRASES = [
     "array&lt;string&gt;",
     "cargo run -p nous_cli -- check",
     "cargo run -p nous_cli -- compile",
+    "cargo run -p nous_cli -- build",
     "cargo run -p nous_cli -- inspect",
     "cargo run -p nous_cli -- run",
     "cargo run -p nous_cli -- docs",

@@ -48,6 +48,7 @@ Common commands:
 cargo run -p nous_cli -- check examples\valid\calculator.nl
 cargo run -p nous_cli -- run examples\valid\calculator.nl
 cargo run -p nous_cli -- compile --optimize alpha -o target\calculator.nbc examples\valid\calculator.nl
+cargo run -p nous_cli -- build --optimize alpha -o target\calculator-build.nbc examples\valid\calculator.nl
 cargo run -p nous_cli -- inspect target\calculator.nbc
 cargo run -p nous_cli -- run target\calculator.nbc
 ```
@@ -62,6 +63,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
 
 - `nlang check [--verbose|--format json] <file.nl>`
 - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
+- `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
 - `nlang inspect [--verbose|--format json] <file.nbc>`
 - `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
 - `nlang run [--verbose|--format json] <file.nbc>`
@@ -70,7 +72,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
 - `nlang help`
 - `nlang --version`
 
-`nlang check` can validate helper/library-style `.nl` files without `main`. `nlang compile` and source `nlang run` require executable source with zero-argument `main`; invalid entry points report `N0329`.
+`nlang check` can validate helper/library-style `.nl` files without `main`. `nlang compile`, `nlang build`, and source `nlang run` require executable source with zero-argument `main`; invalid entry points report `N0329`. `nlang build` is an artifact-generation alias for `nlang compile`.
 
 ## Documentation
 

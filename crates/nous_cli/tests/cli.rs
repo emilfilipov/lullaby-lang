@@ -207,6 +207,49 @@ fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
 }
 
 #[test]
+fn builds_fixture_to_bytecode_artifact_and_runs_it() {
+    let root = workspace_root();
+    let fixture = root.join("tests/fixtures/valid/run_arithmetic.nl");
+    let artifact = root.join("target/build_arithmetic.nbc");
+    let _ = std::fs::remove_file(&artifact);
+
+    let build = nlang()
+        .args([
+            "build",
+            "--optimize",
+            "alpha",
+            "-o",
+            artifact.to_str().expect("artifact path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("build cli");
+
+    assert!(build.status.success(), "{build:?}");
+    assert!(stdout(&build).contains("compiled:"), "{build:?}");
+    let artifact_text = std::fs::read_to_string(&artifact).expect("artifact");
+    assert!(artifact_text.contains("\"format\": \"nous-bytecode\""));
+    assert!(artifact_text.contains("\"version\": 3"));
+    assert!(artifact_text.contains("\"instructions\""));
+
+    let inspect = nlang()
+        .args(["inspect", artifact.to_str().expect("artifact path")])
+        .output()
+        .expect("inspect artifact cli");
+    assert!(inspect.status.success(), "{inspect:?}");
+    assert!(stdout(&inspect).contains("format: nous-bytecode"));
+
+    let run = nlang()
+        .args(["run", artifact.to_str().expect("artifact path")])
+        .output()
+        .expect("run artifact cli");
+
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(stdout(&run).trim(), "42");
+    let _ = std::fs::remove_file(artifact);
+}
+
+#[test]
 fn inspects_bytecode_artifact() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.nl");

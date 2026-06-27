@@ -33,6 +33,7 @@ From the unpacked package directory:
 .\bin\nlang.exe check .\examples\valid\calculator.nl
 .\bin\nlang.exe run .\examples\valid\calculator.nl
 .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\calculator.nbc .\examples\valid\calculator.nl
+.\bin\nlang.exe build --optimize alpha -o .\examples\valid\calculator-build.nbc .\examples\valid\calculator.nl
 .\bin\nlang.exe inspect .\examples\valid\calculator.nbc
 .\bin\nlang.exe run .\examples\valid\calculator.nbc
 ```
@@ -74,6 +75,7 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 
 - `nlang check [--verbose|--format json] <file.nl>`
 - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
+- `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
 - `nlang inspect [--verbose|--format json] <file.nbc>`
 - `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
 - `nlang run [--verbose|--format json] <file.nbc>`
@@ -81,11 +83,11 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 - `nlang examples`
 - `nlang --version`
 
-`--diagnostic-format json` is accepted as a JSON diagnostics alias.
+`--diagnostic-format json` is accepted as a JSON diagnostics alias. `nlang build` is an artifact-generation alias for `nlang compile`.
 
 ## Compiled Artifact Contract
 
-`nlang compile` writes a versioned `.nbc` JSON artifact with:
+`nlang compile` and `nlang build` write a versioned `.nbc` JSON artifact with:
 
 - `format`: `nous-bytecode`
 - `version`: `3`
@@ -141,6 +143,7 @@ The Markdown local-reference check also passed with the repository's file-like l
 - `check`
 - source `run`
 - `compile`
+- `build`
 - `.nbc` artifact `inspect`
 - `.nbc` artifact `run`
 - invalid example diagnostics
