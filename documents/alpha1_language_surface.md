@@ -2,7 +2,7 @@
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
-This document freezes the installable Alpha 1 surface. If another design document describes a feature that is not listed here, treat that feature as planned design material, not implemented Alpha 1 behavior.
+This document freezes the installable Alpha 1 surface. The implemented parser grammar is drafted in [formal_grammar.md](formal_grammar.md). If another design document describes a feature that is not listed here, treat that feature as planned design material, not implemented Alpha 1 behavior.
 
 ## Source And Blocks
 

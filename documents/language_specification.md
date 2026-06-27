@@ -37,6 +37,8 @@ The current Rust toolchain implements a small executable subset while the wider 
 - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] <file.nl>` emits a versioned `.nbc` instruction-bytecode artifact with metadata and a function table. `nlang build` accepts the same artifact-generation options as an alias. `nlang inspect <file.nbc>` summarizes that artifact, and `nlang run <file.nbc>` executes it after compatibility checks.
 - CLI commands are `nlang check [--verbose|--format json] <file.nl>`, `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `nlang inspect [--verbose|--format json] <file.nbc>`, `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl|file.nbc>`, `nlang docs`, and `nlang examples`. During development, these are also available through `cargo run -p nous_cli -- ...`. `--diagnostic-format json` is accepted as a JSON diagnostics alias.
 
+The current parser grammar is drafted in [formal_grammar.md](formal_grammar.md).
+
 ## Planned Design Material
 
 The remaining sections describe the intended full systems language. They are design material unless a feature is explicitly listed in the current Alpha implementation above or in [alpha1_language_surface.md](alpha1_language_surface.md). Examples in those sections may use planned syntax that the Alpha 1 compiler rejects today.
