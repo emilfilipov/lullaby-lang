@@ -1,0 +1,197 @@
+{
+  "functions": [
+    {
+      "name": "cleanup",
+      "params": [
+        {
+          "name": "ptr",
+          "ty": {
+            "name": "ptr_i64"
+          }
+        }
+      ],
+      "return_type": {
+        "name": "void"
+      },
+      "body": [
+        {
+          "Expr": {
+            "kind": {
+              "Call": {
+                "name": "dealloc",
+                "args": [
+                  {
+                    "kind": {
+                      "Variable": "ptr"
+                    },
+                    "span": {
+                      "line": 2,
+                      "column": 13
+                    }
+                  }
+                ]
+              }
+            },
+            "span": {
+              "line": 2,
+              "column": 5
+            }
+          }
+        }
+      ],
+      "span": {
+        "line": 1,
+        "column": 1
+      }
+    },
+    {
+      "name": "main",
+      "params": [],
+      "return_type": {
+        "name": "i64"
+      },
+      "body": [
+        {
+          "Let": {
+            "name": "ptr",
+            "ty": {
+              "name": "ptr_i64"
+            },
+            "value": {
+              "kind": {
+                "Call": {
+                  "name": "alloc",
+                  "args": [
+                    {
+                      "kind": {
+                        "Integer": 42
+                      },
+                      "span": {
+                        "line": 5,
+                        "column": 29
+                      }
+                    }
+                  ]
+                }
+              },
+              "span": {
+                "line": 5,
+                "column": 23
+              }
+            },
+            "span": {
+              "line": 5,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Expr": {
+            "kind": {
+              "Call": {
+                "name": "store",
+                "args": [
+                  {
+                    "kind": {
+                      "Variable": "ptr"
+                    },
+                    "span": {
+                      "line": 6,
+                      "column": 11
+                    }
+                  },
+                  {
+                    "kind": {
+                      "Integer": 42
+                    },
+                    "span": {
+                      "line": 6,
+                      "column": 16
+                    }
+                  }
+                ]
+              }
+            },
+            "span": {
+              "line": 6,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Let": {
+            "name": "value",
+            "ty": {
+              "name": "i64"
+            },
+            "value": {
+              "kind": {
+                "Call": {
+                  "name": "load",
+                  "args": [
+                    {
+                      "kind": {
+                        "Variable": "ptr"
+                      },
+                      "span": {
+                        "line": 7,
+                        "column": 26
+                      }
+                    }
+                  ]
+                }
+              },
+              "span": {
+                "line": 7,
+                "column": 21
+              }
+            },
+            "span": {
+              "line": 7,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Expr": {
+            "kind": {
+              "Call": {
+                "name": "cleanup",
+                "args": [
+                  {
+                    "kind": {
+                      "Variable": "ptr"
+                    },
+                    "span": {
+                      "line": 8,
+                      "column": 13
+                    }
+                  }
+                ]
+              }
+            },
+            "span": {
+              "line": 8,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Expr": {
+            "kind": {
+              "Variable": "value"
+            },
+            "span": {
+              "line": 9,
+              "column": 5
+            }
+          }
+        }
+      ],
+      "span": {
+        "line": 4,
+        "column": 1
+      }
+    }
+  ]
+}

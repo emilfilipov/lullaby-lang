@@ -1,0 +1,128 @@
+{
+  "functions": [
+    {
+      "name": "add",
+      "params": [
+        {
+          "name": "x",
+          "ty": {
+            "name": "i64"
+          }
+        },
+        {
+          "name": "y",
+          "ty": {
+            "name": "i64"
+          }
+        }
+      ],
+      "return_type": {
+        "name": "i64"
+      },
+      "body": [
+        {
+          "Expr": {
+            "kind": {
+              "Binary": {
+                "left": {
+                  "kind": {
+                    "Variable": "x"
+                  },
+                  "span": {
+                    "line": 2,
+                    "column": 5
+                  }
+                },
+                "op": "Add",
+                "right": {
+                  "kind": {
+                    "Variable": "y"
+                  },
+                  "span": {
+                    "line": 2,
+                    "column": 9
+                  }
+                }
+              }
+            },
+            "span": {
+              "line": 2,
+              "column": 5
+            }
+          }
+        }
+      ],
+      "span": {
+        "line": 1,
+        "column": 1
+      }
+    },
+    {
+      "name": "main",
+      "params": [],
+      "return_type": {
+        "name": "i64"
+      },
+      "body": [
+        {
+          "Let": {
+            "name": "value",
+            "ty": {
+              "name": "i64"
+            },
+            "value": {
+              "kind": {
+                "Call": {
+                  "name": "add",
+                  "args": [
+                    {
+                      "kind": {
+                        "Integer": 40
+                      },
+                      "span": {
+                        "line": 5,
+                        "column": 25
+                      }
+                    },
+                    {
+                      "kind": {
+                        "Integer": 2
+                      },
+                      "span": {
+                        "line": 5,
+                        "column": 29
+                      }
+                    }
+                  ]
+                }
+              },
+              "span": {
+                "line": 5,
+                "column": 21
+              }
+            },
+            "span": {
+              "line": 5,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Expr": {
+            "kind": {
+              "Variable": "value"
+            },
+            "span": {
+              "line": 6,
+              "column": 5
+            }
+          }
+        }
+      ],
+      "span": {
+        "line": 4,
+        "column": 1
+      }
+    }
+  ]
+}

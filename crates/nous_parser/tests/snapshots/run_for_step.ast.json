@@ -1,0 +1,126 @@
+{
+  "functions": [
+    {
+      "name": "main",
+      "params": [],
+      "return_type": {
+        "name": "i64"
+      },
+      "body": [
+        {
+          "Let": {
+            "name": "total",
+            "ty": {
+              "name": "i64"
+            },
+            "value": {
+              "kind": {
+                "Integer": 0
+              },
+              "span": {
+                "line": 2,
+                "column": 21
+              }
+            },
+            "span": {
+              "line": 2,
+              "column": 5
+            }
+          }
+        },
+        {
+          "For": {
+            "name": "i",
+            "start": {
+              "kind": {
+                "Integer": 5
+              },
+              "span": {
+                "line": 3,
+                "column": 16
+              }
+            },
+            "end": {
+              "kind": {
+                "Integer": 1
+              },
+              "span": {
+                "line": 3,
+                "column": 21
+              }
+            },
+            "step": {
+              "kind": {
+                "Binary": {
+                  "left": {
+                    "kind": {
+                      "Integer": 0
+                    },
+                    "span": {
+                      "line": 3,
+                      "column": 26
+                    }
+                  },
+                  "op": "Subtract",
+                  "right": {
+                    "kind": {
+                      "Integer": 2
+                    },
+                    "span": {
+                      "line": 3,
+                      "column": 27
+                    }
+                  }
+                }
+              },
+              "span": {
+                "line": 3,
+                "column": 26
+              }
+            },
+            "body": [
+              {
+                "Assign": {
+                  "name": "total",
+                  "op": "Add",
+                  "value": {
+                    "kind": {
+                      "Variable": "i"
+                    },
+                    "span": {
+                      "line": 4,
+                      "column": 18
+                    }
+                  },
+                  "span": {
+                    "line": 4,
+                    "column": 9
+                  }
+                }
+              }
+            ],
+            "span": {
+              "line": 3,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Expr": {
+            "kind": {
+              "Variable": "total"
+            },
+            "span": {
+              "line": 5,
+              "column": 5
+            }
+          }
+        }
+      ],
+      "span": {
+        "line": 1,
+        "column": 1
+      }
+    }
+  ]
+}

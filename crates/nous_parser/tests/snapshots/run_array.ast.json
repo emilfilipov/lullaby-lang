@@ -1,0 +1,96 @@
+{
+  "functions": [
+    {
+      "name": "main",
+      "params": [],
+      "return_type": {
+        "name": "i64"
+      },
+      "body": [
+        {
+          "Let": {
+            "name": "values",
+            "ty": {
+              "name": "array<i64>"
+            },
+            "value": {
+              "kind": {
+                "Array": [
+                  {
+                    "kind": {
+                      "Integer": 2
+                    },
+                    "span": {
+                      "line": 2,
+                      "column": 30
+                    }
+                  },
+                  {
+                    "kind": {
+                      "Integer": 4
+                    },
+                    "span": {
+                      "line": 2,
+                      "column": 33
+                    }
+                  },
+                  {
+                    "kind": {
+                      "Integer": 6
+                    },
+                    "span": {
+                      "line": 2,
+                      "column": 36
+                    }
+                  }
+                ]
+              },
+              "span": {
+                "line": 2,
+                "column": 29
+              }
+            },
+            "span": {
+              "line": 2,
+              "column": 5
+            }
+          }
+        },
+        {
+          "Expr": {
+            "kind": {
+              "Index": {
+                "target": {
+                  "kind": {
+                    "Variable": "values"
+                  },
+                  "span": {
+                    "line": 3,
+                    "column": 5
+                  }
+                },
+                "index": {
+                  "kind": {
+                    "Integer": 2
+                  },
+                  "span": {
+                    "line": 3,
+                    "column": 12
+                  }
+                }
+              }
+            },
+            "span": {
+              "line": 3,
+              "column": 5
+            }
+          }
+        }
+      ],
+      "span": {
+        "line": 1,
+        "column": 1
+      }
+    }
+  ]
+}
