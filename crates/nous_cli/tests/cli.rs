@@ -373,6 +373,35 @@ fn reports_invalid_bytecode_artifact_as_json() {
 }
 
 #[test]
+fn reports_missing_bytecode_instructions_as_json() {
+    let root = workspace_root();
+    let artifact = root.join("target/missing_instructions_artifact_json.nbc");
+    std::fs::write(
+        &artifact,
+        "{\"format\":\"nous-bytecode\",\"version\":3,\"metadata\":{\"producer\":\"test\",\"target\":\"alpha1\",\"payload\":\"instruction-bytecode\"},\"entry\":\"main\",\"function_table\":[],\"module\":{\"functions\":[{\"name\":\"main\",\"params\":[],\"return_type\":{\"name\":\"i64\"},\"span\":{\"line\":1,\"column\":1}}]}}",
+    )
+    .expect("write missing instructions artifact");
+
+    let output = nlang()
+        .args([
+            "run",
+            "--format",
+            "json",
+            artifact.to_str().expect("artifact path"),
+        ])
+        .output()
+        .expect("run artifact cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("\"code\":\"N0601\""), "{stderr}");
+    assert!(stderr.contains("\"phase\":\"bytecode\""), "{stderr}");
+    assert!(stderr.contains("missing field"), "{stderr}");
+    assert!(stderr.contains("instructions"), "{stderr}");
+    let _ = std::fs::remove_file(artifact);
+}
+
+#[test]
 fn reports_compile_write_failure_as_json() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.nl");

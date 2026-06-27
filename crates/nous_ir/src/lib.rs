@@ -2539,6 +2539,20 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_artifact_rejects_old_structured_payload_version() {
+        let invalid = format!(
+            "{{\"format\":\"{BYTECODE_ARTIFACT_FORMAT}\",\"version\":2,\"entry\":\"main\",\"metadata\":{{\"producer\":\"test\",\"target\":\"alpha1\",\"payload\":\"structured-bytecode\"}},\"function_table\":[],\"module\":{{\"functions\":[]}}}}"
+        );
+        let error = decode_bytecode_artifact(&invalid).expect_err("old artifact");
+
+        assert!(
+            error
+                .message
+                .contains("unsupported bytecode artifact version `2`")
+        );
+    }
+
+    #[test]
     fn bytecode_artifact_rejects_missing_entry_function() {
         let invalid = format!(
             "{{\"format\":\"{BYTECODE_ARTIFACT_FORMAT}\",\"version\":{BYTECODE_ARTIFACT_VERSION},\"entry\":\"main\",\"metadata\":{{\"producer\":\"test\",\"target\":\"alpha1\",\"payload\":\"instruction-bytecode\"}},\"function_table\":[],\"module\":{{\"functions\":[]}}}}"
