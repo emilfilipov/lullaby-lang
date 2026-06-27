@@ -27,6 +27,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed" }
     python offline_docs\verify_offline_docs.py
     if ($LASTEXITCODE -ne 0) { throw "offline docs verification failed" }
+    & (Join-Path $ScriptDir "verify_markdown_refs.ps1")
+    if ($LASTEXITCODE -ne 0) { throw "markdown reference verification failed" }
 
     & (Join-Path $ScriptDir "package_windows_portable.ps1") -PackageName $PackageName
 

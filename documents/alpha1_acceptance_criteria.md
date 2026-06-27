@@ -53,7 +53,7 @@ python offline_docs/verify_offline_docs.py
 git diff --check -- .
 ```
 
-The stale-source marker search from `AGENTS.md` should return no matches. Markdown local-reference checks should also pass with a file-like local target filter so language examples such as `[FUNCTION_NAME]([ARGUMENTS])` are not misclassified as broken file links.
+`scripts/verify_markdown_refs.ps1` should pass. It covers stale-source markers, file-like local Markdown links, and backticked `.md` references while filtering out language examples such as `[FUNCTION_NAME]([ARGUMENTS])`.
 
 `scripts/verify_release.ps1` should be the release proof command for Alpha 1. It must also prove the packaged or release-built `nlang` binary can:
 
