@@ -93,12 +93,13 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 - entry point
 - function table
 - instruction-bytecode module with dedicated function `instructions`
+- instruction-contract validation for entry-point shape and loop-control placement
 
 `nlang inspect file.nbc` prints artifact metadata and function signatures without executing the program. `nlang run file.nbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, and function-table/module compatibility before execution.
 
 ## Diagnostics
 
-Alpha 1 emits stable `N####` diagnostics for source, lexer, parser, semantic, IR, optimizer, bytecode, runtime, and resource failures. Concise, verbose, and JSON modes are covered by CLI tests for representative failures.
+Alpha 1 emits stable `N####` diagnostics for source, lexer, parser, semantic, IR, optimizer, bytecode, runtime, and resource failures. Concise, verbose, and JSON modes are covered by CLI tests for representative failures, including malformed bytecode artifacts and invalid bytecode instruction contracts.
 
 Notable codes:
 
@@ -107,7 +108,7 @@ Notable codes:
 - `N0329`: executable entry point is missing or has parameters.
 - `N0501`: IR lowering failure.
 - `N0502`: optimizer mode requires IR or bytecode backend.
-- `N0601`: malformed, unsupported, or incompatible `.nbc` artifact.
+- `N0601`: malformed, unsupported, incompatible, or instruction-contract-invalid `.nbc` artifact.
 
 See [diagnostic_registry.md](diagnostic_registry.md) for the full registry.
 

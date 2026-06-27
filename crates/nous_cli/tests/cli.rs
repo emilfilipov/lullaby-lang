@@ -402,6 +402,37 @@ fn reports_missing_bytecode_instructions_as_json() {
 }
 
 #[test]
+fn reports_invalid_bytecode_instruction_contract_as_json() {
+    let root = workspace_root();
+    let artifact = root.join("target/invalid_instruction_artifact_json.nbc");
+    std::fs::write(
+        &artifact,
+        "{\"format\":\"nous-bytecode\",\"version\":3,\"metadata\":{\"producer\":\"test\",\"target\":\"alpha1\",\"payload\":\"instruction-bytecode\"},\"entry\":\"main\",\"function_table\":[{\"name\":\"main\",\"params\":[],\"return_type\":{\"name\":\"i64\"}}],\"module\":{\"functions\":[{\"name\":\"main\",\"params\":[],\"return_type\":{\"name\":\"i64\"},\"instructions\":[{\"Break\":{\"line\":1,\"column\":1}}],\"span\":{\"line\":1,\"column\":1}}]}}",
+    )
+    .expect("write invalid instruction artifact");
+
+    let output = nlang()
+        .args([
+            "run",
+            "--format",
+            "json",
+            artifact.to_str().expect("artifact path"),
+        ])
+        .output()
+        .expect("run artifact cli");
+
+    let stderr = stderr(&output);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr.contains("\"code\":\"N0601\""), "{stderr}");
+    assert!(stderr.contains("\"phase\":\"bytecode\""), "{stderr}");
+    assert!(
+        stderr.contains("instruction `break` outside loop"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_file(artifact);
+}
+
+#[test]
 fn reports_compile_write_failure_as_json() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.nl");

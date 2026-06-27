@@ -91,6 +91,7 @@ REQUIRED_PHRASES = [
     "RELEASE_NOTES.md",
     ".nbc",
     "instruction-bytecode",
+    "instruction contract",
     "function instructions",
     "function table",
     "metadata",

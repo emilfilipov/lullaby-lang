@@ -499,6 +499,18 @@ fn validate_bytecode_artifact_contract(
                 function.name
             )));
         }
+
+        let mut params = HashSet::new();
+        for param in &function.params {
+            if !params.insert(param.name.as_str()) {
+                return Err(BytecodeArtifactError::new(format!(
+                    "duplicate bytecode parameter `{}` in function `{}`",
+                    param.name, function.name
+                )));
+            }
+        }
+
+        validate_bytecode_instructions(&function.name, &function.instructions, 0)?;
     }
 
     if !names.contains(artifact.entry.as_str()) {
@@ -518,6 +530,65 @@ fn validate_bytecode_artifact_contract(
         return Err(BytecodeArtifactError::new(
             "bytecode artifact function_table does not match module functions",
         ));
+    }
+
+    let entry = artifact
+        .module
+        .functions
+        .iter()
+        .find(|function| function.name == artifact.entry)
+        .expect("entry presence was validated");
+    if !entry.params.is_empty() {
+        return Err(BytecodeArtifactError::new(format!(
+            "bytecode artifact entry `{}` must not require parameters",
+            artifact.entry
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_bytecode_instructions(
+    function_name: &str,
+    instructions: &[BytecodeInstruction],
+    loop_depth: usize,
+) -> Result<(), BytecodeArtifactError> {
+    for instruction in instructions {
+        match instruction {
+            BytecodeInstruction::Break(_) => {
+                if loop_depth == 0 {
+                    return Err(BytecodeArtifactError::new(format!(
+                        "bytecode instruction `break` outside loop in function `{function_name}`"
+                    )));
+                }
+            }
+            BytecodeInstruction::Continue(_) => {
+                if loop_depth == 0 {
+                    return Err(BytecodeArtifactError::new(format!(
+                        "bytecode instruction `continue` outside loop in function `{function_name}`"
+                    )));
+                }
+            }
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    validate_bytecode_instructions(function_name, &branch.body, loop_depth)?;
+                }
+                validate_bytecode_instructions(function_name, else_body, loop_depth)?;
+            }
+            BytecodeInstruction::While { body, .. }
+            | BytecodeInstruction::For { body, .. }
+            | BytecodeInstruction::Loop { body, .. } => {
+                validate_bytecode_instructions(function_name, body, loop_depth + 1)?;
+            }
+            BytecodeInstruction::Let { .. }
+            | BytecodeInstruction::Assign { .. }
+            | BytecodeInstruction::Return(_)
+            | BytecodeInstruction::Expr(_) => {}
+        }
     }
 
     Ok(())
@@ -3379,6 +3450,57 @@ mod tests {
         let error = decode_bytecode_artifact(&invalid).expect_err("table mismatch");
 
         assert!(error.message.contains("function_table does not match"));
+    }
+
+    #[test]
+    fn bytecode_artifact_rejects_parameterized_entrypoint() {
+        let span = Span::new(1, 1);
+        let module = BytecodeModule {
+            functions: vec![BytecodeFunction {
+                name: "main".to_string(),
+                params: vec![IrParam {
+                    name: "argc".to_string(),
+                    ty: TypeRef::new("i64"),
+                }],
+                return_type: TypeRef::new("i64"),
+                instructions: vec![BytecodeInstruction::Return(Some(BytecodeExpr {
+                    kind: BytecodeExprKind::Variable("argc".to_string()),
+                    ty: TypeRef::new("i64"),
+                    span,
+                }))],
+                span,
+            }],
+        };
+        let encoded = serde_json::to_string(&BytecodeArtifact::new(module)).expect("encode");
+        let error = decode_bytecode_artifact(&encoded).expect_err("parameterized entry");
+
+        assert!(
+            error
+                .message
+                .contains("entry `main` must not require parameters")
+        );
+    }
+
+    #[test]
+    fn bytecode_artifact_rejects_break_outside_loop_instruction() {
+        let span = Span::new(1, 1);
+        let module = BytecodeModule {
+            functions: vec![BytecodeFunction {
+                name: "main".to_string(),
+                params: Vec::new(),
+                return_type: TypeRef::new("i64"),
+                instructions: vec![BytecodeInstruction::Break(span)],
+                span,
+            }],
+        };
+        let encoded = serde_json::to_string(&BytecodeArtifact::new(module)).expect("encode");
+        let error = decode_bytecode_artifact(&encoded).expect_err("invalid break");
+
+        assert!(
+            error
+                .message
+                .contains("instruction `break` outside loop in function `main`")
+        );
     }
 
     #[test]
