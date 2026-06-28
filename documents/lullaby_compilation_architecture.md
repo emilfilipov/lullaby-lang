@@ -39,6 +39,12 @@ The current memory-aware IR increment keeps `alloc`, `load`, `store`, `dealloc`,
 
 Each operation carries safety metadata for live-resource requirements, bounds-check requirements, memory mutation, cleanup role, and unsafe-boundary handling. Region creation/resizing, copy operations, and compiler-inserted cleanup are reserved in the roadmap but are not emitted until the language surface and runtime model support them.
 
+### Native Backend Contract
+
+`lullaby_ir::native_contract` records the first Alpha 1 native backend contract before machine-code output exists. It defines the first prototype target, supported 64-bit target family, internal calling convention, stack-frame slot classes, current value layouts, pointer and array lowering rules, cleanup sequencing, and native diagnostic requirements.
+
+The contract is serializable and unit-tested so object-emission work can consume stable data instead of embedding target policy directly into lowering code. See [native_backend_contract.md](native_backend_contract.md).
+
 ### Stage 1: Lexical Analysis (Tokenizer)
 
 Converts raw source text into a stream of tokens optimized for compact representation.

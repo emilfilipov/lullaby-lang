@@ -10,6 +10,8 @@ use lullaby_runtime::{RuntimeError, Value};
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
 
+pub mod native_contract;
+
 pub const BYTECODE_ARTIFACT_FORMAT: &str = "lullaby-bytecode";
 pub const BYTECODE_ARTIFACT_EXTENSION: &str = "lbc";
 pub const BYTECODE_ARTIFACT_VERSION: u32 = 5;
