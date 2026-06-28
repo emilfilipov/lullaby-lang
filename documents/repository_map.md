@@ -42,7 +42,7 @@ This file maps the repository layout and explains where to find core information
 
 - `offline_docs/index.html`: local browser entry point for alpha user documentation. It must remain self-contained with no server, CDN, remote fonts, or internet dependency.
 - `offline_docs/generate_offline_docs.py`: initial standard-library generator that renders canonical Markdown sources into a self-contained HTML bundle under `target/offline_docs/index.html` by default.
-- `offline_docs/verify_offline_docs.py`: deterministic verifier for the offline docs entry point, required sections, required alpha topics, local anchors, lack of remote dependencies, and fixture-backed executable examples.
+- `offline_docs/verify_offline_docs.py`: deterministic verifier for the shipped and generated offline docs entry points, required sections, required alpha topics, local anchors, lack of remote dependencies, and fixture-backed executable examples.
 
 ## Examples
 
@@ -65,7 +65,7 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `crates/lullaby_cli/tests/`: binary-level integration tests for the CLI pipeline, including valid checks, backend execution, bytecode artifact inspection/execution, malformed artifact and invalid instruction-contract diagnostics, lexical errors, and semantic errors.
 - `scripts/package_windows_portable.ps1`: builds the release CLI, creates `dist\lullaby-alpha1-windows-x64\`, copies `bin\lullaby.exe`, bundles `docs\index.html`, release notes, user-facing examples, and optional PATH install/uninstall helpers, copies a repository license file if one exists, writes package metadata/readme files, and creates a `.zip` archive plus `.sha256` checksum file.
 - `scripts/verify_markdown_refs.ps1`: verifies file-like Markdown links, backticked `.md` references, and stale-source markers while ignoring language syntax examples that only resemble Markdown links.
-- `scripts/verify_release.ps1`: runs formatting, test, clippy, offline-doc verification, Markdown reference verification, builds the portable package, and smoke-tests the packaged `lullaby.exe` against version, docs, examples, check, run, compile, build, bytecode artifact inspection/execution, invalid example diagnostics, dry-run PATH install/uninstall helpers, and archive checksum verification.
+- `scripts/verify_release.ps1`: runs formatting, test, clippy, shipped offline-doc verification, generated offline-doc build/verification, Markdown reference verification, builds the portable package, and smoke-tests the packaged `lullaby.exe` against version, docs, examples, check, run, compile, build, bytecode artifact inspection/execution, invalid example diagnostics, dry-run PATH install/uninstall helpers, and archive checksum verification.
 - `scripts/publish_github_release.ps1`: requires a clean worktree, runs release verification, creates/pushes a release tag, and creates a GitHub prerelease with the portable zip and checksum assets using `documents/alpha1_release_notes.md` as the release body.
 - `scripts/install_windows_path.ps1` and `scripts/uninstall_windows_path.ps1`: package-root PowerShell helpers copied as `install.ps1` and `uninstall.ps1` for optional user PATH setup/cleanup.
 - `scripts/install.cmd` and `scripts/uninstall.cmd`: cmd wrappers copied to the package root for users who prefer `cmd.exe`.
@@ -130,8 +130,9 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p lullaby_cli -- compile -o target/missing_main.lbc tests/fixtures/invalid/missing_main.lullaby`: verify `N0329` executable entry-point diagnostics.
 - `$env:LULLABY_UPDATE_PARSER_SNAPSHOTS='1'; cargo test -p lullaby_parser --test ast_snapshots; Remove-Item Env:LULLABY_UPDATE_PARSER_SNAPSHOTS`: intentionally refresh parser AST golden snapshots after reviewing expected AST-shape changes.
 - Running a malformed `.lbc` artifact verifies `N0601 [bytecode error]` diagnostics for unsupported bytecode artifacts and invalid instruction contracts such as top-level `break`/`continue`.
-- `python offline_docs/verify_offline_docs.py`: verify the self-contained offline browser documentation entry point, including metadata, fixture content, compile/run/inspect/examples command coverage, and `lullaby check`/`lullaby run` execution for documented `.lullaby` examples.
+- `python offline_docs/verify_offline_docs.py`: verify the shipped self-contained offline browser documentation entry point, including metadata, fixture content, compile/run/inspect/examples command coverage, and `lullaby check`/`lullaby run` execution for documented `.lullaby` examples.
 - `python offline_docs/generate_offline_docs.py`: generate the initial Markdown-sourced offline documentation bundle to `target/offline_docs/index.html`.
+- `python offline_docs/verify_offline_docs.py target/offline_docs/index.html --profile generated`: verify the generated offline docs bundle, including source-section coverage, local-only links, and fixture-backed executable examples.
 - `powershell -ExecutionPolicy Bypass -File scripts/verify_markdown_refs.ps1`: verify file-like Markdown links, backticked `.md` references, and stale-source markers without misclassifying language syntax examples.
 - `powershell -ExecutionPolicy Bypass -File scripts/package_windows_portable.ps1`: build the Windows Alpha 1 portable package, zip archive, and SHA-256 checksum under `dist/`.
 - `powershell -ExecutionPolicy Bypass -File scripts/verify_release.ps1`: run the full Alpha 1 release gate and smoke-test the packaged toolchain, including Markdown reference verification, `lullaby build`, dry-run install/uninstall PATH helpers, and checksum verification.

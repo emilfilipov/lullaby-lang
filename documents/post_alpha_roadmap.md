@@ -30,11 +30,13 @@ Current increment:
 - `offline_docs/generate_offline_docs.py` builds a standalone HTML file from canonical Markdown using only the Python standard library.
 - The first generated source set includes the project overview, core language rules, Alpha 1 language surface, diagnostic registry, release notes, and this roadmap.
 - The default output is `target/offline_docs/index.html`, keeping generated artifacts out of source control.
+- The generated output includes fixture-backed examples and is verified with `python offline_docs/verify_offline_docs.py target/offline_docs/index.html --profile generated`.
+- `scripts/verify_release.ps1` now builds and verifies generated docs before packaging.
 
 Acceptance path:
 
 - Expand the generator to cover examples, CLI command reference, current limitations, and installation/package content.
-- Teach `offline_docs/verify_offline_docs.py` to validate both the current hand-authored entry page and the generated output.
+- Expand generated profile coverage until it reaches parity with the current hand-authored entry page.
 - Switch packaging from copying `offline_docs/index.html` to invoking the generator once generated parity is proven.
 
 ## 3. Platform-Agnostic Build Orchestration

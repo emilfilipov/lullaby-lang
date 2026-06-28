@@ -25,6 +25,12 @@ SOURCE_DOCS = [
     ("Post-Alpha Roadmap", REPO_ROOT / "documents" / "post_alpha_roadmap.md"),
 ]
 
+EXAMPLE_FIXTURES = [
+    ("Quick Start", REPO_ROOT / "tests" / "fixtures" / "valid" / "docs_quick_start.lullaby", "run"),
+    ("Calculator", REPO_ROOT / "examples" / "valid" / "calculator.lullaby", "run"),
+    ("Arrays And Control Flow", REPO_ROOT / "examples" / "valid" / "arrays_control_flow.lullaby", "run"),
+]
+
 
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
@@ -58,7 +64,9 @@ def markdown_to_html(markdown: str) -> str:
 
         if line.startswith("```"):
             if in_code:
-                output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                output.append(
+                    f'<pre data-planned="true"><code>{html.escape(chr(10).join(code_lines))}</code></pre>'
+                )
                 code_lines.clear()
                 in_code = False
             else:
@@ -101,7 +109,9 @@ def markdown_to_html(markdown: str) -> str:
 
     flush_list(output, list_items)
     if in_code:
-        output.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+        output.append(
+            f'<pre data-planned="true"><code>{html.escape(chr(10).join(code_lines))}</code></pre>'
+        )
 
     return "\n".join(output)
 
@@ -121,6 +131,9 @@ def render_document() -> str:
             f'<p class="source">Source: <code>{html.escape(source.relative_to(REPO_ROOT).as_posix())}</code></p>'
             f"{body}</section>"
         )
+
+    nav_items.append('<li><a href="#executable-examples">Executable Examples</a></li>')
+    sections.append(render_examples_section())
 
     return f"""<!doctype html>
 <html lang="en">
@@ -159,6 +172,26 @@ def render_document() -> str:
 </body>
 </html>
 """
+
+
+def render_examples_section() -> str:
+    parts = [
+        '<section id="executable-examples">',
+        "<h1>Executable Examples</h1>",
+        "<p>These examples are copied from repository fixtures and verified by the offline docs verifier.</p>",
+    ]
+    for title, fixture, mode in EXAMPLE_FIXTURES:
+        if not fixture.exists():
+            raise FileNotFoundError(f"required example fixture not found: {fixture}")
+        relative = fixture.relative_to(REPO_ROOT).as_posix()
+        source = html.escape(fixture.read_text(encoding="utf-8").strip())
+        parts.append(f"<h2>{html.escape(title)}</h2>")
+        parts.append(f'<p>Fixture: <code>{html.escape(relative)}</code></p>')
+        parts.append(
+            f'<pre data-fixture="{html.escape(relative)}" data-mode="{html.escape(mode)}"><code>{source}</code></pre>'
+        )
+    parts.append("</section>")
+    return "".join(parts)
 
 
 def main() -> int:

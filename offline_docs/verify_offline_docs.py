@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import html
 import re
 import subprocess
@@ -131,6 +132,35 @@ REQUIRED_PHRASES = [
     "Current Limitations",
 ]
 
+GENERATED_REQUIRED_IDS = [
+    "project-overview",
+    "core-language-rules",
+    "alpha-1-language-surface",
+    "diagnostics-registry",
+    "release-notes",
+    "post-alpha-roadmap",
+    "executable-examples",
+]
+
+GENERATED_REQUIRED_PHRASES = [
+    "Self-contained HTML generated from canonical repository Markdown.",
+    "Source: <code>README.md</code>",
+    "Source: <code>documents/core_language_rules.md</code>",
+    "Source: <code>documents/alpha1_language_surface.md</code>",
+    "Source: <code>documents/diagnostic_registry.md</code>",
+    "Source: <code>documents/alpha1_release_notes.md</code>",
+    "Source: <code>documents/post_alpha_roadmap.md</code>",
+    "Executable Examples",
+    "tests/fixtures/valid/docs_quick_start.lullaby",
+    "examples/valid/calculator.lullaby",
+    "examples/valid/arrays_control_flow.lullaby",
+    ".lullaby",
+    "Alpha 1",
+    "diagnostic registry",
+    "Memory-Aware IR",
+    "Native Code Generation Roadmap",
+]
+
 FORBIDDEN_REMOTE_PATTERNS = [
     "http://",
     "https://",
@@ -214,27 +244,27 @@ def verify_examples(html_text: str) -> str | None:
     return None
 
 
-def main() -> int:
-    if not ENTRY.is_file():
-        return fail(f"missing entry point: {ENTRY}")
+def verify_html(entry: Path, required_ids: list[str], required_phrases: list[str]) -> int:
+    if not entry.is_file():
+        return fail(f"missing entry point: {entry}")
 
-    html = ENTRY.read_text(encoding="utf-8")
+    html_text = entry.read_text(encoding="utf-8")
 
-    for section_id in REQUIRED_IDS:
-        if f'id="{section_id}"' not in html:
+    for section_id in required_ids:
+        if f'id="{section_id}"' not in html_text:
             return fail(f"missing section id #{section_id}")
 
-    for phrase in REQUIRED_PHRASES:
-        if phrase not in html:
+    for phrase in required_phrases:
+        if phrase not in html_text:
             return fail(f"missing required phrase: {phrase}")
 
-    lowered = html.lower()
+    lowered = html_text.lower()
     for pattern in FORBIDDEN_REMOTE_PATTERNS:
         if pattern in lowered:
             return fail(f"remote dependency pattern found: {pattern}")
 
-    ids = set(re.findall(r'id="([^"]+)"', html))
-    hrefs = re.findall(r'href="([^"]+)"', html)
+    ids = set(re.findall(r'id="([^"]+)"', html_text))
+    hrefs = re.findall(r'href="([^"]+)"', html_text)
     for href in hrefs:
         if href.startswith("#"):
             target = href[1:]
@@ -243,18 +273,44 @@ def main() -> int:
             continue
         if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", href):
             return fail(f"non-local href found: {href}")
-        local_target = (ROOT / href).resolve()
-        if ROOT not in local_target.parents and local_target != ROOT:
+        local_target = (entry.parent / href).resolve()
+        if entry.parent not in local_target.parents and local_target != entry.parent:
             return fail(f"href escapes offline docs directory: {href}")
         if not local_target.exists():
             return fail(f"local href target is missing: {href}")
 
-    example_error = verify_examples(html)
+    example_error = verify_examples(html_text)
     if example_error:
         return fail(example_error)
 
-    print(f"offline docs verification passed: {ENTRY}")
+    print(f"offline docs verification passed: {entry}")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "entry",
+        nargs="?",
+        type=Path,
+        default=ENTRY,
+        help=f"HTML entry to verify, default: {ENTRY}",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("shipped", "generated"),
+        default="shipped",
+        help="verification profile for required sections and phrases",
+    )
+    args = parser.parse_args()
+
+    entry = args.entry
+    if not entry.is_absolute():
+        entry = (REPO / entry).resolve()
+
+    if args.profile == "generated":
+        return verify_html(entry, GENERATED_REQUIRED_IDS, GENERATED_REQUIRED_PHRASES)
+    return verify_html(entry, REQUIRED_IDS, REQUIRED_PHRASES)
 
 
 if __name__ == "__main__":
