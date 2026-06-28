@@ -140,6 +140,11 @@ GENERATED_REQUIRED_IDS = [
     "release-notes",
     "post-alpha-roadmap",
     "executable-examples",
+    "quick-start",
+    "cli-reference",
+    "package-layout",
+    "diagnostics",
+    "current-limitations",
 ]
 
 GENERATED_REQUIRED_PHRASES = [
@@ -159,6 +164,20 @@ GENERATED_REQUIRED_PHRASES = [
     "diagnostic registry",
     "Memory-Aware IR",
     "Native Code Generation Roadmap",
+    "lullaby check [--verbose|--format json] file.lullaby",
+    "lullaby compile [--optimize none|constant-fold|dead-code|alpha]",
+    "lullaby inspect file.lbc",
+    "lullaby run [--backend ast|ir|bytecode] file.lullaby",
+    "lullaby docs",
+    "lullaby examples",
+    "docs/index.html",
+    "RELEASE_NOTES.md",
+    "MANIFEST.json",
+    "*.sha256",
+    "--diagnostic-format json",
+    "Current Limitations",
+    "N0211",
+    "No native code generation yet",
 ]
 
 FORBIDDEN_REMOTE_PATTERNS = [

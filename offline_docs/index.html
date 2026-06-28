@@ -606,7 +606,7 @@ Suggested fix:
           <li>The current I/O surface is limited to text file builtins and direct program-plus-argv command calls; streams, binary I/O, memory mapping, async, sockets, and IPC are future work.</li>
           <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive with optional user PATH helper scripts.</li>
           <li>Planned syntax keywords such as <code>import</code>, <code>module</code>, <code>struct</code>, <code>match</code>, and <code>try</code> are rejected with <code>N0211 [parser]</code> until their feature areas are implemented.</li>
-          <li>The shipped documentation bundle is currently hand-authored HTML. The first standard-library generator from canonical docs is available at <code>offline_docs/generate_offline_docs.py</code>, with packaging integration still pending.</li>
+          <li>The shipped documentation bundle is currently hand-authored HTML. The standard-library generator from canonical docs is available at <code>offline_docs/generate_offline_docs.py</code> and now emits package-ready quick start, CLI reference, package layout, diagnostics, limitations, and fixture-backed examples; full replacement of the hand-authored package docs is still pending.</li>
         </ul>
       </section>
 

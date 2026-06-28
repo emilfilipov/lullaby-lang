@@ -134,6 +134,9 @@ def render_document() -> str:
 
     nav_items.append('<li><a href="#executable-examples">Executable Examples</a></li>')
     sections.append(render_examples_section())
+    for title, section_id, body in alpha_user_sections():
+        nav_items.append(f'<li><a href="#{section_id}">{html.escape(title)}</a></li>')
+        sections.append(f'<section id="{section_id}"><h1>{html.escape(title)}</h1>{body}</section>')
 
     return f"""<!doctype html>
 <html lang="en">
@@ -172,6 +175,84 @@ def render_document() -> str:
 </body>
 </html>
 """
+
+
+def alpha_user_sections() -> list[tuple[str, str, str]]:
+    return [
+        (
+            "Quick Start",
+            "quick-start",
+            """
+            <p>Use the portable package from a shell without a development server or internet access.</p>
+            <ol>
+              <li>Run <code>bin/lullaby --version</code> or <code>bin\\lullaby.exe --version</code>.</li>
+              <li>Open the local docs with <code>bin/lullaby docs</code> or <code>bin\\lullaby.exe docs</code>.</li>
+              <li>Find packaged examples with <code>bin/lullaby examples</code>.</li>
+              <li>Check a source file with <code>bin/lullaby check examples/valid/calculator.lullaby</code>.</li>
+              <li>Run a source file with <code>bin/lullaby run examples/valid/calculator.lullaby</code>.</li>
+              <li>Compile a bytecode artifact with <code>bin/lullaby compile --optimize alpha -o examples/valid/calculator.lbc examples/valid/calculator.lullaby</code>.</li>
+              <li>Inspect and run the artifact with <code>bin/lullaby inspect examples/valid/calculator.lbc</code> and <code>bin/lullaby run examples/valid/calculator.lbc</code>.</li>
+            </ol>
+            """,
+        ),
+        (
+            "CLI Reference",
+            "cli-reference",
+            """
+            <table>
+              <tr><td><code>lullaby check [--verbose|--format json] file.lullaby</code></td><td>Validate source, parse it, and run semantic checks. Library-style files without <code>main</code> are allowed.</td></tr>
+              <tr><td><code>lullaby compile [--optimize none|constant-fold|dead-code|alpha] -o file.lbc file.lullaby</code></td><td>Compile executable source to a versioned <code>.lbc</code> instruction-bytecode artifact.</td></tr>
+              <tr><td><code>lullaby build</code></td><td>Build-oriented alias for artifact generation.</td></tr>
+              <tr><td><code>lullaby inspect file.lbc</code></td><td>Print bytecode artifact metadata, function table details, target, payload, and entry point.</td></tr>
+              <tr><td><code>lullaby run [--backend ast|ir|bytecode] file.lullaby</code></td><td>Execute source through the selected backend.</td></tr>
+              <tr><td><code>lullaby run file.lbc</code></td><td>Execute a compiled bytecode artifact.</td></tr>
+              <tr><td><code>lullaby docs</code></td><td>Print the local offline documentation path.</td></tr>
+              <tr><td><code>lullaby examples</code></td><td>Print the packaged valid examples directory.</td></tr>
+            </table>
+            """,
+        ),
+        (
+            "Package Layout",
+            "package-layout",
+            """
+            <p>Portable archives use a stable layout so installers and user docs can share one contract.</p>
+            <ul>
+              <li><code>bin/lullaby</code> or <code>bin/lullaby.exe</code>: command-line tool.</li>
+              <li><code>docs/index.html</code>: generated offline documentation.</li>
+              <li><code>examples/</code>: valid examples and invalid diagnostic examples.</li>
+              <li><code>RELEASE_NOTES.md</code>: release notes, supported surface, verification evidence, and limitations.</li>
+              <li><code>README.txt</code>: package-local quick start.</li>
+              <li><code>MANIFEST.json</code>: package metadata including target tag, commit, binary path, docs path, and archive name.</li>
+              <li><code>*.sha256</code>: SHA-256 checksum for the archive.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Diagnostics",
+            "diagnostics",
+            """
+            <p>Diagnostics use stable <code>N####</code> codes and support concise, verbose, and JSON output.</p>
+            <ul>
+              <li><code>--verbose</code> includes source excerpts, root cause, suggested fix, and runtime traceback when available.</li>
+              <li><code>--format json</code> and <code>--diagnostic-format json</code> produce deterministic machine-readable diagnostics.</li>
+              <li>See <code>documents/diagnostic_registry.md</code> in this generated bundle for the registry source.</li>
+            </ul>
+            """,
+        ),
+        (
+            "Current Limitations",
+            "current-limitations",
+            """
+            <ul>
+              <li>No native code generation yet. Execution currently supports AST, typed IR, instruction bytecode, and versioned <code>.lbc</code> artifacts.</li>
+              <li>The full region memory model, ARC/reference counting, compiler-inserted cleanup, and lifetime analysis remain planned.</li>
+              <li>Modules, imports, structs, try/catch, packages, and advanced generics are planned syntax and are rejected with <code>N0211</code> until implemented.</li>
+              <li>Cross-platform portable package generation exists, but release assets still need non-Windows host validation and active CI workflow runs.</li>
+              <li>The legacy Windows Alpha 1 package still ships the hand-authored offline docs until generated docs reach full package parity.</li>
+            </ul>
+            """,
+        ),
+    ]
 
 
 def render_examples_section() -> str:

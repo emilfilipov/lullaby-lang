@@ -42,8 +42,8 @@ This file maps the repository layout and explains where to find core information
 ## Offline Browser Docs
 
 - `offline_docs/index.html`: local browser entry point for alpha user documentation. It must remain self-contained with no server, CDN, remote fonts, or internet dependency.
-- `offline_docs/generate_offline_docs.py`: initial standard-library generator that renders canonical Markdown sources into a self-contained HTML bundle under `target/offline_docs/index.html` by default.
-- `offline_docs/verify_offline_docs.py`: deterministic verifier for the shipped and generated offline docs entry points, required sections, required alpha topics, local anchors, lack of remote dependencies, and fixture-backed executable examples.
+- `offline_docs/generate_offline_docs.py`: initial standard-library generator that renders canonical Markdown sources plus package-ready quick start, CLI reference, package layout, diagnostics, limitations, and fixture-backed examples into a self-contained HTML bundle under `target/offline_docs/index.html` by default.
+- `offline_docs/verify_offline_docs.py`: deterministic verifier for the shipped and generated offline docs entry points, required sections, required alpha topics, generated package-ready user sections, local anchors, lack of remote dependencies, and fixture-backed executable examples.
 
 ## CI
 
@@ -137,8 +137,8 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `$env:LULLABY_UPDATE_PARSER_SNAPSHOTS='1'; cargo test -p lullaby_parser --test ast_snapshots; Remove-Item Env:LULLABY_UPDATE_PARSER_SNAPSHOTS`: intentionally refresh parser AST golden snapshots after reviewing expected AST-shape changes.
 - Running a malformed `.lbc` artifact verifies `N0601 [bytecode error]` diagnostics for unsupported bytecode artifacts and invalid instruction contracts such as top-level `break`/`continue`.
 - `python offline_docs/verify_offline_docs.py`: verify the shipped self-contained offline browser documentation entry point, including metadata, fixture content, compile/run/inspect/examples command coverage, and `lullaby check`/`lullaby run` execution for documented `.lullaby` examples.
-- `python offline_docs/generate_offline_docs.py`: generate the initial Markdown-sourced offline documentation bundle to `target/offline_docs/index.html`.
-- `python offline_docs/verify_offline_docs.py target/offline_docs/index.html --profile generated`: verify the generated offline docs bundle, including source-section coverage, local-only links, and fixture-backed executable examples.
+- `python offline_docs/generate_offline_docs.py`: generate the Markdown-sourced offline documentation bundle with package-ready quick start, CLI reference, package layout, diagnostics, limitations, and fixture-backed examples to `target/offline_docs/index.html`.
+- `python offline_docs/verify_offline_docs.py target/offline_docs/index.html --profile generated`: verify the generated offline docs bundle, including source-section coverage, generated package-ready user sections, local-only links, and fixture-backed executable examples.
 - `powershell -ExecutionPolicy Bypass -File scripts/verify_markdown_refs.ps1`: verify file-like Markdown links, backticked `.md` references, and stale-source markers without misclassifying language syntax examples.
 - `powershell -ExecutionPolicy Bypass -File scripts/package_windows_portable.ps1`: build the Windows Alpha 1 portable package, zip archive, and SHA-256 checksum under `dist/`.
 - `python scripts/package_portable.py --verify`: build the host portable package with generated offline docs, create an archive plus checksum under `dist/`, and run host-compatible package smoke tests.

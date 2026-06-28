@@ -31,11 +31,11 @@ Current increment:
 - The first generated source set includes the project overview, core language rules, Alpha 1 language surface, diagnostic registry, release notes, and this roadmap.
 - The default output is `target/offline_docs/index.html`, keeping generated artifacts out of source control.
 - The generated output includes fixture-backed examples and is verified with `python offline_docs/verify_offline_docs.py target/offline_docs/index.html --profile generated`.
+- The generated output now includes package-ready user sections for quick start, CLI command reference, portable package layout, diagnostics behavior, and current limitations.
 - `scripts/verify_release.ps1` now builds and verifies generated docs before packaging.
 
 Acceptance path:
 
-- Expand the generator to cover examples, CLI command reference, current limitations, and installation/package content.
 - Expand generated profile coverage until it reaches parity with the current hand-authored entry page.
 - Switch packaging from copying `offline_docs/index.html` to invoking the generator once generated parity is proven.
 
