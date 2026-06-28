@@ -21,7 +21,7 @@ The name should be short, easy to pronounce, easy to search, plausible as a comm
 
 - PyPI has `nous-lang`, described as "NOUS -- The Living Language" and a programming language for agentic AI systems: https://pypi.org/project/nous-lang/5.1.0/
 - The public website `nous-lang.org` presents NOUS as a language/compliance infrastructure for agentic AI systems: https://nous-lang.org/
-- The GitHub project metadata points to `contrario/nous` and describes "NOUS (Νοῦς) -- The Living Language for Agentic AI Systems": https://github.com/contrario/nous/blob/main/pyproject.toml
+- The GitHub project metadata points to `contrario/nous` and describes "NOUS -- The Living Language for Agentic AI Systems": https://github.com/contrario/nous/blob/main/pyproject.toml
 
 Conclusion: we should rename.
 
