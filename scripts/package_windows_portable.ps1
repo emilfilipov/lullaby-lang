@@ -32,7 +32,15 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "examples") | Out-Null
 
     Copy-Item -LiteralPath $Binary -Destination (Join-Path $PackageRoot "bin\lullaby.exe")
-    Copy-Item -LiteralPath (Join-Path $RepoRoot "offline_docs\index.html") -Destination (Join-Path $PackageRoot "docs\index.html")
+    $PackageDocs = Join-Path $PackageRoot "docs\index.html"
+    python (Join-Path $RepoRoot "offline_docs\generate_offline_docs.py") $PackageDocs
+    if ($LASTEXITCODE -ne 0) {
+        throw "offline docs generation failed"
+    }
+    python (Join-Path $RepoRoot "offline_docs\verify_offline_docs.py") $PackageDocs --profile generated
+    if ($LASTEXITCODE -ne 0) {
+        throw "offline docs verification failed"
+    }
     Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\README.md") -Destination (Join-Path $PackageRoot "examples\README.md")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\valid") -Destination (Join-Path $PackageRoot "examples\valid") -Recurse
     Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\invalid") -Destination (Join-Path $PackageRoot "examples\invalid") -Recurse

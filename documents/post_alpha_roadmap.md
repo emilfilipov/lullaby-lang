@@ -32,12 +32,14 @@ Current increment:
 - The default output is `target/offline_docs/index.html`, keeping generated artifacts out of source control.
 - The generated output includes fixture-backed examples and is verified with `python offline_docs/verify_offline_docs.py target/offline_docs/index.html --profile generated`.
 - The generated output now includes package-ready user sections for quick start, CLI command reference, portable package layout, diagnostics behavior, and current limitations.
+- The generated verification profile now requires the same user-facing section and phrase coverage as the shipped-doc profile, plus generated-source metadata.
 - `scripts/verify_release.ps1` now builds and verifies generated docs before packaging.
+- `scripts/package_windows_portable.ps1` now generates and verifies `docs\index.html` during Windows portable packaging instead of copying the checked-in hand-authored HTML.
 
 Acceptance path:
 
-- Expand generated profile coverage until it reaches parity with the current hand-authored entry page.
-- Switch packaging from copying `offline_docs/index.html` to invoking the generator once generated parity is proven.
+- Keep the checked-in hand-authored entry page synchronized until it is intentionally retired or replaced by committed generated output.
+- Continue improving generated layout and source organization as more language features leave the planned state.
 
 ## 3. Platform-Agnostic Build Orchestration
 
@@ -61,7 +63,7 @@ Remaining work:
 
 - Activate the GitHub Actions workflow under `.github/workflows/portable-package.yml` once the GitHub token/session has `workflow` scope.
 - Add explicit target-triple package jobs once host-native packaging is stable on all three CI operating systems.
-- Promote the portable package archives to release assets after the generated docs reach package parity with the hand-authored Alpha 1 docs.
+- Promote the portable package archives to release assets after host-native package verification is proven on Windows, Linux, and macOS.
 
 ## 4. Installer Packaging
 
