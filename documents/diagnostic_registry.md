@@ -2,13 +2,13 @@
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
-This registry defines the stable diagnostic codes currently emitted by the Nous Lang alpha. Diagnostics are designed for both human readers and LLM/tooling consumers.
+This registry defines the stable diagnostic codes currently emitted by the Lullaby alpha. Diagnostics are designed for both human readers and LLM/tooling consumers.
 
 ## Output Modes
 
-- Concise default: `nlang check file.nl`, `nlang compile file.nl`, `nlang build file.nl`, and `nlang run file.nl` print one line per diagnostic.
-- Verbose: `nlang check --verbose file.nl`, `nlang compile --verbose file.nl`, `nlang build --verbose file.nl`, and `nlang run --verbose file.nl` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
-- JSON: `nlang check --format json file.nl`, `nlang compile --format json file.nl`, `nlang build --format json file.nl`, and `nlang run --format json file.nl` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
+- Concise default: `lullaby check file.lullaby`, `lullaby compile file.lullaby`, `lullaby build file.lullaby`, and `lullaby run file.lullaby` print one line per diagnostic.
+- Verbose: `lullaby check --verbose file.lullaby`, `lullaby compile --verbose file.lullaby`, `lullaby build --verbose file.lullaby`, and `lullaby run --verbose file.lullaby` print source excerpts, caret markers, root cause, suggested fix, notes, and runtime tracebacks when available.
+- JSON: `lullaby check --format json file.lullaby`, `lullaby compile --format json file.lullaby`, `lullaby build --format json file.lullaby`, and `lullaby run --format json file.lullaby` print deterministic JSON. `--diagnostic-format json` is accepted as an alias.
 
 JSON failures are written to stderr and keep a non-zero exit status. JSON successes are written to stdout as:
 
@@ -26,7 +26,7 @@ Each diagnostic object uses stable field names:
   "phase": "semantic",
   "severity": "error",
   "message": "argument 2 for `sys_status` must be `array<string>` but got `array<i64>`",
-  "source_path": "tests/fixtures/invalid/sys_args_type.nl",
+  "source_path": "tests/fixtures/invalid/sys_args_type.lullaby",
   "span": {"line": 2, "column": 24},
   "function": "bad",
   "explanation": "Function and builtin arguments are statically type checked.",
@@ -43,7 +43,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 
 | Code | Phase | Meaning | Likely cause | Suggested fix |
 | :--- | :--- | :--- | :--- | :--- |
-| `N0001` | source | Unsupported source extension. | File path does not end in `.nl`. | Rename the source file or pass a `.nl` file. |
+| `N0001` | source | Unsupported source extension. | File path does not end in `.lullaby`. | Rename the source file or pass a `.lullaby` file. |
 | `N0002` | resource | CLI could not read a source file. | Missing file or unreadable path. | Check path and permissions. |
 | `N0003` | resource | CLI could not write a compiled artifact. | Output path is unwritable or its directory is missing. | Choose a writable `-o` path or create the parent directory. |
 | `N0101` | lexer | Indentation does not match an active block. | A line dedented to a column not on the indent stack. | Align with an existing block level. |
@@ -93,7 +93,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `N0329` | semantic | Executable entry point is missing or has parameters. | Source passed to `compile`, `build`, or source `run` lacks a zero-argument `main`. | Add `fn main -> Type` with no parameters and call helpers from there. |
 | `N0501` | ir | IR lowering failed. | A checked program did not match the current IR lowering contract. | Treat this as a compiler bug and retry with `--backend ast` as a workaround. |
 | `N0502` | optimizer | Optimizer mode is incompatible with the selected backend. | `--optimize` was requested with the default AST backend. | Add `--backend ir` or `--backend bytecode`, or use `--optimize none`. |
-| `N0601` | bytecode | Bytecode artifact failed to load. | The `.nbc` artifact is malformed, has an unsupported format/version/metadata target or payload, names an unsupported or missing entry point, contains duplicate functions or parameters, has a mismatched function table, or contains an invalid instruction contract such as `break`/`continue` outside a loop. | Recompile the source with the current `nlang compile` or `nlang build` command. |
+| `N0601` | bytecode | Bytecode artifact failed to load. | The `.lbc` artifact is malformed, has an unsupported format/version/metadata target or payload, names an unsupported or missing entry point, contains duplicate functions or parameters, has a mismatched function table, or contains an invalid instruction contract such as `break`/`continue` outside a loop. | Recompile the source with the current `lullaby compile` or `lullaby build` command. |
 | `N0400` | runtime | Missing `main`. | Runtime cannot find an entrypoint. | Define `fn main`. |
 | `N0401` | runtime | Unknown function at runtime. | Runtime call target was not found. | Check semantic validation and function names. |
 | `N0402` | runtime | Runtime function arity mismatch. | Runtime call has wrong argument count. | Match the function signature. |

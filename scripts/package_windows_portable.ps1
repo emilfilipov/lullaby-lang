@@ -1,5 +1,5 @@
 param(
-    [string]$PackageName = "nous-lang-alpha1-windows-x64",
+    [string]$PackageName = "lullaby-alpha1-windows-x64",
     [switch]$SkipBuild
 )
 
@@ -15,13 +15,13 @@ $ChecksumPath = "$ArchivePath.sha256"
 Push-Location $RepoRoot
 try {
     if (-not $SkipBuild) {
-        cargo build --release -p nous_cli
+        cargo build --release -p lullaby_cli
         if ($LASTEXITCODE -ne 0) {
             throw "cargo release build failed"
         }
     }
 
-    $Binary = Join-Path $RepoRoot "target\release\nlang.exe"
+    $Binary = Join-Path $RepoRoot "target\release\lullaby.exe"
     if (-not (Test-Path -LiteralPath $Binary)) {
         throw "release binary not found: $Binary"
     }
@@ -31,7 +31,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "docs") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $PackageRoot "examples") | Out-Null
 
-    Copy-Item -LiteralPath $Binary -Destination (Join-Path $PackageRoot "bin\nlang.exe")
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $PackageRoot "bin\lullaby.exe")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "offline_docs\index.html") -Destination (Join-Path $PackageRoot "docs\index.html")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\README.md") -Destination (Join-Path $PackageRoot "examples\README.md")
     Copy-Item -LiteralPath (Join-Path $RepoRoot "examples\valid") -Destination (Join-Path $PackageRoot "examples\valid") -Recurse
@@ -60,33 +60,33 @@ try {
     }
 
     @"
-Nous Lang Alpha 1 portable package
+Lullaby Alpha 1 portable package
 Commit: $Commit
 $LicenseStatus
 
 Layout:
-- bin\nlang.exe: command-line tool
+- bin\lullaby.exe: command-line tool
 - docs\index.html: offline documentation
-- examples\: executable and invalid diagnostic .nl examples
+- examples\: executable and invalid diagnostic .lullaby examples
 - RELEASE_NOTES.md: release notes, verification evidence, and known limitations
 - install.cmd / install.ps1: optional user PATH setup
 - uninstall.cmd / uninstall.ps1: optional user PATH cleanup
 
 Quick start:
 1. Open PowerShell in this directory.
-2. Run: .\bin\nlang.exe --version
-3. Run: .\bin\nlang.exe docs
-4. Run: .\bin\nlang.exe examples
-5. Run: .\bin\nlang.exe check .\examples\valid\calculator.nl
-6. Run: .\bin\nlang.exe run .\examples\valid\calculator.nl
-7. Run: .\bin\nlang.exe compile --optimize alpha -o .\examples\valid\calculator.nbc .\examples\valid\calculator.nl
-8. Run: .\bin\nlang.exe build --optimize alpha -o .\examples\valid\calculator-build.nbc .\examples\valid\calculator.nl
-9. Run: .\bin\nlang.exe inspect .\examples\valid\calculator.nbc
-10. Run: .\bin\nlang.exe run .\examples\valid\calculator.nbc
+2. Run: .\bin\lullaby.exe --version
+3. Run: .\bin\lullaby.exe docs
+4. Run: .\bin\lullaby.exe examples
+5. Run: .\bin\lullaby.exe check .\examples\valid\calculator.lullaby
+6. Run: .\bin\lullaby.exe run .\examples\valid\calculator.lullaby
+7. Run: .\bin\lullaby.exe compile --optimize alpha -o .\examples\valid\calculator.lbc .\examples\valid\calculator.lullaby
+8. Run: .\bin\lullaby.exe build --optimize alpha -o .\examples\valid\calculator-build.lbc .\examples\valid\calculator.lullaby
+9. Run: .\bin\lullaby.exe inspect .\examples\valid\calculator.lbc
+10. Run: .\bin\lullaby.exe run .\examples\valid\calculator.lbc
 
 Optional PATH setup:
-- Run .\install.cmd from this directory to add bin\nlang.exe to your user PATH.
-- Open a new shell, then run: nlang --version
+- Run .\install.cmd from this directory to add bin\lullaby.exe to your user PATH.
+- Open a new shell, then run: lullaby --version
 - Run .\uninstall.cmd from this directory to remove this package from your user PATH.
 
 Checksum:
@@ -97,7 +97,7 @@ Checksum:
     @"
 package=$PackageName
 commit=$Commit
-binary=bin\nlang.exe
+binary=bin\lullaby.exe
 docs=docs\index.html
 release_notes=RELEASE_NOTES.md
 installer=install.cmd

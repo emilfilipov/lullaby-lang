@@ -1,10 +1,10 @@
-# Nous Lang (nlang) - Complete Language Specification
+# Lullaby (lullaby) - Complete Language Specification
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 
 ## Overview
 
-Nous Lang is a next-generation compiled systems programming language designed with three fundamental goals:
+Lullaby is a next-generation compiled systems programming language designed with three fundamental goals:
 
 1. **Minimalistic Syntax**: No squiggly brackets, semicolons, or other noise. Clean, readable syntax optimized for human understanding.
 2. **Token Efficiency**: Minimal token expenditure during generation by LLMs, enabling smaller models to generate correct code.
@@ -16,7 +16,7 @@ Nous Lang is a next-generation compiled systems programming language designed wi
 
 The current Rust toolchain implements a small executable subset while the wider systems-language design remains in progress. The frozen installable Alpha 1 surface is canonical in [alpha1_language_surface.md](alpha1_language_surface.md):
 
-- Source files use the `.nl` extension.
+- Source files use the `.lullaby` extension.
 - Blocks are indentation-only. Curly braces and semicolon terminators are compile errors.
 - Functions use `fn name param Type -> ReturnType` and return the last reachable expression unless an explicit `return` exits earlier.
 - Void functions use `-> void` and may use bare `return`.
@@ -33,10 +33,10 @@ The current Rust toolchain implements a small executable subset while the wider 
 - Implemented text file I/O builtins are `read_file(path)`, `write_file(path, content)`, `append_file(path, content)`, and `file_exists(path)`.
 - Implemented system command builtins are `sys_status(program, args)` and `sys_output(program, args)`, where `args` is `array<string>`. These execute a program with an argv array directly and do not invoke a shell.
 - Runtime resource failures use structured CLI formatting such as `N0414 [resource]: failed to read ...`.
-- The default execution backend is the AST runtime. `nlang run` also supports `--backend ir` and `--backend bytecode` for the current alpha subset.
+- The default execution backend is the AST runtime. `lullaby run` also supports `--backend ir` and `--backend bytecode` for the current alpha subset.
 - IR and bytecode execution can opt into the initial deterministic optimizer with `--optimize constant-fold`, `--optimize dead-code`, or `--optimize alpha`; the alpha pipeline currently includes constant folding, conservative CSE, conservative loop-invariant motion, conservative copy propagation, and dead-code elimination. The default is `--optimize none`.
-- `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] <file.nl>` emits a versioned `.nbc` instruction-bytecode artifact with metadata and a function table. `nlang build` accepts the same artifact-generation options as an alias. `nlang inspect <file.nbc>` summarizes that artifact, and `nlang run <file.nbc>` executes it after compatibility checks.
-- CLI commands are `nlang check [--verbose|--format json] <file.nl>`, `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`, `nlang inspect [--verbose|--format json] <file.nbc>`, `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl|file.nbc>`, `nlang docs`, and `nlang examples`. During development, these are also available through `cargo run -p nous_cli -- ...`. `--diagnostic-format json` is accepted as a JSON diagnostics alias.
+- `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] <file.lullaby>` emits a versioned `.lbc` instruction-bytecode artifact with metadata and a function table. `lullaby build` accepts the same artifact-generation options as an alias. `lullaby inspect <file.lbc>` summarizes that artifact, and `lullaby run <file.lbc>` executes it after compatibility checks.
+- CLI commands are `lullaby check [--verbose|--format json] <file.lullaby>`, `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`, `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`, `lullaby inspect [--verbose|--format json] <file.lbc>`, `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lullaby|file.lbc>`, `lullaby docs`, and `lullaby examples`. During development, these are also available through `cargo run -p lullaby_cli -- ...`. `--diagnostic-format json` is accepted as a JSON diagnostics alias.
 
 The current parser grammar is drafted in [formal_grammar.md](formal_grammar.md).
 
@@ -46,7 +46,7 @@ The remaining sections describe the intended full systems language. They are des
 
 ## Language Philosophy
 
-Nous Lang rejects traditional design patterns that prioritize compiler convenience over code clarity:
+Lullaby rejects traditional design patterns that prioritize compiler convenience over code clarity:
 
 - **No Braces**: Control blocks defined through indentation only (Python-inspired but simpler)
 - **No Semicolons**: Line-based statements without terminator requirements
@@ -56,18 +56,18 @@ Nous Lang rejects traditional design patterns that prioritize compiler convenien
 
 ## Core Language Components
 
-### 1. Syntax Design (See: `nous_lang_syntax_design.md`)
+### 1. Syntax Design (See: `lullaby_syntax_design.md`)
 
 The syntax is intentionally minimal and predictable:
 
 **Variables**:
-```nlang
+```lullaby
 type name = value   // Type prefix required for clarity
 name               // Type inferred from context
 ```
 
 **Functions**:
-```nlang
+```lullaby
 fn add x i64 y i64 -> i64
     x + y
 
@@ -79,7 +79,7 @@ fn log message string -> void
 
 **Return Rule**: A non-void function returns the last reachable expression unless an explicit `return` exits earlier. A `void` function returns no value and may use bare `return` for early exit.
 
-### 2. Memory Management (See: `nous_lang_memory_management.md`)
+### 2. Memory Management (See: `lullaby_memory_management.md`)
 
 Reference-counted memory with automatic lifetime management:
 
@@ -96,12 +96,12 @@ Reference-counted memory with automatic lifetime management:
 - `map<K,V>` - Key-value mappings
 - `ptr<T>`, `ref<T>` - Pointers and references
 
-### 3. Control Structures (See: `nous_lang_control_structures.md`)
+### 3. Control Structures (See: `lullaby_control_structures.md`)
 
 Flat control flow without nesting complexity:
 
 **Conditionals**:
-```nlang
+```lullaby
 if condition
     then_statements
 elif other_condition
@@ -111,7 +111,7 @@ else
 ```
 
 **Loops**:
-```nlang
+```lullaby
 for variable from start to end [by step]:
     loop_body
 
@@ -125,7 +125,7 @@ break  // Exit loop
 continue  // Skip remaining statements in iteration
 ```
 
-### 4. Type System (See: `nous_lang_type_system.md`)
+### 4. Type System (See: `lullaby_type_system.md`)
 
 Pragmatic type system for systems programming:
 
@@ -135,14 +135,14 @@ Pragmatic type system for systems programming:
 - **Type inference**: Automatic type detection from usage
 
 **Core Types**:
-```nlang
+```lullaby
 type Integer is num  int, uint
 type Float is num  float, double
 type Bool is bool  false, true
 type Text is str  string, char
 ```
 
-### 5. I/O and Concurrency (See: `nous_lang_input_output.md`)
+### 5. I/O and Concurrency (See: `lullaby_input_output.md`)
 
 Efficient systems programming primitives:
 
@@ -161,7 +161,7 @@ Efficient systems programming primitives:
 ## Planned Syntax Reference
 
 ### Primitives
-```nlang
+```lullaby
 # Boolean values
 
 false, true
@@ -192,7 +192,7 @@ none  // Represents absence of value
 **Functional**: `map reduce fold select min max avg sum mode`
 
 ### Control Flow
-```nlang
+```lullaby
 if condition:
     statements
 
@@ -206,7 +206,7 @@ end_switch
 ```
 
 ### Functions
-```nlang
+```lullaby
 fn function_name param Type -> ReturnType
     # final expression is returned
     result_value
@@ -222,7 +222,7 @@ fn side_effect message string -> void
 ```
 
 ### Structs and Objects
-```nlang
+```lullaby
 struct Type
     field1: type1  // Explicit typing
     field2        // Inferred typing
@@ -236,7 +236,7 @@ type_instance = Type(field1: value1, field2: value2)  // Direct construction
 ```
 
 ### Collections
-```nlang
+```lullaby
 let values array<i64> = [1, 2, 3]
 values[0]
 
@@ -252,7 +252,7 @@ filter(coll, pred)   // Selective collection
 ```
 
 ### Memory Operations
-```nlang
+```lullaby
 alloc(size/type)      // Allocate memory
 store(ptr, value)     // Replace value in allocated memory
 dealloc(ptr)          // Free allocated memory
@@ -263,7 +263,7 @@ duplicate(value)     // Deep copy
 ```
 
 Current alpha memory form:
-```nlang
+```lullaby
 fn main -> i64
     let ptr ptr_i64 = alloc(0)
     store(ptr, 41)
@@ -274,20 +274,20 @@ fn main -> i64
 
 ### I/O Operations
 Current alpha text file and system command form:
-```nlang
+```lullaby
 fn main -> string
     write_file("target/example.txt", "alpha")
     append_file("target/example.txt", " beta")
     read_file("target/example.txt")
 ```
 
-```nlang
+```lullaby
 fn main -> i64
     sys_status("rustc", ["--version"])
 ```
 
 Planned standard-library I/O forms:
-```nlang
+```lullaby
 io.read(path)         # Read entire file
 io.readlines(path, max_lines=N)  # Read limited lines
 io.open(path, mode)   # Open stream for reading/writing
@@ -300,7 +300,7 @@ mm_data = mm_file.data_pointer
 ```
 
 ### Concurrency Primitives
-```nlang
+```lullaby
 thread func = spawn_thread(func, args)
 result = wait(thread)
 
@@ -350,7 +350,7 @@ results = await_all(tasks)
 
 ## Comparison with Existing Languages
 
-| Feature | C/C++/Java | Python | Nous Lang |
+| Feature | C/C++/Java | Python | Lullaby |
 |---------|------------|--------|-----------|
 | Block syntax | Brace-delimited blocks | Indentation | **Indentation only** |
 | Statement terminator | Semicolon `;` | None (new line) | **No terminators** |
@@ -384,13 +384,13 @@ results = await_all(tasks)
 ## Getting Started Examples
 
 ### Hello World
-```nlang
+```lullaby
 fn main -> string
-    "Hello, Nous Lang!"
+    "Hello, Lullaby!"
 ```
 
 ### Simple Calculator
-```nlang
+```lullaby
 fn add x i64 y i64 -> i64
     x + y
 
@@ -400,7 +400,7 @@ fn main -> i64
 ```
 
 ### Branching
-```nlang
+```lullaby
 fn main -> i64
     if true
         42
@@ -409,7 +409,7 @@ fn main -> i64
 ```
 
 ### Loops
-```nlang
+```lullaby
 fn main -> i64
     let value i64 = 0
     while value < 4
@@ -417,7 +417,7 @@ fn main -> i64
     value
 ```
 
-```nlang
+```lullaby
 fn main -> i64
     let total i64 = 0
     for i from 1 to 3
@@ -425,7 +425,7 @@ fn main -> i64
     total
 ```
 
-```nlang
+```lullaby
 fn main -> i64
     let value i64 = 0
     loop
@@ -437,13 +437,13 @@ fn main -> i64
 ```
 
 ### Boolean Logic
-```nlang
+```lullaby
 fn main -> bool
     not false and true or false
 ```
 
 ### Arrays
-```nlang
+```lullaby
 fn main -> i64
     let values array<i64> = [2, 4, 6]
     values[2]
@@ -460,9 +460,9 @@ fn main -> i64
 
 ## Conclusion
 
-Nous Lang represents a fresh approach to systems programming, combining the performance and type safety of compiled languages with the simplicity and LLM-friendliness of modern design. By eliminating traditional sources of complexity (braces, semicolons, deep nesting) while maintaining rigorous type checking and memory safety, Nous Lang enables developers to write clear, efficient code that can be reliably generated by smaller language models.
+Lullaby represents a fresh approach to systems programming, combining the performance and type safety of compiled languages with the simplicity and LLM-friendliness of modern design. By eliminating traditional sources of complexity (braces, semicolons, deep nesting) while maintaining rigorous type checking and memory safety, Lullaby enables developers to write clear, efficient code that can be reliably generated by smaller language models.
 
-This specification provides the foundation for both human developers building complex systems programs and AI models generating correct, optimized code. The minimalist design philosophy ensures that as LLM capabilities improve, Nous Lang will continue to benefit from more sophisticated generation while maintaining its core advantages of simplicity and efficiency.
+This specification provides the foundation for both human developers building complex systems programs and AI models generating correct, optimized code. The minimalist design philosophy ensures that as LLM capabilities improve, Lullaby will continue to benefit from more sophisticated generation while maintaining its core advantages of simplicity and efficiency.
 
 ---
 **Language Version**: 1.0 (Alpha Specification)

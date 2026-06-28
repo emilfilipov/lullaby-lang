@@ -1,20 +1,20 @@
-# Nous Lang Alpha 1 Release Notes
+# Lullaby Alpha 1 Release Notes
 
 Release: `v0.1.0-alpha.2`
 
 Functional baseline commit: `51f85b5`
 
-Package artifact: `dist\nous-lang-alpha1-windows-x64.zip`
+Package artifact: `dist\lullaby-alpha1-windows-x64.zip`
 
-Checksum artifact: `dist\nous-lang-alpha1-windows-x64.zip.sha256`
+Checksum artifact: `dist\lullaby-alpha1-windows-x64.zip.sha256`
 
-Alpha 1 is the first installable Nous Lang toolchain checkpoint. It is a minimal working language and tooling release, not the full systems language.
+Alpha 1 is the first installable Lullaby toolchain checkpoint. It is a minimal working language and tooling release, not the full systems language.
 
 ## Package Contents
 
-- `bin\nlang.exe`: release CLI binary.
+- `bin\lullaby.exe`: release CLI binary.
 - `docs\index.html`: self-contained offline documentation.
-- `examples\`: executable `.nl` examples plus invalid diagnostic examples.
+- `examples\`: executable `.lullaby` examples plus invalid diagnostic examples.
 - `install.cmd` / `install.ps1`: optional user PATH setup helper.
 - `uninstall.cmd` / `uninstall.ps1`: optional user PATH cleanup helper.
 - `README.txt`: package quick start and optional PATH setup.
@@ -27,36 +27,36 @@ Alpha 1 is the first installable Nous Lang toolchain checkpoint. It is a minimal
 From the unpacked package directory:
 
 ```powershell
-.\bin\nlang.exe --version
-.\bin\nlang.exe docs
-.\bin\nlang.exe examples
-.\bin\nlang.exe check .\examples\valid\calculator.nl
-.\bin\nlang.exe run .\examples\valid\calculator.nl
-.\bin\nlang.exe compile --optimize alpha -o .\examples\valid\calculator.nbc .\examples\valid\calculator.nl
-.\bin\nlang.exe build --optimize alpha -o .\examples\valid\calculator-build.nbc .\examples\valid\calculator.nl
-.\bin\nlang.exe inspect .\examples\valid\calculator.nbc
-.\bin\nlang.exe run .\examples\valid\calculator.nbc
+.\bin\lullaby.exe --version
+.\bin\lullaby.exe docs
+.\bin\lullaby.exe examples
+.\bin\lullaby.exe check .\examples\valid\calculator.lullaby
+.\bin\lullaby.exe run .\examples\valid\calculator.lullaby
+.\bin\lullaby.exe compile --optimize alpha -o .\examples\valid\calculator.lbc .\examples\valid\calculator.lullaby
+.\bin\lullaby.exe build --optimize alpha -o .\examples\valid\calculator-build.lbc .\examples\valid\calculator.lullaby
+.\bin\lullaby.exe inspect .\examples\valid\calculator.lbc
+.\bin\lullaby.exe run .\examples\valid\calculator.lbc
 ```
 
 Optional user PATH setup from the same unpacked package directory:
 
 ```powershell
 .\install.cmd
-nlang --version
+lullaby --version
 .\uninstall.cmd
 ```
 
 Verify a downloaded package checksum:
 
 ```powershell
-$expected = (Get-Content .\nous-lang-alpha1-windows-x64.zip.sha256 -Raw).Split(" ")[0]
-$actual = (Get-FileHash .\nous-lang-alpha1-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\lullaby-alpha1-windows-x64.zip.sha256 -Raw).Split(" ")[0]
+$actual = (Get-FileHash .\lullaby-alpha1-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw "checksum mismatch" }
 ```
 
 ## Supported Language Surface
 
-- `.nl` source files.
+- `.lullaby` source files.
 - Indentation-only blocks; curly braces and semicolon terminators are errors.
 - Functions with typed parameters and explicit return types.
 - Last-expression returns, explicit `return`, and `-> void`.
@@ -67,29 +67,29 @@ if ($actual -ne $expected) { throw "checksum mismatch" }
 - Memory builtins: `alloc`, `load`, `store`, and `dealloc`.
 - Text file builtins: `read_file`, `write_file`, `append_file`, and `file_exists`.
 - Safe program-plus-argv command builtins: `sys_status` and `sys_output`.
-- Executable source passed to `nlang compile` or source `nlang run` must define zero-argument `main`; helper-only files remain valid for `nlang check`.
+- Executable source passed to `lullaby compile` or source `lullaby run` must define zero-argument `main`; helper-only files remain valid for `lullaby check`.
 
 See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feature surface.
 
 ## CLI Surface
 
-- `nlang check [--verbose|--format json] <file.nl>`
-- `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
-- `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
-- `nlang inspect [--verbose|--format json] <file.nbc>`
-- `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
-- `nlang run [--verbose|--format json] <file.nbc>`
-- `nlang docs`
-- `nlang examples`
-- `nlang --version`
+- `lullaby check [--verbose|--format json] <file.lullaby>`
+- `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`
+- `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`
+- `lullaby inspect [--verbose|--format json] <file.lbc>`
+- `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lullaby>`
+- `lullaby run [--verbose|--format json] <file.lbc>`
+- `lullaby docs`
+- `lullaby examples`
+- `lullaby --version`
 
-`--diagnostic-format json` is accepted as a JSON diagnostics alias. `nlang build` is an artifact-generation alias for `nlang compile`.
+`--diagnostic-format json` is accepted as a JSON diagnostics alias. `lullaby build` is an artifact-generation alias for `lullaby compile`.
 
 ## Compiled Artifact Contract
 
-`nlang compile` and `nlang build` write a versioned `.nbc` JSON artifact with:
+`lullaby compile` and `lullaby build` write a versioned `.lbc` JSON artifact with:
 
-- `format`: `nous-bytecode`
+- `format`: `lullaby-bytecode`
 - `version`: `3`
 - deterministic metadata
 - entry point
@@ -97,7 +97,7 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 - instruction-bytecode module with dedicated function `instructions`
 - instruction-contract validation for entry-point shape and loop-control placement
 
-`nlang inspect file.nbc` prints artifact metadata and function signatures without executing the program. `nlang run file.nbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, and function-table/module compatibility before execution.
+`lullaby inspect file.lbc` prints artifact metadata and function signatures without executing the program. `lullaby run file.lbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, and function-table/module compatibility before execution.
 
 ## Diagnostics
 
@@ -110,7 +110,7 @@ Notable codes:
 - `N0329`: executable entry point is missing or has parameters.
 - `N0501`: IR lowering failure.
 - `N0502`: optimizer mode requires IR or bytecode backend.
-- `N0601`: malformed, unsupported, incompatible, or instruction-contract-invalid `.nbc` artifact.
+- `N0601`: malformed, unsupported, incompatible, or instruction-contract-invalid `.lbc` artifact.
 
 See [diagnostic_registry.md](diagnostic_registry.md) for the full registry.
 
@@ -135,7 +135,7 @@ git diff --check -- .
 
 The Markdown local-reference check also passed with the repository's file-like local target filter.
 
-`scripts\verify_release.ps1` builds the portable package and smoke-tests the packaged `nlang.exe` for:
+`scripts\verify_release.ps1` builds the portable package and smoke-tests the packaged `lullaby.exe` for:
 
 - `--version`
 - `docs`
@@ -144,8 +144,8 @@ The Markdown local-reference check also passed with the repository's file-like l
 - source `run`
 - `compile`
 - `build`
-- `.nbc` artifact `inspect`
-- `.nbc` artifact `run`
+- `.lbc` artifact `inspect`
+- `.lbc` artifact `run`
 - invalid example diagnostics
 - dry-run PATH setup and cleanup helpers
 - generated zip checksum

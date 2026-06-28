@@ -1,0 +1,4 @@
+fn main -> string
+    write_file("target/lullaby_fixture_io.txt", "alpha")
+    append_file("target/lullaby_fixture_io.txt", " beta")
+    read_file("target/lullaby_fixture_io.txt")

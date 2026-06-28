@@ -1,7 +1,0 @@
-[package]
-name = "nous_lexer"
-version = "0.1.0-alpha.2"
-edition = "2024"
-
-[dependencies]
-nous_diagnostics = { path = "../nous_diagnostics" }

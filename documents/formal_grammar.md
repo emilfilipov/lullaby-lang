@@ -1,4 +1,4 @@
-# Nous Lang Alpha 1 Formal Grammar
+# Lullaby Alpha 1 Formal Grammar
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 Frozen Alpha 1 surface: see [alpha1_language_surface.md](alpha1_language_surface.md).
@@ -9,7 +9,7 @@ This document is the formal grammar draft for the current implemented Alpha 1 pa
 
 This grammar covers:
 
-- `.nl` source files.
+- `.lullaby` source files.
 - Top-level function declarations.
 - Indentation-only blocks.
 - `let` bindings, assignment, return, break, continue, expressions, branches, while loops, range-for loops, and infinite loops.
@@ -86,7 +86,7 @@ parameter =
 
 Examples:
 
-```nlang
+```lullaby
 fn add x i64 y i64 -> i64
     x + y
 
@@ -94,7 +94,7 @@ fn main -> i64
     add(40, 2)
 ```
 
-Executable commands such as `nlang run`, `nlang compile`, and `nlang build` require a zero-argument `main`, but that is a semantic/executable validation rule rather than grammar.
+Executable commands such as `lullaby run`, `lullaby compile`, and `lullaby build` require a zero-argument `main`, but that is a semantic/executable validation rule rather than grammar.
 
 ## Types
 

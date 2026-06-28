@@ -1,0 +1,4 @@
+fn main -> string
+    write_file("lullaby_example_io.txt", "alpha")
+    append_file("lullaby_example_io.txt", " beta")
+    read_file("lullaby_example_io.txt")

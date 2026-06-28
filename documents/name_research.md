@@ -2,7 +2,7 @@
 
 Date researched: 2026-06-28.
 
-This document evaluates replacement names for Nous Lang. It is not a legal clearance report. Before a final public rename, run a proper trademark/domain/package-name clearance pass.
+This document records the rename research for the project formerly named Nous Lang and the current decision to use Lullaby. It is not a legal clearance report. Before a final public rename, run a proper trademark/domain/package-name clearance pass.
 
 ## Naming Constraints
 
@@ -23,13 +23,13 @@ The name should be short, easy to pronounce, easy to search, plausible as a comm
 - The public website `nous-lang.org` presents NOUS as a language/compliance infrastructure for agentic AI systems: https://nous-lang.org/
 - The GitHub project metadata points to `contrario/nous` and describes "NOUS -- The Living Language for Agentic AI Systems": https://github.com/contrario/nous/blob/main/pyproject.toml
 
-Conclusion: we should rename.
+Conclusion: the old name should be retired.
 
-## Candidate Assessment
+## Earlier Candidate Assessment
 
 | Candidate | Fit | Collision Risk | Assessment |
 | :--- | :--- | :--- | :--- |
-| **Seren** | Short, calm, memorable; can imply clarity/star/navigation. Works as `seren`, `serenc`, or `seren-lang`. | Medium-low. No obvious programming-language collision in web search. `cargo search seren` has a small placeholder-looking crate; PyPI has `seren 0.0.1`; npm package name appears available. There are non-language products such as Seren case-management software and SerenDB. | **Best current candidate.** Strong enough brand, relatively clean in developer-language space, not too mystical. |
+| **Seren** | Short, calm, memorable; can imply clarity/star/navigation. Works as `seren`, `serenc`, or `seren-lang`. | Medium-low. No obvious programming-language collision in web search. `cargo search seren` has a small placeholder-looking crate; PyPI has `seren 0.0.1`; npm package name appears available. There are non-language products such as Seren case-management software and SerenDB. | Earlier leading fallback before Lullaby was selected. Strong enough brand, relatively clean in developer-language space, not too mystical. |
 | **Syra** | Very short and distinctive. Works as `syra`, `syrac`, or `syra-lang`. | Medium. No obvious "Syra Lang" programming-language collision in web search. `cargo search syra` has a cryptography crate; npm has `syra`; PyPI appears free. The word is less meaningful and has unrelated uses. | Good fallback if we want a coined, compact name. Needs stronger story. |
 | **Sorin** | Human-name feel, concise, pronounceable. Works as `sorin` or `sorin-lang`. | Medium. No obvious language collision; npm appears free. PyPI has `sorin`; common personal name and PL professor search noise. | Acceptable, but weaker brand semantics for an AI-optimized systems language. |
 | **Vireo** | Distinctive, lively, pronounceable; a bird name. | Medium-high. No exact programming language found, but Twitter/X has `vireo` video-processing library, PyPI has many `vireo` releases, npm has `vireo`, and there are older technical products with the name. | Usable only if we accept package-name friction. |
@@ -44,19 +44,19 @@ Conclusion: we should rename.
 | **Augur** | Similar semantic field to Seer. | High. Augur is a probabilistic programming language/compiler and other developer/security tooling. | Avoid. |
 | **Scry** | Strong semantic fit. | High. Scry is a Crystal language server and there are current "Scry programming language" references. | Avoid. |
 
-## Recommendation
+## Current Decision
 
-Use **Seren** as the leading rename candidate.
+Use **Lullaby** as the project name.
 
 Suggested public spelling:
 
-- Language: **Seren**
-- Formal: **Seren Lang**
-- Compiler/CLI possibilities: `seren`, `serenc`, or `srl`
-- Repository/package possibilities: `seren-lang`, `seren`, or `serenc`
-- File extension candidates: `.srn` or `.seren`
+- Language: **Lullaby**
+- Formal: **Lullaby**
+- Compiler/CLI: `lullaby`
+- Repository/package possibilities: `lullaby` or `lullaby-lang`
+- File extension: `.lullaby`
 
-Prefer `.srn` if we want a compact extension and lower collision with generic `.ser` serialized-file usage. Prefer `.seren` if discoverability matters more than brevity.
+The long extension is deliberate: it is clear in examples, searchable in docs, and reinforces the brand during the alpha period.
 
 ## Why Not Seer
 
@@ -69,12 +69,12 @@ Seer is semantically appealing, but the search surface is already crowded in exa
 
 That makes "Seer Lang" harder to search for and easier to confuse with existing developer tools.
 
-## Follow-Up Clearance Before Final Rename
+## Follow-Up Clearance
 
-Before changing the repo:
+Before publishing broadly:
 
-1. Check USPTO/EUIPO/WIPO trademark records for the final candidate and likely package names.
-2. Check domain options such as `<name>-lang.org`, `<name>lang.org`, and `<name>.dev`.
+1. Check USPTO/EUIPO/WIPO trademark records for Lullaby and likely package names.
+2. Check domain options such as `lullaby-lang.org`, `lullabylang.org`, and `lullaby.dev`.
 3. Reserve or verify package names in crates.io, npm, PyPI, GitHub, and VS Code extension marketplace.
-4. Decide whether the current `.nl` extension changes immediately or remains as a transitional compatibility extension.
-5. Rename in one explicit implementation pass: docs, crate metadata, CLI binary, package scripts, offline docs, examples, diagnostics, release artifacts, and ClickUp folder/list references.
+4. Decide whether `.lullaby` remains the canonical extension long term or receives a shorter alias later.
+5. Rename external project surfaces that live outside this repository, including the GitHub repository and ClickUp folder/list references.

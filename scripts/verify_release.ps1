@@ -1,5 +1,5 @@
 param(
-    [string]$PackageName = "nous-lang-alpha1-windows-x64"
+    [string]$PackageName = "lullaby-alpha1-windows-x64"
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,11 +10,11 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $PackageRoot = Join-Path $RepoRoot "dist\$PackageName"
 $ArchivePath = Join-Path $RepoRoot "dist\$PackageName.zip"
 $ChecksumPath = "$ArchivePath.sha256"
-$Nlang = Join-Path $PackageRoot "bin\nlang.exe"
-$Example = Join-Path $PackageRoot "examples\valid\calculator.nl"
-$InvalidExample = Join-Path $PackageRoot "examples\invalid\type_mismatch.nl"
-$Artifact = Join-Path $PackageRoot "examples\valid\calculator.nbc"
-$BuildArtifact = Join-Path $PackageRoot "examples\valid\calculator-build.nbc"
+$Lullaby = Join-Path $PackageRoot "bin\lullaby.exe"
+$Example = Join-Path $PackageRoot "examples\valid\calculator.lullaby"
+$InvalidExample = Join-Path $PackageRoot "examples\invalid\type_mismatch.lullaby"
+$Artifact = Join-Path $PackageRoot "examples\valid\calculator.lbc"
+$BuildArtifact = Join-Path $PackageRoot "examples\valid\calculator-build.lbc"
 $InstallScript = Join-Path $PackageRoot "install.ps1"
 $UninstallScript = Join-Path $PackageRoot "uninstall.ps1"
 
@@ -33,8 +33,8 @@ try {
 
     & (Join-Path $ScriptDir "package_windows_portable.ps1") -PackageName $PackageName
 
-    if (-not (Test-Path -LiteralPath $Nlang)) {
-        throw "packaged nlang.exe not found: $Nlang"
+    if (-not (Test-Path -LiteralPath $Lullaby)) {
+        throw "packaged lullaby.exe not found: $Lullaby"
     }
     if (-not (Test-Path -LiteralPath (Join-Path $PackageRoot "docs\index.html"))) {
         throw "packaged offline docs not found"
@@ -67,30 +67,30 @@ try {
         throw "packaged uninstall.cmd not found"
     }
 
-    & $Nlang --version
-    if ($LASTEXITCODE -ne 0) { throw "nlang --version failed" }
-    & $Nlang docs
-    if ($LASTEXITCODE -ne 0) { throw "nlang docs failed" }
-    & $Nlang examples
-    if ($LASTEXITCODE -ne 0) { throw "nlang examples failed" }
-    & $Nlang check $Example
-    if ($LASTEXITCODE -ne 0) { throw "nlang check failed: $Example" }
-    & $Nlang run $Example
-    if ($LASTEXITCODE -ne 0) { throw "nlang run failed: $Example" }
-    & $Nlang check $InvalidExample
+    & $Lullaby --version
+    if ($LASTEXITCODE -ne 0) { throw "lullaby --version failed" }
+    & $Lullaby docs
+    if ($LASTEXITCODE -ne 0) { throw "lullaby docs failed" }
+    & $Lullaby examples
+    if ($LASTEXITCODE -ne 0) { throw "lullaby examples failed" }
+    & $Lullaby check $Example
+    if ($LASTEXITCODE -ne 0) { throw "lullaby check failed: $Example" }
+    & $Lullaby run $Example
+    if ($LASTEXITCODE -ne 0) { throw "lullaby run failed: $Example" }
+    & $Lullaby check $InvalidExample
     if ($LASTEXITCODE -eq 0) {
         throw "invalid example unexpectedly passed check: $InvalidExample"
     }
     Remove-Item -LiteralPath $Artifact -Force -ErrorAction SilentlyContinue
-    & $Nlang compile --optimize alpha -o $Artifact $Example
-    if ($LASTEXITCODE -ne 0) { throw "nlang compile failed: $Example" }
+    & $Lullaby compile --optimize alpha -o $Artifact $Example
+    if ($LASTEXITCODE -ne 0) { throw "lullaby compile failed: $Example" }
     Remove-Item -LiteralPath $BuildArtifact -Force -ErrorAction SilentlyContinue
-    & $Nlang build --optimize alpha -o $BuildArtifact $Example
-    if ($LASTEXITCODE -ne 0) { throw "nlang build failed: $Example" }
-    & $Nlang inspect $Artifact
-    if ($LASTEXITCODE -ne 0) { throw "nlang inspect failed: $Artifact" }
-    & $Nlang run $Artifact
-    if ($LASTEXITCODE -ne 0) { throw "nlang run failed: $Artifact" }
+    & $Lullaby build --optimize alpha -o $BuildArtifact $Example
+    if ($LASTEXITCODE -ne 0) { throw "lullaby build failed: $Example" }
+    & $Lullaby inspect $Artifact
+    if ($LASTEXITCODE -ne 0) { throw "lullaby inspect failed: $Artifact" }
+    & $Lullaby run $Artifact
+    if ($LASTEXITCODE -ne 0) { throw "lullaby run failed: $Artifact" }
     powershell -ExecutionPolicy Bypass -File $InstallScript -DryRun
     if ($LASTEXITCODE -ne 0) { throw "install.ps1 dry-run failed" }
     powershell -ExecutionPolicy Bypass -File $UninstallScript -DryRun

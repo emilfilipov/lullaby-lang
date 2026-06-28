@@ -21,10 +21,10 @@ function Normalize-PathValue {
 
 $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BinPath = Join-Path $PackageRoot "bin"
-$NlangExe = Join-Path $BinPath "nlang.exe"
+$LullabyExe = Join-Path $BinPath "lullaby.exe"
 
-if (-not (Test-Path -LiteralPath $NlangExe)) {
-    throw "nlang.exe not found at $NlangExe. Run this script from the root of the Nous Lang portable package."
+if (-not (Test-Path -LiteralPath $LullabyExe)) {
+    throw "lullaby.exe not found at $LullabyExe. Run this script from the root of the Lullaby portable package."
 }
 
 $ResolvedBinPath = (Resolve-Path -LiteralPath $BinPath).ProviderPath
@@ -45,7 +45,7 @@ foreach ($Part in $Parts) {
 }
 
 if ($AlreadyPresent) {
-    Write-Output "Nous Lang bin directory is already in the user PATH: $ResolvedBinPath"
+    Write-Output "Lullaby bin directory is already in the user PATH: $ResolvedBinPath"
     exit 0
 }
 
@@ -56,5 +56,5 @@ if ($DryRun) {
 }
 
 [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-Write-Output "Added Nous Lang to the user PATH: $ResolvedBinPath"
-Write-Output "Open a new PowerShell or cmd window, then run: nlang --version"
+Write-Output "Added Lullaby to the user PATH: $ResolvedBinPath"
+Write-Output "Open a new PowerShell or cmd window, then run: lullaby --version"

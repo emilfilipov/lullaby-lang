@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the self-contained Nous Lang offline documentation entry point."""
+"""Verify the self-contained Lullaby offline documentation entry point."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ REQUIRED_IDS = [
 ]
 
 REQUIRED_PHRASES = [
-    ".nl",
+    ".lullaby",
     "Alpha 1 language surface",
     "Indentation defines scope",
     "Last-expression return",
@@ -71,27 +71,27 @@ REQUIRED_PHRASES = [
     "sys_status(program, args)",
     "sys_output(program, args)",
     "array&lt;string&gt;",
-    "cargo run -p nous_cli -- check",
-    "cargo run -p nous_cli -- compile",
-    "cargo run -p nous_cli -- build",
-    "cargo run -p nous_cli -- inspect",
-    "cargo run -p nous_cli -- run",
-    "cargo run -p nous_cli -- docs",
-    "cargo run -p nous_cli -- examples",
-    "nlang inspect",
-    "nlang docs",
-    "nlang examples",
-    "bin\\nlang.exe",
+    "cargo run -p lullaby_cli -- check",
+    "cargo run -p lullaby_cli -- compile",
+    "cargo run -p lullaby_cli -- build",
+    "cargo run -p lullaby_cli -- inspect",
+    "cargo run -p lullaby_cli -- run",
+    "cargo run -p lullaby_cli -- docs",
+    "cargo run -p lullaby_cli -- examples",
+    "lullaby inspect",
+    "lullaby docs",
+    "lullaby examples",
+    "bin\\lullaby.exe",
     "docs\\index.html",
-    "examples\\valid\\calculator.nl",
-    "nous-lang-alpha1-windows-x64.zip.sha256",
+    "examples\\valid\\calculator.lullaby",
+    "lullaby-alpha1-windows-x64.zip.sha256",
     "install.cmd",
     "uninstall.cmd",
     "package_windows_portable.ps1",
     "verify_release.ps1",
     "publish_github_release.ps1",
     "RELEASE_NOTES.md",
-    ".nbc",
+    ".lbc",
     "instruction-bytecode",
     "instruction contract",
     "function instructions",
@@ -164,11 +164,11 @@ def verify_examples(html_text: str) -> str | None:
     for block in PRE_BLOCK_RE.finditer(html_text):
         attrs = attrs_from(block.group("attrs"))
         snippet = normalize_snippet(block.group("code"))
-        looks_like_nlang = "\n" in snippet and (
+        looks_like_lullaby = "\n" in snippet and (
             snippet.startswith("fn ") or "\nfn " in snippet
         )
 
-        if not looks_like_nlang:
+        if not looks_like_lullaby:
             continue
 
         if "data-planned" in attrs:
@@ -176,7 +176,7 @@ def verify_examples(html_text: str) -> str | None:
 
         fixture_attr = attrs.get("data-fixture")
         if not fixture_attr:
-            return f"nlang example missing data-fixture metadata: {snippet[:80]}"
+            return f"lullaby example missing data-fixture metadata: {snippet[:80]}"
 
         mode = attrs.get("data-mode", "check")
         if mode not in {"check", "run"}:
@@ -197,11 +197,11 @@ def verify_examples(html_text: str) -> str | None:
             fixture_modes[fixture_path] = mode
 
     if not fixture_modes:
-        return "no executable nlang examples were found"
+        return "no executable lullaby examples were found"
 
     for fixture_path, mode in sorted(fixture_modes.items()):
         result = subprocess.run(
-            ["cargo", "run", "--quiet", "-p", "nous_cli", "--", mode, str(fixture_path)],
+            ["cargo", "run", "--quiet", "-p", "lullaby_cli", "--", mode, str(fixture_path)],
             cwd=REPO,
             capture_output=True,
             text=True,
@@ -209,7 +209,7 @@ def verify_examples(html_text: str) -> str | None:
         )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()
-            return f"fixture did not pass `nlang {mode}`: {fixture_path} {detail}"
+            return f"fixture did not pass `lullaby {mode}`: {fixture_path} {detail}"
 
     return None
 

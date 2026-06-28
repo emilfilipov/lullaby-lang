@@ -1,16 +1,16 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/nous_cli",
-    "crates/nous_diagnostics",
-    "crates/nous_ir",
-    "crates/nous_lexer",
-    "crates/nous_parser",
-    "crates/nous_runtime",
-    "crates/nous_semantics",
+    "crates/lullaby_cli",
+    "crates/lullaby_diagnostics",
+    "crates/lullaby_ir",
+    "crates/lullaby_lexer",
+    "crates/lullaby_parser",
+    "crates/lullaby_runtime",
+    "crates/lullaby_semantics",
 ]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/emilfilipov/nous_lang"
+repository = "https://github.com/emilfilipov/lullaby"

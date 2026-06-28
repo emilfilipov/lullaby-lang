@@ -1,28 +1,28 @@
-# Nous Lang Core Language Rules
+# Lullaby Core Language Rules
 
-This file is the canonical location for global Nous Lang rules that apply across all subsystem documents and implementation work.
+This file is the canonical location for global Lullaby rules that apply across all subsystem documents and implementation work.
 
 For the installable Alpha 1 feature freeze, see [alpha1_language_surface.md](alpha1_language_surface.md). Examples in this file may mention planned scoped constructs to show that indentation remains the universal block rule; they are not automatically implemented Alpha 1 syntax.
 
 ## Canonical Source Extension
 
-Nous Lang source files use the `.nl` file extension.
+Lullaby source files use the `.lullaby` file extension.
 
 Examples:
 
 ```text
-main.nl
-kernel.nl
-memory.nl
-driver.nl
-allocator.nl
+main.lullaby
+kernel.lullaby
+memory.lullaby
+driver.lullaby
+allocator.lullaby
 ```
 
-The compiler, installer, tests, examples, CLI, diagnostics, generated project templates, and documentation must consistently use `.nl` unless the language specification is intentionally changed.
+The compiler, installer, tests, examples, CLI, diagnostics, generated project templates, and documentation must consistently use `.lullaby` unless the language specification is intentionally changed.
 
 ## Indentation-Only Scope
 
-Nous Lang / nlang uses indentation-only scope.
+Lullaby / lullaby uses indentation-only scope.
 
 Curly brace characters are forbidden as block delimiters in:
 
@@ -39,7 +39,7 @@ Curly brace characters are forbidden as block delimiters in:
 
 Canonical block form:
 
-```nlang
+```lullaby
 fn add x y
     x + y
 

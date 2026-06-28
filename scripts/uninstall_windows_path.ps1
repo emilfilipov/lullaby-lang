@@ -23,7 +23,7 @@ $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BinPath = Join-Path $PackageRoot "bin"
 
 if (-not (Test-Path -LiteralPath $BinPath)) {
-    throw "bin directory not found at $BinPath. Run this script from the root of the Nous Lang portable package."
+    throw "bin directory not found at $BinPath. Run this script from the root of the Lullaby portable package."
 }
 
 $ResolvedBinPath = (Resolve-Path -LiteralPath $BinPath).ProviderPath
@@ -46,7 +46,7 @@ foreach ($Part in $Parts) {
 }
 
 if ($Removed -eq 0) {
-    Write-Output "Nous Lang bin directory was not present in the user PATH: $ResolvedBinPath"
+    Write-Output "Lullaby bin directory was not present in the user PATH: $ResolvedBinPath"
     exit 0
 }
 
@@ -57,5 +57,5 @@ if ($DryRun) {
 }
 
 [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-Write-Output "Removed Nous Lang from the user PATH: $ResolvedBinPath"
+Write-Output "Removed Lullaby from the user PATH: $ResolvedBinPath"
 Write-Output "Open a new PowerShell or cmd window for the PATH change to take effect."

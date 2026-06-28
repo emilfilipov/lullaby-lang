@@ -6,7 +6,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 
 ## Source And Blocks
 
-- Source files use the `.nl` extension.
+- Source files use the `.lullaby` extension.
 - Scope is indentation-only.
 - Curly braces are rejected as block delimiters.
 - Semicolons are rejected as statement terminators.
@@ -18,7 +18,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 - Function parameters require explicit types.
 - Non-void functions return the last reachable expression unless `return expression` exits earlier.
 - Void functions use `-> void` and may use bare `return`.
-- Executable source passed to `nlang compile` or source `nlang run` must define `fn main -> Type` with zero parameters. `nlang check` can still validate helper/library-style functions that do not define `main`.
+- Executable source passed to `lullaby compile` or source `lullaby run` must define `fn main -> Type` with zero parameters. `lullaby check` can still validate helper/library-style functions that do not define `main`.
 - Local bindings use `let name Type = expression` for explicit annotations or `let name = expression` when the initializer type is unambiguous.
 - Existing local bindings can be updated with `=`, `+=`, `-=`, `*=`, and `/=` when the types are valid.
 
@@ -55,21 +55,21 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 
 ## CLI And Artifacts
 
-- Development commands are available through `cargo run -p nous_cli -- ...`.
-- The release package exposes `bin\nlang.exe`.
+- Development commands are available through `cargo run -p lullaby_cli -- ...`.
+- The release package exposes `bin\lullaby.exe`.
 - Supported commands:
-  - `nlang check [--verbose|--format json] <file.nl>`
-  - `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
-  - `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
-  - `nlang inspect [--verbose|--format json] <file.nbc>`
-  - `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
-  - `nlang run [--verbose|--format json] <file.nbc>`
-  - `nlang docs`
-  - `nlang examples`
-  - `nlang --version`
+  - `lullaby check [--verbose|--format json] <file.lullaby>`
+  - `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`
+  - `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`
+  - `lullaby inspect [--verbose|--format json] <file.lbc>`
+  - `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lullaby>`
+  - `lullaby run [--verbose|--format json] <file.lbc>`
+  - `lullaby docs`
+  - `lullaby examples`
+  - `lullaby --version`
 - `--diagnostic-format json` is accepted as a JSON diagnostics alias.
-- `nlang compile`, `nlang build`, and source `nlang run` require a zero-argument `main` entry point before lowering or execution. Invalid executable entry points report `N0329`.
-- `nlang compile` and its artifact-generation alias `nlang build` write a versioned `.nbc` instruction-bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module instructions. `nlang inspect` prints artifact metadata and function signatures without executing the program.
+- `lullaby compile`, `lullaby build`, and source `lullaby run` require a zero-argument `main` entry point before lowering or execution. Invalid executable entry points report `N0329`.
+- `lullaby compile` and its artifact-generation alias `lullaby build` write a versioned `.lbc` instruction-bytecode artifact with a format marker, artifact version, metadata, entry point, function table, compatibility checks, and bytecode module instructions. `lullaby inspect` prints artifact metadata and function signatures without executing the program.
 
 ## Diagnostics
 
@@ -81,7 +81,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 ## Packaging
 
 - `scripts/package_windows_portable.ps1` builds the Windows Alpha 1 portable package and zip archive under `dist/`.
-- The package contains `bin\nlang.exe`, `docs\index.html`, valid `.nl` examples, invalid diagnostic examples, optional PATH setup/cleanup helpers, README/VERSION metadata, a zip checksum, and a repository license file if one exists.
+- The package contains `bin\lullaby.exe`, `docs\index.html`, valid `.lullaby` examples, invalid diagnostic examples, optional PATH setup/cleanup helpers, README/VERSION metadata, a zip checksum, and a repository license file if one exists.
 - `scripts/verify_release.ps1` is the Alpha 1 release gate for the packaged toolchain.
 - `scripts/publish_github_release.ps1` verifies the package, tags the current commit, and creates a GitHub prerelease with the portable zip plus checksum asset.
 

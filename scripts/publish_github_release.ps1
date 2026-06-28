@@ -1,7 +1,7 @@
 param(
     [string]$TagName = "v0.1.0-alpha.2",
-    [string]$PackageName = "nous-lang-alpha1-windows-x64",
-    [string]$ReleaseTitle = "Nous Lang v0.1.0-alpha.2",
+    [string]$PackageName = "lullaby-alpha1-windows-x64",
+    [string]$ReleaseTitle = "Lullaby v0.1.0-alpha.2",
     [switch]$Draft
 )
 

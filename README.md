@@ -1,17 +1,17 @@
-# Nous Lang
+# Lullaby
 
-Nous Lang is an experimental compiled systems programming language focused on concise, indentation-only syntax, strong typing, memory-safety foundations, and source that is easy for LLMs to generate.
+Lullaby is an experimental compiled systems programming language focused on concise, indentation-only syntax, strong typing, memory-safety foundations, and source that is easy for LLMs to generate.
 
 The current toolchain is an Alpha 1 language surface with a Windows-first portable package. It is useful for trying the syntax, diagnostics, bytecode artifact path, offline docs, and early runtime subset. It is not yet a native-code compiler or full systems standard library.
 
 ## Install The Portable Package
 
-1. Download `nous-lang-alpha1-windows-x64.zip` and `nous-lang-alpha1-windows-x64.zip.sha256` from the latest GitHub prerelease.
+1. Download `lullaby-alpha1-windows-x64.zip` and `lullaby-alpha1-windows-x64.zip.sha256` from the latest GitHub prerelease.
 2. Verify the archive checksum:
 
 ```powershell
-$expected = (Get-Content .\nous-lang-alpha1-windows-x64.zip.sha256 -Raw).Split(" ")[0]
-$actual = (Get-FileHash .\nous-lang-alpha1-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\lullaby-alpha1-windows-x64.zip.sha256 -Raw).Split(" ")[0]
+$actual = (Get-FileHash .\lullaby-alpha1-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw "checksum mismatch" }
 ```
 
@@ -19,17 +19,17 @@ if ($actual -ne $expected) { throw "checksum mismatch" }
 4. From the package directory, run:
 
 ```powershell
-.\bin\nlang.exe --version
-.\bin\nlang.exe docs
-.\bin\nlang.exe examples
-.\bin\nlang.exe run .\examples\valid\calculator.nl
+.\bin\lullaby.exe --version
+.\bin\lullaby.exe docs
+.\bin\lullaby.exe examples
+.\bin\lullaby.exe run .\examples\valid\calculator.lullaby
 ```
 
 Optional user PATH setup:
 
 ```powershell
 .\install.cmd
-nlang --version
+lullaby --version
 .\uninstall.cmd
 ```
 
@@ -45,12 +45,12 @@ Prerequisites:
 Common commands:
 
 ```powershell
-cargo run -p nous_cli -- check examples\valid\calculator.nl
-cargo run -p nous_cli -- run examples\valid\calculator.nl
-cargo run -p nous_cli -- compile --optimize alpha -o target\calculator.nbc examples\valid\calculator.nl
-cargo run -p nous_cli -- build --optimize alpha -o target\calculator-build.nbc examples\valid\calculator.nl
-cargo run -p nous_cli -- inspect target\calculator.nbc
-cargo run -p nous_cli -- run target\calculator.nbc
+cargo run -p lullaby_cli -- check examples\valid\calculator.lullaby
+cargo run -p lullaby_cli -- run examples\valid\calculator.lullaby
+cargo run -p lullaby_cli -- compile --optimize alpha -o target\calculator.lbc examples\valid\calculator.lullaby
+cargo run -p lullaby_cli -- build --optimize alpha -o target\calculator-build.lbc examples\valid\calculator.lullaby
+cargo run -p lullaby_cli -- inspect target\calculator.lbc
+cargo run -p lullaby_cli -- run target\calculator.lbc
 ```
 
 Release package verification:
@@ -61,18 +61,18 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
 
 ## Current CLI
 
-- `nlang check [--verbose|--format json] <file.nl>`
-- `nlang compile [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
-- `nlang build [--optimize none|constant-fold|dead-code|alpha] [-o output.nbc] [--verbose|--format json] <file.nl>`
-- `nlang inspect [--verbose|--format json] <file.nbc>`
-- `nlang run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.nl>`
-- `nlang run [--verbose|--format json] <file.nbc>`
-- `nlang docs`
-- `nlang examples`
-- `nlang help`
-- `nlang --version`
+- `lullaby check [--verbose|--format json] <file.lullaby>`
+- `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`
+- `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lullaby>`
+- `lullaby inspect [--verbose|--format json] <file.lbc>`
+- `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lullaby>`
+- `lullaby run [--verbose|--format json] <file.lbc>`
+- `lullaby docs`
+- `lullaby examples`
+- `lullaby help`
+- `lullaby --version`
 
-`nlang check` can validate helper/library-style `.nl` files without `main`. `nlang compile`, `nlang build`, and source `nlang run` require executable source with zero-argument `main`; invalid entry points report `N0329`. `nlang build` is an artifact-generation alias for `nlang compile`.
+`lullaby check` can validate helper/library-style `.lullaby` files without `main`. `lullaby compile`, `lullaby build`, and source `lullaby run` require executable source with zero-argument `main`; invalid entry points report `N0329`. `lullaby build` is an artifact-generation alias for `lullaby compile`.
 
 ## Documentation
 

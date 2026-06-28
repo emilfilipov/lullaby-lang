@@ -1,6 +1,6 @@
-# Nous Lang Agent Guide
+# Lullaby Agent Guide
 
-This repository defines and will implement Nous Lang, a compiled systems programming language optimized for concise syntax, strong typing, memory safety, and LLM-friendly source generation.
+This repository defines and will implement Lullaby, a compiled systems programming language optimized for concise syntax, strong typing, memory safety, and LLM-friendly source generation.
 
 ## First Moves
 
@@ -14,7 +14,7 @@ This repository defines and will implement Nous Lang, a compiled systems program
 
 - Implementation language: Rust, unless the owner explicitly changes this decision.
 - Initial compiler target: a clear, testable frontend and semantic pipeline before native code generation.
-- Canonical source extension: `.nl` until the language specification is intentionally changed.
+- Canonical source extension: `.lullaby` until the language specification is intentionally changed.
 - Keep the syntax indentation-only. Curly braces are not block delimiters, and semicolons are not statement terminators.
 - Keep the implementation conservative: prefer a correct parser/type checker/runtime prototype over speculative backend complexity.
 - Maintain offline browser-based documentation from the start. The project must eventually ship a self-contained HTML documentation bundle that users can open locally without a server or internet access, and that bundle should be suitable for inclusion in the language toolchain installer.
@@ -24,18 +24,18 @@ This repository defines and will implement Nous Lang, a compiled systems program
 - `documents/core_language_rules.md`: canonical source extension, indentation-only scope, forbidden block delimiters, canonical block examples, and global language rules.
 - `documents/language_specification.md`: full language overview, philosophy, core language components, syntax reference, examples, and roadmap.
 - `documents/implementation_plan.md`: compiler and installer implementation epics, dependency order, and delivery plan.
-- `documents/nous_lang_syntax_design.md`: syntax philosophy, declarations, control forms, functions, data structures, operators, naming, comments, examples, and token-efficiency goals.
-- `documents/nous_lang_type_system.md`: primitive/composite/reference/function types, inference rules, type safety, generics, aliases, and OS-development type needs.
-- `documents/nous_lang_memory_management.md`: regions, stack/heap model, lifetime tracking, GC hooks, memory safety, runtime API, and kernel memory examples.
-- `documents/nous_lang_control_structures.md`: conditionals, loops, switch, error-control forms, coroutine syntax, operators, and control-flow examples.
-- `documents/nous_lang_input_output.md`: file I/O, streams, memory-mapped files, threads, processes, async operations, IPC, sockets, and I/O performance strategy.
-- `documents/nous_lang_error_handling.md`: error token model, compile-time/runtime/resource/type error families, throw/catch/recovery behavior, and diagnostic integration.
-- `documents/nous_lang_compilation_architecture.md`: tokenizer, semantic analysis, IR, optimization, code generation, linking, binary output, and compiler performance.
+- `documents/lullaby_syntax_design.md`: syntax philosophy, declarations, control forms, functions, data structures, operators, naming, comments, examples, and token-efficiency goals.
+- `documents/lullaby_type_system.md`: primitive/composite/reference/function types, inference rules, type safety, generics, aliases, and OS-development type needs.
+- `documents/lullaby_memory_management.md`: regions, stack/heap model, lifetime tracking, GC hooks, memory safety, runtime API, and kernel memory examples.
+- `documents/lullaby_control_structures.md`: conditionals, loops, switch, error-control forms, coroutine syntax, operators, and control-flow examples.
+- `documents/lullaby_input_output.md`: file I/O, streams, memory-mapped files, threads, processes, async operations, IPC, sockets, and I/O performance strategy.
+- `documents/lullaby_error_handling.md`: error token model, compile-time/runtime/resource/type error families, throw/catch/recovery behavior, and diagnostic integration.
+- `documents/lullaby_compilation_architecture.md`: tokenizer, semantic analysis, IR, optimization, code generation, linking, binary output, and compiler performance.
 - `documents/repository_map.md`: living map of the repository. Update it with every material source, docs, test, command, or layout change.
 
 ## Development Workflow
 
-- Convert non-trivial implementation plans into ClickUp tasks before large changes. Use the existing `Nous Lang` ClickUp folder/backlog when the connector is available.
+- Convert non-trivial implementation plans into ClickUp tasks before large changes. Use the existing `Lullaby` ClickUp folder/backlog when the connector is available.
 - Keep ClickUp current as implementation work progresses. When tasks are started, completed, materially changed, or blocked, update the relevant ClickUp ticket status when the tool supports it; otherwise add a concise task comment with the commit, verification, and remaining work.
 - Work in small, reviewable increments. Each commit should describe one coherent change.
 - Keep source, tests, and docs moving together. If implementation changes behavior, update the relevant core document and `documents/repository_map.md` in the same commit.
@@ -70,7 +70,7 @@ Once Rust code exists:
 - Use `cargo clippy --all-targets --all-features -- -D warnings` for linting unless a narrower documented command replaces it.
 - Use `cargo test --all` for unit and integration tests.
 - Keep fixture-based tests for lexer/parser/type-checker/diagnostics deterministic.
-- Add integration tests for end-to-end `.nl` source through parse, semantic validation, runtime/backend execution, stdout/stderr capture, and exit code.
+- Add integration tests for end-to-end `.lullaby` source through parse, semantic validation, runtime/backend execution, stdout/stderr capture, and exit code.
 - Do not call work complete until relevant tests and documentation checks have run or the reason they could not run is documented.
 - Run `python offline_docs/verify_offline_docs.py` when the offline browser docs exist and user-facing language behavior, examples, CLI usage, diagnostics, installer docs, or the offline docs artifact changes.
 

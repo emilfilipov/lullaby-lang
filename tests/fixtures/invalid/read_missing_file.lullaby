@@ -1,0 +1,2 @@
+fn main -> string
+    read_file("target/lullaby_missing_file.txt")

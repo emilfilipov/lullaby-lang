@@ -55,7 +55,7 @@ foreach ($File in $MarkdownFiles) {
         if ($Target -match '^(https?:|mailto:|#)') {
             continue
         }
-        if ($Target -notmatch '\.(md|html|nl|nbc|ps1|cmd|py|toml|rs|txt)(#.*)?$') {
+        if ($Target -notmatch '\.(md|html|lullaby|lbc|ps1|cmd|py|toml|rs|txt)(#.*)?$') {
             continue
         }
 
