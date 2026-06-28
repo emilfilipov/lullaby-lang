@@ -47,7 +47,7 @@ lullaby check --verbose file.lullaby
 lullaby check --format json file.lullaby
 ```
 
-The same flags are available for `lullaby compile`, `lullaby build`, `lullaby inspect`, and `lullaby run`. `lullaby run` defaults to the AST runtime and accepts `--backend ir` and `--backend bytecode` for the current alpha subset. `lullaby compile` emits a versioned `.lbc` bytecode artifact, `lullaby build` is the same artifact-generation path under a build-oriented command name, `lullaby inspect file.lbc` summarizes that artifact, and `lullaby run file.lbc` executes it. IR lowering failures use code `N0501` and phase `ir`; bytecode artifact failures use code `N0601` and phase `bytecode`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
+The same flags are available for `lullaby compile`, `lullaby build`, `lullaby inspect`, and `lullaby run`. `lullaby run` defaults to the AST runtime and accepts `--backend ir` and `--backend bytecode` for the current alpha subset. `lullaby compile` emits a versioned `.lbc` bytecode artifact with function-table and memory-operation metadata, `lullaby build` is the same artifact-generation path under a build-oriented command name, `lullaby inspect file.lbc` summarizes that artifact, and `lullaby run file.lbc` executes it. IR lowering failures use code `N0501` and phase `ir`; bytecode artifact failures use code `N0601` and phase `bytecode`. The alias `--diagnostic-format json` is also accepted. Extra positional arguments are rejected so tools do not accidentally ignore misspelled paths or flags.
 
 ### Concise Output
 

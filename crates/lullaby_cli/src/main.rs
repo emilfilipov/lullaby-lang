@@ -8,9 +8,10 @@ use lullaby_diagnostics::{
     DiagnosticPhase, DiagnosticReport, render_concise, render_json, render_verbose,
 };
 use lullaby_ir::{
-    BYTECODE_ARTIFACT_EXTENSION, BytecodeArtifact, BytecodeArtifactError, OptimizationConfig,
-    decode_bytecode_artifact, encode_bytecode_artifact, lower, lower_to_bytecode, optimize,
-    run_bytecode_main, run_main as run_ir_main,
+    BYTECODE_ARTIFACT_EXTENSION, BytecodeArtifact, BytecodeArtifactError, IrCleanupRole,
+    IrMemoryOperation, IrMemoryOperationKind, OptimizationConfig, decode_bytecode_artifact,
+    encode_bytecode_artifact, lower, lower_to_bytecode, optimize, run_bytecode_main,
+    run_main as run_ir_main,
 };
 use lullaby_lexer::{Diagnostic, lex, validate_source_path};
 use lullaby_parser::{Program, parse};
@@ -313,9 +314,13 @@ fn inspect_bytecode_artifact(path: PathBuf, mode: OutputMode) -> Result<(), Stri
             println!("target: {}", artifact.metadata.target);
             println!("payload: {}", artifact.metadata.payload);
             println!("functions: {}", artifact.function_table.len());
+            println!("memory operations: {}", artifact.memory_operations.len());
             if mode == OutputMode::Verbose {
                 for signature in &artifact.function_table {
                     println!("function: {}", format_signature(signature));
+                }
+                for operation in &artifact.memory_operations {
+                    println!("memory operation: {}", format_memory_operation(operation));
                 }
             }
         }
@@ -363,9 +368,15 @@ fn inspect_json(path: &Path, artifact: &BytecodeArtifact) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
+    let memory_operations = artifact
+        .memory_operations
+        .iter()
+        .map(memory_operation_json)
+        .collect::<Vec<_>>()
+        .join(",");
 
     format!(
-        "{{\"status\":\"ok\",\"artifact\":{{\"path\":\"{}\",\"format\":\"{}\",\"version\":{},\"entry\":\"{}\",\"metadata\":{{\"producer\":\"{}\",\"target\":\"{}\",\"payload\":\"{}\"}},\"functions\":[{}]}}}}",
+        "{{\"status\":\"ok\",\"artifact\":{{\"path\":\"{}\",\"format\":\"{}\",\"version\":{},\"entry\":\"{}\",\"metadata\":{{\"producer\":\"{}\",\"target\":\"{}\",\"payload\":\"{}\"}},\"functions\":[{}],\"memory_operations\":[{}]}}}}",
         json_escape(&path.display().to_string()),
         json_escape(&artifact.format),
         artifact.version,
@@ -373,8 +384,63 @@ fn inspect_json(path: &Path, artifact: &BytecodeArtifact) -> String {
         json_escape(&artifact.metadata.producer),
         json_escape(&artifact.metadata.target),
         json_escape(&artifact.metadata.payload),
-        functions
+        functions,
+        memory_operations
     )
+}
+
+fn format_memory_operation(operation: &IrMemoryOperation) -> String {
+    format!(
+        "{} {} at {}:{} live={} bounds={} mutates={} cleanup={} unsafe={}",
+        operation.function,
+        memory_operation_kind_label(&operation.kind),
+        operation.span.line,
+        operation.span.column,
+        operation.safety.requires_live_resource,
+        operation.safety.requires_bounds_check,
+        operation.safety.mutates_memory,
+        cleanup_role_label(operation.safety.cleanup_role),
+        operation.safety.unsafe_boundary
+    )
+}
+
+fn memory_operation_json(operation: &IrMemoryOperation) -> String {
+    format!(
+        "{{\"function\":\"{}\",\"kind\":\"{}\",\"span\":{{\"line\":{},\"column\":{}}},\"safety\":{{\"requires_live_resource\":{},\"requires_bounds_check\":{},\"mutates_memory\":{},\"cleanup_role\":\"{}\",\"unsafe_boundary\":{}}}}}",
+        json_escape(&operation.function),
+        json_escape(memory_operation_kind_label(&operation.kind)),
+        operation.span.line,
+        operation.span.column,
+        operation.safety.requires_live_resource,
+        operation.safety.requires_bounds_check,
+        operation.safety.mutates_memory,
+        json_escape(cleanup_role_label(operation.safety.cleanup_role)),
+        operation.safety.unsafe_boundary
+    )
+}
+
+fn memory_operation_kind_label(kind: &IrMemoryOperationKind) -> &'static str {
+    match kind {
+        IrMemoryOperationKind::Allocate { .. } => "allocate",
+        IrMemoryOperationKind::Load { .. } => "load",
+        IrMemoryOperationKind::Store { .. } => "store",
+        IrMemoryOperationKind::Deallocate { .. } => "deallocate",
+        IrMemoryOperationKind::BoundsCheck { .. } => "bounds-check",
+        IrMemoryOperationKind::RegionCreate { .. } => "region-create",
+        IrMemoryOperationKind::RegionResize { .. } => "region-resize",
+        IrMemoryOperationKind::Copy { .. } => "copy",
+        IrMemoryOperationKind::Cleanup { .. } => "cleanup",
+    }
+}
+
+fn cleanup_role_label(role: IrCleanupRole) -> &'static str {
+    match role {
+        IrCleanupRole::None => "none",
+        IrCleanupRole::CreatesResource => "creates-resource",
+        IrCleanupRole::UsesResource => "uses-resource",
+        IrCleanupRole::ReleasesResource => "releases-resource",
+        IrCleanupRole::CheckedAccess => "checked-access",
+    }
 }
 
 fn json_escape(value: &str) -> String {

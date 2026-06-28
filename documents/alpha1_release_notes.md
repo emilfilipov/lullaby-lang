@@ -90,14 +90,15 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 `lullaby compile` and `lullaby build` write a versioned `.lbc` JSON artifact with:
 
 - `format`: `lullaby-bytecode`
-- `version`: `3`
+- `version`: `4`
 - deterministic metadata
 - entry point
 - function table
+- memory operation metadata for allocation, load, store, deallocation, and bounds-checked indexing
 - instruction-bytecode module with dedicated function `instructions`
 - instruction-contract validation for entry-point shape and loop-control placement
 
-`lullaby inspect file.lbc` prints artifact metadata and function signatures without executing the program. `lullaby run file.lbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, and function-table/module compatibility before execution.
+`lullaby inspect file.lbc` prints artifact metadata, function signatures, and memory operation counts without executing the program. `lullaby inspect --verbose file.lbc` prints individual memory operations and safety metadata, and JSON inspect output includes the `memory_operations` array. `lullaby run file.lbc` validates format, version, metadata target/payload, entry support, entry presence, duplicate functions, function-table/module compatibility, and memory-operation/module compatibility before execution.
 
 ## Diagnostics
 
@@ -162,10 +163,10 @@ powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1
 - No modules, packages, imports, structs, unions, traits, interfaces, classes, pattern matching, or user-defined generics beyond `array<T>`.
 - No region memory, ARC/reference counting, lifetime analysis, or GC hooks yet.
 - I/O is limited to text file builtins and direct program-plus-argv command calls.
-- Offline docs are hand-authored HTML; a generated docs pipeline is still planned.
+- Offline docs have both a checked-in hand-authored entry page and a generated package entry page; release packages now generate and verify their offline docs during packaging.
 - Alpha 1 distribution is a Windows portable archive with optional user PATH helper scripts, not a full MSI/NSIS-style installer.
 - Optimizer support is intentionally conservative: constant folding, block-local CSE for repeated pure bindings, conservative loop-invariant motion for safe loop-body bindings, block-local copy propagation for simple aliases, and block-local dead-code elimination are implemented.
 
 ## Next Phase
 
-The next phase should keep the working AST runtime and installable package intact while hardening the typed IR and bytecode backend with broader backend snapshots, more bytecode instruction validation, a fuller instruction-bytecode VM, and memory-operation metadata for optimizer/codegen work. The active post-Alpha sequence is tracked in [post_alpha_roadmap.md](post_alpha_roadmap.md).
+The next phase should keep the working AST runtime and installable package intact while hardening the typed IR and bytecode backend with broader backend snapshots, a fuller instruction-bytecode VM, target-triple package verification, and native-backend prerequisites. The active post-Alpha sequence is tracked in [post_alpha_roadmap.md](post_alpha_roadmap.md).

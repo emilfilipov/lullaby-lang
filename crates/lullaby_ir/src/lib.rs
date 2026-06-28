@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub const BYTECODE_ARTIFACT_FORMAT: &str = "lullaby-bytecode";
 pub const BYTECODE_ARTIFACT_EXTENSION: &str = "lbc";
-pub const BYTECODE_ARTIFACT_VERSION: u32 = 3;
+pub const BYTECODE_ARTIFACT_VERSION: u32 = 4;
 const BYTECODE_ARTIFACT_PAYLOAD: &str = "instruction-bytecode";
 const BYTECODE_ARTIFACT_TARGET: &str = "alpha1";
 
@@ -482,41 +482,7 @@ fn classify_memory_call(
         _ => return None,
     };
 
-    let safety = match kind {
-        IrMemoryOperationKind::Allocate { .. } => IrMemorySafety {
-            requires_live_resource: false,
-            requires_bounds_check: false,
-            mutates_memory: true,
-            cleanup_role: IrCleanupRole::CreatesResource,
-            unsafe_boundary: false,
-        },
-        IrMemoryOperationKind::Load { .. } => IrMemorySafety {
-            requires_live_resource: true,
-            requires_bounds_check: false,
-            mutates_memory: false,
-            cleanup_role: IrCleanupRole::UsesResource,
-            unsafe_boundary: true,
-        },
-        IrMemoryOperationKind::Store { .. } => IrMemorySafety {
-            requires_live_resource: true,
-            requires_bounds_check: false,
-            mutates_memory: true,
-            cleanup_role: IrCleanupRole::UsesResource,
-            unsafe_boundary: true,
-        },
-        IrMemoryOperationKind::Deallocate { .. } => IrMemorySafety {
-            requires_live_resource: true,
-            requires_bounds_check: false,
-            mutates_memory: true,
-            cleanup_role: IrCleanupRole::ReleasesResource,
-            unsafe_boundary: true,
-        },
-        IrMemoryOperationKind::BoundsCheck { .. }
-        | IrMemoryOperationKind::RegionCreate { .. }
-        | IrMemoryOperationKind::RegionResize { .. }
-        | IrMemoryOperationKind::Copy { .. }
-        | IrMemoryOperationKind::Cleanup { .. } => return None,
-    };
+    let safety = memory_safety_for_kind(&kind)?;
 
     Some(IrMemoryOperation {
         function: function.to_string(),
@@ -524,6 +490,50 @@ fn classify_memory_call(
         kind,
         safety,
     })
+}
+
+fn memory_safety_for_kind(kind: &IrMemoryOperationKind) -> Option<IrMemorySafety> {
+    match kind {
+        IrMemoryOperationKind::Allocate { .. } => Some(IrMemorySafety {
+            requires_live_resource: false,
+            requires_bounds_check: false,
+            mutates_memory: true,
+            cleanup_role: IrCleanupRole::CreatesResource,
+            unsafe_boundary: false,
+        }),
+        IrMemoryOperationKind::Load { .. } => Some(IrMemorySafety {
+            requires_live_resource: true,
+            requires_bounds_check: false,
+            mutates_memory: false,
+            cleanup_role: IrCleanupRole::UsesResource,
+            unsafe_boundary: true,
+        }),
+        IrMemoryOperationKind::Store { .. } => Some(IrMemorySafety {
+            requires_live_resource: true,
+            requires_bounds_check: false,
+            mutates_memory: true,
+            cleanup_role: IrCleanupRole::UsesResource,
+            unsafe_boundary: true,
+        }),
+        IrMemoryOperationKind::Deallocate { .. } => Some(IrMemorySafety {
+            requires_live_resource: true,
+            requires_bounds_check: false,
+            mutates_memory: true,
+            cleanup_role: IrCleanupRole::ReleasesResource,
+            unsafe_boundary: true,
+        }),
+        IrMemoryOperationKind::BoundsCheck { .. } => Some(IrMemorySafety {
+            requires_live_resource: false,
+            requires_bounds_check: true,
+            mutates_memory: false,
+            cleanup_role: IrCleanupRole::CheckedAccess,
+            unsafe_boundary: false,
+        }),
+        IrMemoryOperationKind::RegionCreate { .. }
+        | IrMemoryOperationKind::RegionResize { .. }
+        | IrMemoryOperationKind::Copy { .. }
+        | IrMemoryOperationKind::Cleanup { .. } => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +640,8 @@ pub struct BytecodeArtifact {
     pub entry: String,
     #[serde(default)]
     pub function_table: Vec<BytecodeFunctionSignature>,
+    #[serde(default)]
+    pub memory_operations: Vec<IrMemoryOperation>,
     pub module: BytecodeModule,
 }
 
@@ -640,12 +652,14 @@ impl BytecodeArtifact {
             .iter()
             .map(BytecodeFunctionSignature::from_function)
             .collect();
+        let memory_operations = analyze_bytecode_memory_operations(&module);
         Self {
             format: BYTECODE_ARTIFACT_FORMAT.to_string(),
             version: BYTECODE_ARTIFACT_VERSION,
             metadata: BytecodeArtifactMetadata::default(),
             entry: "main".to_string(),
             function_table,
+            memory_operations,
             module,
         }
     }
@@ -683,6 +697,178 @@ impl BytecodeFunctionSignature {
             return_type: function.return_type.clone(),
         }
     }
+}
+
+pub fn analyze_bytecode_memory_operations(module: &BytecodeModule) -> Vec<IrMemoryOperation> {
+    let mut operations = Vec::new();
+    for function in &module.functions {
+        collect_bytecode_memory_operations_from_block(
+            &function.name,
+            &function.instructions,
+            &mut operations,
+        );
+    }
+    operations
+}
+
+fn collect_bytecode_memory_operations_from_block(
+    function: &str,
+    instructions: &[BytecodeInstruction],
+    operations: &mut Vec<IrMemoryOperation>,
+) {
+    for instruction in instructions {
+        match instruction {
+            BytecodeInstruction::Let { value, .. }
+            | BytecodeInstruction::Assign { value, .. }
+            | BytecodeInstruction::Expr(value) => {
+                collect_bytecode_memory_operations_from_expr(function, value, operations);
+            }
+            BytecodeInstruction::Return(Some(value)) => {
+                collect_bytecode_memory_operations_from_expr(function, value, operations);
+            }
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    collect_bytecode_memory_operations_from_expr(
+                        function,
+                        &branch.condition,
+                        operations,
+                    );
+                    collect_bytecode_memory_operations_from_block(
+                        function,
+                        &branch.body,
+                        operations,
+                    );
+                }
+                collect_bytecode_memory_operations_from_block(function, else_body, operations);
+            }
+            BytecodeInstruction::While {
+                condition, body, ..
+            } => {
+                collect_bytecode_memory_operations_from_expr(function, condition, operations);
+                collect_bytecode_memory_operations_from_block(function, body, operations);
+            }
+            BytecodeInstruction::For {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
+                collect_bytecode_memory_operations_from_expr(function, start, operations);
+                collect_bytecode_memory_operations_from_expr(function, end, operations);
+                if let Some(step) = step {
+                    collect_bytecode_memory_operations_from_expr(function, step, operations);
+                }
+                collect_bytecode_memory_operations_from_block(function, body, operations);
+            }
+            BytecodeInstruction::Loop { body, .. } => {
+                collect_bytecode_memory_operations_from_block(function, body, operations);
+            }
+            BytecodeInstruction::Return(None)
+            | BytecodeInstruction::Break(_)
+            | BytecodeInstruction::Continue(_) => {}
+        }
+    }
+}
+
+fn collect_bytecode_memory_operations_from_expr(
+    function: &str,
+    expr: &BytecodeExpr,
+    operations: &mut Vec<IrMemoryOperation>,
+) {
+    match &expr.kind {
+        BytecodeExprKind::Array(values) => {
+            for value in values {
+                collect_bytecode_memory_operations_from_expr(function, value, operations);
+            }
+        }
+        BytecodeExprKind::Index { target, index } => {
+            collect_bytecode_memory_operations_from_expr(function, target, operations);
+            collect_bytecode_memory_operations_from_expr(function, index, operations);
+            let kind = IrMemoryOperationKind::BoundsCheck {
+                target_type: target.ty.clone(),
+                index_type: index.ty.clone(),
+            };
+            if let Some(safety) = memory_safety_for_kind(&kind) {
+                operations.push(IrMemoryOperation {
+                    function: function.to_string(),
+                    span: expr.span,
+                    kind,
+                    safety,
+                });
+            }
+        }
+        BytecodeExprKind::Unary { expr, .. } => {
+            collect_bytecode_memory_operations_from_expr(function, expr, operations);
+        }
+        BytecodeExprKind::Binary { left, right, .. } => {
+            collect_bytecode_memory_operations_from_expr(function, left, operations);
+            collect_bytecode_memory_operations_from_expr(function, right, operations);
+        }
+        BytecodeExprKind::Call { name, args } => {
+            for arg in args {
+                collect_bytecode_memory_operations_from_expr(function, arg, operations);
+            }
+            if let Some(operation) = classify_bytecode_memory_call(function, name, args, expr) {
+                operations.push(operation);
+            }
+        }
+        BytecodeExprKind::Integer(_)
+        | BytecodeExprKind::Bool(_)
+        | BytecodeExprKind::String(_)
+        | BytecodeExprKind::Variable(_) => {}
+    }
+}
+
+fn classify_bytecode_memory_call(
+    function: &str,
+    name: &str,
+    args: &[BytecodeExpr],
+    expr: &BytecodeExpr,
+) -> Option<IrMemoryOperation> {
+    let kind = match name {
+        "alloc" => {
+            let value = args.first()?;
+            IrMemoryOperationKind::Allocate {
+                value_type: value.ty.clone(),
+                pointer_type: expr.ty.clone(),
+            }
+        }
+        "load" => {
+            let pointer = args.first()?;
+            IrMemoryOperationKind::Load {
+                pointer_type: pointer.ty.clone(),
+                value_type: expr.ty.clone(),
+            }
+        }
+        "store" => {
+            let pointer = args.first()?;
+            let value = args.get(1)?;
+            IrMemoryOperationKind::Store {
+                pointer_type: pointer.ty.clone(),
+                value_type: value.ty.clone(),
+            }
+        }
+        "dealloc" => {
+            let pointer = args.first()?;
+            IrMemoryOperationKind::Deallocate {
+                pointer_type: pointer.ty.clone(),
+            }
+        }
+        _ => return None,
+    };
+    let safety = memory_safety_for_kind(&kind)?;
+
+    Some(IrMemoryOperation {
+        function: function.to_string(),
+        span: expr.span,
+        kind,
+        safety,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -787,6 +973,13 @@ fn validate_bytecode_artifact_contract(
     if artifact.function_table != expected {
         return Err(BytecodeArtifactError::new(
             "bytecode artifact function_table does not match module functions",
+        ));
+    }
+
+    let expected_memory_operations = analyze_bytecode_memory_operations(&artifact.module);
+    if artifact.memory_operations != expected_memory_operations {
+        return Err(BytecodeArtifactError::new(
+            "bytecode artifact memory_operations does not match module instructions",
         ));
     }
 
@@ -3712,6 +3905,43 @@ mod tests {
     }
 
     #[test]
+    fn bytecode_artifact_preserves_memory_operation_metadata() {
+        let ir = lower_source(
+            "fn main -> i64\n    let ptr ptr_i64 = alloc(0)\n    store(ptr, 41)\n    let values array<i64> = [1, 2, 3]\n    let selected i64 = values[1]\n    let value i64 = load(ptr)\n    dealloc(ptr)\n    value + selected\n",
+        );
+        let bytecode = lower_to_bytecode(&ir);
+        let encoded = encode_bytecode_artifact(&bytecode).expect("encode artifact");
+        let artifact = decode_bytecode_artifact(&encoded).expect("decode artifact");
+
+        assert!(encoded.contains("\"memory_operations\""));
+        assert_eq!(
+            artifact.memory_operations,
+            analyze_bytecode_memory_operations(&artifact.module)
+        );
+        assert_eq!(artifact.memory_operations.len(), 5);
+        assert!(matches!(
+            artifact.memory_operations[0].kind,
+            IrMemoryOperationKind::Allocate { .. }
+        ));
+        assert!(matches!(
+            artifact.memory_operations[1].kind,
+            IrMemoryOperationKind::Store { .. }
+        ));
+        assert!(matches!(
+            artifact.memory_operations[2].kind,
+            IrMemoryOperationKind::BoundsCheck { .. }
+        ));
+        assert!(matches!(
+            artifact.memory_operations[3].kind,
+            IrMemoryOperationKind::Load { .. }
+        ));
+        assert!(matches!(
+            artifact.memory_operations[4].kind,
+            IrMemoryOperationKind::Deallocate { .. }
+        ));
+    }
+
+    #[test]
     fn bytecode_artifact_rejects_wrong_version() {
         let invalid = format!(
             "{{\"format\":\"{BYTECODE_ARTIFACT_FORMAT}\",\"version\":999,\"entry\":\"main\",\"module\":{{\"functions\":[]}}}}"
@@ -3765,6 +3995,22 @@ mod tests {
         let error = decode_bytecode_artifact(&invalid).expect_err("table mismatch");
 
         assert!(error.message.contains("function_table does not match"));
+    }
+
+    #[test]
+    fn bytecode_artifact_rejects_memory_operation_mismatch() {
+        let ir = lower_source(
+            "fn main -> i64\n    let ptr ptr_i64 = alloc(0)\n    let value i64 = load(ptr)\n    dealloc(ptr)\n    value\n",
+        );
+        let bytecode = lower_to_bytecode(&ir);
+        let encoded = encode_bytecode_artifact(&bytecode).expect("encode artifact");
+        let mut value: serde_json::Value = serde_json::from_str(&encoded).expect("json artifact");
+        value["memory_operations"] = serde_json::json!([]);
+        let invalid = serde_json::to_string(&value).expect("invalid json artifact");
+
+        let error = decode_bytecode_artifact(&invalid).expect_err("memory mismatch");
+
+        assert!(error.message.contains("memory_operations does not match"));
     }
 
     #[test]

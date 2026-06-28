@@ -144,16 +144,17 @@ Transforms IR into efficient machine code with systems-level optimizations.
 
 #### Current Alpha Bytecode Artifact
 
-The current compiler artifact is a JSON `.lbc` file with a format marker, artifact version, metadata, entry point, function table, and instruction-bytecode module:
+The current compiler artifact is a JSON `.lbc` file with a format marker, artifact version, metadata, entry point, function table, memory operation metadata, and instruction-bytecode module:
 
 - `format`: `lullaby-bytecode`
-- `version`: artifact version, currently `3`
+- `version`: artifact version, currently `4`
 - `metadata`: deterministic producer, target, and payload metadata
 - `entry`: currently `main`
 - `function_table`: declared bytecode function signatures used for compatibility checks
+- `memory_operations`: analyzed allocation, load, store, deallocation, and bounds-check metadata used for backend and native-codegen preparation
 - `module`: bytecode functions containing dedicated `instructions` rather than raw IR statements
 
-`lullaby compile file.lullaby -o file.lbc` writes this artifact. `lullaby build file.lullaby -o file.lbc` is the same artifact-generation path under a build-oriented command name. `lullaby inspect file.lbc` prints artifact metadata and function signatures, and `lullaby run file.lbc` executes it through the bytecode VM entry point. Unsupported artifact format, version, target, payload, entry values, duplicate functions, or function-table/module mismatches produce `N0601 [bytecode error]`.
+`lullaby compile file.lullaby -o file.lbc` writes this artifact. `lullaby build file.lullaby -o file.lbc` is the same artifact-generation path under a build-oriented command name. `lullaby inspect file.lbc` prints artifact metadata, function signatures, and memory operation counts, and `lullaby run file.lbc` executes it through the bytecode VM entry point. Unsupported artifact format, version, target, payload, entry values, duplicate functions, function-table/module mismatches, or memory-operation/module mismatches produce `N0601 [bytecode error]`.
 
 #### Optimization Passes
 1. **Algebraic Simplification**

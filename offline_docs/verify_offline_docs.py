@@ -97,6 +97,8 @@ REQUIRED_PHRASES = [
     "instruction contract",
     "function instructions",
     "function table",
+    "memory_operations",
+    "memory operation",
     "metadata",
     "--backend ir",
     "--backend bytecode",
