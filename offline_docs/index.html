@@ -601,12 +601,12 @@ Suggested fix:
         </div>
         <ul>
           <li>No native code generation yet. Execution currently supports AST, typed IR, an instruction-bytecode backend, and versioned <code>.lbc</code> bytecode artifacts. The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
-          <li>The full region memory model, ARC/reference counting, and lifetime analysis are pending.</li>
+          <li>Typed IR now reports Alpha 1 memory operations and bounds-checked indexing with safety metadata for backend work. The full region memory model, ARC/reference counting, cleanup insertion, and lifetime analysis are pending.</li>
           <li>The type system currently covers the alpha scalar, array, call, local binding, assignment, control-flow, and interim pointer subset.</li>
           <li>The current I/O surface is limited to text file builtins and direct program-plus-argv command calls; streams, binary I/O, memory mapping, async, sockets, and IPC are future work.</li>
           <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive with optional user PATH helper scripts.</li>
           <li>Planned syntax keywords such as <code>import</code>, <code>module</code>, <code>struct</code>, <code>match</code>, and <code>try</code> are rejected with <code>N0211 [parser]</code> until their feature areas are implemented.</li>
-          <li>The documentation bundle is currently hand-authored HTML. A generator from canonical docs is planned in Epic 1.5.</li>
+          <li>The shipped documentation bundle is currently hand-authored HTML. The first standard-library generator from canonical docs is available at <code>offline_docs/generate_offline_docs.py</code>, with packaging integration still pending.</li>
         </ul>
       </section>
 
@@ -615,6 +615,8 @@ Suggested fix:
         <p>Keep this offline documentation updated whenever user-facing syntax, semantics, CLI behavior, examples, diagnostics, installation, or toolchain packaging changes. The entry point must remain self-contained and openable directly from disk.</p>
         <p>Verification command:</p>
         <pre><code>python offline_docs/verify_offline_docs.py</code></pre>
+        <p>Generated docs prototype command:</p>
+        <pre><code>python offline_docs/generate_offline_docs.py</code></pre>
         <p>Release package command:</p>
         <pre><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></pre>
       </section>

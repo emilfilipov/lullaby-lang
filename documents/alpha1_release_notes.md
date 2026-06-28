@@ -168,4 +168,4 @@ powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1
 
 ## Next Phase
 
-The next phase should keep the working AST runtime and installable package intact while hardening the typed IR and bytecode backend with broader backend snapshots, more bytecode instruction validation, and a fuller instruction-bytecode VM.
+The next phase should keep the working AST runtime and installable package intact while hardening the typed IR and bytecode backend with broader backend snapshots, more bytecode instruction validation, a fuller instruction-bytecode VM, and memory-operation metadata for optimizer/codegen work. The active post-Alpha sequence is tracked in [post_alpha_roadmap.md](post_alpha_roadmap.md).

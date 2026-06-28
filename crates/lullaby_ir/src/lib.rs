@@ -117,6 +117,68 @@ pub enum IrExprKind {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrMemoryOperation {
+    pub function: String,
+    pub span: Span,
+    pub kind: IrMemoryOperationKind,
+    pub safety: IrMemorySafety,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrMemoryOperationKind {
+    Allocate {
+        value_type: TypeRef,
+        pointer_type: TypeRef,
+    },
+    Load {
+        pointer_type: TypeRef,
+        value_type: TypeRef,
+    },
+    Store {
+        pointer_type: TypeRef,
+        value_type: TypeRef,
+    },
+    Deallocate {
+        pointer_type: TypeRef,
+    },
+    BoundsCheck {
+        target_type: TypeRef,
+        index_type: TypeRef,
+    },
+    RegionCreate {
+        region_type: TypeRef,
+    },
+    RegionResize {
+        region_type: TypeRef,
+    },
+    Copy {
+        source_type: TypeRef,
+        target_type: TypeRef,
+    },
+    Cleanup {
+        resource_type: TypeRef,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrMemorySafety {
+    pub requires_live_resource: bool,
+    pub requires_bounds_check: bool,
+    pub mutates_memory: bool,
+    pub cleanup_role: IrCleanupRole,
+    pub unsafe_boundary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrCleanupRole {
+    None,
+    CreatesResource,
+    UsesResource,
+    ReleasesResource,
+    CheckedAccess,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrLoweringError {
     pub message: String,
@@ -268,6 +330,200 @@ pub fn optimize(module: &IrModule, config: &OptimizationConfig) -> (IrModule, Op
 pub fn run_main(module: &IrModule) -> Result<Value, RuntimeError> {
     let mut runtime = IrRuntime::new(module)?;
     runtime.call_function("main", Vec::new())
+}
+
+pub fn analyze_memory_operations(module: &IrModule) -> Vec<IrMemoryOperation> {
+    let mut operations = Vec::new();
+    for function in &module.functions {
+        collect_memory_operations_from_block(&function.name, &function.body, &mut operations);
+    }
+    operations
+}
+
+fn collect_memory_operations_from_block(
+    function: &str,
+    statements: &[IrStmt],
+    operations: &mut Vec<IrMemoryOperation>,
+) {
+    for statement in statements {
+        match statement {
+            IrStmt::Let { value, .. } | IrStmt::Assign { value, .. } | IrStmt::Expr(value) => {
+                collect_memory_operations_from_expr(function, value, operations);
+            }
+            IrStmt::Return(Some(value)) => {
+                collect_memory_operations_from_expr(function, value, operations);
+            }
+            IrStmt::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    collect_memory_operations_from_expr(function, &branch.condition, operations);
+                    collect_memory_operations_from_block(function, &branch.body, operations);
+                }
+                collect_memory_operations_from_block(function, else_body, operations);
+            }
+            IrStmt::While {
+                condition, body, ..
+            } => {
+                collect_memory_operations_from_expr(function, condition, operations);
+                collect_memory_operations_from_block(function, body, operations);
+            }
+            IrStmt::For {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
+                collect_memory_operations_from_expr(function, start, operations);
+                collect_memory_operations_from_expr(function, end, operations);
+                if let Some(step) = step {
+                    collect_memory_operations_from_expr(function, step, operations);
+                }
+                collect_memory_operations_from_block(function, body, operations);
+            }
+            IrStmt::Loop { body, .. } => {
+                collect_memory_operations_from_block(function, body, operations);
+            }
+            IrStmt::Return(None) | IrStmt::Break(_) | IrStmt::Continue(_) => {}
+        }
+    }
+}
+
+fn collect_memory_operations_from_expr(
+    function: &str,
+    expr: &IrExpr,
+    operations: &mut Vec<IrMemoryOperation>,
+) {
+    match &expr.kind {
+        IrExprKind::Array(values) => {
+            for value in values {
+                collect_memory_operations_from_expr(function, value, operations);
+            }
+        }
+        IrExprKind::Index { target, index } => {
+            collect_memory_operations_from_expr(function, target, operations);
+            collect_memory_operations_from_expr(function, index, operations);
+            operations.push(IrMemoryOperation {
+                function: function.to_string(),
+                span: expr.span,
+                kind: IrMemoryOperationKind::BoundsCheck {
+                    target_type: target.ty.clone(),
+                    index_type: index.ty.clone(),
+                },
+                safety: IrMemorySafety {
+                    requires_live_resource: false,
+                    requires_bounds_check: true,
+                    mutates_memory: false,
+                    cleanup_role: IrCleanupRole::CheckedAccess,
+                    unsafe_boundary: false,
+                },
+            });
+        }
+        IrExprKind::Unary { expr, .. } => {
+            collect_memory_operations_from_expr(function, expr, operations);
+        }
+        IrExprKind::Binary { left, right, .. } => {
+            collect_memory_operations_from_expr(function, left, operations);
+            collect_memory_operations_from_expr(function, right, operations);
+        }
+        IrExprKind::Call { name, args } => {
+            for arg in args {
+                collect_memory_operations_from_expr(function, arg, operations);
+            }
+            if let Some(operation) = classify_memory_call(function, name, args, expr) {
+                operations.push(operation);
+            }
+        }
+        IrExprKind::Integer(_)
+        | IrExprKind::Bool(_)
+        | IrExprKind::String(_)
+        | IrExprKind::Variable(_) => {}
+    }
+}
+
+fn classify_memory_call(
+    function: &str,
+    name: &str,
+    args: &[IrExpr],
+    expr: &IrExpr,
+) -> Option<IrMemoryOperation> {
+    let kind = match name {
+        "alloc" => {
+            let value = args.first()?;
+            IrMemoryOperationKind::Allocate {
+                value_type: value.ty.clone(),
+                pointer_type: expr.ty.clone(),
+            }
+        }
+        "load" => {
+            let pointer = args.first()?;
+            IrMemoryOperationKind::Load {
+                pointer_type: pointer.ty.clone(),
+                value_type: expr.ty.clone(),
+            }
+        }
+        "store" => {
+            let pointer = args.first()?;
+            let value = args.get(1)?;
+            IrMemoryOperationKind::Store {
+                pointer_type: pointer.ty.clone(),
+                value_type: value.ty.clone(),
+            }
+        }
+        "dealloc" => {
+            let pointer = args.first()?;
+            IrMemoryOperationKind::Deallocate {
+                pointer_type: pointer.ty.clone(),
+            }
+        }
+        _ => return None,
+    };
+
+    let safety = match kind {
+        IrMemoryOperationKind::Allocate { .. } => IrMemorySafety {
+            requires_live_resource: false,
+            requires_bounds_check: false,
+            mutates_memory: true,
+            cleanup_role: IrCleanupRole::CreatesResource,
+            unsafe_boundary: false,
+        },
+        IrMemoryOperationKind::Load { .. } => IrMemorySafety {
+            requires_live_resource: true,
+            requires_bounds_check: false,
+            mutates_memory: false,
+            cleanup_role: IrCleanupRole::UsesResource,
+            unsafe_boundary: true,
+        },
+        IrMemoryOperationKind::Store { .. } => IrMemorySafety {
+            requires_live_resource: true,
+            requires_bounds_check: false,
+            mutates_memory: true,
+            cleanup_role: IrCleanupRole::UsesResource,
+            unsafe_boundary: true,
+        },
+        IrMemoryOperationKind::Deallocate { .. } => IrMemorySafety {
+            requires_live_resource: true,
+            requires_bounds_check: false,
+            mutates_memory: true,
+            cleanup_role: IrCleanupRole::ReleasesResource,
+            unsafe_boundary: true,
+        },
+        IrMemoryOperationKind::BoundsCheck { .. }
+        | IrMemoryOperationKind::RegionCreate { .. }
+        | IrMemoryOperationKind::RegionResize { .. }
+        | IrMemoryOperationKind::Copy { .. }
+        | IrMemoryOperationKind::Cleanup { .. } => return None,
+    };
+
+    Some(IrMemoryOperation {
+        function: function.to_string(),
+        span: expr.span,
+        kind,
+        safety,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1158,7 +1414,7 @@ impl CommonSubexpressionEliminator {
                 span,
             } => {
                 let value = self.rewrite_expr(value);
-                if expr_contains_call(&value) {
+                if expr_requires_optimizer_barrier(&value) {
                     available.clear();
                 }
                 invalidate_available_exprs(name, available);
@@ -1201,7 +1457,7 @@ impl CommonSubexpressionEliminator {
                 span,
             } => {
                 let value = self.rewrite_expr(value);
-                if expr_contains_call(&value) {
+                if expr_requires_optimizer_barrier(&value) {
                     available.clear();
                 }
                 invalidate_available_exprs(name, available);
@@ -1214,7 +1470,7 @@ impl CommonSubexpressionEliminator {
             }
             IrStmt::Return(expr) => {
                 let expr = expr.as_ref().map(|expr| self.rewrite_expr(expr));
-                if expr.as_ref().is_some_and(expr_contains_call) {
+                if expr.as_ref().is_some_and(expr_requires_optimizer_barrier) {
                     available.clear();
                 }
                 IrStmt::Return(expr)
@@ -1223,7 +1479,7 @@ impl CommonSubexpressionEliminator {
             IrStmt::Continue(span) => IrStmt::Continue(*span),
             IrStmt::Expr(expr) => {
                 let expr = self.rewrite_expr(expr);
-                if expr_contains_call(&expr) {
+                if expr_requires_optimizer_barrier(&expr) {
                     available.clear();
                 }
                 IrStmt::Expr(expr)
@@ -1786,8 +2042,8 @@ impl CopyPropagator {
                 span,
             } => {
                 let value = self.propagate_expr(value, aliases);
-                let has_call = expr_contains_call(&value);
-                if has_call {
+                let has_optimizer_barrier = expr_requires_optimizer_barrier(&value);
+                if has_optimizer_barrier {
                     aliases.clear();
                 }
                 invalidate_alias(name, aliases);
@@ -1811,7 +2067,7 @@ impl CopyPropagator {
                 span,
             } => {
                 let value = self.propagate_expr(value, aliases);
-                if expr_contains_call(&value) {
+                if expr_requires_optimizer_barrier(&value) {
                     aliases.clear();
                 }
                 invalidate_alias(name, aliases);
@@ -1824,7 +2080,7 @@ impl CopyPropagator {
             }
             IrStmt::Return(expr) => {
                 let expr = expr.as_ref().map(|expr| self.propagate_expr(expr, aliases));
-                if expr.as_ref().is_some_and(expr_contains_call) {
+                if expr.as_ref().is_some_and(expr_requires_optimizer_barrier) {
                     aliases.clear();
                 }
                 IrStmt::Return(expr)
@@ -1833,7 +2089,7 @@ impl CopyPropagator {
             IrStmt::Continue(span) => IrStmt::Continue(*span),
             IrStmt::Expr(expr) => {
                 let expr = self.propagate_expr(expr, aliases);
-                if expr_contains_call(&expr) {
+                if expr_requires_optimizer_barrier(&expr) {
                     aliases.clear();
                 }
                 IrStmt::Expr(expr)
@@ -1991,16 +2247,14 @@ fn invalidate_alias(name: &str, aliases: &mut HashMap<String, String>) {
     }
 }
 
-fn expr_contains_call(expr: &IrExpr) -> bool {
+fn expr_requires_optimizer_barrier(expr: &IrExpr) -> bool {
     match &expr.kind {
         IrExprKind::Call { .. } => true,
-        IrExprKind::Array(values) => values.iter().any(expr_contains_call),
-        IrExprKind::Index { target, index } => {
-            expr_contains_call(target) || expr_contains_call(index)
-        }
-        IrExprKind::Unary { expr, .. } => expr_contains_call(expr),
+        IrExprKind::Array(values) => values.iter().any(expr_requires_optimizer_barrier),
+        IrExprKind::Index { .. } => true,
+        IrExprKind::Unary { expr, .. } => expr_requires_optimizer_barrier(expr),
         IrExprKind::Binary { left, right, .. } => {
-            expr_contains_call(left) || expr_contains_call(right)
+            expr_requires_optimizer_barrier(left) || expr_requires_optimizer_barrier(right)
         }
         IrExprKind::Integer(_)
         | IrExprKind::Bool(_)
@@ -3089,6 +3343,64 @@ mod tests {
             panic!("expected load binding");
         };
         assert_eq!(value.ty, TypeRef::new("i64"));
+    }
+
+    #[test]
+    fn memory_analysis_reports_alpha_memory_operations_and_safety_metadata() {
+        let source = "fn main -> i64\n    let ptr ptr_i64 = alloc(0)\n    store(ptr, 41)\n    let values array<i64> = [1, 2, 3]\n    let selected i64 = values[1]\n    let value i64 = load(ptr)\n    dealloc(ptr)\n    value + selected\n";
+        let module = lower_source(source);
+        let operations = analyze_memory_operations(&module);
+
+        assert_eq!(operations.len(), 5);
+        assert_eq!(operations[0].function, "main");
+        assert!(matches!(
+            operations[0].kind,
+            IrMemoryOperationKind::Allocate { .. }
+        ));
+        assert_eq!(
+            operations[0].safety.cleanup_role,
+            IrCleanupRole::CreatesResource
+        );
+        assert!(operations[0].safety.mutates_memory);
+
+        assert!(matches!(
+            operations[1].kind,
+            IrMemoryOperationKind::Store { .. }
+        ));
+        assert_eq!(
+            operations[1].safety.cleanup_role,
+            IrCleanupRole::UsesResource
+        );
+        assert!(operations[1].safety.requires_live_resource);
+        assert!(operations[1].safety.unsafe_boundary);
+
+        assert!(matches!(
+            operations[2].kind,
+            IrMemoryOperationKind::BoundsCheck { .. }
+        ));
+        assert_eq!(
+            operations[2].safety.cleanup_role,
+            IrCleanupRole::CheckedAccess
+        );
+        assert!(operations[2].safety.requires_bounds_check);
+        assert!(!operations[2].safety.mutates_memory);
+
+        assert!(matches!(
+            operations[3].kind,
+            IrMemoryOperationKind::Load { .. }
+        ));
+        assert!(operations[3].safety.requires_live_resource);
+        assert!(!operations[3].safety.mutates_memory);
+
+        assert!(matches!(
+            operations[4].kind,
+            IrMemoryOperationKind::Deallocate { .. }
+        ));
+        assert_eq!(
+            operations[4].safety.cleanup_role,
+            IrCleanupRole::ReleasesResource
+        );
+        assert!(operations[4].safety.mutates_memory);
     }
 
     #[test]

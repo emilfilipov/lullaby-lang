@@ -19,13 +19,25 @@ The current Rust workspace implements a frontend and in-process execution pipeli
 1. `lullaby_lexer` validates `.lullaby` paths, emits tokens, emits indentation/dedent structure, and rejects forbidden block delimiters.
 2. `lullaby_parser` builds an AST for functions, typed parameters, `let`, assignment, returns, break/continue, if/elif/else, while/loop/range-for blocks, calls, literals, array literals/indexing, variables, arithmetic, comparisons, and boolean logic.
 3. `lullaby_semantics` validates static types, explicit and inferred local bindings, assignments, function calls, return behavior, bool conditions, loop-control placement, arithmetic/comparison/logical operands, homogeneous non-empty arrays, array indexes, interim pointer-style memory builtins, text file I/O builtins, and safe system command builtins. Successful validation returns `CheckedProgram` metadata with function signatures and inferred expression types.
-4. `lullaby_ir` lowers a `CheckedProgram` into typed semantic IR for the current alpha subset, including typed functions, parameters, statements, control flow, calls, builtins, and expressions.
+4. `lullaby_ir` lowers a `CheckedProgram` into typed semantic IR for the current alpha subset, including typed functions, parameters, statements, control flow, calls, builtins, and expressions. It also exposes memory-operation analysis for current heap-slot operations and array bounds checks so optimizers, bytecode work, and later native backends can share one side-effect and safety model.
 5. `lullaby_runtime` executes the validated AST directly, including `main`, calls, scoped locals, assignment, branch result values, while/loop/range-for control flow, array literals/indexing with runtime bounds checks, arithmetic/comparisons, short-circuit boolean logic, heap-slot memory operations including `alloc`/`load`/`store`/`dealloc`, text file I/O, and safe system command builtins.
-6. `lullaby_ir` provides a deterministic optimization pass framework. Implemented passes are constant folding for pure literal arithmetic, comparisons, boolean logic, string equality, and unary `not`, conservative block-local common subexpression elimination for repeated pure bindings, conservative loop-invariant motion for safe loop-body bindings, conservative block-local copy propagation for simple variable aliases, plus dead-code elimination for statements after unconditional `return`, `break`, or `continue` in the same block. Constant folding and loop-invariant motion deliberately leave potentially failing divide-by-zero expressions in place so runtime diagnostics and zero-iteration loop behavior are preserved.
+6. `lullaby_ir` provides a deterministic optimization pass framework. Implemented passes are constant folding for pure literal arithmetic, comparisons, boolean logic, string equality, and unary `not`, conservative block-local common subexpression elimination for repeated pure bindings, conservative loop-invariant motion for safe loop-body bindings, conservative block-local copy propagation for simple variable aliases, plus dead-code elimination for statements after unconditional `return`, `break`, or `continue` in the same block. Constant folding and loop-invariant motion deliberately leave potentially failing divide-by-zero expressions in place so runtime diagnostics and zero-iteration loop behavior are preserved. Optimizer barriers are conservative around calls and bounds-checked indexing.
 7. `lullaby_ir` can also execute the lowered typed IR, lower it into an explicit instruction-bytecode module, and encode/decode a versioned `.lbc` bytecode artifact for the current alpha subset.
 8. `lullaby_cli` exposes the current pipeline as `lullaby check <file.lullaby>`, `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] <file.lullaby>`, `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] <file.lullaby>`, `lullaby inspect <file.lbc>`, `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] <file.lullaby|file.lbc>`, `lullaby docs`, and `lullaby examples`. Optimization is opt-in and applies only to IR/bytecode source runs and compiled bytecode artifacts.
 
 Additional optimization passes, native code generation, linking, and binary output remain planned architecture stages.
+
+### Memory-Aware IR Contract
+
+The current memory-aware IR increment keeps `alloc`, `load`, `store`, `dealloc`, and array indexing in the existing expression/statement IR shape while adding an analysis contract for backend consumers:
+
+- `Allocate`: records the initialized value type and produced pointer type.
+- `Load`: records the pointer type and loaded value type.
+- `Store`: records the pointer type and stored value type.
+- `Deallocate`: records the released pointer type.
+- `BoundsCheck`: records the indexed target type and index type.
+
+Each operation carries safety metadata for live-resource requirements, bounds-check requirements, memory mutation, cleanup role, and unsafe-boundary handling. Region creation/resizing, copy operations, and compiler-inserted cleanup are reserved in the roadmap but are not emitted until the language surface and runtime model support them.
 
 ### Stage 1: Lexical Analysis (Tokenizer)
 
