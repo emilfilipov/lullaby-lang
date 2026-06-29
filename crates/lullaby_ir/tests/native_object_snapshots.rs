@@ -8,28 +8,48 @@ use lullaby_parser::parse;
 use lullaby_semantics::validate_executable;
 
 const UPDATE_ENV: &str = "LULLABY_UPDATE_NATIVE_OBJECT_SNAPSHOTS";
-const SNAPSHOT: &str = "tests/snapshots/alpha1_return_42.coff.json";
-const SOURCE: &str = "fn main -> i64\n    return 42\n";
+
+struct SnapshotCase {
+    source: &'static str,
+    snapshot: &'static str,
+}
+
+const CASES: &[SnapshotCase] = &[
+    SnapshotCase {
+        source: "fn main -> i64\n    return 42\n",
+        snapshot: "tests/snapshots/alpha1_return_42.coff.json",
+    },
+    SnapshotCase {
+        source: "fn main -> i64\n    let left i64 = 40\n    let right i64 = 2\n    return left + right\n",
+        snapshot: "tests/snapshots/alpha1_locals_add.coff.json",
+    },
+];
 
 #[test]
-fn alpha1_literal_return_coff_object_matches_checked_in_snapshot() {
-    let snapshot_path = ir_crate_root().join(SNAPSHOT);
-    let actual = snapshot_for(SOURCE);
+fn alpha1_coff_objects_match_checked_in_snapshots() {
+    let ir_crate = ir_crate_root();
+    let update = std::env::var_os(UPDATE_ENV).is_some();
 
-    if std::env::var_os(UPDATE_ENV).is_some() {
-        if let Some(parent) = snapshot_path.parent() {
-            fs::create_dir_all(parent).expect("create native object snapshot directory");
+    for case in CASES {
+        let snapshot_path = ir_crate.join(case.snapshot);
+        let actual = snapshot_for(case.source);
+
+        if update {
+            if let Some(parent) = snapshot_path.parent() {
+                fs::create_dir_all(parent).expect("create native object snapshot directory");
+            }
+            fs::write(&snapshot_path, &actual).expect("write native object snapshot");
+            continue;
         }
-        fs::write(&snapshot_path, &actual).expect("write native object snapshot");
-        return;
-    }
 
-    let expected = fs::read_to_string(&snapshot_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", snapshot_path.display()));
-    assert_eq!(
-        expected, actual,
-        "native object snapshot changed.\nReview the object-emission change, then refresh the checked-in golden file with PowerShell: `$env:LULLABY_UPDATE_NATIVE_OBJECT_SNAPSHOTS='1'; cargo test -p lullaby_ir --test native_object_snapshots; Remove-Item Env:LULLABY_UPDATE_NATIVE_OBJECT_SNAPSHOTS`."
-    );
+        let expected = fs::read_to_string(&snapshot_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", snapshot_path.display()));
+        assert_eq!(
+            expected, actual,
+            "native object snapshot changed for {}.\nReview the object-emission change, then refresh the checked-in golden file with PowerShell: `$env:LULLABY_UPDATE_NATIVE_OBJECT_SNAPSHOTS='1'; cargo test -p lullaby_ir --test native_object_snapshots; Remove-Item Env:LULLABY_UPDATE_NATIVE_OBJECT_SNAPSHOTS`.",
+            case.snapshot
+        );
+    }
 }
 
 fn snapshot_for(source: &str) -> String {

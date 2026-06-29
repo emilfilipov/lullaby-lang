@@ -1,0 +1,22 @@
+{
+  "target_triple": "x86_64-pc-windows-msvc",
+  "object_format": "Coff",
+  "entry_symbol": "main",
+  "sections": [
+    {
+      "name": ".text",
+      "offset": 60,
+      "size": 58,
+      "characteristics": 1615855648
+    }
+  ],
+  "symbols": [
+    {
+      "name": "main",
+      "section": ".text",
+      "offset": 0,
+      "storage_class": "External"
+    }
+  ],
+  "bytes_hex": "64860100000000007600000001000000000000002e7465787400000000000000000000003a0000003c00000000000000000000000000000020005060554889e54883ec1048b82800000000000000488945f848b80200000000000000488945f0488b45f850488b45f04889c1584801c84883c4105dc36d61696e000000000000000001002000020004000000"
+}

@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use lullaby_parser::BinaryOp;
 
 use crate::native_contract::{NativeObjectFormat, NativeTarget, alpha1_native_backend_contract};
 use crate::{
@@ -161,6 +164,14 @@ fn validate_entry_signature(function: &BytecodeFunction) -> Result<(), NativeObj
 fn lower_entry_function_to_x86_64(
     function: &BytecodeFunction,
 ) -> Result<Vec<u8>, NativeObjectError> {
+    if function
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, BytecodeInstruction::Let { .. }))
+    {
+        return NativeFunctionCodegen::new(function)?.emit();
+    }
+
     match function.instructions.as_slice() {
         [BytecodeInstruction::Return(Some(expr))] => lower_return_expr(function, expr),
         [BytecodeInstruction::Return(None)] if function.return_type.is_void() => Ok(vec![0xC3]),
@@ -177,6 +188,251 @@ fn lower_entry_function_to_x86_64(
             reason: "prototype emitter only supports a single literal return".to_string(),
         }),
     }
+}
+
+struct NativeFunctionCodegen<'a> {
+    function: &'a BytecodeFunction,
+    locals: HashMap<String, i32>,
+    stack_size: u8,
+}
+
+impl<'a> NativeFunctionCodegen<'a> {
+    fn new(function: &'a BytecodeFunction) -> Result<Self, NativeObjectError> {
+        let mut locals = HashMap::new();
+
+        for instruction in &function.instructions {
+            match instruction {
+                BytecodeInstruction::Let { name, ty, .. } if ty.name == "i64" => {
+                    let offset = ((locals.len() + 1) * 8) as i32;
+                    locals.insert(name.clone(), offset);
+                }
+                BytecodeInstruction::Let { name, ty, .. } => {
+                    return Err(NativeObjectError::UnsupportedBody {
+                        function: function.name.clone(),
+                        reason: format!(
+                            "prototype emitter only supports i64 locals; `{name}` has `{}`",
+                            ty.name
+                        ),
+                    });
+                }
+                BytecodeInstruction::Return(_)
+                | BytecodeInstruction::Expr(_)
+                | BytecodeInstruction::Assign { .. }
+                | BytecodeInstruction::Break(_)
+                | BytecodeInstruction::Continue(_)
+                | BytecodeInstruction::If { .. }
+                | BytecodeInstruction::While { .. }
+                | BytecodeInstruction::For { .. }
+                | BytecodeInstruction::Loop { .. } => {}
+            }
+        }
+
+        let local_bytes = locals.len() * 8;
+        let stack_size = local_bytes.div_ceil(16) * 16;
+        if stack_size > i8::MAX as usize {
+            return Err(NativeObjectError::UnsupportedBody {
+                function: function.name.clone(),
+                reason: "prototype emitter supports at most 120 bytes of local stack".to_string(),
+            });
+        }
+
+        Ok(Self {
+            function,
+            locals,
+            stack_size: stack_size as u8,
+        })
+    }
+
+    fn emit(&self) -> Result<Vec<u8>, NativeObjectError> {
+        let mut code = Vec::new();
+        self.emit_prologue(&mut code);
+
+        for (index, instruction) in self.function.instructions.iter().enumerate() {
+            let is_last = index + 1 == self.function.instructions.len();
+            match instruction {
+                BytecodeInstruction::Let {
+                    name, ty, value, ..
+                } => {
+                    if ty.name != "i64" {
+                        return self.unsupported(format!(
+                            "prototype emitter only supports i64 locals; `{name}` has `{}`",
+                            ty.name
+                        ));
+                    }
+                    self.emit_i64_expr(value, &mut code)?;
+                    self.emit_store_local(name, &mut code)?;
+                }
+                BytecodeInstruction::Return(Some(expr)) => {
+                    self.emit_return_expr(expr, &mut code)?;
+                    self.emit_epilogue(&mut code);
+                    return Ok(code);
+                }
+                BytecodeInstruction::Return(None) if self.function.return_type.is_void() => {
+                    self.emit_epilogue(&mut code);
+                    return Ok(code);
+                }
+                BytecodeInstruction::Expr(expr)
+                    if is_last && !self.function.return_type.is_void() =>
+                {
+                    self.emit_return_expr(expr, &mut code)?;
+                    self.emit_epilogue(&mut code);
+                    return Ok(code);
+                }
+                BytecodeInstruction::Expr(_) => {
+                    return self.unsupported(
+                        "prototype emitter only supports a final return expression".to_string(),
+                    );
+                }
+                BytecodeInstruction::Assign { .. }
+                | BytecodeInstruction::Break(_)
+                | BytecodeInstruction::Continue(_)
+                | BytecodeInstruction::If { .. }
+                | BytecodeInstruction::While { .. }
+                | BytecodeInstruction::For { .. }
+                | BytecodeInstruction::Loop { .. } => {
+                    return self.unsupported(
+                        "prototype emitter only supports let statements plus one return"
+                            .to_string(),
+                    );
+                }
+                BytecodeInstruction::Return(None) => {
+                    return self
+                        .unsupported("non-void entry function must return a value".to_string());
+                }
+            }
+        }
+
+        if self.function.return_type.is_void() {
+            self.emit_epilogue(&mut code);
+            Ok(code)
+        } else {
+            self.unsupported("entry function does not return a value".to_string())
+        }
+    }
+
+    fn emit_return_expr(
+        &self,
+        expr: &BytecodeExpr,
+        code: &mut Vec<u8>,
+    ) -> Result<(), NativeObjectError> {
+        match self.function.return_type.name.as_str() {
+            "i64" => self.emit_i64_expr(expr, code),
+            "bool" => self.emit_bool_expr(expr, code),
+            "void" => self.unsupported("void entry function cannot return a value".to_string()),
+            other => self.unsupported(format!(
+                "prototype emitter cannot lower return type `{other}`"
+            )),
+        }
+    }
+
+    fn emit_i64_expr(
+        &self,
+        expr: &BytecodeExpr,
+        code: &mut Vec<u8>,
+    ) -> Result<(), NativeObjectError> {
+        if expr.ty.name != "i64" {
+            return self.unsupported(format!(
+                "prototype emitter expected i64 expression, found `{}`",
+                expr.ty.name
+            ));
+        }
+
+        match &expr.kind {
+            BytecodeExprKind::Integer(value) => {
+                code.extend_from_slice(&[0x48, 0xB8]);
+                code.extend_from_slice(&(*value as u64).to_le_bytes());
+                Ok(())
+            }
+            BytecodeExprKind::Variable(name) => self.emit_load_local(name, code),
+            BytecodeExprKind::Binary { left, op, right } => {
+                self.emit_i64_expr(left, code)?;
+                code.push(0x50);
+                self.emit_i64_expr(right, code)?;
+                code.extend_from_slice(&[0x48, 0x89, 0xC1]);
+                code.push(0x58);
+                match op {
+                    BinaryOp::Add => code.extend_from_slice(&[0x48, 0x01, 0xC8]),
+                    BinaryOp::Subtract => code.extend_from_slice(&[0x48, 0x29, 0xC8]),
+                    BinaryOp::Multiply => code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC1]),
+                    other => {
+                        return self.unsupported(format!(
+                            "prototype emitter does not support i64 binary operator `{other:?}`"
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            _ => self.unsupported(
+                "prototype emitter only supports i64 literals, locals, and + - * expressions"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn emit_bool_expr(
+        &self,
+        expr: &BytecodeExpr,
+        code: &mut Vec<u8>,
+    ) -> Result<(), NativeObjectError> {
+        match &expr.kind {
+            BytecodeExprKind::Bool(value) => {
+                code.push(0xB8);
+                code.extend_from_slice(&u32::from(*value).to_le_bytes());
+                Ok(())
+            }
+            _ => self.unsupported(
+                "prototype emitter only supports literal bool return values".to_string(),
+            ),
+        }
+    }
+
+    fn emit_prologue(&self, code: &mut Vec<u8>) {
+        if self.stack_size == 0 {
+            return;
+        }
+
+        code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, self.stack_size]);
+    }
+
+    fn emit_epilogue(&self, code: &mut Vec<u8>) {
+        if self.stack_size > 0 {
+            code.extend_from_slice(&[0x48, 0x83, 0xC4, self.stack_size, 0x5D]);
+        }
+        code.push(0xC3);
+    }
+
+    fn emit_load_local(&self, name: &str, code: &mut Vec<u8>) -> Result<(), NativeObjectError> {
+        let offset = self.local_offset(name)?;
+        code.extend_from_slice(&[0x48, 0x8B, 0x45, displacement_for_offset(offset)]);
+        Ok(())
+    }
+
+    fn emit_store_local(&self, name: &str, code: &mut Vec<u8>) -> Result<(), NativeObjectError> {
+        let offset = self.local_offset(name)?;
+        code.extend_from_slice(&[0x48, 0x89, 0x45, displacement_for_offset(offset)]);
+        Ok(())
+    }
+
+    fn local_offset(&self, name: &str) -> Result<i32, NativeObjectError> {
+        self.locals
+            .get(name)
+            .copied()
+            .ok_or_else(|| NativeObjectError::UnsupportedBody {
+                function: self.function.name.clone(),
+                reason: format!("unknown native local `{name}`"),
+            })
+    }
+
+    fn unsupported<T>(&self, reason: String) -> Result<T, NativeObjectError> {
+        Err(NativeObjectError::UnsupportedBody {
+            function: self.function.name.clone(),
+            reason,
+        })
+    }
+}
+
+fn displacement_for_offset(offset: i32) -> u8 {
+    (-(offset as i8)) as u8
 }
 
 fn lower_return_expr(
@@ -280,7 +536,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use lullaby_diagnostics::Span;
-    use lullaby_parser::TypeRef;
+    use lullaby_parser::{BinaryOp, TypeRef};
 
     use super::*;
 
@@ -322,6 +578,56 @@ mod tests {
         assert!(matches!(error, NativeObjectError::UnsupportedBody { .. }));
     }
 
+    #[test]
+    fn emits_stack_backed_i64_locals_and_addition() {
+        let span = Span { line: 1, column: 1 };
+        let i64_type = TypeRef::new("i64");
+        let module = BytecodeModule {
+            functions: vec![BytecodeFunction {
+                name: "main".to_string(),
+                params: Vec::new(),
+                return_type: i64_type.clone(),
+                instructions: vec![
+                    BytecodeInstruction::Let {
+                        name: "left".to_string(),
+                        ty: i64_type.clone(),
+                        value: bytecode_expr(BytecodeExprKind::Integer(40), "i64"),
+                        span,
+                    },
+                    BytecodeInstruction::Let {
+                        name: "right".to_string(),
+                        ty: i64_type.clone(),
+                        value: bytecode_expr(BytecodeExprKind::Integer(2), "i64"),
+                        span,
+                    },
+                    BytecodeInstruction::Return(Some(bytecode_expr(
+                        BytecodeExprKind::Binary {
+                            left: Box::new(bytecode_expr(
+                                BytecodeExprKind::Variable("left".to_string()),
+                                "i64",
+                            )),
+                            op: BinaryOp::Add,
+                            right: Box::new(bytecode_expr(
+                                BytecodeExprKind::Variable("right".to_string()),
+                                "i64",
+                            )),
+                        },
+                        "i64",
+                    ))),
+                ],
+                span,
+            }],
+        };
+
+        let object = emit_alpha1_coff_object(&module).expect("emit object");
+        let text =
+            &object.bytes[object.sections[0].offset as usize..][..object.sections[0].size as usize];
+
+        assert_eq!(&text[..8], &[0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 16]);
+        assert!(text.windows(3).any(|window| window == [0x48, 0x01, 0xC8]));
+        assert_eq!(&text[text.len() - 6..], &[0x48, 0x83, 0xC4, 16, 0x5D, 0xC3]);
+    }
+
     fn literal_return_module(return_type: &str, kind: BytecodeExprKind) -> BytecodeModule {
         BytecodeModule {
             functions: vec![BytecodeFunction {
@@ -335,6 +641,14 @@ mod tests {
                 }))],
                 span: Span { line: 1, column: 1 },
             }],
+        }
+    }
+
+    fn bytecode_expr(kind: BytecodeExprKind, ty: &str) -> BytecodeExpr {
+        BytecodeExpr {
+            kind,
+            ty: TypeRef::new(ty),
+            span: Span { line: 1, column: 1 },
         }
     }
 }
