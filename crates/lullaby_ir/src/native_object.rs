@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use lullaby_parser::BinaryOp;
+use lullaby_parser::{AssignOp, BinaryOp};
 
 use crate::native_contract::{NativeObjectFormat, NativeTarget, alpha1_native_backend_contract};
 use crate::{
@@ -283,15 +283,19 @@ impl<'a> NativeFunctionCodegen<'a> {
                         "prototype emitter only supports a final return expression".to_string(),
                     );
                 }
-                BytecodeInstruction::Assign { .. }
-                | BytecodeInstruction::Break(_)
+                BytecodeInstruction::Assign {
+                    name, op, value, ..
+                } => {
+                    self.emit_i64_assignment(name, *op, value, &mut code)?;
+                }
+                BytecodeInstruction::Break(_)
                 | BytecodeInstruction::Continue(_)
                 | BytecodeInstruction::If { .. }
                 | BytecodeInstruction::While { .. }
                 | BytecodeInstruction::For { .. }
                 | BytecodeInstruction::Loop { .. } => {
                     return self.unsupported(
-                        "prototype emitter only supports let statements plus one return"
+                        "prototype emitter only supports let, assignment, and one return"
                             .to_string(),
                     );
                 }
@@ -384,6 +388,38 @@ impl<'a> NativeFunctionCodegen<'a> {
                 "prototype emitter only supports literal bool return values".to_string(),
             ),
         }
+    }
+
+    fn emit_i64_assignment(
+        &self,
+        name: &str,
+        op: AssignOp,
+        value: &BytecodeExpr,
+        code: &mut Vec<u8>,
+    ) -> Result<(), NativeObjectError> {
+        match op {
+            AssignOp::Replace => {
+                self.emit_i64_expr(value, code)?;
+            }
+            AssignOp::Add | AssignOp::Subtract | AssignOp::Multiply => {
+                self.emit_i64_expr(value, code)?;
+                code.extend_from_slice(&[0x48, 0x89, 0xC1]);
+                self.emit_load_local(name, code)?;
+                match op {
+                    AssignOp::Add => code.extend_from_slice(&[0x48, 0x01, 0xC8]),
+                    AssignOp::Subtract => code.extend_from_slice(&[0x48, 0x29, 0xC8]),
+                    AssignOp::Multiply => code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC1]),
+                    AssignOp::Replace | AssignOp::Divide => unreachable!(),
+                }
+            }
+            AssignOp::Divide => {
+                return self.unsupported(
+                    "prototype emitter does not support native i64 division assignment".to_string(),
+                );
+            }
+        }
+
+        self.emit_store_local(name, code)
     }
 
     fn emit_prologue(&self, code: &mut Vec<u8>) {
@@ -626,6 +662,61 @@ mod tests {
         assert_eq!(&text[..8], &[0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 16]);
         assert!(text.windows(3).any(|window| window == [0x48, 0x01, 0xC8]));
         assert_eq!(&text[text.len() - 6..], &[0x48, 0x83, 0xC4, 16, 0x5D, 0xC3]);
+    }
+
+    #[test]
+    fn emits_i64_local_assignments() {
+        let span = Span { line: 1, column: 1 };
+        let i64_type = TypeRef::new("i64");
+        let module = BytecodeModule {
+            functions: vec![BytecodeFunction {
+                name: "main".to_string(),
+                params: Vec::new(),
+                return_type: i64_type.clone(),
+                instructions: vec![
+                    BytecodeInstruction::Let {
+                        name: "value".to_string(),
+                        ty: i64_type.clone(),
+                        value: bytecode_expr(BytecodeExprKind::Integer(40), "i64"),
+                        span,
+                    },
+                    BytecodeInstruction::Assign {
+                        name: "value".to_string(),
+                        op: AssignOp::Add,
+                        value: bytecode_expr(BytecodeExprKind::Integer(2), "i64"),
+                        span,
+                    },
+                    BytecodeInstruction::Assign {
+                        name: "value".to_string(),
+                        op: AssignOp::Multiply,
+                        value: bytecode_expr(BytecodeExprKind::Integer(2), "i64"),
+                        span,
+                    },
+                    BytecodeInstruction::Assign {
+                        name: "value".to_string(),
+                        op: AssignOp::Subtract,
+                        value: bytecode_expr(BytecodeExprKind::Integer(42), "i64"),
+                        span,
+                    },
+                    BytecodeInstruction::Return(Some(bytecode_expr(
+                        BytecodeExprKind::Variable("value".to_string()),
+                        "i64",
+                    ))),
+                ],
+                span,
+            }],
+        };
+
+        let object = emit_alpha1_coff_object(&module).expect("emit object");
+        let text =
+            &object.bytes[object.sections[0].offset as usize..][..object.sections[0].size as usize];
+
+        assert!(text.windows(3).any(|window| window == [0x48, 0x01, 0xC8]));
+        assert!(
+            text.windows(4)
+                .any(|window| window == [0x48, 0x0F, 0xAF, 0xC1])
+        );
+        assert!(text.windows(3).any(|window| window == [0x48, 0x29, 0xC8]));
     }
 
     fn literal_return_module(return_type: &str, kind: BytecodeExprKind) -> BytecodeModule {

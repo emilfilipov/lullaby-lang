@@ -23,6 +23,10 @@ const CASES: &[SnapshotCase] = &[
         source: "fn main -> i64\n    let left i64 = 40\n    let right i64 = 2\n    return left + right\n",
         snapshot: "tests/snapshots/alpha1_locals_add.coff.json",
     },
+    SnapshotCase {
+        source: "fn main -> i64\n    let value i64 = 40\n    value += 2\n    value *= 2\n    value -= 42\n    return value\n",
+        snapshot: "tests/snapshots/alpha1_assignments.coff.json",
+    },
 ];
 
 #[test]

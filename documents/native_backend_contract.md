@@ -13,12 +13,12 @@ Implemented now:
 - `alpha1_value_layout(TypeRef)` coverage for the current Alpha 1 type surface: `void`, `i64`, `bool`, `string`, `array<T>`, and `ptr_*`.
 - Unit tests for target selection, current value layouts, cleanup sequencing, and JSON round-trip stability.
 - A checked-in JSON snapshot under `crates/lullaby_ir/tests/snapshots/alpha1_native_backend_contract.json`.
-- A first `x86_64-pc-windows-msvc` COFF object emitter in `crates/lullaby_ir/src/native_object.rs` for zero-argument `main` functions that return a literal `i64`, literal `bool`, `void`, or stack-backed `i64` local arithmetic.
-- Checked-in object-emission snapshots under `crates/lullaby_ir/tests/snapshots/alpha1_return_42.coff.json` and `crates/lullaby_ir/tests/snapshots/alpha1_locals_add.coff.json`.
+- A first `x86_64-pc-windows-msvc` COFF object emitter in `crates/lullaby_ir/src/native_object.rs` for zero-argument `main` functions that return a literal `i64`, literal `bool`, `void`, stack-backed `i64` local arithmetic, or straight-line `i64` local assignment arithmetic.
+- Checked-in object-emission snapshots under `crates/lullaby_ir/tests/snapshots/alpha1_return_42.coff.json`, `crates/lullaby_ir/tests/snapshots/alpha1_locals_add.coff.json`, and `crates/lullaby_ir/tests/snapshots/alpha1_assignments.coff.json`.
 
 Not implemented yet:
 
-- General machine-code lowering beyond the current literal, `i64` local, and simple arithmetic subset.
+- General machine-code lowering beyond the current literal, `i64` local, assignment, and simple arithmetic subset.
 - Object file writing for non-COFF targets.
 - Linker orchestration.
 - Native runtime packaging.
@@ -90,11 +90,11 @@ Native backend diagnostics must use the shared `N####` diagnostic model. Target-
 - source is still validated, lowered to typed IR, and lowered to bytecode before object emission
 - the entry function must be zero-argument `main`
 - return type must be `void`, `i64`, or `bool`
-- the body may be empty `void`, `return <literal>`, a final literal expression, `i64` local bindings, and an `i64` return expression using locals, literals, `+`, `-`, and `*`
+- the body may be empty `void`, `return <literal>`, a final literal expression, `i64` local bindings, `i64` `=`, `+=`, `-=`, and `*=` assignment, and an `i64` return expression using locals, literals, `+`, `-`, and `*`
 - unsupported bytecode returns a structured `NativeObjectError`
 
-For literal `i64`, the prototype emits `mov rax, imm64; ret`. For `bool`, it emits `mov eax, imm32; ret`. For `void`, it emits `ret`. For local `i64` arithmetic, it emits a frame pointer prologue, 16-byte-aligned stack slots, local loads/stores, arithmetic into `rax`, and a frame epilogue.
+For literal `i64`, the prototype emits `mov rax, imm64; ret`. For `bool`, it emits `mov eax, imm32; ret`. For `void`, it emits `ret`. For local `i64` arithmetic and assignment, it emits a frame pointer prologue, 16-byte-aligned stack slots, local loads/stores, arithmetic into `rax`, and a frame epilogue. Native `i64` division and `/=` remain unsupported until signed division lowering and trap behavior are specified.
 
 ## Next Backend Work
 
-The next native backend checkpoint should expand object emission to assignments, calls, control flow, or stronger object validation with platform object tools when available; linker workflow for `x86_64-pc-windows-msvc` remains pending. It should not bypass the AST runtime, typed IR validation, bytecode VM, or existing release verification.
+The next native backend checkpoint should expand object emission to calls, control flow, division semantics, or stronger object validation with platform object tools when available; linker workflow for `x86_64-pc-windows-msvc` remains pending. It should not bypass the AST runtime, typed IR validation, bytecode VM, or existing release verification.
