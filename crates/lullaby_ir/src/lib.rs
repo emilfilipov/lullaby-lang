@@ -11,6 +11,7 @@ use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
 
 pub mod native_contract;
+pub mod native_object;
 
 pub const BYTECODE_ARTIFACT_FORMAT: &str = "lullaby-bytecode";
 pub const BYTECODE_ARTIFACT_EXTENSION: &str = "lbc";

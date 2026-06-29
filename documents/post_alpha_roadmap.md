@@ -90,9 +90,9 @@ Goal: reach native code generation only after the typed IR, bytecode contract, m
 Recommended sequence:
 
 - Freeze the typed IR contract for the Alpha 1 subset plus memory-effect metadata. Current status: bytecode memory metadata is versioned and ordered, and `crates/lullaby_ir::native_contract` records the first native backend contract.
-- Add backend snapshots for IR and bytecode before introducing machine-code output. Current status: bytecode memory metadata snapshots exist, and the Alpha 1 native backend contract has a checked-in JSON snapshot; object-emission snapshots are still pending until an emitter exists.
+- Add backend snapshots for IR and bytecode before introducing machine-code output. Current status: bytecode memory metadata snapshots exist, the Alpha 1 native backend contract has a checked-in JSON snapshot, and the first literal-return COFF object-emission snapshot exists.
 - Define calling convention, stack-frame, value layout, pointer, array, and resource-cleanup rules. Current status: see [native_backend_contract.md](native_backend_contract.md) and `alpha1_native_backend_contract()`.
-- Prototype object emission for one host target before adding a linker workflow.
+- Prototype object emission for one host target before adding a linker workflow. Current status: `lullaby_ir::native_object` emits a minimal `x86_64-pc-windows-msvc` COFF object for zero-argument literal-return `main`; broader lowering and linker work remain pending.
 - Require native backend diagnostics to use the shared `N####` diagnostic model.
 
 Native backend non-goals for the next checkpoint:

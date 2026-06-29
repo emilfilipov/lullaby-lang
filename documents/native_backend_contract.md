@@ -13,12 +13,13 @@ Implemented now:
 - `alpha1_value_layout(TypeRef)` coverage for the current Alpha 1 type surface: `void`, `i64`, `bool`, `string`, `array<T>`, and `ptr_*`.
 - Unit tests for target selection, current value layouts, cleanup sequencing, and JSON round-trip stability.
 - A checked-in JSON snapshot under `crates/lullaby_ir/tests/snapshots/alpha1_native_backend_contract.json`.
+- A first `x86_64-pc-windows-msvc` COFF object emitter in `crates/lullaby_ir/src/native_object.rs` for zero-argument `main` functions that return a literal `i64`, `bool`, or `void`.
+- A checked-in object-emission snapshot under `crates/lullaby_ir/tests/snapshots/alpha1_return_42.coff.json`.
 
 Not implemented yet:
 
-- Machine-code lowering.
-- Object file writing.
-- Object-emission snapshots.
+- General machine-code lowering beyond literal-return entry points.
+- Object file writing for non-COFF targets.
 - Linker orchestration.
 - Native runtime packaging.
 
@@ -82,6 +83,18 @@ Explicit release and future compiler cleanup must share `IrMemoryOperation.seque
 
 Native backend diagnostics must use the shared `N####` diagnostic model. Target-specific failures must include the target triple.
 
+## Prototype Object Emission
+
+`lullaby_ir::native_object` emits the first prototype COFF object for `x86_64-pc-windows-msvc`. The current emitter deliberately supports only the smallest reviewable native slice:
+
+- source is still validated, lowered to typed IR, and lowered to bytecode before object emission
+- the entry function must be zero-argument `main`
+- return type must be `void`, `i64`, or `bool`
+- the body must be empty `void`, `return <literal>`, or a final literal expression
+- unsupported bytecode returns a structured `NativeObjectError`
+
+For `i64`, the prototype emits `mov rax, imm64; ret`. For `bool`, it emits `mov eax, imm32; ret`. For `void`, it emits `ret`.
+
 ## Next Backend Work
 
-The next native backend checkpoint should use this contract to add object-emission snapshots or a prototype object-emission crate/module for `x86_64-pc-windows-msvc`. It should not bypass the AST runtime, typed IR validation, bytecode VM, or existing release verification.
+The next native backend checkpoint should expand object emission beyond literal returns, add stronger object validation with platform object tools when available, or introduce a linker workflow for `x86_64-pc-windows-msvc`. It should not bypass the AST runtime, typed IR validation, bytecode VM, or existing release verification.

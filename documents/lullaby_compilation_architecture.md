@@ -45,6 +45,8 @@ Each operation carries safety metadata for live-resource requirements, bounds-ch
 
 The contract is serializable and unit-tested so object-emission work can consume stable data instead of embedding target policy directly into lowering code. See [native_backend_contract.md](native_backend_contract.md).
 
+`lullaby_ir::native_object` now provides the first object-emission prototype for `x86_64-pc-windows-msvc`. It emits a deterministic COFF object for a zero-argument `main` that returns a literal `i64`, `bool`, or `void`, after the source has already passed semantic validation, typed IR lowering, and bytecode lowering. Broader instruction lowering, linker orchestration, and native runtime packaging remain planned work.
+
 ### Stage 1: Lexical Analysis (Tokenizer)
 
 Converts raw source text into a stream of tokens optimized for compact representation.
