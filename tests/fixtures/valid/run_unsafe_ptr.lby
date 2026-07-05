@@ -1,0 +1,7 @@
+fn main -> i64
+    let p ptr_i64 = alloc(42)
+    let value i64 = 0
+    unsafe
+        value = ptr_read(p)
+    dealloc(p)
+    value

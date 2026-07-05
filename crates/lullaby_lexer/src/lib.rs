@@ -76,6 +76,7 @@ pub enum Keyword {
     Async,
     Await,
     Coroutine,
+    Unsafe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,6 +390,7 @@ fn keyword(text: &str) -> Option<Keyword> {
         "async" => Keyword::Async,
         "await" => Keyword::Await,
         "coroutine" => Keyword::Coroutine,
+        "unsafe" => Keyword::Unsafe,
         _ => return None,
     })
 }

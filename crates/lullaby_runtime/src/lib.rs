@@ -115,6 +115,9 @@ pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
 struct Runtime<'a> {
     functions: HashMap<&'a str, &'a Function>,
     heap: Vec<Option<Value>>,
+    /// Ownership counts for reference-counted (`rc<T>`) heap slots, keyed by
+    /// slot index. Slots not present here are raw pointers / plain allocations.
+    refcounts: HashMap<usize, usize>,
     call_stack: Vec<TraceFrame>,
 }
 
@@ -133,6 +136,7 @@ impl<'a> Runtime<'a> {
         Ok(Self {
             functions,
             heap: Vec::new(),
+            refcounts: HashMap::new(),
             call_stack: Vec::new(),
         })
     }
@@ -153,6 +157,12 @@ impl<'a> Runtime<'a> {
             "println" => self.builtin_print("println", args, true),
             "warn" => self.builtin_warn(args),
             "flush" => self.builtin_flush(args),
+            "rc_new" => self.builtin_rc_new(args),
+            "rc_clone" => self.builtin_rc_clone(args),
+            "rc_release" => self.builtin_rc_release(args),
+            "rc_get" | "ref_get" | "ptr_read" => self.builtin_ref_get(name, args),
+            "rc_borrow" => self.builtin_rc_borrow(args),
+            "ptr_write" => self.builtin_store(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("N0401", format!("unknown function `{name}`"))
@@ -321,6 +331,9 @@ impl<'a> Runtime<'a> {
                 }
                 Ok(Control::Value(Value::Void))
             }
+            // `unsafe` is a transparent gate: its body runs in the enclosing
+            // scope, matching IR lowering, which inlines the body.
+            Stmt::Unsafe { body, .. } => self.eval_block(body, env),
         };
         result.map_err(|error| self.annotate_error(error, span))
     }
@@ -625,6 +638,84 @@ impl<'a> Runtime<'a> {
         Ok(Value::Void)
     }
 
+    fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_new", 1, args.len()))?;
+        self.heap.push(Some(value));
+        let slot = self.heap.len() - 1;
+        self.refcounts.insert(slot, 1);
+        Ok(Value::Ptr(slot))
+    }
+
+    fn builtin_rc_clone(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_clone", 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        match self.refcounts.get_mut(&slot) {
+            Some(count) => {
+                *count += 1;
+                Ok(Value::Ptr(slot))
+            }
+            None => Err(RuntimeError::new(
+                "N0406",
+                format!("invalid reference-counted handle `{slot}`"),
+            )),
+        }
+    }
+
+    fn builtin_rc_release(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_release", 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        match self.refcounts.get_mut(&slot) {
+            Some(count) => {
+                *count -= 1;
+                if *count == 0 {
+                    self.refcounts.remove(&slot);
+                    if let Some(target) = self.heap.get_mut(slot) {
+                        *target = None;
+                    }
+                }
+                Ok(Value::Void)
+            }
+            None => Err(RuntimeError::new(
+                "N0406",
+                format!("invalid reference-counted handle `{slot}`"),
+            )),
+        }
+    }
+
+    fn builtin_rc_borrow(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_borrow", 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        if self.refcounts.contains_key(&slot) {
+            // A borrow is a non-owning view of the same live slot.
+            Ok(Value::Ptr(slot))
+        } else {
+            Err(RuntimeError::new(
+                "N0406",
+                format!("invalid reference-counted handle `{slot}`"),
+            ))
+        }
+    }
+
+    /// Shared dereference for `rc_get`, `ref_get`, and (unsafe) `ptr_read`.
+    fn builtin_ref_get(&self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        self.heap
+            .get(slot)
+            .and_then(|value| value.clone())
+            .ok_or_else(|| RuntimeError::new("N0406", format!("invalid pointer `{slot}`")))
+    }
+
     fn wrong_arity(name: &str, expected: usize, actual: usize) -> RuntimeError {
         RuntimeError::new(
             "N0405",
@@ -649,7 +740,8 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
         | Stmt::For { span, .. }
-        | Stmt::Loop { span, .. } => *span,
+        | Stmt::Loop { span, .. }
+        | Stmt::Unsafe { span, .. } => *span,
         Stmt::Return(Some(expr)) | Stmt::Expr(expr) => expr.span,
         Stmt::Return(None) => Span::new(1, 1),
     }
@@ -901,6 +993,25 @@ mod tests {
     fn runs_safe_system_status_builtin() {
         let source = "fn main -> i64\n    sys_status(\"rustc\", [\"--version\"])\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(0));
+    }
+
+    #[test]
+    fn runs_reference_counted_values() {
+        let source = "fn main -> i64\n    let handle rc<i64> = rc_new(41)\n    let shared rc<i64> = rc_clone(handle)\n    let view ref<i64> = rc_borrow(handle)\n    let a i64 = rc_get(handle)\n    let b i64 = ref_get(view)\n    rc_release(shared)\n    rc_release(handle)\n    a + b - 40\n";
+        assert_eq!(run_source(source).expect("run"), Value::I64(42));
+    }
+
+    #[test]
+    fn rejects_use_after_rc_release() {
+        let source = "fn main -> i64\n    let handle rc<i64> = rc_new(1)\n    rc_release(handle)\n    rc_get(handle)\n";
+        let error = run_source(source).expect_err("runtime error");
+        assert_eq!(error.code, "N0406");
+    }
+
+    #[test]
+    fn runs_unsafe_raw_pointer_read() {
+        let source = "fn main -> i64\n    let p ptr_i64 = alloc(42)\n    let v i64 = 0\n    unsafe\n        v = ptr_read(p)\n    dealloc(p)\n    v\n";
+        assert_eq!(run_source(source).expect("run"), Value::I64(42));
     }
 
     #[test]

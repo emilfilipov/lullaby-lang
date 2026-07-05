@@ -36,10 +36,43 @@ impl TypeRef {
     }
 
     pub fn array_element(&self) -> Option<TypeRef> {
+        self.generic_arg("array")
+    }
+
+    /// The inner type of a `<ctor><T>` spelling, e.g. `generic_arg("rc")` on
+    /// `rc<i64>` yields `i64`.
+    pub fn generic_arg(&self, ctor: &str) -> Option<TypeRef> {
         self.name
-            .strip_prefix("array<")
+            .strip_prefix(&format!("{ctor}<"))
             .and_then(|name| name.strip_suffix('>'))
             .map(TypeRef::new)
+    }
+
+    /// The pointee of a raw pointer, accepting the modern `ptr<T>` spelling and
+    /// the legacy `ptr_T` spelling produced by `alloc`.
+    pub fn pointer_target(&self) -> Option<TypeRef> {
+        self.generic_arg("ptr")
+            .or_else(|| self.name.strip_prefix("ptr_").map(TypeRef::new))
+    }
+
+    /// The referent of a safe borrowed reference `ref<T>`.
+    pub fn reference_target(&self) -> Option<TypeRef> {
+        self.generic_arg("ref")
+    }
+
+    /// The owned type of a reference-counted handle `rc<T>`.
+    pub fn rc_target(&self) -> Option<TypeRef> {
+        self.generic_arg("rc")
+    }
+
+    /// True for a raw pointer (`ptr<T>` or legacy `ptr_T`).
+    pub fn is_raw_pointer(&self) -> bool {
+        self.pointer_target().is_some()
+    }
+
+    /// True for a safe reference type (`ref<T>` or `rc<T>`).
+    pub fn is_safe_reference(&self) -> bool {
+        self.reference_target().is_some() || self.rc_target().is_some()
     }
 }
 
@@ -80,6 +113,10 @@ pub enum Stmt {
         span: Span,
     },
     Loop {
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    Unsafe {
         body: Vec<Stmt>,
         span: Span,
     },
@@ -310,6 +347,10 @@ impl<'a> Parser<'a> {
             return self.parse_loop();
         }
 
+        if self.eat_keyword(Keyword::Unsafe).is_some() {
+            return self.parse_unsafe();
+        }
+
         if self.next_is_assignment() {
             return self.parse_assignment();
         }
@@ -454,6 +495,15 @@ impl<'a> Parser<'a> {
         Some(Stmt::Loop { body, span })
     }
 
+    fn parse_unsafe(&mut self) -> Option<Stmt> {
+        let span = self.previous().span;
+        self.expect_newline("expected newline after unsafe");
+        self.expect(TokenKindRef::Indent, "expected indented unsafe body")?;
+        let body = self.parse_block(&[BlockEnd::Dedent]);
+        self.expect(TokenKindRef::Dedent, "expected unsafe body dedent")?;
+        Some(Stmt::Unsafe { body, span })
+    }
+
     fn parse_expr_line(&mut self, fallback_span: Span) -> Option<Expr> {
         self.parse_expr_until(fallback_span, &[])
     }
@@ -492,17 +542,17 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                if name == "array" && self.eat_symbol("<") {
-                    let element_type = self.expect_type("expected array element type")?;
+                if matches!(name.as_str(), "array" | "ptr" | "ref" | "rc") && self.eat_symbol("<") {
+                    let inner = self.expect_type("expected generic type argument")?;
                     if !self.eat_symbol(">") {
                         self.error(
                             "N0203",
-                            "expected `>` after array element type",
+                            "expected `>` after generic type argument",
                             self.peek().span,
                         );
                         return None;
                     }
-                    Some(TypeRef::new(format!("array<{}>", element_type.name)))
+                    Some(TypeRef::new(format!("{name}<{}>", inner.name)))
                 } else {
                     Some(TypeRef::new(name))
                 }
@@ -996,6 +1046,19 @@ mod tests {
         let program = parse(&tokens).expect("parse");
         assert_eq!(program.functions[0].body.len(), 3);
         assert!(matches!(program.functions[0].body[0], Stmt::Expr(_)));
+    }
+
+    #[test]
+    fn parses_unsafe_block_and_reference_types() {
+        let source = "fn main -> i64\n    let h rc<i64> = rc_new(1)\n    let p ptr_i64 = alloc(2)\n    unsafe\n        let v i64 = ptr_read(p)\n    rc_get(h)\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert!(matches!(program.functions[0].body[2], Stmt::Unsafe { .. }));
+        // `rc<i64>` parses as a generic reference type.
+        let Stmt::Let { ty: Some(ty), .. } = &program.functions[0].body[0] else {
+            panic!("expected typed let");
+        };
+        assert_eq!(ty.rc_target().expect("rc target").name, "i64");
     }
 
     #[test]

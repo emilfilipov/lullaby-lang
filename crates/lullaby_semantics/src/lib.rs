@@ -113,6 +113,7 @@ struct Checker<'a> {
     expression_types: Vec<ExpressionType>,
     diagnostics: Vec<SemanticDiagnostic>,
     loop_depth: usize,
+    unsafe_depth: usize,
 }
 
 impl<'a> Checker<'a> {
@@ -123,6 +124,7 @@ impl<'a> Checker<'a> {
             expression_types: Vec::new(),
             diagnostics: Vec::new(),
             loop_depth: 0,
+            unsafe_depth: 0,
         }
     }
 
@@ -444,6 +446,16 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
                 None
             }
+            Stmt::Unsafe { body, .. } => {
+                // `unsafe` is a transparent compile-time gate: its body runs in
+                // the enclosing scope, but raw-pointer operations inside it are
+                // permitted. Locals declared here remain visible afterward, to
+                // match IR lowering, which inlines the body.
+                self.unsafe_depth += 1;
+                let block_type = self.check_block(body, scope, function);
+                self.unsafe_depth -= 1;
+                block_type
+            }
         }
     }
 
@@ -730,6 +742,68 @@ impl<'a> Checker<'a> {
                 self.expect_arg_count(name, args, 0, function)?;
                 Some(TypeRef::new("void"))
             }
+            "rc_new" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let value_type = self.check_expr(&args[0], scope, function)?;
+                Some(TypeRef::new(format!("rc<{}>", value_type.name)))
+            }
+            "rc_clone" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                self.expect_reference("rc_clone", "rc", &ty, args[0].span, function)?;
+                Some(ty)
+            }
+            "rc_release" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                self.expect_reference("rc_release", "rc", &ty, args[0].span, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "rc_get" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                self.expect_reference("rc_get", "rc", &ty, args[0].span, function)
+            }
+            "rc_borrow" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                let inner =
+                    self.expect_reference("rc_borrow", "rc", &ty, args[0].span, function)?;
+                Some(TypeRef::new(format!("ref<{}>", inner.name)))
+            }
+            "ref_get" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                self.expect_reference("ref_get", "ref", &ty, args[0].span, function)
+            }
+            "ptr_read" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                let inner = self.expect_raw_pointer("ptr_read", &ty, args[0].span, function)?;
+                self.require_unsafe("ptr_read", call_span, function)?;
+                Some(inner)
+            }
+            "ptr_write" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let ptr_type = self.check_expr(&args[0], scope, function)?;
+                let value_type = self.check_expr(&args[1], scope, function)?;
+                let inner =
+                    self.expect_raw_pointer("ptr_write", &ptr_type, args[0].span, function)?;
+                self.require_unsafe("ptr_write", call_span, function)?;
+                if value_type != inner {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "N0331",
+                        format!(
+                            "ptr_write expects value `{}` for pointer `{}` but got `{}`",
+                            inner.name, ptr_type.name, value_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new("void"))
+            }
             _ => {
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     self.diagnostics.push(SemanticDiagnostic::at(
@@ -778,6 +852,67 @@ impl<'a> Checker<'a> {
 
                 Some(signature.return_type)
             }
+        }
+    }
+
+    /// Verify `ty` is a `<ctor><T>` reference (`rc` or `ref`) and return its
+    /// inner type `T`.
+    fn expect_reference(
+        &mut self,
+        name: &str,
+        ctor: &str,
+        ty: &TypeRef,
+        span: Span,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        match ty.generic_arg(ctor) {
+            Some(inner) => Some(inner),
+            None => {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "N0331",
+                    format!("{name} expects a `{ctor}<T>` value but got `{}`", ty.name),
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    /// Verify `ty` is a raw pointer and return its pointee type.
+    fn expect_raw_pointer(
+        &mut self,
+        name: &str,
+        ty: &TypeRef,
+        span: Span,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        match ty.pointer_target() {
+            Some(inner) => Some(inner),
+            None => {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "N0331",
+                    format!("{name} expects a raw pointer value but got `{}`", ty.name),
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    /// Require the current context to be inside an `unsafe` block.
+    fn require_unsafe(&mut self, name: &str, span: Span, function: &Function) -> Option<()> {
+        if self.unsafe_depth > 0 {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "N0330",
+                format!("raw pointer operation `{name}` requires an `unsafe` block"),
+                Some(function.name.clone()),
+                span,
+            ));
+            None
         }
     }
 
@@ -1088,6 +1223,42 @@ mod tests {
     fn validates_io_and_system_builtins() {
         let source = "fn main -> bool\n    write_file(\"target/lullaby_semantics_io.txt\", \"alpha\")\n    append_file(\"target/lullaby_semantics_io.txt\", \" beta\")\n    let content string = read_file(\"target/lullaby_semantics_io.txt\")\n    let exists bool = file_exists(\"target/lullaby_semantics_io.txt\")\n    let status i64 = sys_status(\"rustc\", [\"--version\"])\n    content == \"alpha beta\" and exists and status == 0\n";
         assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn validates_reference_builtins() {
+        let source = "fn main -> i64\n    let h rc<i64> = rc_new(1)\n    let s rc<i64> = rc_clone(h)\n    let v ref<i64> = rc_borrow(h)\n    let a i64 = ref_get(v)\n    rc_release(s)\n    rc_release(h)\n    a\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn requires_unsafe_for_raw_pointer_read() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    let p ptr_i64 = alloc(1)\n    ptr_read(p)\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0330")
+        );
+    }
+
+    #[test]
+    fn allows_raw_pointer_read_inside_unsafe() {
+        let source = "fn main -> i64\n    let p ptr_i64 = alloc(1)\n    let v i64 = 0\n    unsafe\n        v = ptr_read(p)\n    dealloc(p)\n    v\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_reference_builtin_type_mismatch() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    let x i64 = 1\n    rc_get(x)\n    x\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0331")
+        );
     }
 
     #[test]

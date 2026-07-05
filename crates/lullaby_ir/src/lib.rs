@@ -488,6 +488,44 @@ fn classify_memory_call(
                 pointer_type: pointer.ty.clone(),
             }
         }
+        // Reference-counted and raw-reference operations feed the same memory
+        // analysis so optimizers and codegen see their allocation, sharing,
+        // cleanup, and dereference effects.
+        "rc_new" => {
+            let value = args.first()?;
+            IrMemoryOperationKind::Allocate {
+                value_type: value.ty.clone(),
+                pointer_type: expr.ty.clone(),
+            }
+        }
+        "rc_clone" => {
+            let handle = args.first()?;
+            IrMemoryOperationKind::Copy {
+                source_type: handle.ty.clone(),
+                target_type: expr.ty.clone(),
+            }
+        }
+        "rc_release" => {
+            let handle = args.first()?;
+            IrMemoryOperationKind::Cleanup {
+                resource_type: handle.ty.clone(),
+            }
+        }
+        "rc_get" | "ref_get" | "ptr_read" => {
+            let reference = args.first()?;
+            IrMemoryOperationKind::Load {
+                pointer_type: reference.ty.clone(),
+                value_type: expr.ty.clone(),
+            }
+        }
+        "ptr_write" => {
+            let pointer = args.first()?;
+            let value = args.get(1)?;
+            IrMemoryOperationKind::Store {
+                pointer_type: pointer.ty.clone(),
+                value_type: value.ty.clone(),
+            }
+        }
         _ => return None,
     };
 
@@ -895,6 +933,41 @@ fn classify_bytecode_memory_call(
             let pointer = args.first()?;
             IrMemoryOperationKind::Deallocate {
                 pointer_type: pointer.ty.clone(),
+            }
+        }
+        "rc_new" => {
+            let value = args.first()?;
+            IrMemoryOperationKind::Allocate {
+                value_type: value.ty.clone(),
+                pointer_type: expr.ty.clone(),
+            }
+        }
+        "rc_clone" => {
+            let handle = args.first()?;
+            IrMemoryOperationKind::Copy {
+                source_type: handle.ty.clone(),
+                target_type: expr.ty.clone(),
+            }
+        }
+        "rc_release" => {
+            let handle = args.first()?;
+            IrMemoryOperationKind::Cleanup {
+                resource_type: handle.ty.clone(),
+            }
+        }
+        "rc_get" | "ref_get" | "ptr_read" => {
+            let reference = args.first()?;
+            IrMemoryOperationKind::Load {
+                pointer_type: reference.ty.clone(),
+                value_type: expr.ty.clone(),
+            }
+        }
+        "ptr_write" => {
+            let pointer = args.first()?;
+            let value = args.get(1)?;
+            IrMemoryOperationKind::Store {
+                pointer_type: pointer.ty.clone(),
+                value_type: value.ty.clone(),
             }
         }
         _ => return None,
@@ -2604,6 +2677,7 @@ fn is_unconditional_terminator(statement: &IrStmt) -> bool {
 struct IrRuntime<'a> {
     functions: HashMap<&'a str, &'a IrFunction>,
     heap: Vec<Option<Value>>,
+    refcounts: HashMap<usize, usize>,
     call_stack: Vec<TraceFrame>,
 }
 
@@ -2622,6 +2696,7 @@ impl<'a> IrRuntime<'a> {
         Ok(Self {
             functions,
             heap: Vec::new(),
+            refcounts: HashMap::new(),
             call_stack: Vec::new(),
         })
     }
@@ -2642,6 +2717,12 @@ impl<'a> IrRuntime<'a> {
             "println" => self.builtin_print("println", args, true),
             "warn" => self.builtin_warn(args),
             "flush" => self.builtin_flush(args),
+            "rc_new" => self.builtin_rc_new(args),
+            "rc_clone" => self.builtin_rc_clone(args),
+            "rc_release" => self.builtin_rc_release(args),
+            "rc_get" | "ref_get" | "ptr_read" => self.builtin_ref_get(name, args),
+            "rc_borrow" => self.builtin_rc_borrow(args),
+            "ptr_write" => self.builtin_store(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("N0401", format!("unknown function `{name}`"))
@@ -3121,6 +3202,82 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::Void)
     }
 
+    fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_new", 1, args.len()))?;
+        self.heap.push(Some(value));
+        let slot = self.heap.len() - 1;
+        self.refcounts.insert(slot, 1);
+        Ok(Value::Ptr(slot))
+    }
+
+    fn builtin_rc_clone(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_clone", 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        match self.refcounts.get_mut(&slot) {
+            Some(count) => {
+                *count += 1;
+                Ok(Value::Ptr(slot))
+            }
+            None => Err(RuntimeError::new(
+                "N0406",
+                format!("invalid reference-counted handle `{slot}`"),
+            )),
+        }
+    }
+
+    fn builtin_rc_release(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_release", 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        match self.refcounts.get_mut(&slot) {
+            Some(count) => {
+                *count -= 1;
+                if *count == 0 {
+                    self.refcounts.remove(&slot);
+                    if let Some(target) = self.heap.get_mut(slot) {
+                        *target = None;
+                    }
+                }
+                Ok(Value::Void)
+            }
+            None => Err(RuntimeError::new(
+                "N0406",
+                format!("invalid reference-counted handle `{slot}`"),
+            )),
+        }
+    }
+
+    fn builtin_rc_borrow(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rc_borrow", 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        if self.refcounts.contains_key(&slot) {
+            Ok(Value::Ptr(slot))
+        } else {
+            Err(RuntimeError::new(
+                "N0406",
+                format!("invalid reference-counted handle `{slot}`"),
+            ))
+        }
+    }
+
+    fn builtin_ref_get(&self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        let slot = handle.as_ptr()?;
+        self.heap
+            .get(slot)
+            .and_then(|value| value.clone())
+            .ok_or_else(|| RuntimeError::new("N0406", format!("invalid pointer `{slot}`")))
+    }
+
     fn wrong_arity(name: &str, expected: usize, actual: usize) -> RuntimeError {
         RuntimeError::new(
             "N0405",
@@ -3253,10 +3410,18 @@ impl<'a> Lowerer<'a> {
         statements: &[Stmt],
         scope: &mut HashMap<String, TypeRef>,
     ) -> Result<Vec<IrStmt>, IrLoweringError> {
-        statements
-            .iter()
-            .map(|statement| self.lower_statement(statement, scope))
-            .collect()
+        let mut lowered = Vec::with_capacity(statements.len());
+        for statement in statements {
+            match statement {
+                // `unsafe` is a transparent compile-time gate; inline its body
+                // into the enclosing block so no IR node is needed for it.
+                Stmt::Unsafe { body, .. } => {
+                    lowered.extend(self.lower_block(body, scope)?);
+                }
+                other => lowered.push(self.lower_statement(other, scope)?),
+            }
+        }
+        Ok(lowered)
     }
 
     fn lower_statement(
@@ -3366,6 +3531,22 @@ impl<'a> Lowerer<'a> {
                 let mut loop_scope = scope.clone();
                 let body = self.lower_block(body, &mut loop_scope)?;
                 Ok(IrStmt::Loop { body, span: *span })
+            }
+            // `unsafe` blocks are flattened in `lower_block`; reaching here means
+            // a lone unsafe statement, which we lower transparently by inlining.
+            Stmt::Unsafe { body, span } => {
+                let mut lowered = self.lower_block(body, scope)?;
+                match lowered.len() {
+                    1 => Ok(lowered.remove(0)),
+                    // An empty or multi-statement unsafe body cannot collapse to
+                    // one IR statement; represent it as a always-false guard-free
+                    // block via an `if false` is overkill, so surface it as a
+                    // lowering error to be handled by the flattening path.
+                    _ => Err(IrLoweringError::new(
+                        "unsafe block must be lowered by lower_block".to_string(),
+                        Some(*span),
+                    )),
+                }
             }
         }
     }
@@ -3500,10 +3681,35 @@ impl<'a> Lowerer<'a> {
                     })?
             }
             "store" | "dealloc" | "write_file" | "append_file" | "print" | "println" | "warn"
-            | "flush" => TypeRef::new("void"),
+            | "flush" | "rc_release" | "ptr_write" => TypeRef::new("void"),
             "read_file" | "sys_output" => TypeRef::new("string"),
             "file_exists" => TypeRef::new("bool"),
             "sys_status" => TypeRef::new("i64"),
+            "rc_new" => {
+                let value = args.first().ok_or_else(|| {
+                    IrLoweringError::new("rc_new call missing value argument", Some(span))
+                })?;
+                TypeRef::new(format!("rc<{}>", value.ty.name))
+            }
+            "rc_clone" => args
+                .first()
+                .map(|handle| handle.ty.clone())
+                .ok_or_else(|| {
+                    IrLoweringError::new("rc_clone call missing handle argument", Some(span))
+                })?,
+            "rc_get" => reference_inner(args, "rc", span)?,
+            "ref_get" => reference_inner(args, "ref", span)?,
+            "rc_borrow" => {
+                TypeRef::new(format!("ref<{}>", reference_inner(args, "rc", span)?.name))
+            }
+            "ptr_read" => {
+                let ptr = args.first().ok_or_else(|| {
+                    IrLoweringError::new("ptr_read call missing pointer argument", Some(span))
+                })?;
+                ptr.ty.pointer_target().ok_or_else(|| {
+                    IrLoweringError::new("ptr_read call argument is not a pointer", Some(span))
+                })?
+            }
             _ => self
                 .signatures
                 .get(name)
@@ -3513,6 +3719,18 @@ impl<'a> Lowerer<'a> {
                 })?,
         })
     }
+}
+
+/// Extract the inner type `T` of the first argument's `<ctor><T>` reference type.
+fn reference_inner(args: &[IrExpr], ctor: &str, span: Span) -> Result<TypeRef, IrLoweringError> {
+    args.first()
+        .and_then(|arg| arg.ty.generic_arg(ctor))
+        .ok_or_else(|| {
+            IrLoweringError::new(
+                format!("{ctor} reference call argument is invalid"),
+                Some(span),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -3694,6 +3912,37 @@ mod tests {
             IrCleanupRole::ReleasesResource
         );
         assert!(operations[4].safety.mutates_memory);
+    }
+
+    #[test]
+    fn memory_analysis_reports_reference_operations() {
+        let source = "fn main -> i64\n    let h rc<i64> = rc_new(1)\n    let s rc<i64> = rc_clone(h)\n    let v i64 = rc_get(h)\n    rc_release(s)\n    rc_release(h)\n    v\n";
+        let module = lower_source(source);
+        let operations = analyze_memory_operations(&module);
+
+        assert!(
+            operations
+                .iter()
+                .any(|op| matches!(op.kind, IrMemoryOperationKind::Allocate { .. })),
+            "rc_new should be an allocation"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|op| matches!(op.kind, IrMemoryOperationKind::Copy { .. })),
+            "rc_clone should be a copy/share"
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|op| matches!(op.kind, IrMemoryOperationKind::Load { .. })),
+            "rc_get should be a load"
+        );
+        let cleanups = operations
+            .iter()
+            .filter(|op| matches!(op.kind, IrMemoryOperationKind::Cleanup { .. }))
+            .count();
+        assert_eq!(cleanups, 2, "two rc_release calls should be cleanups");
     }
 
     #[test]
@@ -4270,7 +4519,12 @@ mod tests {
         let mut fixtures = fs::read_dir(&fixture_dir)
             .expect("valid fixture directory")
             .map(|entry| entry.expect("fixture entry").path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("lullaby"))
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("lby") | Some("lullaby")
+                )
+            })
             .collect::<Vec<_>>();
         fixtures.sort();
 

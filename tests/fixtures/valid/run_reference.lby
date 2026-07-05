@@ -1,0 +1,9 @@
+fn main -> i64
+    let handle rc<i64> = rc_new(41)
+    let shared rc<i64> = rc_clone(handle)
+    let view ref<i64> = rc_borrow(handle)
+    let a i64 = rc_get(handle)
+    let b i64 = ref_get(view)
+    rc_release(shared)
+    rc_release(handle)
+    a + b - 40

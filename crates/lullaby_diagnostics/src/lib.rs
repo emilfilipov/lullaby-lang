@@ -302,6 +302,20 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Add `fn main -> Type` with no parameters, then call helper functions from inside main.",
     },
     DiagnosticEntry {
+        code: "N0330",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "Raw pointer operations may read or write arbitrary memory and must be explicitly opted into.",
+        root_cause: "A raw-pointer operation such as `ptr_read` or `ptr_write` was used outside an `unsafe` block.",
+        suggested_fix: "Wrap the raw pointer operation in an `unsafe` block, or use safe `rc<T>`/`ref<T>` references instead.",
+    },
+    DiagnosticEntry {
+        code: "N0331",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A reference builtin received a value whose type is not the expected reference or pointer kind.",
+        root_cause: "An `rc`/`ref`/raw-pointer builtin was called with a value of a different type.",
+        suggested_fix: "Pass an `rc<T>` to rc builtins, a `ref<T>` to `ref_get`, or a raw pointer to `ptr_read`/`ptr_write`.",
+    },
+    DiagnosticEntry {
         code: "N0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",
