@@ -1,0 +1,25 @@
+fn bit b bool -> i64
+    if b
+        1
+    else
+        0
+
+fn main -> i64
+    let s string = "Hello, World"
+    let head string = substring(s, 0, 5)
+    let idx i64 = find(s, "World")
+    let has bool = contains(s, "Planet")
+    let parts array<string> = split("a,b,c", ",")
+    let joined string = join(parts, "-")
+    let clean string = trim("  hi  ")
+    let dashed string = replace("aXbXc", "X", "-")
+    let loud string = upper("abc")
+    let quiet string = lower("ABC")
+    let head_ok i64 = bit(head == "Hello")
+    let joined_ok i64 = bit(joined == "a-b-c")
+    let clean_ok i64 = bit(clean == "hi")
+    let dashed_ok i64 = bit(dashed == "a-b-c")
+    let loud_ok i64 = bit(loud == "ABC")
+    let quiet_ok i64 = bit(quiet == "abc")
+    let has_ok i64 = bit(not has)
+    idx + len(parts) + head_ok + joined_ok + clean_ok + dashed_ok + loud_ok + quiet_ok + has_ok

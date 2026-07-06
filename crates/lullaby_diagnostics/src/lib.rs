@@ -407,6 +407,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass a string or array value to `len`, or read a numeric field directly.",
     },
     DiagnosticEntry {
+        code: "L0375",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "String-library builtins take strings, char indices, or string arrays.",
+        root_cause: "An argument to a string builtin has the wrong type (expected string, i64, or array<string>).",
+        suggested_fix: "Pass the argument type the builtin expects: strings for text, i64 for char indices, array<string> for join.",
+    },
+    DiagnosticEntry {
         code: "L0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",

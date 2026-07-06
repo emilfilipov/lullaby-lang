@@ -6,7 +6,10 @@ use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
     AssignOp, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt, TypeRef, UnaryOp,
 };
-use lullaby_runtime::{ResolvedPlace, RuntimeError, Value, apply_compound, get_place, set_place};
+use lullaby_runtime::{
+    ResolvedPlace, RuntimeError, Value, apply_compound, char_find, expect_i64, expect_string,
+    get_place, set_place,
+};
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
 
@@ -3084,6 +3087,15 @@ impl<'a> IrRuntime<'a> {
             "flush" => self.builtin_flush(args),
             "to_string" => Self::builtin_to_string(args),
             "len" => Self::builtin_len(args),
+            "substring" => Self::builtin_substring(args),
+            "find" => Self::builtin_find(args),
+            "contains" => Self::builtin_contains(args),
+            "split" => Self::builtin_split(args),
+            "join" => Self::builtin_join(args),
+            "trim" => Self::builtin_trim(args),
+            "replace" => Self::builtin_replace(args),
+            "upper" => Self::builtin_upper(args),
+            "lower" => Self::builtin_lower(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -3672,6 +3684,125 @@ impl<'a> IrRuntime<'a> {
                 format!("len expects a string or array but got `{other}`"),
             )),
         }
+    }
+
+    fn builtin_substring(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, start, end]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("substring", 3, args.len()))?;
+        let text = expect_string("substring", text)?;
+        let start = expect_i64("substring", start)?;
+        let end = expect_i64("substring", end)?;
+        let chars: Vec<char> = text.chars().collect();
+        let count = chars.len() as i64;
+        if start < 0 || end < 0 || start > end || end > count {
+            return Err(RuntimeError::new(
+                "L0413",
+                format!(
+                    "substring range [{start}, {end}) is out of bounds for a string of length {count}"
+                ),
+            ));
+        }
+        let slice: String = chars[start as usize..end as usize].iter().collect();
+        Ok(Value::String(slice))
+    }
+
+    fn builtin_find(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, needle]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("find", 2, args.len()))?;
+        let text = expect_string("find", text)?;
+        let needle = expect_string("find", needle)?;
+        Ok(Value::I64(char_find(&text, &needle)))
+    }
+
+    fn builtin_contains(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, needle]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("contains", 2, args.len()))?;
+        let text = expect_string("contains", text)?;
+        let needle = expect_string("contains", needle)?;
+        Ok(Value::Bool(text.contains(&needle)))
+    }
+
+    fn builtin_split(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, sep]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("split", 2, args.len()))?;
+        let text = expect_string("split", text)?;
+        let sep = expect_string("split", sep)?;
+        if sep.is_empty() {
+            return Err(RuntimeError::new(
+                "L0417",
+                "split requires a non-empty separator".to_string(),
+            ));
+        }
+        let parts = text
+            .split(sep.as_str())
+            .map(|part| Value::String(part.to_string()))
+            .collect();
+        Ok(Value::Array(parts))
+    }
+
+    fn builtin_join(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [parts, sep]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("join", 2, args.len()))?;
+        let Value::Array(parts) = parts else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("join expects an array of strings but got `{parts}`"),
+            ));
+        };
+        let sep = expect_string("join", sep)?;
+        let mut pieces = Vec::with_capacity(parts.len());
+        for part in parts {
+            pieces.push(expect_string("join", part)?);
+        }
+        Ok(Value::String(pieces.join(sep.as_str())))
+    }
+
+    fn builtin_trim(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("trim", 1, args.len()))?;
+        let text = expect_string("trim", text)?;
+        Ok(Value::String(
+            text.trim_matches(|c: char| c.is_ascii_whitespace())
+                .to_string(),
+        ))
+    }
+
+    fn builtin_replace(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, from, to]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("replace", 3, args.len()))?;
+        let text = expect_string("replace", text)?;
+        let from = expect_string("replace", from)?;
+        let to = expect_string("replace", to)?;
+        if from.is_empty() {
+            return Err(RuntimeError::new(
+                "L0417",
+                "replace requires a non-empty `from` pattern".to_string(),
+            ));
+        }
+        Ok(Value::String(text.replace(from.as_str(), to.as_str())))
+    }
+
+    fn builtin_upper(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("upper", 1, args.len()))?;
+        let text = expect_string("upper", text)?;
+        Ok(Value::String(text.to_uppercase()))
+    }
+
+    fn builtin_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("lower", 1, args.len()))?;
+        let text = expect_string("lower", text)?;
+        Ok(Value::String(text.to_lowercase()))
     }
 
     fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -4330,9 +4461,11 @@ impl<'a> Lowerer<'a> {
             }
             "store" | "dealloc" | "write_file" | "append_file" | "print" | "println" | "warn"
             | "flush" | "rc_release" | "ptr_write" | "region_create" => TypeRef::new("void"),
-            "read_file" | "sys_output" | "to_string" => TypeRef::new("string"),
-            "file_exists" => TypeRef::new("bool"),
-            "sys_status" | "len" => TypeRef::new("i64"),
+            "read_file" | "sys_output" | "to_string" | "substring" | "join" | "trim"
+            | "replace" | "upper" | "lower" => TypeRef::new("string"),
+            "file_exists" | "contains" => TypeRef::new("bool"),
+            "sys_status" | "len" | "find" => TypeRef::new("i64"),
+            "split" => TypeRef::new("array<string>"),
             "rc_new" => {
                 let value = args.first().ok_or_else(|| {
                     IrLoweringError::new("rc_new call missing value argument", Some(span))

@@ -122,6 +122,36 @@ impl fmt::Display for ErrorCategory {
     }
 }
 
+/// Unwrap a runtime `Value` expected to be a string, reporting `L0417` otherwise.
+pub fn expect_string(name: &str, value: Value) -> Result<String, RuntimeError> {
+    match value {
+        Value::String(text) => Ok(text),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a string but got `{other}`"),
+        )),
+    }
+}
+
+/// Unwrap a runtime `Value` expected to be an `i64`, reporting `L0417` otherwise.
+pub fn expect_i64(name: &str, value: Value) -> Result<i64, RuntimeError> {
+    match value {
+        Value::I64(number) => Ok(number),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects an i64 but got `{other}`"),
+        )),
+    }
+}
+
+/// First character index of `needle` in `text`, or `-1` when absent.
+pub fn char_find(text: &str, needle: &str) -> i64 {
+    match text.find(needle) {
+        Some(byte_index) => text[..byte_index].chars().count() as i64,
+        None => -1,
+    }
+}
+
 pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
     let mut runtime = Runtime::new(program)?;
     runtime.call_function("main", Vec::new())
@@ -199,6 +229,15 @@ impl<'a> Runtime<'a> {
             "flush" => self.builtin_flush(args),
             "to_string" => Self::builtin_to_string(args),
             "len" => Self::builtin_len(args),
+            "substring" => Self::builtin_substring(args),
+            "find" => Self::builtin_find(args),
+            "contains" => Self::builtin_contains(args),
+            "split" => Self::builtin_split(args),
+            "join" => Self::builtin_join(args),
+            "trim" => Self::builtin_trim(args),
+            "replace" => Self::builtin_replace(args),
+            "upper" => Self::builtin_upper(args),
+            "lower" => Self::builtin_lower(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -821,6 +860,125 @@ impl<'a> Runtime<'a> {
         }
     }
 
+    fn builtin_substring(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, start, end]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("substring", 3, args.len()))?;
+        let text = expect_string("substring", text)?;
+        let start = expect_i64("substring", start)?;
+        let end = expect_i64("substring", end)?;
+        let chars: Vec<char> = text.chars().collect();
+        let count = chars.len() as i64;
+        if start < 0 || end < 0 || start > end || end > count {
+            return Err(RuntimeError::new(
+                "L0413",
+                format!(
+                    "substring range [{start}, {end}) is out of bounds for a string of length {count}"
+                ),
+            ));
+        }
+        let slice: String = chars[start as usize..end as usize].iter().collect();
+        Ok(Value::String(slice))
+    }
+
+    fn builtin_find(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, needle]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("find", 2, args.len()))?;
+        let text = expect_string("find", text)?;
+        let needle = expect_string("find", needle)?;
+        Ok(Value::I64(char_find(&text, &needle)))
+    }
+
+    fn builtin_contains(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, needle]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("contains", 2, args.len()))?;
+        let text = expect_string("contains", text)?;
+        let needle = expect_string("contains", needle)?;
+        Ok(Value::Bool(text.contains(&needle)))
+    }
+
+    fn builtin_split(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, sep]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("split", 2, args.len()))?;
+        let text = expect_string("split", text)?;
+        let sep = expect_string("split", sep)?;
+        if sep.is_empty() {
+            return Err(RuntimeError::new(
+                "L0417",
+                "split requires a non-empty separator".to_string(),
+            ));
+        }
+        let parts = text
+            .split(sep.as_str())
+            .map(|part| Value::String(part.to_string()))
+            .collect();
+        Ok(Value::Array(parts))
+    }
+
+    fn builtin_join(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [parts, sep]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("join", 2, args.len()))?;
+        let Value::Array(parts) = parts else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("join expects an array of strings but got `{parts}`"),
+            ));
+        };
+        let sep = expect_string("join", sep)?;
+        let mut pieces = Vec::with_capacity(parts.len());
+        for part in parts {
+            pieces.push(expect_string("join", part)?);
+        }
+        Ok(Value::String(pieces.join(sep.as_str())))
+    }
+
+    fn builtin_trim(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("trim", 1, args.len()))?;
+        let text = expect_string("trim", text)?;
+        Ok(Value::String(
+            text.trim_matches(|c: char| c.is_ascii_whitespace())
+                .to_string(),
+        ))
+    }
+
+    fn builtin_replace(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, from, to]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("replace", 3, args.len()))?;
+        let text = expect_string("replace", text)?;
+        let from = expect_string("replace", from)?;
+        let to = expect_string("replace", to)?;
+        if from.is_empty() {
+            return Err(RuntimeError::new(
+                "L0417",
+                "replace requires a non-empty `from` pattern".to_string(),
+            ));
+        }
+        Ok(Value::String(text.replace(from.as_str(), to.as_str())))
+    }
+
+    fn builtin_upper(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("upper", 1, args.len()))?;
+        let text = expect_string("upper", text)?;
+        Ok(Value::String(text.to_uppercase()))
+    }
+
+    fn builtin_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("lower", 1, args.len()))?;
+        let text = expect_string("lower", text)?;
+        Ok(Value::String(text.to_lowercase()))
+    }
+
     fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -1196,6 +1354,44 @@ mod tests {
     fn runs_store_builtin() {
         let source = "fn main -> i64\n    let ptr ptr_i64 = alloc(0)\n    store(ptr, 41)\n    let value i64 = load(ptr)\n    dealloc(ptr)\n    value + 1\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(42));
+    }
+
+    #[test]
+    fn runs_string_builtins() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let s string = \"Hello, World\"\n",
+            "    let parts array<string> = split(\"a,b,c\", \",\")\n",
+            "    find(s, \"World\") + len(parts)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(10));
+    }
+
+    #[test]
+    fn runs_string_transforms() {
+        let source = concat!(
+            "fn main -> string\n",
+            "    let joined string = join(split(\"a,b,c\", \",\"), \"-\")\n",
+            "    upper(replace(substring(joined, 0, 3), \"-\", \"_\"))\n",
+        );
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::String("A_B".to_string())
+        );
+    }
+
+    #[test]
+    fn substring_out_of_range_is_runtime_error() {
+        let source = "fn main -> string\n    substring(\"hi\", 0, 5)\n";
+        let error = run_source(source).expect_err("runtime error");
+        assert_eq!(error.code, "L0413");
+    }
+
+    #[test]
+    fn split_empty_separator_is_runtime_error() {
+        let source = "fn main -> i64\n    len(split(\"hi\", \"\"))\n";
+        let error = run_source(source).expect_err("runtime error");
+        assert_eq!(error.code, "L0417");
     }
 
     #[test]

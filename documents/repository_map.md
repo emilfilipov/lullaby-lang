@@ -123,6 +123,7 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo run -p lullaby_cli -- run tests/fixtures/valid/run_array_mutation.lby`: run array element assignment, compound `+=` on elements, nested array-of-struct mutation, and the `len` builtin across the AST, IR, and bytecode backends.
 - `cargo run -p lullaby_cli -- run tests/fixtures/valid/run_named_struct.lby`: run named-field struct construction with fields supplied out of order across the AST, IR, and bytecode backends.
 - `cargo run -p lullaby_cli -- run tests/fixtures/valid/run_file_io.lby`: run text file write, append, and read builtins.
+- `cargo run -p lullaby_cli -- run tests/fixtures/valid/run_string.lby`: run the character-indexed string library builtins (`substring`, `find`, `contains`, `split`, `join`, `trim`, `replace`, `upper`, `lower`) across the AST, IR, and bytecode backends.
 - `cargo run -p lullaby_cli -- check tests/fixtures/invalid/brace.lby`: verify forbidden block delimiter diagnostics.
 - `cargo run -p lullaby_cli -- check tests/fixtures/invalid/missing_indented_body.lby`: verify parser diagnostics for missing indentation.
 - `cargo test -p lullaby_parser --test ast_snapshots`: verify selected valid `.lby` fixtures still produce the checked-in parser AST golden snapshots.

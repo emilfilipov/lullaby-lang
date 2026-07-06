@@ -1326,6 +1326,61 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
+            "substring" => {
+                self.expect_arg_count(name, args, 3, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "i64", scope, function)?;
+                self.expect_string_builtin_arg(name, 3, &args[2], "i64", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
+            "find" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "contains" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("bool"))
+            }
+            "split" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("array<string>"))
+            }
+            "join" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_string_builtin_arg(
+                    name,
+                    1,
+                    &args[0],
+                    "array<string>",
+                    scope,
+                    function,
+                )?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
+            "trim" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
+            "replace" => {
+                self.expect_arg_count(name, args, 3, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 3, &args[2], "string", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
+            "upper" | "lower" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
             "rc_new" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let value_type = self.check_expr(&args[0], scope, function)?;
@@ -1748,6 +1803,39 @@ impl<'a> Checker<'a> {
             None
         }
     }
+
+    /// Validate a string-library builtin argument against an expected type,
+    /// reporting `L0375` on a mismatch.
+    fn expect_string_builtin_arg(
+        &mut self,
+        name: &str,
+        index: usize,
+        arg: &Expr,
+        expected: &str,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<()> {
+        let expected = TypeRef::new(expected);
+        let actual = self.check_expr(arg, scope, function);
+        if actual.as_ref() == Some(&expected) {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0375",
+                format!(
+                    "argument {index} for `{name}` must be `{}` but got `{}`",
+                    expected.name,
+                    actual
+                        .as_ref()
+                        .map(|ty| ty.name.as_str())
+                        .unwrap_or("<unknown>")
+                ),
+                Some(function.name.clone()),
+                arg.span,
+            ));
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1892,6 +1980,42 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0303")
+        );
+    }
+
+    #[test]
+    fn validates_string_builtins() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let parts array<string> = split(\"a,b\", \",\")\n",
+            "    let joined string = join(parts, \"-\")\n",
+            "    let head string = substring(joined, 0, 1)\n",
+            "    let ok bool = contains(head, \"a\")\n",
+            "    let cleaned string = trim(upper(lower(replace(joined, \"-\", \"+\"))))\n",
+            "    find(cleaned, head)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_string_builtin_wrong_type() {
+        let diagnostics = validate_source("fn main -> i64\n    substring(42, 0, 1)\n    0\n")
+            .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn rejects_join_non_array_argument() {
+        let diagnostics = validate_source("fn main -> i64\n    join(\"a\", \"-\")\n    0\n")
+            .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
         );
     }
 
