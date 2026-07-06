@@ -157,6 +157,7 @@ impl<'a> Runtime<'a> {
             "println" => self.builtin_print("println", args, true),
             "warn" => self.builtin_warn(args),
             "flush" => self.builtin_flush(args),
+            "to_string" => Self::builtin_to_string(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -449,6 +450,10 @@ impl<'a> Runtime<'a> {
 
     fn eval_binary(&self, left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
         match op {
+            // `+` concatenates when both operands are strings; otherwise it adds i64s.
+            BinaryOp::Add if matches!((&left, &right), (Value::String(_), Value::String(_))) => {
+                Ok(Value::String(left.as_string()? + &right.as_string()?))
+            }
             BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
             BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
             BinaryOp::Multiply => Ok(Value::I64(left.as_i64()? * right.as_i64()?)),
@@ -659,6 +664,21 @@ impl<'a> Runtime<'a> {
             RuntimeError::resource("N0419", format!("failed to flush stdout: {error}"))
         })?;
         Ok(Value::Void)
+    }
+
+    fn builtin_to_string(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_string", 1, args.len()))?;
+        match value {
+            Value::I64(_) | Value::Bool(_) | Value::String(_) => {
+                Ok(Value::String(value.to_string()))
+            }
+            other => Err(RuntimeError::new(
+                "N0417",
+                format!("to_string cannot convert `{other}`"),
+            )),
+        }
     }
 
     fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1064,6 +1084,15 @@ mod tests {
         assert_eq!(
             run_source(source).expect("run"),
             Value::String("from risky".to_string())
+        );
+    }
+
+    #[test]
+    fn concatenates_strings_and_converts_values() {
+        let source = "fn main -> string\n    let n i64 = 40 + 2\n    \"answer: \" + to_string(n) + \" ok=\" + to_string(n == 42)\n";
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::String("answer: 42 ok=true".to_string())
         );
     }
 

@@ -53,6 +53,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 - System command builtins: `sys_status(program, args)` and `sys_output(program, args)`, where `args` is `array<string>`.
 - System command builtins execute a program with an argv array directly and do not invoke a shell.
 - Standard stream builtins: `print(text)` and `println(text)` write a `string` to stdout, `warn(text)` writes a `string` line to stderr, and `flush()` flushes stdout. Each returns `void`.
+- String operations: `to_string(x)` converts an `i64`, `bool`, or `string` to a `string`; `+` concatenates when both operands are `string` (and still adds when both are `i64`). Mixed `string`/`i64` operands to `+` are a type error (`N0307`). This makes computed values printable, e.g. `println("answer: " + to_string(40 + 2))`.
 - Reference types: `rc<T>` is a reference-counted shared owner, `ref<T>` is a non-null borrowed reference, and `ptr<T>` (legacy spelling `ptr_T`) is a raw pointer.
 - Reference builtins: `rc_new(value)` creates an `rc<T>`; `rc_clone(rc<T>)` shares ownership; `rc_release(rc<T>)` drops one owner and frees at zero; `rc_get(rc<T>)`/`ref_get(ref<T>)` read the referent; `rc_borrow(rc<T>)` yields a `ref<T>`.
 - `unsafe` block: an indented block introduced by `unsafe` in which raw-pointer operations are permitted. `ptr_read(ptr<T>)` and `ptr_write(ptr<T>, value)` require an `unsafe` context (`N0330` otherwise); `unsafe` is a transparent scope, so bindings inside it remain visible afterward.

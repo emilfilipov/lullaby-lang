@@ -932,7 +932,29 @@ impl<'a> Checker<'a> {
                 let left_type = self.check_expr(left, scope, function);
                 let right_type = self.check_expr(right, scope, function);
                 match op {
-                    BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
+                    BinaryOp::Add => {
+                        let i64_type = TypeRef::new("i64");
+                        let string_type = TypeRef::new("string");
+                        if left_type.as_ref() == Some(&i64_type)
+                            && right_type.as_ref() == Some(&i64_type)
+                        {
+                            Some(i64_type)
+                        } else if left_type.as_ref() == Some(&string_type)
+                            && right_type.as_ref() == Some(&string_type)
+                        {
+                            // `+` concatenates two strings.
+                            Some(string_type)
+                        } else {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "N0307",
+                                "operands of `+` must both be i64 or both be string",
+                                Some(function.name.clone()),
+                                expr.span,
+                            ));
+                            None
+                        }
+                    }
+                    BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
                         if left_type.as_ref() == Some(&TypeRef::new("i64"))
                             && right_type.as_ref() == Some(&TypeRef::new("i64"))
                         {
@@ -1149,6 +1171,24 @@ impl<'a> Checker<'a> {
             "flush" => {
                 self.expect_arg_count(name, args, 0, function)?;
                 Some(TypeRef::new("void"))
+            }
+            "to_string" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let arg_type = self.check_expr(&args[0], scope, function)?;
+                if matches!(arg_type.name.as_str(), "i64" | "bool" | "string") {
+                    Some(TypeRef::new("string"))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "N0313",
+                        format!(
+                            "to_string expects an i64, bool, or string value but got `{}`",
+                            arg_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
             }
             "rc_new" => {
                 self.expect_arg_count(name, args, 1, function)?;
@@ -1821,6 +1861,24 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "N0331")
+        );
+    }
+
+    #[test]
+    fn validates_string_concatenation_and_to_string() {
+        let source =
+            "fn main -> string\n    \"n=\" + to_string(1 + 2) + \" b=\" + to_string(true)\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_mixed_string_and_int_addition() {
+        let diagnostics =
+            validate_source("fn main -> string\n    \"n=\" + 5\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0307")
         );
     }
 

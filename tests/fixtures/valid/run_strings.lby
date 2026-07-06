@@ -1,0 +1,4 @@
+fn main -> string
+    let n i64 = 40 + 2
+    let ready bool = n == 42
+    "answer: " + to_string(n) + " ready=" + to_string(ready)

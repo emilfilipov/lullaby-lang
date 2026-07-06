@@ -1624,6 +1624,9 @@ fn fold_binary(left: &IrExpr, op: BinaryOp, right: &IrExpr) -> Option<IrExprKind
         (IrExprKind::Integer(left), BinaryOp::Add, IrExprKind::Integer(right)) => {
             Some(IrExprKind::Integer(left + right))
         }
+        (IrExprKind::String(left), BinaryOp::Add, IrExprKind::String(right)) => {
+            Some(IrExprKind::String(format!("{left}{right}")))
+        }
         (IrExprKind::Integer(left), BinaryOp::Subtract, IrExprKind::Integer(right)) => {
             Some(IrExprKind::Integer(left - right))
         }
@@ -2734,6 +2737,7 @@ impl<'a> IrRuntime<'a> {
             "println" => self.builtin_print("println", args, true),
             "warn" => self.builtin_warn(args),
             "flush" => self.builtin_flush(args),
+            "to_string" => Self::builtin_to_string(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -3010,6 +3014,9 @@ impl<'a> IrRuntime<'a> {
 
     fn eval_binary(&self, left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
         match op {
+            BinaryOp::Add if matches!((&left, &right), (Value::String(_), Value::String(_))) => {
+                Ok(Value::String(left.as_string()? + &right.as_string()?))
+            }
             BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
             BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
             BinaryOp::Multiply => Ok(Value::I64(left.as_i64()? * right.as_i64()?)),
@@ -3220,6 +3227,21 @@ impl<'a> IrRuntime<'a> {
             RuntimeError::resource("N0419", format!("failed to flush stdout: {error}"))
         })?;
         Ok(Value::Void)
+    }
+
+    fn builtin_to_string(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_string", 1, args.len()))?;
+        match value {
+            Value::I64(_) | Value::Bool(_) | Value::String(_) => {
+                Ok(Value::String(value.to_string()))
+            }
+            other => Err(RuntimeError::new(
+                "N0417",
+                format!("to_string cannot convert `{other}`"),
+            )),
+        }
     }
 
     fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -3672,6 +3694,13 @@ impl<'a> Lowerer<'a> {
                 let left = self.lower_expr(left, scope)?;
                 let right = self.lower_expr(right, scope)?;
                 let ty = match op {
+                    // `+` on two strings concatenates and yields a string.
+                    BinaryOp::Add
+                        if left.ty == TypeRef::new("string")
+                            && right.ty == TypeRef::new("string") =>
+                    {
+                        TypeRef::new("string")
+                    }
                     BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
                         TypeRef::new("i64")
                     }
@@ -3743,7 +3772,7 @@ impl<'a> Lowerer<'a> {
             }
             "store" | "dealloc" | "write_file" | "append_file" | "print" | "println" | "warn"
             | "flush" | "rc_release" | "ptr_write" | "region_create" => TypeRef::new("void"),
-            "read_file" | "sys_output" => TypeRef::new("string"),
+            "read_file" | "sys_output" | "to_string" => TypeRef::new("string"),
             "file_exists" => TypeRef::new("bool"),
             "sys_status" => TypeRef::new("i64"),
             "rc_new" => {
