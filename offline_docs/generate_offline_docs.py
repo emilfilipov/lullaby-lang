@@ -349,7 +349,7 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "Diagnostics",
             "diagnostics",
             """
-            <p>Diagnostics use stable <code>N####</code> codes and support concise, verbose, and JSON output.</p>
+            <p>Diagnostics use stable <code>L####</code> codes and support concise, verbose, and JSON output.</p>
             <ul>
               <li><code>--verbose</code> includes source excerpts, root cause, suggested fix, and runtime traceback when available.</li>
               <li><code>--format json</code> and <code>--diagnostic-format json</code> produce deterministic machine-readable diagnostics.</li>

@@ -8,7 +8,7 @@ Lullaby implements a sophisticated yet minimal error handling system designed fo
 
 ## Current Alpha Error Reporting
 
-The Rust alpha reports compiler and runtime failures with stable `N####` diagnostic codes. Lexing and parser diagnostics include source spans when available, semantic diagnostics include the function where the error was found, and runtime failures include a category label in CLI output.
+The Rust alpha reports compiler and runtime failures with stable `L####` diagnostic codes. Lexing and parser diagnostics include source spans when available, semantic diagnostics include the function where the error was found, and runtime failures include a category label in CLI output.
 
 Current diagnostic ranges:
 

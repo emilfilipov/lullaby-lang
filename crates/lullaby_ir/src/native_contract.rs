@@ -229,7 +229,7 @@ pub fn alpha1_native_backend_contract() -> NativeBackendContract {
         },
         diagnostics: NativeDiagnosticsContract {
             phase: "native".to_string(),
-            code_family: "N####".to_string(),
+            code_family: "L####".to_string(),
             requirements: vec![
                 "backend failures must report shared diagnostic codes".to_string(),
                 "target-specific failures must include the target triple".to_string(),

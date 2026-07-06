@@ -33,7 +33,7 @@ Alpha 1 documentation is acceptable when:
 
 - `documents/language_specification.md` accurately lists the current executable alpha separately from planned design material.
 - `documents/alpha1_language_surface.md` is the canonical frozen feature surface for installable Alpha 1.
-- `documents/diagnostic_registry.md` lists every stable `N####` code emitted by the alpha.
+- `documents/diagnostic_registry.md` lists every stable `L####` code emitted by the alpha.
 - `documents/implementation_plan.md` records which epics are alpha-complete, partially complete, or pending.
 - `documents/repository_map.md` accurately maps source layout, docs, fixtures, commands, and verification responsibilities.
 - `offline_docs/index.html` is self-contained and opens directly from disk without a server, CDN, remote font, or internet dependency.

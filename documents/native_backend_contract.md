@@ -81,7 +81,7 @@ Arrays lower as runtime descriptor handles. The descriptor contains a logical `l
 
 Explicit release and future compiler cleanup must share `IrMemoryOperation.sequence` so bytecode and native backends make the same resource-order decisions.
 
-Native backend diagnostics must use the shared `N####` diagnostic model. Target-specific failures must include the target triple.
+Native backend diagnostics must use the shared `L####` diagnostic model. Target-specific failures must include the target triple.
 
 ## Prototype Object Emission
 

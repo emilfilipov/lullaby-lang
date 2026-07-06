@@ -45,7 +45,7 @@ human-readable" against the current subset.
   against (1) other Lullaby object modules, then (2) the platform C runtime.
 - **Duplicate/missing symbols.** A duplicate `GLOBAL` definition or an
   unresolved `UNDEF` at final link is a hard error surfaced through the shared
-  `N####` diagnostic model (reserved: `L0610` duplicate symbol, `L0611`
+  `L####` diagnostic model (reserved: `L0610` duplicate symbol, `L0611`
   unresolved symbol), never a silent link.
 
 ## Relocation Assumptions
@@ -93,7 +93,7 @@ emission is proven end to end.
   by the object emitter plus checked-in snapshots.
 - **Link driver:** verify the produced binary has the expected entry symbol and
   no unresolved externals; capture the linker's own diagnostics and re-emit them
-  through the `N####` model.
+  through the `L####` model.
 - **Post-link smoke:** run the produced binary for representative fixtures and
   compare exit code / stdout against the AST-runtime result, extending the
   existing cross-backend parity tests to a native backend once available.

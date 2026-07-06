@@ -102,7 +102,7 @@ See [alpha1_language_surface.md](alpha1_language_surface.md) for the frozen feat
 
 ## Diagnostics
 
-Alpha 1 emits stable `N####` diagnostics for source, lexer, parser, semantic, IR, optimizer, bytecode, runtime, and resource failures. Concise, verbose, and JSON modes are covered by CLI tests for representative failures, including malformed bytecode artifacts and invalid bytecode instruction contracts.
+Alpha 1 emits stable `L####` diagnostics for source, lexer, parser, semantic, IR, optimizer, bytecode, runtime, and resource failures. Concise, verbose, and JSON modes are covered by CLI tests for representative failures, including malformed bytecode artifacts and invalid bytecode instruction contracts.
 
 Notable codes:
 

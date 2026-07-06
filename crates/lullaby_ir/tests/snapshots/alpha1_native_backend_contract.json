@@ -88,7 +88,7 @@
   },
   "diagnostics": {
     "phase": "native",
-    "code_family": "N####",
+    "code_family": "L####",
     "requirements": [
       "backend failures must report shared diagnostic codes",
       "target-specific failures must include the target triple"

@@ -47,7 +47,7 @@ concurrency features produce clear diagnostics, never partial behavior.**
   within the scope that spawned it; an un-joined handle at scope exit is a
   compile-time error. This keeps cleanup ordering deterministic and matches the
   region/lifetime model.
-- **Error propagation.** A thread/task that fails carries its `N####` runtime
+- **Error propagation.** A thread/task that fails carries its `L####` runtime
   error to the joining site; `wait`/`await` re-raise it with the original span
   plus a "raised in worker" traceback frame.
 - **Cancellation.** Not modeled in the first cut; a joined worker always runs to
