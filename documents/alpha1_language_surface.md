@@ -27,6 +27,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 - Implemented scalar types: `i64`, `f64`, `bool`, `string`, and `void`.
 - Float literals contain a decimal point (e.g. `3.14`, `2.0`) and have type `f64`. `i64` and `f64` do not mix implicitly; combining them is a type error.
 - Implemented array spelling: `array<T>`.
+- Structs: `struct NAME` followed by indented `field type` lines declares a nominal record type (top level only). Construct positionally with call spelling — `Point(3, 4)` — and read fields with `.` — `p.x`. Invalid declarations report `N0370`, bad field access `N0371`, and construction mismatches `N0372`. Structs work across the AST, IR, and bytecode backends. Field mutation and named-field construction are deferred (see `struct_design.md`).
 - Array literals must be non-empty and homogeneous, such as `[1, 2, 3]`.
 - Array indexing is bounds-checked at runtime and requires an `i64` index.
 - Interim pointer type names use concrete spellings such as `ptr_i64`.
@@ -100,10 +101,10 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 The following are not implemented Alpha 1 behavior:
 
 - Native code generation for the full language, linking, and machine-code binary output (a COFF object prototype exists for a small subset).
-- Modules, packages, imports, structs, unions, traits, interfaces, classes, and pattern matching.
+- Modules, packages, imports, unions, traits, interfaces, classes, and pattern matching (structs are implemented; struct methods, field mutation, and named-field construction are deferred).
 - User-defined generics beyond `array<T>` and the `ptr<T>`/`ref<T>`/`rc<T>` reference types and type aliases (struct/record and map generics remain planned).
 - GC hooks and runtime region allocation (region *declarations* are analyzed as compile-time metadata; reference counting via `rc<T>` and conservative lifetime analysis are implemented).
 - Binary I/O, memory mapping, async, sockets, IPC, and general syscall APIs (standard text streams and file/system builtins are implemented).
 - A full installer; Alpha 1 uses a Windows portable archive with optional user PATH helper scripts.
 
-When planned syntax keywords such as `import`, `module`, `struct`, `match`, or a bare `catch` appear as source syntax, the parser reports `N0211` instead of accepting a partial or ambiguous construct.
+When planned syntax keywords such as `import`, `module`, `match`, or a bare `catch` appear as source syntax, the parser reports `N0211` instead of accepting a partial or ambiguous construct.

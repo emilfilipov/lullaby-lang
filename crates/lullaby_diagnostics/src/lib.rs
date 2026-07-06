@@ -379,6 +379,27 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Break the cycle so each alias resolves to a concrete type.",
     },
     DiagnosticEntry {
+        code: "N0370",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A struct declaration is invalid.",
+        root_cause: "Two structs share a name, or a struct declares the same field twice.",
+        suggested_fix: "Give each struct a unique name and each field a unique name.",
+    },
+    DiagnosticEntry {
+        code: "N0371",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A field access is invalid.",
+        root_cause: "The accessed value is not a struct, or the struct has no such field.",
+        suggested_fix: "Access an existing field on a struct value.",
+    },
+    DiagnosticEntry {
+        code: "N0372",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A struct construction does not match its declaration.",
+        root_cause: "The number of arguments or an argument type differs from the struct's fields.",
+        suggested_fix: "Pass one argument per field, in order, with matching types.",
+    },
+    DiagnosticEntry {
         code: "N0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",

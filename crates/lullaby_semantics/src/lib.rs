@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AssignOp, BinaryOp, Expr, ExprKind, Function, IfBranch, Param, Program, RegionDecl, Stmt,
-    TypeRef, UnaryOp,
+    StructDecl, StructField, TypeRef, UnaryOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,10 +137,28 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
         })
         .collect();
 
+    let structs = program
+        .structs
+        .iter()
+        .map(|declaration| StructDecl {
+            name: declaration.name.clone(),
+            fields: declaration
+                .fields
+                .iter()
+                .map(|field| StructField {
+                    name: field.name.clone(),
+                    ty: resolve_alias_type(&field.ty, &map),
+                })
+                .collect(),
+            span: declaration.span,
+        })
+        .collect();
+
     (
         Program {
             functions,
             aliases: program.aliases.clone(),
+            structs,
         },
         diagnostics,
     )
@@ -315,6 +333,8 @@ struct Checker<'a> {
     loop_depth: usize,
     unsafe_depth: usize,
     region_names: HashSet<String>,
+    /// Declared struct types: name -> ordered fields.
+    structs: HashMap<String, Vec<StructField>>,
 }
 
 impl<'a> Checker<'a> {
@@ -327,13 +347,45 @@ impl<'a> Checker<'a> {
             loop_depth: 0,
             unsafe_depth: 0,
             region_names: HashSet::new(),
+            structs: HashMap::new(),
         }
     }
 
     fn validate(&mut self) {
+        self.collect_structs();
         self.collect_signatures();
         for function in &self.program.functions {
             self.validate_function(function);
+        }
+    }
+
+    fn collect_structs(&mut self) {
+        for declaration in &self.program.structs {
+            if self.structs.contains_key(&declaration.name) {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "N0370",
+                    format!("duplicate struct `{}`", declaration.name),
+                    None,
+                    declaration.span,
+                ));
+                continue;
+            }
+            let mut seen = HashSet::new();
+            for field in &declaration.fields {
+                if !seen.insert(field.name.clone()) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "N0370",
+                        format!(
+                            "duplicate field `{}` in struct `{}`",
+                            field.name, declaration.name
+                        ),
+                        None,
+                        declaration.span,
+                    ));
+                }
+            }
+            self.structs
+                .insert(declaration.name.clone(), declaration.fields.clone());
         }
     }
 
@@ -859,6 +911,7 @@ impl<'a> Checker<'a> {
                 self.check_freed_uses(target, freed, function);
                 self.check_freed_uses(index, freed, function);
             }
+            ExprKind::Field { target, .. } => self.check_freed_uses(target, freed, function),
             ExprKind::Unary { expr, .. } => self.check_freed_uses(expr, freed, function),
             ExprKind::Binary { left, right, .. } => {
                 self.check_freed_uses(left, freed, function);
@@ -1020,7 +1073,40 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Call { name, args } => {
-                self.check_call(name, args, expr.span, scope, function)
+                if self.structs.contains_key(name) {
+                    self.check_struct_construction(name, args, expr.span, scope, function)
+                } else {
+                    self.check_call(name, args, expr.span, scope, function)
+                }
+            }
+            ExprKind::Field { target, field } => {
+                let target_type = self.check_expr(target, scope, function)?;
+                match self.structs.get(&target_type.name) {
+                    Some(fields) => match fields.iter().find(|f| &f.name == field) {
+                        Some(matched) => Some(matched.ty.clone()),
+                        None => {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "N0371",
+                                format!("struct `{}` has no field `{field}`", target_type.name),
+                                Some(function.name.clone()),
+                                expr.span,
+                            ));
+                            None
+                        }
+                    },
+                    None => {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "N0371",
+                            format!(
+                                "cannot access field `{field}` on non-struct type `{}`",
+                                target_type.name
+                            ),
+                            Some(function.name.clone()),
+                            expr.span,
+                        ));
+                        None
+                    }
+                }
             }
         };
 
@@ -1303,6 +1389,50 @@ impl<'a> Checker<'a> {
                 Some(signature.return_type)
             }
         }
+    }
+
+    fn check_struct_construction(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let fields = self.structs.get(name).cloned()?;
+        if args.len() != fields.len() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "N0372",
+                format!(
+                    "struct `{name}` expects {} fields but got {}",
+                    fields.len(),
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+            return None;
+        }
+        for (field, arg) in fields.iter().zip(args) {
+            let arg_type = self.check_expr(arg, scope, function);
+            if arg_type.as_ref() != Some(&field.ty) {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "N0372",
+                    format!(
+                        "field `{}` of struct `{name}` expects `{}` but got `{}`",
+                        field.name,
+                        field.ty.name,
+                        arg_type
+                            .as_ref()
+                            .map(|ty| ty.name.as_str())
+                            .unwrap_or("<unknown>")
+                    ),
+                    Some(function.name.clone()),
+                    arg.span,
+                ));
+            }
+        }
+        Some(TypeRef::new(name))
     }
 
     /// Verify `ty` is a `<ctor><T>` reference (`rc` or `ref`) and return its
@@ -1878,6 +2008,51 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "N0331")
+        );
+    }
+
+    #[test]
+    fn validates_struct_construction_and_field_access() {
+        let source = "struct Point\n    x i64\n    y i64\n\nfn main -> i64\n    let p Point = Point(3, 4)\n    p.x + p.y\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_struct_field() {
+        let diagnostics = validate_source(
+            "struct Point\n    x i64\n\nfn main -> i64\n    let p Point = Point(1)\n    p.z\n",
+        )
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0371")
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_struct_construction() {
+        let diagnostics = validate_source(
+            "struct Point\n    x i64\n    y i64\n\nfn main -> i64\n    let p Point = Point(1)\n    p.x\n",
+        )
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0372")
+        );
+    }
+
+    #[test]
+    fn rejects_struct_field_type_mismatch() {
+        let diagnostics = validate_source(
+            "struct Point\n    x i64\n\nfn main -> i64\n    let p Point = Point(true)\n    p.x\n",
+        )
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "N0372")
         );
     }
 

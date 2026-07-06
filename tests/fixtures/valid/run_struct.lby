@@ -1,0 +1,11 @@
+struct Point
+    x i64
+    y i64
+
+fn dist_squared p Point -> i64
+    p.x * p.x + p.y * p.y
+
+fn main -> i64
+    let origin Point = Point(0, 0)
+    let p Point = Point(3, 4)
+    dist_squared(p) + dist_squared(origin)

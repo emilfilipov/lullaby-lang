@@ -102,6 +102,9 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `N0351` | semantic | Borrowed `ref<T>` escapes its owner. | A function declares a `ref<T>` return type. | Return an owning `rc<T>` or a value instead. |
 | `N0360` | semantic | Duplicate type alias. | Two `alias` declarations share a name. | Give each type alias a unique name. |
 | `N0361` | semantic | Cyclic type alias. | An alias chain refers back to itself. | Break the cycle so each alias resolves to a concrete type. |
+| `N0370` | semantic | Invalid struct declaration. | Duplicate struct name or duplicate field. | Give each struct and each field a unique name. |
+| `N0371` | semantic | Invalid field access. | Value is not a struct, or the field does not exist. | Access an existing field on a struct value. |
+| `N0372` | semantic | Struct construction mismatch. | Argument count or a type differs from the struct's fields. | Pass one argument per field, in order, with matching types. |
 | `N0501` | ir | IR lowering failed. | A checked program did not match the current IR lowering contract. | Treat this as a compiler bug and retry with `--backend ast` as a workaround. |
 | `N0502` | optimizer | Optimizer mode is incompatible with the selected backend. | `--optimize` was requested with the default AST backend. | Add `--backend ir` or `--backend bytecode`, or use `--optimize none`. |
 | `N0601` | bytecode | Bytecode artifact failed to load. | The `.lbc` artifact is malformed, has an unsupported format/version/metadata target or payload, names an unsupported or missing entry point, contains duplicate functions or parameters, has a mismatched function table, or contains an invalid instruction contract such as `break`/`continue` outside a loop. | Recompile the source with the current `lullaby compile` or `lullaby build` command. |

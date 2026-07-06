@@ -6,6 +6,22 @@ pub struct Program {
     pub functions: Vec<Function>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<AliasDecl>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structs: Vec<StructDecl>,
+}
+
+/// A struct declaration: `struct NAME` followed by indented `field type` lines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructDecl {
+    pub name: String,
+    pub fields: Vec<StructField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructField {
+    pub name: String,
+    pub ty: TypeRef,
 }
 
 /// A type alias declaration: `alias NAME = TYPE`.
@@ -203,6 +219,10 @@ pub enum ExprKind {
         name: String,
         args: Vec<Expr>,
     },
+    Field {
+        target: Box<Expr>,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +274,7 @@ impl<'a> Parser<'a> {
     fn parse_program(&mut self) -> Program {
         let mut functions = Vec::new();
         let mut aliases = Vec::new();
+        let mut structs = Vec::new();
         self.skip_newlines();
 
         while !self.at(TokenKindRef::Eof) {
@@ -264,6 +285,10 @@ impl<'a> Parser<'a> {
             } else if self.eat_keyword(Keyword::Alias).is_some() {
                 if let Some(alias) = self.parse_alias() {
                     aliases.push(alias);
+                }
+            } else if self.eat_keyword(Keyword::Struct).is_some() {
+                if let Some(declaration) = self.parse_struct() {
+                    structs.push(declaration);
                 }
             } else if self.reject_planned_syntax().is_some() {
                 self.skip_planned_syntax();
@@ -279,7 +304,31 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
 
-        Program { functions, aliases }
+        Program {
+            functions,
+            aliases,
+            structs,
+        }
+    }
+
+    /// Parse `struct NAME` followed by an indented list of `field type` lines.
+    fn parse_struct(&mut self) -> Option<StructDecl> {
+        let span = self.previous().span;
+        let name = self.expect_identifier("expected struct name")?;
+        self.expect_newline("expected newline after struct name");
+        self.expect(TokenKindRef::Indent, "expected indented struct fields")?;
+        let mut fields = Vec::new();
+        while !self.at(TokenKindRef::Dedent) && !self.at(TokenKindRef::Eof) {
+            let field_name = self.expect_identifier("expected field name")?;
+            let ty = self.expect_type("expected field type")?;
+            self.expect_newline("expected newline after struct field");
+            fields.push(StructField {
+                name: field_name,
+                ty,
+            });
+        }
+        self.expect(TokenKindRef::Dedent, "expected struct body dedent")?;
+        Some(StructDecl { name, fields, span })
     }
 
     /// Parse `alias NAME = TYPE`.
@@ -947,7 +996,6 @@ fn planned_syntax_name(kind: &TokenKind) -> Option<&'static str> {
         Keyword::Module => "module",
         Keyword::Import => "import",
         Keyword::Package => "package",
-        Keyword::Struct => "struct",
         Keyword::Union => "union",
         Keyword::Trait => "trait",
         Keyword::Interface => "interface",
@@ -1038,19 +1086,39 @@ impl<'a> ExprParser<'a> {
 
     fn parse_postfix(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
-        while self.eat_symbol("[") {
-            let index = self.parse_binary(0)?;
-            if !self.eat_symbol("]") {
-                return Err("expected `]` after index expression".to_string());
+        loop {
+            if self.eat_symbol("[") {
+                let index = self.parse_binary(0)?;
+                if !self.eat_symbol("]") {
+                    return Err("expected `]` after index expression".to_string());
+                }
+                let span = expr.span;
+                expr = Expr {
+                    kind: ExprKind::Index {
+                        target: Box::new(expr),
+                        index: Box::new(index),
+                    },
+                    span,
+                };
+            } else if self.eat_symbol(".") {
+                let field = match self.peek().map(|token| token.kind.clone()) {
+                    Some(TokenKind::Identifier(name)) => {
+                        self.cursor += 1;
+                        name
+                    }
+                    _ => return Err("expected field name after `.`".to_string()),
+                };
+                let span = expr.span;
+                expr = Expr {
+                    kind: ExprKind::Field {
+                        target: Box::new(expr),
+                        field,
+                    },
+                    span,
+                };
+            } else {
+                break;
             }
-            let span = expr.span;
-            expr = Expr {
-                kind: ExprKind::Index {
-                    target: Box::new(expr),
-                    index: Box::new(index),
-                },
-                span,
-            };
         }
         Ok(expr)
     }
@@ -1380,10 +1448,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_planned_statement_syntax() {
+    fn rejects_struct_declaration_inside_function_body() {
+        // Struct declarations are top-level only.
         let tokens = lex("fn main -> i64\n    struct Point\n        x i64\n    1\n").expect("lex");
-        let diagnostics = parse(&tokens).expect_err("parse should fail");
-        assert_eq!(diagnostics[0].code, "N0211");
-        assert!(diagnostics[0].message.contains("struct"));
+        assert!(parse(&tokens).is_err());
+    }
+
+    #[test]
+    fn parses_struct_declaration_and_field_access() {
+        let source = "struct Point\n    x i64\n    y i64\n\nfn main -> i64\n    let p Point = Point(3, 4)\n    p.x\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert_eq!(program.structs.len(), 1);
+        assert_eq!(program.structs[0].name, "Point");
+        assert_eq!(program.structs[0].fields.len(), 2);
+        assert_eq!(program.structs[0].fields[0].name, "x");
     }
 }

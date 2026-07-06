@@ -429,7 +429,6 @@ fn rejects_planned_unsupported_syntax_with_dedicated_diagnostic() {
     for fixture_name in [
         "unsupported_import.lby",
         "unsupported_module.lby",
-        "unsupported_struct.lby",
         "unsupported_catch.lby",
     ] {
         let fixture = workspace_root()

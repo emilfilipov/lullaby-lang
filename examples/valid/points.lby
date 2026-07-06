@@ -1,0 +1,19 @@
+struct Point
+    x i64
+    y i64
+
+fn manhattan a Point b Point -> i64
+    let dx i64 = a.x - b.x
+    let dy i64 = a.y - b.y
+    let ax i64 = dx
+    if dx < 0
+        ax = 0 - dx
+    let ay i64 = dy
+    if dy < 0
+        ay = 0 - dy
+    ax + ay
+
+fn main -> void
+    let origin Point = Point(0, 0)
+    let target Point = Point(3, 4)
+    println("manhattan distance = " + to_string(manhattan(origin, target)))

@@ -23,6 +23,15 @@ const BYTECODE_ARTIFACT_TARGET: &str = "alpha1";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IrModule {
     pub functions: Vec<IrFunction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structs: Vec<IrStructDef>,
+}
+
+/// A struct type in the IR: name plus ordered `(field, type)` pairs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrStructDef {
+    pub name: String,
+    pub fields: Vec<(String, TypeRef)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +138,10 @@ pub enum IrExprKind {
     Call {
         name: String,
         args: Vec<IrExpr>,
+    },
+    Field {
+        target: Box<IrExpr>,
+        field: String,
     },
 }
 
@@ -428,6 +441,9 @@ fn collect_memory_operations_from_expr(
                 collect_memory_operations_from_expr(function, value, operations);
             }
         }
+        IrExprKind::Field { target, .. } => {
+            collect_memory_operations_from_expr(function, target, operations);
+        }
         IrExprKind::Index { target, index } => {
             collect_memory_operations_from_expr(function, target, operations);
             collect_memory_operations_from_expr(function, index, operations);
@@ -643,6 +659,8 @@ fn memory_safety_for_kind(kind: &IrMemoryOperationKind) -> Option<IrMemorySafety
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BytecodeModule {
     pub functions: Vec<BytecodeFunction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structs: Vec<IrStructDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -743,6 +761,10 @@ pub enum BytecodeExprKind {
     Call {
         name: String,
         args: Vec<BytecodeExpr>,
+    },
+    Field {
+        target: Box<BytecodeExpr>,
+        field: String,
     },
 }
 
@@ -909,6 +931,9 @@ fn collect_bytecode_memory_operations_from_expr(
             for value in values {
                 collect_bytecode_memory_operations_from_expr(function, value, operations);
             }
+        }
+        BytecodeExprKind::Field { target, .. } => {
+            collect_bytecode_memory_operations_from_expr(function, target, operations);
         }
         BytecodeExprKind::Index { target, index } => {
             collect_bytecode_memory_operations_from_expr(function, target, operations);
@@ -1237,11 +1262,13 @@ pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
                 span: function.span,
             })
             .collect(),
+        structs: module.structs.clone(),
     }
 }
 
 pub fn run_bytecode_main(module: &BytecodeModule) -> Result<Value, RuntimeError> {
     let ir = IrModule {
+        structs: module.structs.clone(),
         functions: module
             .functions
             .iter()
@@ -1357,6 +1384,10 @@ fn lower_bytecode_expr(expr: &IrExpr) -> BytecodeExpr {
         IrExprKind::Index { target, index } => BytecodeExprKind::Index {
             target: Box::new(lower_bytecode_expr(target)),
             index: Box::new(lower_bytecode_expr(index)),
+        },
+        IrExprKind::Field { target, field } => BytecodeExprKind::Field {
+            target: Box::new(lower_bytecode_expr(target)),
+            field: field.clone(),
         },
         IrExprKind::Unary { op, expr } => BytecodeExprKind::Unary {
             op: *op,
@@ -1500,6 +1531,10 @@ fn bytecode_expr_to_ir(expr: &BytecodeExpr) -> IrExpr {
             target: Box::new(bytecode_expr_to_ir(target)),
             index: Box::new(bytecode_expr_to_ir(index)),
         },
+        BytecodeExprKind::Field { target, field } => IrExprKind::Field {
+            target: Box::new(bytecode_expr_to_ir(target)),
+            field: field.clone(),
+        },
         BytecodeExprKind::Unary { op, expr } => IrExprKind::Unary {
             op: *op,
             expr: Box::new(bytecode_expr_to_ir(expr)),
@@ -1530,6 +1565,7 @@ struct ConstantFolder {
 impl ConstantFolder {
     fn fold_module(&mut self, module: &IrModule) -> IrModule {
         IrModule {
+            structs: module.structs.clone(),
             functions: module
                 .functions
                 .iter()
@@ -1655,6 +1691,14 @@ impl ConstantFolder {
                 kind: IrExprKind::Index {
                     target: Box::new(self.fold_expr(target)),
                     index: Box::new(self.fold_expr(index)),
+                },
+                ty: expr.ty.clone(),
+                span: expr.span,
+            },
+            IrExprKind::Field { target, field } => IrExpr {
+                kind: IrExprKind::Field {
+                    target: Box::new(self.fold_expr(target)),
+                    field: field.clone(),
                 },
                 ty: expr.ty.clone(),
                 span: expr.span,
@@ -1811,6 +1855,7 @@ struct ExprSignature {
 impl CommonSubexpressionEliminator {
     fn eliminate_module(&mut self, module: &IrModule) -> IrModule {
         IrModule {
+            structs: module.structs.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2031,6 +2076,14 @@ impl CommonSubexpressionEliminator {
                 ty: expr.ty.clone(),
                 span: expr.span,
             },
+            IrExprKind::Field { target, field } => IrExpr {
+                kind: IrExprKind::Field {
+                    target: Box::new(self.rewrite_expr(target)),
+                    field: field.clone(),
+                },
+                ty: expr.ty.clone(),
+                span: expr.span,
+            },
             IrExprKind::Unary { op, expr: inner } => IrExpr {
                 kind: IrExprKind::Unary {
                     op: *op,
@@ -2095,6 +2148,10 @@ fn pure_expr_signature(expr: &IrExpr) -> Option<ExprSignature> {
             let index = pure_expr_signature(index)?;
             combine_signatures("index", &expr.ty.name, vec![target, index])
         }
+        IrExprKind::Field { target, field } => {
+            let target = pure_expr_signature(target)?;
+            combine_signatures(&format!("field:{field}"), &expr.ty.name, vec![target])
+        }
         IrExprKind::Unary { op, expr: inner } => {
             let inner = pure_expr_signature(inner)?;
             combine_signatures(&format!("unary:{op:?}"), &expr.ty.name, vec![inner])
@@ -2134,6 +2191,7 @@ struct LoopInvariantMover {
 impl LoopInvariantMover {
     fn move_module(&mut self, module: &IrModule) -> IrModule {
         IrModule {
+            structs: module.structs.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2470,7 +2528,10 @@ fn loop_invariant_expr_signature(expr: &IrExpr) -> Option<ExprSignature> {
             let right = loop_invariant_expr_signature(right)?;
             combine_signatures(&format!("binary:{op:?}"), &expr.ty.name, vec![left, right])
         }
-        IrExprKind::Array(_) | IrExprKind::Index { .. } | IrExprKind::Call { .. } => return None,
+        IrExprKind::Array(_)
+        | IrExprKind::Index { .. }
+        | IrExprKind::Field { .. }
+        | IrExprKind::Call { .. } => return None,
     };
 
     Some(ExprSignature { key, dependencies })
@@ -2491,6 +2552,7 @@ struct CopyPropagator {
 impl CopyPropagator {
     fn propagate_module(&mut self, module: &IrModule) -> IrModule {
         IrModule {
+            structs: module.structs.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2703,6 +2765,14 @@ impl CopyPropagator {
                 ty: expr.ty.clone(),
                 span: expr.span,
             },
+            IrExprKind::Field { target, field } => IrExpr {
+                kind: IrExprKind::Field {
+                    target: Box::new(self.propagate_expr(target, aliases)),
+                    field: field.clone(),
+                },
+                ty: expr.ty.clone(),
+                span: expr.span,
+            },
             IrExprKind::Unary { op, expr: inner } => IrExpr {
                 kind: IrExprKind::Unary {
                     op: *op,
@@ -2767,6 +2837,8 @@ fn expr_requires_optimizer_barrier(expr: &IrExpr) -> bool {
         IrExprKind::Call { .. } => true,
         IrExprKind::Array(values) => values.iter().any(expr_requires_optimizer_barrier),
         IrExprKind::Index { .. } => true,
+        // Field access is pure; only its target can require a barrier.
+        IrExprKind::Field { target, .. } => expr_requires_optimizer_barrier(target),
         IrExprKind::Unary { expr, .. } => expr_requires_optimizer_barrier(expr),
         IrExprKind::Binary { left, right, .. } => {
             expr_requires_optimizer_barrier(left) || expr_requires_optimizer_barrier(right)
@@ -2787,6 +2859,7 @@ struct DeadCodeEliminator {
 impl DeadCodeEliminator {
     fn eliminate_module(&mut self, module: &IrModule) -> IrModule {
         IrModule {
+            structs: module.structs.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2902,6 +2975,7 @@ fn is_unconditional_terminator(statement: &IrStmt) -> bool {
 
 struct IrRuntime<'a> {
     functions: HashMap<&'a str, &'a IrFunction>,
+    structs: HashMap<&'a str, Vec<String>>,
     heap: Vec<Option<Value>>,
     refcounts: HashMap<usize, usize>,
     call_stack: Vec<TraceFrame>,
@@ -2919,8 +2993,24 @@ impl<'a> IrRuntime<'a> {
             return Err(RuntimeError::new("N0400", "missing `main` function"));
         }
 
+        let structs = module
+            .structs
+            .iter()
+            .map(|declaration| {
+                (
+                    declaration.name.as_str(),
+                    declaration
+                        .fields
+                        .iter()
+                        .map(|(field, _)| field.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
         Ok(Self {
             functions,
+            structs,
             heap: Vec::new(),
             refcounts: HashMap::new(),
             call_stack: Vec::new(),
@@ -2928,6 +3018,12 @@ impl<'a> IrRuntime<'a> {
     }
 
     fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        if let Some(field_names) = self.structs.get(name) {
+            return Ok(Value::Struct {
+                name: name.to_string(),
+                fields: field_names.iter().cloned().zip(args).collect(),
+            });
+        }
         match name {
             "alloc" => self.builtin_alloc(args),
             "load" => self.builtin_load(args),
@@ -3190,6 +3286,17 @@ impl<'a> IrRuntime<'a> {
                     RuntimeError::new("N0413", format!("array index `{index}` is out of bounds"))
                 })
             }
+            IrExprKind::Field { target, field } => match self.eval_expr(target, env)? {
+                Value::Struct { fields, .. } => fields
+                    .into_iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, value)| value)
+                    .ok_or_else(|| RuntimeError::new("N0371", format!("no field `{field}`"))),
+                _ => Err(RuntimeError::new(
+                    "N0371",
+                    format!("cannot access field `{field}` on non-struct value"),
+                )),
+            },
             IrExprKind::Unary { op, expr } => {
                 let value = self.eval_expr(expr, env)?;
                 match op {
@@ -3668,7 +3775,34 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|function| self.lower_function(function))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(IrModule { functions })
+        let structs = self
+            .program
+            .structs
+            .iter()
+            .map(|declaration| IrStructDef {
+                name: declaration.name.clone(),
+                fields: declaration
+                    .fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .collect(),
+            })
+            .collect();
+        Ok(IrModule { functions, structs })
+    }
+
+    /// The declared type of `field` on struct `struct_name`, if any.
+    fn struct_field_type(&self, struct_name: &str, field: &str) -> Option<TypeRef> {
+        self.program
+            .structs
+            .iter()
+            .find(|declaration| declaration.name == struct_name)
+            .and_then(|declaration| declaration.fields.iter().find(|f| f.name == field))
+            .map(|f| f.ty.clone())
+    }
+
+    fn is_struct(&self, name: &str) -> bool {
+        self.program.structs.iter().any(|s| s.name == name)
     }
 
     fn lower_function(&self, function: &Function) -> Result<IrFunction, IrLoweringError> {
@@ -3995,6 +4129,24 @@ impl<'a> Lowerer<'a> {
                     ty,
                 )
             }
+            ExprKind::Field { target, field } => {
+                let target = self.lower_expr(target, scope)?;
+                let ty = self
+                    .struct_field_type(&target.ty.name, field)
+                    .ok_or_else(|| {
+                        IrLoweringError::new(
+                            format!("unknown field `{field}` on `{}`", target.ty.name),
+                            Some(expr.span),
+                        )
+                    })?;
+                (
+                    IrExprKind::Field {
+                        target: Box::new(target),
+                        field: field.clone(),
+                    },
+                    ty,
+                )
+            }
         };
 
         Ok(IrExpr {
@@ -4010,6 +4162,10 @@ impl<'a> Lowerer<'a> {
         args: &[IrExpr],
         span: Span,
     ) -> Result<TypeRef, IrLoweringError> {
+        // A call whose name is a declared struct is a struct construction.
+        if self.is_struct(name) {
+            return Ok(TypeRef::new(name));
+        }
         Ok(match name {
             "alloc" => {
                 let value = args.first().ok_or_else(|| {
@@ -4812,6 +4968,7 @@ mod tests {
     fn bytecode_artifact_rejects_parameterized_entrypoint() {
         let span = Span::new(1, 1);
         let module = BytecodeModule {
+            structs: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: vec![IrParam {
@@ -4841,6 +4998,7 @@ mod tests {
     fn bytecode_artifact_rejects_break_outside_loop_instruction() {
         let span = Span::new(1, 1);
         let module = BytecodeModule {
+            structs: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),

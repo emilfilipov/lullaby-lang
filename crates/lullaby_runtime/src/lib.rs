@@ -15,6 +15,10 @@ pub enum Value {
     String(String),
     Array(Vec<Value>),
     Ptr(usize),
+    Struct {
+        name: String,
+        fields: Vec<(String, Value)>,
+    },
     Void,
 }
 
@@ -34,6 +38,14 @@ impl fmt::Display for Value {
                 write!(formatter, "[{values}]")
             }
             Self::Ptr(slot) => write!(formatter, "ptr({slot})"),
+            Self::Struct { name, fields } => {
+                let rendered = fields
+                    .iter()
+                    .map(|(field, value)| format!("{field}: {value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(formatter, "{name}({rendered})")
+            }
             Self::Void => write!(formatter, "void"),
         }
     }
@@ -117,6 +129,9 @@ pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
 
 struct Runtime<'a> {
     functions: HashMap<&'a str, &'a Function>,
+    /// Declared struct types: name -> ordered field names, used to build struct
+    /// values from positional construction arguments.
+    structs: HashMap<&'a str, Vec<String>>,
     heap: Vec<Option<Value>>,
     /// Ownership counts for reference-counted (`rc<T>`) heap slots, keyed by
     /// slot index. Slots not present here are raw pointers / plain allocations.
@@ -136,8 +151,24 @@ impl<'a> Runtime<'a> {
             return Err(RuntimeError::new("N0400", "missing `main` function"));
         }
 
+        let structs = program
+            .structs
+            .iter()
+            .map(|declaration| {
+                (
+                    declaration.name.as_str(),
+                    declaration
+                        .fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
         Ok(Self {
             functions,
+            structs,
             heap: Vec::new(),
             refcounts: HashMap::new(),
             call_stack: Vec::new(),
@@ -145,6 +176,12 @@ impl<'a> Runtime<'a> {
     }
 
     fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        if let Some(field_names) = self.structs.get(name) {
+            return Ok(Value::Struct {
+                name: name.to_string(),
+                fields: field_names.iter().cloned().zip(args).collect(),
+            });
+        }
         match name {
             "alloc" => self.builtin_alloc(args),
             "load" => self.builtin_load(args),
@@ -378,6 +415,20 @@ impl<'a> Runtime<'a> {
 
     fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         let result = match &expr.kind {
+            ExprKind::Field { target, field } => {
+                let target = self.eval_expr(target, env)?;
+                match target {
+                    Value::Struct { fields, .. } => fields
+                        .into_iter()
+                        .find(|(name, _)| name == field)
+                        .map(|(_, value)| value)
+                        .ok_or_else(|| RuntimeError::new("N0371", format!("no field `{field}`"))),
+                    _ => Err(RuntimeError::new(
+                        "N0371",
+                        format!("cannot access field `{field}` on non-struct value"),
+                    )),
+                }
+            }
             ExprKind::Integer(value) => Ok(Value::I64(*value)),
             ExprKind::Float(value) => Ok(Value::F64(*value)),
             ExprKind::Bool(value) => Ok(Value::Bool(*value)),
@@ -1126,6 +1177,21 @@ mod tests {
         assert_eq!(
             run_source(source).expect("run"),
             Value::String("from risky".to_string())
+        );
+    }
+
+    #[test]
+    fn constructs_and_reads_struct_fields() {
+        let source = "struct Point\n    x i64\n    y i64\n\nfn main -> i64\n    let p Point = Point(3, 4)\n    p.x * p.x + p.y * p.y\n";
+        assert_eq!(run_source(source).expect("run"), Value::I64(25));
+    }
+
+    #[test]
+    fn passes_structs_through_functions() {
+        let source = "struct Player\n    name string\n    score i64\n\nfn label hero Player -> string\n    hero.name + \":\" + to_string(hero.score)\n\nfn main -> string\n    label(Player(\"Ada\", 100))\n";
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::String("Ada:100".to_string())
         );
     }
 
