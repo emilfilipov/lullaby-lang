@@ -36,21 +36,29 @@ Rules:
 
 ## Construction
 
-Construction is qualified by the enum name to stay unambiguous and readable:
+Construction reuses the language's existing spelling exactly like structs do —
+a variant with payloads reads like a call, a unit variant reads like a bare
+name — and is resolved semantically, so **no new construction syntax is added**:
 
 ```lby
-let c Color = Color.Red
-let s Shape = Shape.Circle(2.0)
-let r Shape = Shape.Rect(3.0, 4.0)
+let c Color = Red
+let s Shape = Circle(2.0)
+let r Shape = Rect(3.0, 4.0)
 ```
 
-- `Enum.Variant` constructs a unit variant.
-- `Enum.Variant(args)` constructs a variant with payloads; argument count and
-  per-payload types are checked against the declaration.
+- A bare variant name (`Red`, `Empty`) constructs a unit variant. It parses as a
+  variable; semantics resolves it to enum construction when the name is a known
+  unit variant rather than a local.
+- `Variant(args)` constructs a variant with payloads. It parses as a call;
+  semantics resolves it to enum construction when the name is a known variant
+  (before falling through to function lookup), and checks argument count and
+  per-payload types against the declaration.
 
-Qualification (`Enum.` prefix) is chosen over bare `Variant` so construction
-never collides with function calls, struct construction, or variables, and so a
-reader always sees the type at the construction site.
+To keep this resolution unambiguous in the first increment, **variant names are
+globally unique across all enums** (a collision is a compile-time error). This
+mirrors how struct construction already reuses call spelling and needs zero
+parser changes. A qualified `Enum.Variant` spelling is a possible later
+convenience once postfix call-on-path parsing exists.
 
 ## Pattern matching
 
@@ -61,9 +69,9 @@ expression is the arm's value:
 ```lby
 fn area s Shape -> f64
     match s
-        Shape.Circle(r) -> 3.14159 * r * r
-        Shape.Rect(w, h) -> w * h
-        Shape.Empty -> 0.0
+        Circle(r) -> 3.14159 * r * r
+        Rect(w, h) -> w * h
+        Empty -> 0.0
 ```
 
 - Payload bindings (`r`, `w`, `h`) introduce locals scoped to that arm, typed by
