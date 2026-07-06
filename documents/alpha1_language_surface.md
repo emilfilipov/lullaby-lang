@@ -30,6 +30,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 - Structs: `struct NAME` followed by indented `field type` lines declares a nominal record type (top level only). Construct positionally with call spelling — `Point(3, 4)` — read fields with `.` — `p.x` — and mutate fields with assignment — `p.x = 5`, `p.y += 1`, including nested `a.b.c = e`. Invalid declarations report `L0370`, bad field access `L0371`, and construction mismatches `L0372`; a field assignment with a wrong-type value reports `L0314`. Structs work across the AST, IR, and bytecode backends. Named-field construction is deferred (see `struct_design.md`).
 - Array literals must be non-empty and homogeneous, such as `[1, 2, 3]`.
 - Array indexing is bounds-checked at runtime and requires an `i64` index.
+- Array elements are mutable through assignment — `xs[i] = e`, `xs[i] += 1`, and mixed struct/array targets such as `cells[0].value = e`. The root variable is what optimizers track, and out-of-bounds writes report `L0413`.
 - Interim pointer type names use concrete spellings such as `ptr_i64`.
 - Omitted local binding annotations are inferred from the initializer expression. Empty arrays and `void` initializers cannot supply an inferred local type.
 
@@ -56,6 +57,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 - System command builtins execute a program with an argv array directly and do not invoke a shell.
 - Standard stream builtins: `print(text)` and `println(text)` write a `string` to stdout, `warn(text)` writes a `string` line to stderr, and `flush()` flushes stdout. Each returns `void`.
 - String operations: `to_string(x)` converts an `i64`, `bool`, or `string` to a `string`; `+` concatenates when both operands are `string` (and still adds when both are `i64`). Mixed `string`/`i64` operands to `+` are a type error (`L0307`). This makes computed values printable, e.g. `println("answer: " + to_string(40 + 2))`.
+- Collection length: `len(x)` returns the `i64` element count of an `array<T>` or the character count of a `string`; other argument types report `L0373`. Combine it with indexing for iteration, e.g. `for i from 0 to len(xs) - 1`.
 - Reference types: `rc<T>` is a reference-counted shared owner, `ref<T>` is a non-null borrowed reference, and `ptr<T>` (legacy spelling `ptr_T`) is a raw pointer.
 - Reference builtins: `rc_new(value)` creates an `rc<T>`; `rc_clone(rc<T>)` shares ownership; `rc_release(rc<T>)` drops one owner and frees at zero; `rc_get(rc<T>)`/`ref_get(ref<T>)` read the referent; `rc_borrow(rc<T>)` yields a `ref<T>`.
 - `unsafe` block: an indented block introduced by `unsafe` in which raw-pointer operations are permitted. `ptr_read(ptr<T>)` and `ptr_write(ptr<T>, value)` require an `unsafe` context (`L0330` otherwise); `unsafe` is a transparent scope, so bindings inside it remain visible afterward.

@@ -112,10 +112,12 @@ pub enum Stmt {
     },
     Assign {
         name: String,
-        /// Field path for struct field mutation, e.g. `p.x = e` has path `["x"]`
-        /// and `a.b.c = e` has `["b", "c"]`. Empty for a plain variable assignment.
+        /// Access path for struct field / array element mutation, e.g. `p.x = e`
+        /// has `[Field("x")]`, `a[i] = e` has `[Index(i)]`, and `p.items[0].x = e`
+        /// mixes both. Empty for a plain variable assignment. The root variable
+        /// is always `name`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        path: Vec<String>,
+        path: Vec<Place>,
         op: AssignOp,
         value: Expr,
         span: Span,
@@ -161,6 +163,33 @@ pub enum Stmt {
         catch_body: Vec<Stmt>,
         span: Span,
     },
+}
+
+/// One step in an assignment target path: a struct field or an array index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Place {
+    Field(String),
+    Index(Expr),
+}
+
+/// Convert an lvalue expression (a variable plus `.field` / `[index]` accessors)
+/// into a root variable name and place path. Returns `None` for anything that is
+/// not a valid assignment target.
+fn expr_to_place(expr: &Expr) -> Option<(String, Vec<Place>)> {
+    match &expr.kind {
+        ExprKind::Variable(name) => Some((name.clone(), Vec::new())),
+        ExprKind::Field { target, field } => {
+            let (name, mut path) = expr_to_place(target)?;
+            path.push(Place::Field(field.clone()));
+            Some((name, path))
+        }
+        ExprKind::Index { target, index } => {
+            let (name, mut path) = expr_to_place(target)?;
+            path.push(Place::Index((**index).clone()));
+            Some((name, path))
+        }
+        _ => None,
+    }
 }
 
 /// A memory-region declaration: `region NAME: size=N[, align=N][, kind=static|dynamic][, mutable=true|false]`.
@@ -511,12 +540,23 @@ impl<'a> Parser<'a> {
 
     fn parse_assignment(&mut self) -> Option<Stmt> {
         let span = self.peek().span;
-        let name = self.expect_identifier("expected assignment target")?;
-        // Optional field path: `p.x`, `a.b.c`, ...
-        let mut path = Vec::new();
-        while self.eat_symbol(".") {
-            path.push(self.expect_identifier("expected field name after `.`")?);
-        }
+        // The target is everything before the assignment operator: a variable
+        // plus `.field` / `[index]` accessors. Parse it as an expression, then
+        // convert that expression into a place path.
+        let op_pos = self.assignment_op_position()?;
+        let mut target_parser = ExprParser::new(&self.tokens[self.cursor..op_pos]);
+        let target = match target_parser.parse() {
+            Ok(expr) => expr,
+            Err(_) => {
+                self.error("L0214", "invalid assignment target", span);
+                return None;
+            }
+        };
+        let Some((name, path)) = expr_to_place(&target) else {
+            self.error("L0214", "invalid assignment target", span);
+            return None;
+        };
+        self.cursor = op_pos;
         let op = self.expect_assignment_op()?;
         let value = self.parse_expr_line(span)?;
         self.expect_newline("expected newline after assignment");
@@ -868,30 +908,52 @@ impl<'a> Parser<'a> {
     }
 
     fn next_is_assignment(&self) -> bool {
-        // An assignment target is an identifier optionally followed by a `.field`
-        // chain (struct field mutation), then an assignment operator.
+        self.assignment_op_position().is_some()
+    }
+
+    /// If the statement starting at the cursor is an assignment, return the token
+    /// index of its assignment operator. The target is an identifier optionally
+    /// followed by `.field` and `[index]` accessors (balanced brackets).
+    fn assignment_op_position(&self) -> Option<usize> {
         if !matches!(self.peek().kind, TokenKind::Identifier(_)) {
-            return false;
+            return None;
         }
         let mut index = self.cursor + 1;
-        while let Some(TokenKind::Symbol(symbol)) = self.tokens.get(index).map(|token| &token.kind)
-        {
-            if symbol != "." {
-                break;
+        loop {
+            match self.tokens.get(index).map(|token| &token.kind) {
+                Some(TokenKind::Symbol(symbol)) if symbol == "." => {
+                    if !matches!(
+                        self.tokens.get(index + 1).map(|token| &token.kind),
+                        Some(TokenKind::Identifier(_))
+                    ) {
+                        return None;
+                    }
+                    index += 2;
+                }
+                Some(TokenKind::Symbol(symbol)) if symbol == "[" => {
+                    let mut depth = 1;
+                    index += 1;
+                    while depth > 0 {
+                        match self.tokens.get(index).map(|token| &token.kind) {
+                            Some(TokenKind::Symbol(symbol)) if symbol == "[" => depth += 1,
+                            Some(TokenKind::Symbol(symbol)) if symbol == "]" => depth -= 1,
+                            Some(TokenKind::Eof) | None => return None,
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                }
+                _ => break,
             }
-            if !matches!(
-                self.tokens.get(index + 1).map(|token| &token.kind),
-                Some(TokenKind::Identifier(_))
-            ) {
-                return false;
-            }
-            index += 2;
         }
-        matches!(
-            self.tokens.get(index).map(|token| &token.kind),
+        match self.tokens.get(index).map(|token| &token.kind) {
             Some(TokenKind::Symbol(symbol))
-                if matches!(symbol.as_str(), "=" | "+=" | "-=" | "*=" | "/=")
-        )
+                if matches!(symbol.as_str(), "=" | "+=" | "-=" | "*=" | "/=") =>
+            {
+                Some(index)
+            }
+            _ => None,
+        }
     }
 
     fn expect_assignment_op(&mut self) -> Option<AssignOp> {
@@ -1491,7 +1553,19 @@ mod tests {
             panic!("expected field assignment");
         };
         assert_eq!(name, "p");
-        assert_eq!(path, &vec!["x".to_string()]);
+        assert_eq!(path, &vec![Place::Field("x".to_string())]);
+    }
+
+    #[test]
+    fn parses_array_element_assignment() {
+        let source = "fn main -> i64\n    let a array<i64> = [1, 2, 3]\n    a[1] = 9\n    a[1]\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Assign { name, path, .. } = &program.functions[0].body[1] else {
+            panic!("expected array element assignment");
+        };
+        assert_eq!(name, "a");
+        assert!(matches!(path.as_slice(), [Place::Index(_)]));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+struct Cell
+    value i64
+
+fn main -> i64
+    let xs array<i64> = [1, 2, 3, 4]
+    xs[0] = 10
+    xs[1] += 5
+    xs[len(xs) - 1] = xs[0] + xs[1]
+    let cells array<Cell> = [Cell(0), Cell(0)]
+    cells[0].value = 100
+    cells[1].value = cells[0].value + xs[3]
+    let total i64 = cells[1].value
+    for i from 0 to len(xs) - 1
+        total += xs[i]
+    total

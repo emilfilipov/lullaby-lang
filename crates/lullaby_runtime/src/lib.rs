@@ -4,7 +4,7 @@ use std::fs;
 use std::process::Command;
 
 use lullaby_diagnostics::{Span, TraceFrame};
-use lullaby_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, UnaryOp};
+use lullaby_parser::{AssignOp, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt, UnaryOp};
 
 // `Eq` is intentionally omitted: `Value::F64` holds an `f64`, which is not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +198,7 @@ impl<'a> Runtime<'a> {
             "warn" => self.builtin_warn(args),
             "flush" => self.builtin_flush(args),
             "to_string" => Self::builtin_to_string(args),
+            "len" => Self::builtin_len(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -282,12 +283,13 @@ impl<'a> Runtime<'a> {
                     };
                     env.assign(name, new)?;
                 } else {
+                    let resolved = self.resolve_places(path, env)?;
                     let mut root = env.get(name)?;
                     let new = match op {
                         AssignOp::Replace => rhs,
-                        _ => apply_compound(get_field_path(&root, path)?, op, rhs)?,
+                        _ => apply_compound(get_place(&root, &resolved)?, op, rhs)?,
                     };
-                    set_field_path(&mut root, path, new)?;
+                    set_place(&mut root, &resolved, new)?;
                     env.assign(name, root)?;
                 }
                 Ok(Control::Value(Value::Void))
@@ -416,6 +418,23 @@ impl<'a> Runtime<'a> {
         let result = self.eval_block(statements, env);
         env.pop_scope();
         result
+    }
+
+    /// Resolve a parser assignment path into concrete places, evaluating each
+    /// array index expression against the current environment.
+    fn resolve_places(
+        &mut self,
+        path: &[Place],
+        env: &Env,
+    ) -> Result<Vec<ResolvedPlace>, RuntimeError> {
+        path.iter()
+            .map(|place| match place {
+                Place::Field(field) => Ok(ResolvedPlace::Field(field.clone())),
+                Place::Index(expr) => {
+                    Ok(ResolvedPlace::Index(self.eval_expr(expr, env)?.as_i64()?))
+                }
+            })
+            .collect()
     }
 
     fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
@@ -761,6 +780,20 @@ impl<'a> Runtime<'a> {
         }
     }
 
+    fn builtin_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("len", 1, args.len()))?;
+        match value {
+            Value::Array(values) => Ok(Value::I64(values.len() as i64)),
+            Value::String(text) => Ok(Value::I64(text.chars().count() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("len expects a string or array but got `{other}`"),
+            )),
+        }
+    }
+
     fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -883,40 +916,101 @@ pub fn apply_compound(current: Value, op: &AssignOp, rhs: Value) -> Result<Value
     }))
 }
 
-/// Read the value at a struct field path (for compound assignment).
-pub fn get_field_path(value: &Value, path: &[String]) -> Result<Value, RuntimeError> {
+/// One hop of a resolved assignment target: a struct field name or an
+/// already-evaluated array index. Index expressions are evaluated by each
+/// backend's own evaluator before mutation, so these helpers stay shared.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedPlace {
+    Field(String),
+    Index(i64),
+}
+
+fn place_get<'a>(current: &'a Value, place: &ResolvedPlace) -> Result<&'a Value, RuntimeError> {
+    match place {
+        ResolvedPlace::Field(field) => {
+            let Value::Struct { fields, .. } = current else {
+                return Err(RuntimeError::new(
+                    "L0371",
+                    format!("cannot access field `{field}` on non-struct value"),
+                ));
+            };
+            fields
+                .iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, value)| value)
+                .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`")))
+        }
+        ResolvedPlace::Index(index) => {
+            let Value::Array(values) = current else {
+                return Err(RuntimeError::new("L0412", "index target is not an array"));
+            };
+            if *index < 0 {
+                return Err(RuntimeError::new(
+                    "L0413",
+                    format!("array index `{index}` is out of bounds"),
+                ));
+            }
+            values.get(*index as usize).ok_or_else(|| {
+                RuntimeError::new("L0413", format!("array index `{index}` is out of bounds"))
+            })
+        }
+    }
+}
+
+fn place_get_mut<'a>(
+    current: &'a mut Value,
+    place: &ResolvedPlace,
+) -> Result<&'a mut Value, RuntimeError> {
+    match place {
+        ResolvedPlace::Field(field) => {
+            let Value::Struct { fields, .. } = current else {
+                return Err(RuntimeError::new(
+                    "L0371",
+                    format!("cannot access field `{field}` on non-struct value"),
+                ));
+            };
+            fields
+                .iter_mut()
+                .find(|(name, _)| name == field)
+                .map(|(_, value)| value)
+                .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`")))
+        }
+        ResolvedPlace::Index(index) => {
+            let Value::Array(values) = current else {
+                return Err(RuntimeError::new("L0412", "index target is not an array"));
+            };
+            if *index < 0 {
+                return Err(RuntimeError::new(
+                    "L0413",
+                    format!("array index `{index}` is out of bounds"),
+                ));
+            }
+            let index = *index as usize;
+            let len = values.len();
+            values.get_mut(index).ok_or_else(|| {
+                RuntimeError::new(
+                    "L0413",
+                    format!("array index `{index}` is out of bounds (len {len})"),
+                )
+            })
+        }
+    }
+}
+
+/// Read the value at a resolved place path (for compound assignment).
+pub fn get_place(value: &Value, path: &[ResolvedPlace]) -> Result<Value, RuntimeError> {
     let mut current = value;
-    for field in path {
-        let Value::Struct { fields, .. } = current else {
-            return Err(RuntimeError::new(
-                "L0371",
-                format!("cannot access field `{field}` on non-struct value"),
-            ));
-        };
-        current = fields
-            .iter()
-            .find(|(name, _)| name == field)
-            .map(|(_, value)| value)
-            .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`")))?;
+    for place in path {
+        current = place_get(current, place)?;
     }
     Ok(current.clone())
 }
 
-/// Set the value at a struct field path in place.
-pub fn set_field_path(root: &mut Value, path: &[String], new: Value) -> Result<(), RuntimeError> {
+/// Set the value at a resolved place path in place.
+pub fn set_place(root: &mut Value, path: &[ResolvedPlace], new: Value) -> Result<(), RuntimeError> {
     let mut current = root;
-    for (index, field) in path.iter().enumerate() {
-        let Value::Struct { fields, .. } = current else {
-            return Err(RuntimeError::new(
-                "L0371",
-                format!("cannot access field `{field}` on non-struct value"),
-            ));
-        };
-        let slot = fields
-            .iter_mut()
-            .find(|(name, _)| name == field)
-            .map(|(_, value)| value)
-            .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`")))?;
+    for (index, place) in path.iter().enumerate() {
+        let slot = place_get_mut(current, place)?;
         if index + 1 == path.len() {
             *slot = new;
             return Ok(());
@@ -1111,6 +1205,19 @@ mod tests {
     fn runs_for_loop() {
         let source = "fn main -> i64\n    let total i64 = 0\n    for i from 1 to 3\n        total += i\n    total\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(6));
+    }
+
+    #[test]
+    fn mutates_array_elements_and_reports_len() {
+        let source = "fn main -> i64\n    let xs array<i64> = [1, 2, 3]\n    xs[0] = 10\n    xs[len(xs) - 1] += 4\n    xs[0] + xs[2]\n";
+        assert_eq!(run_source(source).expect("run"), Value::I64(17));
+    }
+
+    #[test]
+    fn array_element_assignment_bounds_checked() {
+        let source = "fn main -> i64\n    let xs array<i64> = [1]\n    xs[3] = 9\n    xs[0]\n";
+        let error = run_source(source).expect_err("out of bounds");
+        assert_eq!(error.code, "L0413");
     }
 
     #[test]

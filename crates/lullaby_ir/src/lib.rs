@@ -4,9 +4,9 @@ use std::process::Command;
 
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
-    AssignOp, BinaryOp, Expr, ExprKind, Function, Program, Stmt, TypeRef, UnaryOp,
+    AssignOp, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt, TypeRef, UnaryOp,
 };
-use lullaby_runtime::{RuntimeError, Value, apply_compound, get_field_path, set_field_path};
+use lullaby_runtime::{ResolvedPlace, RuntimeError, Value, apply_compound, get_place, set_place};
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +60,7 @@ pub enum IrStmt {
     Assign {
         name: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        path: Vec<String>,
+        path: Vec<IrPlace>,
         op: AssignOp,
         value: IrExpr,
         span: Span,
@@ -114,6 +114,13 @@ pub struct IrExpr {
     pub kind: IrExprKind,
     pub ty: TypeRef,
     pub span: Span,
+}
+
+/// One hop of an assignment target in the IR: a struct field or an array index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IrPlace {
+    Field(String),
+    Index(IrExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -685,7 +692,7 @@ pub enum BytecodeInstruction {
     Assign {
         name: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        path: Vec<String>,
+        path: Vec<BytecodePlace>,
         op: AssignOp,
         value: BytecodeExpr,
         span: Span,
@@ -739,6 +746,13 @@ pub struct BytecodeExpr {
     pub kind: BytecodeExprKind,
     pub ty: TypeRef,
     pub span: Span,
+}
+
+/// One hop of an assignment target in bytecode: a struct field or array index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BytecodePlace {
+    Field(String),
+    Index(BytecodeExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1307,7 +1321,7 @@ fn lower_bytecode_instruction(statement: &IrStmt) -> BytecodeInstruction {
             span,
         } => BytecodeInstruction::Assign {
             name: name.clone(),
-            path: path.clone(),
+            path: path.iter().map(ir_place_to_bytecode).collect(),
             op: *op,
             value: lower_bytecode_expr(value),
             span: *span,
@@ -1374,6 +1388,13 @@ fn lower_bytecode_instruction(statement: &IrStmt) -> BytecodeInstruction {
             catch_body: lower_bytecode_block(catch_body),
             span: *span,
         },
+    }
+}
+
+fn ir_place_to_bytecode(place: &IrPlace) -> BytecodePlace {
+    match place {
+        IrPlace::Field(field) => BytecodePlace::Field(field.clone()),
+        IrPlace::Index(expr) => BytecodePlace::Index(lower_bytecode_expr(expr)),
     }
 }
 
@@ -1455,7 +1476,7 @@ fn bytecode_instruction_to_ir(instruction: &BytecodeInstruction) -> IrStmt {
             span,
         } => IrStmt::Assign {
             name: name.clone(),
-            path: path.clone(),
+            path: path.iter().map(bytecode_place_to_ir).collect(),
             op: *op,
             value: bytecode_expr_to_ir(value),
             span: *span,
@@ -1522,6 +1543,13 @@ fn bytecode_instruction_to_ir(instruction: &BytecodeInstruction) -> IrStmt {
             catch_body: bytecode_block_to_ir(catch_body),
             span: *span,
         },
+    }
+}
+
+fn bytecode_place_to_ir(place: &BytecodePlace) -> IrPlace {
+    match place {
+        BytecodePlace::Field(field) => IrPlace::Field(field.clone()),
+        BytecodePlace::Index(expr) => IrPlace::Index(bytecode_expr_to_ir(expr)),
     }
 }
 
@@ -3055,6 +3083,7 @@ impl<'a> IrRuntime<'a> {
             "warn" => self.builtin_warn(args),
             "flush" => self.builtin_flush(args),
             "to_string" => Self::builtin_to_string(args),
+            "len" => Self::builtin_len(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -3150,12 +3179,13 @@ impl<'a> IrRuntime<'a> {
                     };
                     env.assign(name, new)?;
                 } else {
+                    let resolved = self.resolve_places(path, env)?;
                     let mut root = env.get(name)?;
                     let new = match op {
                         AssignOp::Replace => rhs,
-                        _ => apply_compound(get_field_path(&root, path)?, op, rhs)?,
+                        _ => apply_compound(get_place(&root, &resolved)?, op, rhs)?,
                     };
-                    set_field_path(&mut root, path, new)?;
+                    set_place(&mut root, &resolved, new)?;
                     env.assign(name, root)?;
                 }
                 Ok(Control::Value(Value::Void))
@@ -3276,6 +3306,21 @@ impl<'a> IrRuntime<'a> {
         let result = self.eval_block(statements, env);
         env.pop_scope();
         result
+    }
+
+    fn resolve_places(
+        &mut self,
+        path: &[IrPlace],
+        env: &Env,
+    ) -> Result<Vec<ResolvedPlace>, RuntimeError> {
+        path.iter()
+            .map(|place| match place {
+                IrPlace::Field(field) => Ok(ResolvedPlace::Field(field.clone())),
+                IrPlace::Index(expr) => {
+                    Ok(ResolvedPlace::Index(self.eval_expr(expr, env)?.as_i64()?))
+                }
+            })
+            .collect()
     }
 
     fn eval_expr(&mut self, expr: &IrExpr, env: &Env) -> Result<Value, RuntimeError> {
@@ -3615,6 +3660,20 @@ impl<'a> IrRuntime<'a> {
         }
     }
 
+    fn builtin_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("len", 1, args.len()))?;
+        match value {
+            Value::Array(values) => Ok(Value::I64(values.len() as i64)),
+            Value::String(text) => Ok(Value::I64(text.chars().count() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("len expects a string or array but got `{other}`"),
+            )),
+        }
+    }
+
     fn builtin_rc_new(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -3894,13 +3953,19 @@ impl<'a> Lowerer<'a> {
                 op,
                 value,
                 span,
-            } => Ok(IrStmt::Assign {
-                name: name.clone(),
-                path: path.clone(),
-                op: *op,
-                value: self.lower_expr(value, scope)?,
-                span: *span,
-            }),
+            } => {
+                let path = path
+                    .iter()
+                    .map(|place| self.lower_place(place, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(IrStmt::Assign {
+                    name: name.clone(),
+                    path,
+                    op: *op,
+                    value: self.lower_expr(value, scope)?,
+                    span: *span,
+                })
+            }
             Stmt::Return(expr) => Ok(IrStmt::Return(
                 expr.as_ref()
                     .map(|expr| self.lower_expr(expr, scope))
@@ -4045,6 +4110,17 @@ impl<'a> Lowerer<'a> {
                     )),
                 }
             }
+        }
+    }
+
+    fn lower_place(
+        &self,
+        place: &Place,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Result<IrPlace, IrLoweringError> {
+        match place {
+            Place::Field(field) => Ok(IrPlace::Field(field.clone())),
+            Place::Index(expr) => Ok(IrPlace::Index(self.lower_expr(expr, scope)?)),
         }
     }
 
@@ -4211,7 +4287,7 @@ impl<'a> Lowerer<'a> {
             | "flush" | "rc_release" | "ptr_write" | "region_create" => TypeRef::new("void"),
             "read_file" | "sys_output" | "to_string" => TypeRef::new("string"),
             "file_exists" => TypeRef::new("bool"),
-            "sys_status" => TypeRef::new("i64"),
+            "sys_status" | "len" => TypeRef::new("i64"),
             "rc_new" => {
                 let value = args.first().ok_or_else(|| {
                     IrLoweringError::new("rc_new call missing value argument", Some(span))

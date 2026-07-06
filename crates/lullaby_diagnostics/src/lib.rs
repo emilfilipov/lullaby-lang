@@ -400,6 +400,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass one argument per field, in order, with matching types.",
     },
     DiagnosticEntry {
+        code: "L0373",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "`len` returns the element count of a string or array.",
+        root_cause: "The argument passed to `len` is not a string or an `array<T>`.",
+        suggested_fix: "Pass a string or array value to `len`, or read a numeric field directly.",
+    },
+    DiagnosticEntry {
         code: "L0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",

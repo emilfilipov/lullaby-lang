@@ -1,0 +1,5 @@
+fn main -> i64
+    let xs array<i64> = [1, 2, 3]
+    xs[0] = 10
+    xs[len(xs) - 1] += 4
+    xs[0] + xs[2]

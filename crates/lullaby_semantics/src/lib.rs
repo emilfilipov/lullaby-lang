@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    AssignOp, BinaryOp, Expr, ExprKind, Function, IfBranch, Param, Program, RegionDecl, Stmt,
-    StructDecl, StructField, TypeRef, UnaryOp,
+    AssignOp, BinaryOp, Expr, ExprKind, Function, IfBranch, Param, Place, Program, RegionDecl,
+    Stmt, StructDecl, StructField, TypeRef, UnaryOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +181,21 @@ fn chain_is_cyclic(name: &str, map: &HashMap<String, TypeRef>) -> bool {
         }
     }
     false
+}
+
+/// Render an assignment place path for diagnostics, e.g. `.items[0].x`.
+fn render_place_path(path: &[Place]) -> String {
+    let mut out = String::new();
+    for place in path {
+        match place {
+            Place::Field(field) => {
+                out.push('.');
+                out.push_str(field);
+            }
+            Place::Index(_) => out.push_str("[…]"),
+        }
+    }
+    out
 }
 
 /// Expand alias names inside a type, including generic arguments, to canonical
@@ -532,11 +547,11 @@ impl<'a> Checker<'a> {
                     return None;
                 };
                 // Walk any `.field` path to the mutated field's type.
-                let expected = self.resolve_field_path(&root, path, *span, function)?;
+                let expected = self.resolve_field_path(&root, path, *span, scope, function)?;
                 let target = if path.is_empty() {
                     format!("`{name}`")
                 } else {
-                    format!("`{name}.{}`", path.join("."))
+                    format!("`{name}{}`", render_place_path(path))
                 };
                 if *op == AssignOp::Replace {
                     if value_type.as_ref() != Some(&expected) {
@@ -1285,6 +1300,24 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
+            "len" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let arg_type = self.check_expr(&args[0], scope, function)?;
+                if arg_type.name == "string" || arg_type.array_element().is_some() {
+                    Some(TypeRef::new("i64"))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0373",
+                        format!(
+                            "len expects a string or array value but got `{}`",
+                            arg_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
             "rc_new" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let value_type = self.check_expr(&args[0], scope, function)?;
@@ -1403,34 +1436,62 @@ impl<'a> Checker<'a> {
     fn resolve_field_path(
         &mut self,
         root: &TypeRef,
-        path: &[String],
+        path: &[Place],
         span: Span,
+        scope: &Scope,
         function: &Function,
     ) -> Option<TypeRef> {
         let mut current = root.clone();
-        for field in path {
-            let Some(fields) = self.structs.get(&current.name) else {
-                self.diagnostics.push(SemanticDiagnostic::at(
-                    "L0371",
-                    format!(
-                        "cannot access field `{field}` on non-struct type `{}`",
-                        current.name
-                    ),
-                    Some(function.name.clone()),
-                    span,
-                ));
-                return None;
-            };
-            match fields.iter().find(|f| &f.name == field) {
-                Some(matched) => current = matched.ty.clone(),
-                None => {
-                    self.diagnostics.push(SemanticDiagnostic::at(
-                        "L0371",
-                        format!("struct `{}` has no field `{field}`", current.name),
-                        Some(function.name.clone()),
-                        span,
-                    ));
-                    return None;
+        for place in path {
+            match place {
+                Place::Field(field) => {
+                    let Some(fields) = self.structs.get(&current.name) else {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0371",
+                            format!(
+                                "cannot access field `{field}` on non-struct type `{}`",
+                                current.name
+                            ),
+                            Some(function.name.clone()),
+                            span,
+                        ));
+                        return None;
+                    };
+                    match fields.iter().find(|f| &f.name == field) {
+                        Some(matched) => current = matched.ty.clone(),
+                        None => {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0371",
+                                format!("struct `{}` has no field `{field}`", current.name),
+                                Some(function.name.clone()),
+                                span,
+                            ));
+                            return None;
+                        }
+                    }
+                }
+                Place::Index(index) => {
+                    let index_type = self.check_expr(index, scope, function);
+                    if index_type.as_ref().map(|ty| ty.name.as_str()) != Some("i64") {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0326",
+                            "array index expression must be i64",
+                            Some(function.name.clone()),
+                            index.span,
+                        ));
+                    }
+                    match current.array_element() {
+                        Some(element) => current = element,
+                        None => {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0325",
+                                "index target must be an array",
+                                Some(function.name.clone()),
+                                span,
+                            ));
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -2086,6 +2147,47 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0371")
+        );
+    }
+
+    #[test]
+    fn validates_array_element_mutation_and_len() {
+        let source = "fn main -> i64\n    let xs array<i64> = [1, 2, 3]\n    xs[0] = 10\n    xs[1] += 5\n    xs[len(xs) - 1]\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_array_element_type_mismatch() {
+        let diagnostics = validate_source(
+            "fn main -> i64\n    let xs array<i64> = [1]\n    xs[0] = true\n    xs[0]\n",
+        )
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0314")
+        );
+    }
+
+    #[test]
+    fn rejects_index_assignment_on_non_array() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    let n i64 = 1\n    n[0] = 2\n    n\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0325")
+        );
+    }
+
+    #[test]
+    fn rejects_len_on_non_collection() {
+        let diagnostics = validate_source("fn main -> i64\n    len(5)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0373")
         );
     }
 
