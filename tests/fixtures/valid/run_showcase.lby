@@ -1,0 +1,51 @@
+struct Vec2
+    x i64
+    y i64
+
+fn dot a Vec2 b Vec2 -> i64
+    a.x * b.x + a.y * b.y
+
+enum Shape
+    Dot
+    Line i64
+    Box i64 i64
+
+fn area s Shape -> i64
+    match s
+        Dot -> 0
+        Line(n) -> n
+        Box(w, h) -> w * h
+
+fn safe_div n i64 d i64 -> result<i64, string>
+    if d == 0
+        return err("div by zero")
+    ok(n / d)
+
+fn value r result<i64, string> -> i64
+    match r
+        ok(v) -> v
+        err(m) -> 0 - len(m)
+
+fn first_positive first Shape second Shape -> option<i64>
+    let a i64 = area(first)
+    if a > 0
+        return some(a)
+    let b i64 = area(second)
+    if b > 0
+        return some(b)
+    none
+
+fn unwrap o option<i64> -> i64
+    match o
+        some(v) -> v
+        none -> 0
+
+fn main -> i64
+    let u Vec2 = Vec2(3, 4)
+    let v Vec2 = Vec2(1, 2)
+    let d i64 = dot(u, v)
+    let boxarea i64 = area(Box(5, 6))
+    let ok_val i64 = value(safe_div(20, 4))
+    let err_val i64 = value(safe_div(1, 0))
+    let picked i64 = unwrap(first_positive(Dot, Box(2, 3)))
+    d + boxarea + ok_val + err_val + picked
