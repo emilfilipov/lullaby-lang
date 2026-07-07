@@ -472,6 +472,15 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// Inline assembly: raw x86-64 machine-code bytes emitted verbatim into the
+    /// current function's `.text` at this point. Native-only and inherently
+    /// `unsafe`. Each byte is an `i64` value in `0..=255`; semantics validates
+    /// the range and requires an enclosing `unsafe` block, and only the native
+    /// backend can emit it (the interpreters reject it with `L0425`).
+    Asm {
+        bytes: Vec<i64>,
+        span: Span,
+    },
     Region(RegionDecl),
     Throw {
         value: Expr,
@@ -1304,6 +1313,10 @@ impl<'a> Parser<'a> {
             return self.parse_unsafe();
         }
 
+        if self.eat_keyword(Keyword::Asm).is_some() {
+            return self.parse_asm();
+        }
+
         if self.eat_keyword(Keyword::Region).is_some() {
             return self.parse_region();
         }
@@ -1492,6 +1505,28 @@ impl<'a> Parser<'a> {
         let body = self.parse_block(&[BlockEnd::Dedent]);
         self.expect(TokenKindRef::Dedent, "expected unsafe body dedent")?;
         Some(Stmt::Unsafe { body, span })
+    }
+
+    /// Parse an `asm` statement: the `asm` keyword followed by a comma-separated
+    /// list of integer byte literals on the same line, e.g.
+    /// `asm 72, 199, 192, 42, 0, 0, 0`. The bytes are emitted verbatim into the
+    /// current function's `.text` by the native backend. The parser only checks
+    /// the shape (at least one integer literal, comma-separated); semantics
+    /// validates each byte is in `0..=255` and that the statement is inside an
+    /// `unsafe` block.
+    fn parse_asm(&mut self) -> Option<Stmt> {
+        let span = self.previous().span;
+        let mut bytes = Vec::new();
+        loop {
+            let byte = self.expect_number("expected integer byte literal in asm statement")?;
+            bytes.push(byte);
+            if self.eat_symbol(",") {
+                continue;
+            }
+            break;
+        }
+        self.expect_newline("expected newline after asm statement");
+        Some(Stmt::Asm { bytes, span })
     }
 
     /// Parse a `try` / `catch NAME` block.
@@ -2680,6 +2715,20 @@ mod tests {
         assert_eq!(program.aliases[0].name, "Count");
         assert_eq!(program.aliases[0].target.name, "i64");
         assert_eq!(program.aliases[1].target.name, "array<i64>");
+    }
+
+    #[test]
+    fn parses_asm_statement() {
+        let source = "fn main -> i64\n    unsafe\n        asm 72, 199, 192, 42, 0, 0, 0\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Unsafe { body, .. } = &program.functions[0].body[0] else {
+            panic!("expected unsafe block");
+        };
+        let Stmt::Asm { bytes, .. } = &body[0] else {
+            panic!("expected asm statement");
+        };
+        assert_eq!(bytes, &vec![72, 199, 192, 42, 0, 0, 0]);
     }
 
     #[test]

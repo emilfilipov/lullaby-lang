@@ -227,6 +227,7 @@ impl<'a> NativeFunctionCodegen<'a> {
                 | BytecodeInstruction::Throw { .. }
                 | BytecodeInstruction::Try { .. }
                 | BytecodeInstruction::Match { .. }
+                | BytecodeInstruction::Asm { .. }
                 | BytecodeInstruction::Loop { .. } => {}
             }
         }
@@ -300,6 +301,7 @@ impl<'a> NativeFunctionCodegen<'a> {
                 | BytecodeInstruction::Throw { .. }
                 | BytecodeInstruction::Try { .. }
                 | BytecodeInstruction::Match { .. }
+                | BytecodeInstruction::Asm { .. }
                 | BytecodeInstruction::Loop { .. } => {
                     return self.unsupported(
                         "prototype emitter only supports let, assignment, and one return"
@@ -1194,6 +1196,7 @@ fn instruction_has_call(instruction: &BytecodeInstruction) -> bool {
         BytecodeInstruction::Loop { body, .. } => body_has_call(body),
         BytecodeInstruction::Throw { .. }
         | BytecodeInstruction::Try { .. }
+        | BytecodeInstruction::Asm { .. }
         | BytecodeInstruction::Match { .. } => false,
     }
 }
@@ -1262,7 +1265,20 @@ fn lower_native_function(
         instructions.last(),
         Some(BytecodeInstruction::Expr(expr)) if !expr.ty.is_void()
     );
-    if tail_is_value_expr {
+    // A function whose last statement is an `asm` block is trusted to leave the
+    // return value in `rax`. Lower the head, emit the asm bytes, then emit the
+    // normal epilogue so `rax` is returned intact rather than being clobbered by
+    // the fallthrough `xor eax,eax` below. (The programmer must not emit their
+    // own `ret` — the epilogue restores `rbp` and `rsp` and returns.)
+    let tail_is_asm = matches!(instructions.last(), Some(BytecodeInstruction::Asm { .. }));
+    if tail_is_asm {
+        let (head, tail) = instructions.split_at(instructions.len() - 1);
+        lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
+        if let BytecodeInstruction::Asm { bytes, .. } = &tail[0] {
+            code.extend_from_slice(bytes);
+        }
+        emit_native_epilogue(&mut code, ctx.frame_size);
+    } else if tail_is_value_expr {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
         if let BytecodeInstruction::Expr(expr) = &tail[0] {
@@ -1456,6 +1472,16 @@ fn lower_native_stmt(
             body,
             ..
         } => lower_native_for(ctx, name, start, end, step.as_ref(), body, code, loops),
+        // Inline assembly: emit the raw x86-64 machine-code bytes verbatim into
+        // the current function's `.text` at this point. The programmer is trusted
+        // (this is `unsafe`); the bytes are not decoded, relocated, or validated
+        // beyond the 0..=255 range check already done in semantics. A block that
+        // leaves a value in `rax` (e.g. `mov rax, imm32`) returns it, since the
+        // Win64 epilogue returns `rax`.
+        BytecodeInstruction::Asm { bytes, .. } => {
+            code.extend_from_slice(bytes);
+            Ok(())
+        }
         BytecodeInstruction::Throw { .. } | BytecodeInstruction::Try { .. } => {
             Err("throw/try is not in the native subset".to_string())
         }
@@ -3544,6 +3570,30 @@ mod native_program_tests {
         assert!(
             coff_symbol(&program.bytes, NATIVE_ENTRY_SYMBOL).is_some(),
             "entry stub present when `main` exists"
+        );
+    }
+
+    #[test]
+    fn asm_bytes_are_emitted_verbatim_into_text() {
+        // A `main` whose `unsafe` `asm` block emits the seven bytes of
+        // `mov rax, 42`. The emitter must copy those bytes verbatim into `.text`.
+        let program = emit_alpha1_native_program(&module_for(
+            "fn main -> i64\n    unsafe\n        asm 72, 199, 192, 42, 0, 0, 0\n",
+        ))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(program.skipped.is_empty());
+
+        // The exact `mov rax, 42` byte pattern must appear in the object bytes
+        // (inside `.text`), proving the raw bytes were emitted verbatim.
+        let needle = [0x48u8, 0xC7, 0xC0, 0x2A, 0x00, 0x00, 0x00];
+        let found = program
+            .bytes
+            .windows(needle.len())
+            .any(|window| window == needle);
+        assert!(
+            found,
+            "expected the raw `mov rax, 42` asm bytes verbatim in the emitted object"
         );
     }
 }

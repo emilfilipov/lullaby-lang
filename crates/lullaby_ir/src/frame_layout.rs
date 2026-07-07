@@ -182,6 +182,7 @@ impl LayoutBuilder {
                 | IrStmt::Break(_)
                 | IrStmt::Continue(_)
                 | IrStmt::Throw { .. }
+                | IrStmt::Asm { .. }
                 | IrStmt::Expr(_) => {}
             }
         }

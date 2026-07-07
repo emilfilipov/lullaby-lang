@@ -233,6 +233,42 @@ Rules:
 
 Deferred beyond this increment: non-scalar/pointer/struct/`f64`/32-bit export parameter and return types, callbacks (a Lullaby function value handed to C as a function pointer), string/buffer marshalling across the boundary, and non-Windows C ABIs.
 
+## Inline Assembly (raw byte emission) (DELIVERED, first increment)
+
+The native backend can emit raw x86-64 machine-code bytes verbatim into a function's `.text`. This is the first inline-assembly increment: a trusted, native-only escape hatch, gated by `unsafe`.
+
+### The `asm` surface
+
+An `asm` statement takes a comma-separated list of integer byte literals (each an `i64` in `0..=255`) and emits those bytes verbatim into the current function's `.text` at that point:
+
+```lullaby
+fn main -> i64
+    unsafe
+        asm 72, 199, 192, 42, 0, 0, 0
+```
+
+The seven bytes above are `48 C7 C0 2A 00 00 00` = `mov rax, 42`. Because the Win64 epilogue returns `rax`, a trailing `asm` that leaves a value in `rax` makes the function return it — observable through the process exit code (this program exits `42`). The bytes are emitted as-is: they are not decoded, relocated, register-modeled, or validated beyond the range check.
+
+### Unsafe gating and shape validation
+
+- `asm` is inherently `unsafe`, so it must appear inside an `unsafe` block, exactly like the raw-pointer builtins `ptr_read`/`ptr_write`. Using it outside `unsafe` is `L0330` ("`asm` inline assembly requires an `unsafe` block").
+- `lullaby check` still validates the construct's shape: the statement must emit at least one byte and every byte must be in `0..=255`. An empty or out-of-range `asm` is `L0425` at check time.
+- A trailing `asm` is treated as divergent-like (as `throw` is), so it satisfies a non-void function's final-value requirement: the programmer is trusted to leave the return value in `rax`.
+
+### Native-only behavior and codegen
+
+- **Native-only.** Like `extern`, the AST, IR, and bytecode interpreters cannot execute raw machine code, so any `asm` statement is rejected at runtime with diagnostic **`L0425`** ("cannot execute an `asm` (inline assembly) statement on an interpreter; compile with `lullaby native` to emit and link the machine code"). It runs only after native codegen + linking.
+- **Codegen.** `emit_alpha1_native_program` copies the `asm` bytes verbatim into the function's `.text` at the statement's position. When `asm` is a function's last statement, the emitter emits it followed by the normal Win64 epilogue (restore `rsp`/`rbp`, `ret`) so `rax` is returned intact rather than clobbered by the fallthrough `xor eax,eax`; the programmer must therefore not emit their own `ret`. A non-tail `asm` is emitted inline between the surrounding statements.
+
+### Testing
+
+- The native-only fixture `tests/fixtures/native_only/asm_mov.lby` (`main`'s `unsafe` `asm` emits `mov rax, 42`) lives outside `tests/fixtures/valid/` because it cannot run on the interpreters (it would break the cross-backend parity harness). `asm_emits_raw_bytes_when_linkable` in `crates/lullaby_cli/tests/cli.rs` checks it, asserts `L0425` on every interpreter backend, and — when `rust-lld` + `kernel32.lib` are available — native-links and runs it, asserting exit code `42`; it skips the link+run gracefully otherwise.
+- `asm_bytes_are_emitted_verbatim_into_text` in `crates/lullaby_ir/src/native_object.rs` asserts the exact `mov rax, 42` byte pattern appears in the emitted object. Semantics/runtime unit tests cover the `unsafe` gate, the byte-range check, and the interpreter `L0425` rejection.
+
+### Deferred inline-assembly work
+
+Deferred beyond this increment: no register/clobber modeling, no operand substitution (no way to reference Lullaby locals/values from the bytes), no assembly-text parsing (bytes only, not mnemonics), no verification that the bytes form valid instructions or preserve the frame, no relocation of the bytes, and non-Windows/non-x86-64 targets.
+
 ## Deferred Native Work
 
 Deferred beyond this increment: `f64`/`bool`/`char`/`byte` scalar lowering, more than four parameters (stack arguments), aggregates as parameters/returns/call arguments, trapping native array bounds checks, string/enum/collection *values* (native string locals, concatenation, indexing, comparison), heap allocation exposed beyond the string-constant copy, a heap `free`/reclamation path, `match`, builtins beyond a constant-folded array `len` and string-literal `len`, cross-platform ELF/Mach-O object emission, and CRT-driven `mainCRTStartup` entry. This work must not bypass the AST runtime, typed IR validation, bytecode VM, or existing release verification.

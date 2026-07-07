@@ -647,6 +647,12 @@ fn lower_stmt(
         IrStmt::Throw { .. } | IrStmt::Try { .. } => {
             Err("throw/try is not supported by the WASM backend".to_string())
         }
+        // Inline `asm` emits raw x86-64 machine code and is native-only; a WASM
+        // module cannot host it, so the function is demoted to the interpreters
+        // (which then reject the `asm` with `L0425`).
+        IrStmt::Asm { .. } => {
+            Err("inline `asm` is native-only and not supported by the WASM backend".to_string())
+        }
         IrStmt::Match { .. } => {
             Err("match/enums are not yet supported by the WASM backend".to_string())
         }

@@ -285,6 +285,17 @@ pub fn extern_call_error(name: &str) -> RuntimeError {
     )
 }
 
+/// The error raised when an interpreter encounters an `asm` inline-assembly
+/// statement. Raw machine code can only run after native codegen + linking, so
+/// every interpreter (AST, IR, bytecode) rejects it with `L0425`. `check` still
+/// validates the byte range and the enclosing `unsafe` block.
+pub fn asm_interpreter_error() -> RuntimeError {
+    RuntimeError::new(
+        "L0425",
+        "cannot execute an `asm` (inline assembly) statement on an interpreter; compile with `lullaby native` to emit and link the machine code",
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
     Runtime,
@@ -1630,6 +1641,10 @@ impl<'a> Runtime<'a> {
             // `unsafe` is a transparent gate: its body runs in the enclosing
             // scope, matching IR lowering, which inlines the body.
             Stmt::Unsafe { body, .. } => self.eval_block(body, env),
+            // Inline assembly emits raw machine code and can only run after native
+            // codegen + linking; the AST interpreter cannot execute it, so reject
+            // it with `L0425` (like `extern`'s `L0423`) rather than no-op.
+            Stmt::Asm { .. } => Err(asm_interpreter_error()),
             // A region declaration is compile-time metadata; it has no runtime
             // effect in the current analysis-only region model.
             Stmt::Region(_) => Ok(Control::Value(Value::Void)),
@@ -3129,6 +3144,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::For { span, .. }
         | Stmt::Loop { span, .. }
         | Stmt::Unsafe { span, .. }
+        | Stmt::Asm { span, .. }
         | Stmt::Throw { span, .. }
         | Stmt::Try { span, .. } => *span,
         Stmt::Region(decl) => decl.span,
@@ -3255,6 +3271,15 @@ mod tests {
     fn runs_function_calls_and_arithmetic() {
         let source = "fn add x i64 y i64 -> i64\n    x + y\n\nfn main -> i64\n    let value i64 = add(40, 2)\n    value\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(42));
+    }
+
+    #[test]
+    fn rejects_asm_on_the_ast_interpreter() {
+        // Inline assembly is native-only; the AST interpreter rejects it with
+        // `L0425` rather than executing raw machine code.
+        let source = "fn main -> i64\n    unsafe\n        asm 72, 199, 192, 42, 0, 0, 0\n";
+        let error = run_source(source).expect_err("asm must not run on an interpreter");
+        assert_eq!(error.code, "L0425");
     }
 
     #[test]

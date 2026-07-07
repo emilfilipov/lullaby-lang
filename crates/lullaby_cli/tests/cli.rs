@@ -3197,6 +3197,77 @@ fn ffi_calls_c_abs_when_linkable() {
     assert_eq!(exit, 7, "llabs(-7) via C FFI must exit 7");
 }
 
+/// Inline assembly: a `main` whose `unsafe` `asm` block emits the seven bytes of
+/// `mov rax, 42` (`0x48,0xC7,0xC0,0x2A,0x00,0x00,0x00`). On the interpreters the
+/// `asm` is rejected with `L0425` (raw machine code needs native codegen). Native-
+/// compiled and linked, the emitted `mov rax, 42` reaches the Win64 epilogue, so
+/// the process exits 42. Gated on `rust-lld` + `kernel32.lib`; skips gracefully.
+#[test]
+fn asm_emits_raw_bytes_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/native_only/asm_mov.lby");
+
+    // `check` validates the asm shape (byte range + enclosing `unsafe`).
+    let check = lullaby()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(check.status.success(), "{}", stderr(&check));
+
+    // Every interpreter backend rejects the `asm` with L0425.
+    for backend in ["ast", "ir", "bytecode"] {
+        let run = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(
+            !run.status.success(),
+            "asm must fail on the {backend} interpreter"
+        );
+        let rendered = format!("{}{}", stdout(&run), stderr(&run));
+        assert!(
+            rendered.contains("L0425"),
+            "expected L0425 on {backend}: {rendered}"
+        );
+    }
+
+    // Native codegen: emit + (best-effort) link + run.
+    let out = std::env::temp_dir().join("lullaby_asm_mov.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    assert!(
+        stdout(&emit).contains("compiled main"),
+        "expected `main` compiled: {}",
+        stdout(&emit)
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib (via the LIB env var) not available; \
+             skipping inline-asm link+run"
+        );
+        return;
+    }
+
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(exit, 42, "asm `mov rax, 42` must make the process exit 42");
+}
+
 /// Discover a C compiler for the export-into-Lullaby execution test: prefer
 /// MSVC `cl.exe` (present in a Developer Command Prompt, alongside `kernel32.lib`
 /// on `LIB`), else `clang`. Returns the compiler program name when it runs.

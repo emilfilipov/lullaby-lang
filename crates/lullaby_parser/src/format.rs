@@ -266,6 +266,14 @@ fn render_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
             line(out, &pad, "unsafe");
             render_block(body, depth + 1, out);
         }
+        Stmt::Asm { bytes, .. } => {
+            let rendered = bytes
+                .iter()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            line(out, &pad, &format!("asm {rendered}"));
+        }
         Stmt::Region(decl) => line(out, &pad, &render_region(decl)),
         Stmt::Throw { value, .. } => {
             line(out, &pad, &format!("throw {}", render_expr(value)));
@@ -587,6 +595,13 @@ mod tests {
     #[test]
     fn formats_function_with_canonical_spacing() {
         let source = "fn add a i64 b i64 -> i64\n    a + b\n";
+        assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn formats_asm_statement_canonically() {
+        // An `asm` block renders as `asm b0, b1, ...` and is idempotent.
+        let source = "fn main -> i64\n    unsafe\n        asm 72, 199, 192, 42, 0, 0, 0\n";
         assert_eq!(fmt(source), source);
     }
 

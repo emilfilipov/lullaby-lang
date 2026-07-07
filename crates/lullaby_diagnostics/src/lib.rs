@@ -683,6 +683,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         root_cause: "Exposing a Lullaby function to C currently covers only the Win64 integer convention, so every parameter and the return type must be `i64` and the function must not be generic.",
         suggested_fix: "Restrict the exported function to `i64` parameters and an `i64` return type, or remove the `export` marker until wider export types land.",
     },
+    DiagnosticEntry {
+        code: "L0425",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "An `asm` inline-assembly statement (raw x86-64 machine-code bytes) was invalid or run on an interpreter. It is validated statically (each byte must be 0..=255, inside an `unsafe` block) but only the native backend can emit it; the AST, IR, and bytecode interpreters reject it at runtime.",
+        root_cause: "An `asm` byte was out of the 0..=255 range, the statement was empty or outside `unsafe`, or the program was run on an interpreter, which cannot execute raw machine code.",
+        suggested_fix: "Keep every `asm` byte in 0..=255 inside an `unsafe` block, and compile with `lullaby native` to emit and link the machine code into an `.exe` rather than running it on an interpreter.",
+    },
 ];
 
 pub fn render_concise(report: &DiagnosticReport) -> String {

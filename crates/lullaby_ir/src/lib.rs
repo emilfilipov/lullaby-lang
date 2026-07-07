@@ -11,10 +11,10 @@ use lullaby_parser::{
 };
 use lullaby_runtime::{
     Future, ResolvedPlace, RuntimeError, SharedMutex, SocketResource, Task, Value, apply_compound,
-    await_future, char_find, expect_chan, expect_future, expect_i64, expect_list, expect_map,
-    expect_mutex, expect_string, expect_task, extern_call_error, get_place, http_exchange,
-    join_task, net_err, new_chan, option_value, result_value, scalar_order_keys, set_place,
-    value_type_name,
+    asm_interpreter_error, await_future, char_find, expect_chan, expect_future, expect_i64,
+    expect_list, expect_map, expect_mutex, expect_string, expect_task, extern_call_error,
+    get_place, http_exchange, join_task, net_err, new_chan, option_value, result_value,
+    scalar_order_keys, set_place, value_type_name,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,13 @@ pub enum IrStmt {
     },
     Loop {
         body: Vec<IrStmt>,
+        span: Span,
+    },
+    /// Inline assembly: raw x86-64 machine-code bytes emitted verbatim by the
+    /// native backend. Native-only; the IR and bytecode interpreters reject it
+    /// at runtime with `L0425`. Each byte is validated in `0..=255` by semantics.
+    Asm {
+        bytes: Vec<u8>,
         span: Span,
     },
     Throw {
@@ -560,7 +567,7 @@ fn collect_memory_operations_from_block(
                     collect_memory_operations_from_block(function, &arm.body, operations);
                 }
             }
-            IrStmt::Return(None) | IrStmt::Break(_) | IrStmt::Continue(_) => {}
+            IrStmt::Return(None) | IrStmt::Break(_) | IrStmt::Continue(_) | IrStmt::Asm { .. } => {}
         }
     }
 }
@@ -886,6 +893,13 @@ pub enum BytecodeInstruction {
         body: Vec<BytecodeInstruction>,
         span: Span,
     },
+    /// Inline assembly: raw x86-64 machine-code bytes emitted verbatim by the
+    /// native backend. Native-only; the bytecode VM rejects it at runtime with
+    /// `L0425`.
+    Asm {
+        bytes: Vec<u8>,
+        span: Span,
+    },
     Throw {
         value: BytecodeExpr,
         span: Span,
@@ -1133,7 +1147,8 @@ fn collect_bytecode_memory_operations_from_block(
             }
             BytecodeInstruction::Return(None)
             | BytecodeInstruction::Break(_)
-            | BytecodeInstruction::Continue(_) => {}
+            | BytecodeInstruction::Continue(_)
+            | BytecodeInstruction::Asm { .. } => {}
         }
     }
 }
@@ -1469,6 +1484,7 @@ fn validate_bytecode_instructions(
             | BytecodeInstruction::Assign { .. }
             | BytecodeInstruction::Return(_)
             | BytecodeInstruction::Throw { .. }
+            | BytecodeInstruction::Asm { .. }
             | BytecodeInstruction::Expr(_) => {}
         }
     }
@@ -1622,6 +1638,10 @@ fn lower_bytecode_instruction(statement: &IrStmt) -> BytecodeInstruction {
         },
         IrStmt::Loop { body, span } => BytecodeInstruction::Loop {
             body: lower_bytecode_block(body),
+            span: *span,
+        },
+        IrStmt::Asm { bytes, span } => BytecodeInstruction::Asm {
+            bytes: bytes.clone(),
             span: *span,
         },
         IrStmt::Throw { value, span } => BytecodeInstruction::Throw {
@@ -1806,6 +1826,10 @@ fn bytecode_instruction_to_ir(instruction: &BytecodeInstruction) -> IrStmt {
         },
         BytecodeInstruction::Loop { body, span } => IrStmt::Loop {
             body: bytecode_block_to_ir(body),
+            span: *span,
+        },
+        BytecodeInstruction::Asm { bytes, span } => IrStmt::Asm {
+            bytes: bytes.clone(),
             span: *span,
         },
         BytecodeInstruction::Throw { value, span } => IrStmt::Throw {
@@ -2013,6 +2037,11 @@ impl ConstantFolder {
             },
             IrStmt::Loop { body, span } => IrStmt::Loop {
                 body: self.fold_block(body),
+                span: *span,
+            },
+            // Inline assembly is opaque bytes; folding leaves it unchanged.
+            IrStmt::Asm { bytes, span } => IrStmt::Asm {
+                bytes: bytes.clone(),
                 span: *span,
             },
             IrStmt::Throw { value, span } => IrStmt::Throw {
@@ -2415,6 +2444,15 @@ impl CommonSubexpressionEliminator {
                 available.clear();
                 IrStmt::Loop { body, span: *span }
             }
+            // Inline assembly is an opaque barrier: clear any available
+            // expressions and pass the bytes through unchanged.
+            IrStmt::Asm { bytes, span } => {
+                available.clear();
+                IrStmt::Asm {
+                    bytes: bytes.clone(),
+                    span: *span,
+                }
+            }
             IrStmt::Throw { value, span } => {
                 available.clear();
                 IrStmt::Throw {
@@ -2734,6 +2772,7 @@ impl LoopInvariantMover {
             | IrStmt::Throw { .. }
             | IrStmt::Try { .. }
             | IrStmt::Match { .. }
+            | IrStmt::Asm { .. }
             | IrStmt::Expr(_) => vec![statement.clone()],
         }
     }
@@ -2891,6 +2930,7 @@ fn collect_declared_names(statements: &[IrStmt], names: &mut HashSet<String>) {
             | IrStmt::Break(_)
             | IrStmt::Continue(_)
             | IrStmt::Throw { .. }
+            | IrStmt::Asm { .. }
             | IrStmt::Expr(_) => {}
         }
     }
@@ -2935,6 +2975,7 @@ fn collect_mutated_names(statements: &[IrStmt], names: &mut HashSet<String>) {
             | IrStmt::Break(_)
             | IrStmt::Continue(_)
             | IrStmt::Throw { .. }
+            | IrStmt::Asm { .. }
             | IrStmt::Expr(_) => {}
         }
     }
@@ -3171,6 +3212,14 @@ impl CopyPropagator {
                 let body = self.propagate_block(body, &mut HashMap::new());
                 aliases.clear();
                 IrStmt::Loop { body, span: *span }
+            }
+            // Inline assembly is opaque: clear aliases and pass the bytes through.
+            IrStmt::Asm { bytes, span } => {
+                aliases.clear();
+                IrStmt::Asm {
+                    bytes: bytes.clone(),
+                    span: *span,
+                }
             }
             IrStmt::Throw { value, span } => {
                 let value = self.propagate_expr(value, aliases);
@@ -3440,6 +3489,12 @@ impl DeadCodeEliminator {
             },
             IrStmt::Loop { body, span } => IrStmt::Loop {
                 body: self.eliminate_block(body),
+                span: *span,
+            },
+            // Inline assembly has an observable machine-code effect; it is never
+            // dead. Preserve it verbatim.
+            IrStmt::Asm { bytes, span } => IrStmt::Asm {
+                bytes: bytes.clone(),
                 span: *span,
             },
             IrStmt::Throw { value, span } => IrStmt::Throw {
@@ -3947,6 +4002,9 @@ impl<'a> IrRuntime<'a> {
                 }
                 Ok(Control::Value(Value::Void))
             }
+            // Inline assembly cannot run on the IR interpreter (raw machine code
+            // requires native codegen + linking); reject it with `L0425`.
+            IrStmt::Asm { .. } => Err(asm_interpreter_error()),
             IrStmt::Throw { value, .. } => {
                 let message = self.eval_expr(value, env)?.as_string()?;
                 Err(RuntimeError::new("L0420", message))
@@ -5741,6 +5799,7 @@ fn statement_span(statement: &IrStmt) -> Span {
         | IrStmt::While { span, .. }
         | IrStmt::For { span, .. }
         | IrStmt::Loop { span, .. }
+        | IrStmt::Asm { span, .. }
         | IrStmt::Throw { span, .. }
         | IrStmt::Try { span, .. }
         | IrStmt::Match { span, .. } => *span,
@@ -6151,6 +6210,13 @@ impl<'a> Lowerer<'a> {
                 let body = self.lower_block(body, &mut loop_scope)?;
                 Ok(IrStmt::Loop { body, span: *span })
             }
+            // Inline assembly lowers straight through to an `IrStmt::Asm` carrying
+            // the raw bytes. Semantics has already validated each byte is 0..=255,
+            // so the `as u8` truncation is exact.
+            Stmt::Asm { bytes, span } => Ok(IrStmt::Asm {
+                bytes: bytes.iter().map(|byte| *byte as u8).collect(),
+                span: *span,
+            }),
             // A region declaration lowers to a `region_create` marker call so
             // its metadata flows through memory analysis as a RegionCreate op.
             Stmt::Region(decl) => {

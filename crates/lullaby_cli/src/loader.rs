@@ -533,7 +533,7 @@ fn collect_stmt_references(stmt: &Stmt, out: &mut Vec<(String, Span)>) {
         }
         Stmt::Assign { value, .. } => collect_expr_references(value, out),
         Stmt::Return(Some(expr)) => collect_expr_references(expr, out),
-        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Asm { .. } => {}
         Stmt::Expr(expr) => collect_expr_references(expr, out),
         Stmt::If {
             branches,

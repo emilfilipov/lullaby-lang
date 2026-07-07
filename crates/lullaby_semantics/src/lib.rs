@@ -1524,6 +1524,13 @@ impl<'a> Checker<'a> {
                 self.unsafe_depth -= 1;
                 block_type
             }
+            Stmt::Asm { bytes, span } => {
+                self.check_asm(bytes, *span, function);
+                // Inline assembly is trusted to leave the return value in `rax`
+                // (the native epilogue returns `rax`), so — like `throw` — a
+                // trailing `asm` satisfies the function's final-value requirement.
+                Some(function.return_type.clone())
+            }
             Stmt::Region(decl) => {
                 self.check_region(decl, function);
                 None
@@ -1696,7 +1703,11 @@ impl<'a> Checker<'a> {
                     self.walk_lifetimes(body, &mut freed.clone(), function);
                     self.walk_lifetimes(catch_body, &mut freed.clone(), function);
                 }
-                Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
+                Stmt::Return(None)
+                | Stmt::Break(_)
+                | Stmt::Continue(_)
+                | Stmt::Region(_)
+                | Stmt::Asm { .. } => {}
             }
         }
     }
@@ -4108,6 +4119,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Validate an `asm` inline-assembly statement: it must sit inside an
+    /// `unsafe` block (inline machine code is inherently unsafe) and every byte
+    /// literal must be in `0..=255`. The statement is native-only, so this is the
+    /// only place its shape is checked; the interpreters reject it at runtime with
+    /// `L0425`, and the native backend emits the bytes verbatim.
+    fn check_asm(&mut self, bytes: &[i64], span: Span, function: &Function) {
+        if self.unsafe_depth == 0 {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0330",
+                "`asm` inline assembly requires an `unsafe` block".to_string(),
+                Some(function.name.clone()),
+                span,
+            ));
+        }
+        if bytes.is_empty() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0425",
+                "`asm` statement must emit at least one byte".to_string(),
+                Some(function.name.clone()),
+                span,
+            ));
+        }
+        for byte in bytes {
+            if !(0..=255).contains(byte) {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0425",
+                    format!("`asm` byte value {byte} is out of range; each byte must be 0..=255"),
+                    Some(function.name.clone()),
+                    span,
+                ));
+            }
+        }
+    }
+
     /// Require the current context to be inside an `unsafe` block.
     fn require_unsafe(&mut self, name: &str, span: Span, function: &Function) -> Option<()> {
         if self.unsafe_depth > 0 {
@@ -5168,6 +5213,39 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0330")
+        );
+    }
+
+    #[test]
+    fn validates_asm_inside_unsafe() {
+        // A well-formed `asm` inside `unsafe` with in-range bytes type-checks; a
+        // trailing `asm` satisfies the `i64` final-value requirement.
+        let source = "fn main -> i64\n    unsafe\n        asm 72, 199, 192, 42, 0, 0, 0\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_asm_outside_unsafe() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    asm 72, 199, 192, 42, 0, 0, 0\n    0\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0330"),
+            "asm outside unsafe must be L0330"
+        );
+    }
+
+    #[test]
+    fn rejects_asm_byte_out_of_range() {
+        let diagnostics = validate_source("fn main -> i64\n    unsafe\n        asm 256\n    0\n")
+            .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0425"),
+            "out-of-range asm byte must be L0425"
         );
     }
 
