@@ -15,11 +15,18 @@
 //! - Formatting: `textDocument/formatting` returns a single full-document
 //!   `TextEdit` produced by the canonical formatter, or no edits when the
 //!   document does not parse.
+//! - Hover: `textDocument/hover` returns a signature for a function, a type for
+//!   a local/parameter, a declaration for a struct/enum, or a short builtin
+//!   description, resolved from the reused parser + checked metadata.
+//! - Go-to-definition: `textDocument/definition` resolves the identifier under
+//!   the cursor to its declaration `Location` (function/struct/enum/alias, or a
+//!   local `let`/parameter binding).
 
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+mod analysis;
 mod diagnostics;
 mod transport;
 
@@ -152,6 +159,14 @@ pub fn handle_message(
             Some(id) => vec![Message::result(id, handle_formatting(state, &params))],
             None => Vec::new(),
         },
+        "textDocument/hover" => match id {
+            Some(id) => vec![Message::result(id, handle_hover(state, &params))],
+            None => Vec::new(),
+        },
+        "textDocument/definition" => match id {
+            Some(id) => vec![Message::result(id, handle_definition(state, &params))],
+            None => Vec::new(),
+        },
         // Unknown request: reply with a "method not found" error so the client
         // is not left waiting. Unknown notifications are ignored.
         _ => match id {
@@ -174,6 +189,8 @@ fn initialize_result() -> Value {
             // 1 = full document sync: the client sends the whole text on change.
             "textDocumentSync": 1,
             "documentFormattingProvider": true,
+            "hoverProvider": true,
+            "definitionProvider": true,
         },
         "serverInfo": {
             "name": "lullaby-lsp",
@@ -255,6 +272,39 @@ fn handle_formatting(state: &ServerState, params: &Value) -> Value {
         // Already canonical or not parseable: no edits.
         _ => Value::Array(Vec::new()),
     }
+}
+
+/// `textDocument/hover`: resolve the identifier under the cursor and return an
+/// LSP `Hover`, or `null` when there is nothing to show (whitespace, an unknown
+/// identifier, or a document that does not parse).
+fn handle_hover(state: &ServerState, params: &Value) -> Value {
+    let Some((text, line, character)) = position_of(state, params) else {
+        return Value::Null;
+    };
+    analysis::hover(text, line, character).unwrap_or(Value::Null)
+}
+
+/// `textDocument/definition`: resolve the identifier under the cursor to its
+/// definition `Location`, or `null` when it does not resolve.
+fn handle_definition(state: &ServerState, params: &Value) -> Value {
+    let Some(uri) = params["textDocument"]["uri"].as_str() else {
+        return Value::Null;
+    };
+    let Some((text, line, character)) = position_of(state, params) else {
+        return Value::Null;
+    };
+    analysis::definition(text, uri, line, character).unwrap_or(Value::Null)
+}
+
+/// Look up the open document text plus the 0-based `(line, character)` for a
+/// `TextDocumentPositionParams`, or `None` when the document is not open or the
+/// position is missing.
+fn position_of<'a>(state: &'a ServerState, params: &Value) -> Option<(&'a str, usize, usize)> {
+    let uri = params["textDocument"]["uri"].as_str()?;
+    let text = state.documents.get(uri)?;
+    let line = params["position"]["line"].as_u64()? as usize;
+    let character = params["position"]["character"].as_u64()? as usize;
+    Some((text.as_str(), line, character))
 }
 
 /// A 0-based LSP range covering the whole document, from (0,0) to just past the
@@ -451,8 +501,142 @@ mod tests {
     #[test]
     fn unknown_request_returns_method_not_found() {
         let mut state = ServerState::new();
-        let out = handle_message(&mut state, "textDocument/hover", Some(json!(7)), json!({}));
+        let out = handle_message(
+            &mut state,
+            "textDocument/references",
+            Some(json!(7)),
+            json!({}),
+        );
         let value = out[0].clone().into_json();
         assert_eq!(value["error"]["code"], json!(-32601));
+    }
+
+    #[test]
+    fn initialize_advertises_hover_and_definition() {
+        let mut state = ServerState::new();
+        let out = handle_message(&mut state, "initialize", Some(json!(1)), json!({}));
+        let value = out[0].clone().into_json();
+        let caps = &value["result"]["capabilities"];
+        assert_eq!(caps["hoverProvider"], json!(true));
+        assert_eq!(caps["definitionProvider"], json!(true));
+    }
+
+    /// A two-function program used by the hover/definition request tests.
+    const HOVER_PROG: &str = "\
+fn add a i64 b i64 -> i64
+    return a + b
+
+fn main -> i64
+    let total i64 = add(1, 2)
+    return total
+";
+
+    fn position(uri: &str, line: u64, character: u64) -> Value {
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character },
+        })
+    }
+
+    #[test]
+    fn hover_over_function_returns_signature() {
+        let mut state = ServerState::new();
+        open(&mut state, "file:///h.lby", HOVER_PROG);
+        // `add` inside the call on line 4 (0-based).
+        let out = handle_message(
+            &mut state,
+            "textDocument/hover",
+            Some(json!(10)),
+            position("file:///h.lby", 4, 20),
+        );
+        let value = out[0].clone().into_json();
+        let contents = value["result"]["contents"]["value"]
+            .as_str()
+            .expect("hover markdown");
+        assert!(
+            contents.contains("fn add a i64 b i64 -> i64"),
+            "got {contents}"
+        );
+    }
+
+    #[test]
+    fn hover_over_typed_local_returns_type() {
+        let mut state = ServerState::new();
+        open(&mut state, "file:///h.lby", HOVER_PROG);
+        // `total` in `return total` on line 5 (0-based).
+        let out = handle_message(
+            &mut state,
+            "textDocument/hover",
+            Some(json!(11)),
+            position("file:///h.lby", 5, 11),
+        );
+        let value = out[0].clone().into_json();
+        let contents = value["result"]["contents"]["value"]
+            .as_str()
+            .expect("hover markdown");
+        assert!(contents.contains("total i64"), "got {contents}");
+    }
+
+    #[test]
+    fn hover_over_whitespace_returns_null() {
+        let mut state = ServerState::new();
+        open(&mut state, "file:///h.lby", HOVER_PROG);
+        // Line 2 is blank.
+        let out = handle_message(
+            &mut state,
+            "textDocument/hover",
+            Some(json!(12)),
+            position("file:///h.lby", 2, 0),
+        );
+        let value = out[0].clone().into_json();
+        assert_eq!(value["result"], Value::Null);
+    }
+
+    #[test]
+    fn definition_on_call_jumps_to_declaration() {
+        let mut state = ServerState::new();
+        open(&mut state, "file:///h.lby", HOVER_PROG);
+        let out = handle_message(
+            &mut state,
+            "textDocument/definition",
+            Some(json!(13)),
+            position("file:///h.lby", 4, 20),
+        );
+        let value = out[0].clone().into_json();
+        let loc = &value["result"];
+        assert_eq!(loc["uri"], json!("file:///h.lby"));
+        // `add` is declared on line 0, name at columns 3..6 (`fn add`).
+        assert_eq!(loc["range"]["start"]["line"], json!(0));
+        assert_eq!(loc["range"]["start"]["character"], json!(3));
+        assert_eq!(loc["range"]["end"]["character"], json!(6));
+    }
+
+    #[test]
+    fn definition_on_local_jumps_to_let() {
+        let mut state = ServerState::new();
+        open(&mut state, "file:///h.lby", HOVER_PROG);
+        let out = handle_message(
+            &mut state,
+            "textDocument/definition",
+            Some(json!(14)),
+            position("file:///h.lby", 5, 11),
+        );
+        let value = out[0].clone().into_json();
+        // The `let total` binding is on line 4 (0-based).
+        assert_eq!(value["result"]["range"]["start"]["line"], json!(4));
+    }
+
+    #[test]
+    fn definition_on_unknown_returns_null() {
+        let mut state = ServerState::new();
+        open(&mut state, "file:///h.lby", HOVER_PROG);
+        let out = handle_message(
+            &mut state,
+            "textDocument/definition",
+            Some(json!(15)),
+            position("file:///h.lby", 2, 0),
+        );
+        let value = out[0].clone().into_json();
+        assert_eq!(value["result"], Value::Null);
     }
 }

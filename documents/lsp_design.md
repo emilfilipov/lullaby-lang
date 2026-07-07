@@ -39,8 +39,10 @@ The `initialize` response advertises:
 
 - `textDocumentSync = 1` (full): the client sends the entire document text on every change.
 - `documentFormattingProvider = true`.
+- `hoverProvider = true`.
+- `definitionProvider = true`.
 
-Hover, completion, and other providers are intentionally not advertised.
+Completion, references, and other providers are intentionally not advertised.
 
 ## Lifecycle
 
@@ -69,6 +71,47 @@ Lullaby spans are single 1-based `line`/`column` points. They are converted to 0
 
 `textDocument/formatting` looks up the stored document text and runs the canonical formatter (`lullaby_parser::format_program`) after a successful lex+parse. It returns a single full-document `TextEdit` whose range spans the entire current document. If the document does not parse, or is already canonical, it returns no edits.
 
+## Hover And Go-To-Definition
+
+`crates/lullaby_lsp/src/analysis.rs` resolves the identifier under the cursor for
+`textDocument/hover` and `textDocument/definition`. Both reuse the frontend
+rather than re-implementing any analysis:
+
+- The cursor position (0-based) is mapped to the whole word it lands on by
+  scanning the document line for word characters. A position on whitespace or a
+  non-identifier token resolves to nothing.
+- The document is lexed and parsed; hover additionally runs
+  `lullaby_semantics::validate` to obtain the `CheckedProgram`. When any stage
+  fails, hover/definition return `null` (diagnostics still cover the errors).
+
+Hover picks the first match, in order:
+
+1. A top-level declaration with that name — a function's `fn NAME p T ... -> Ret`
+   signature, or a `struct`/`enum` declaration rendered from the AST.
+2. A known builtin — a short description (checked before locals because a builtin
+   *call* expression is also recorded in the checker's inferred-type table, and
+   the description is the more useful hover).
+3. A local or parameter — the inferred type the checker recorded for the
+   identifier expression at that exact 1-based span
+   (`SemanticInfo::expression_types`), or the declared parameter/`let` type as a
+   fallback.
+
+This relies on the parser giving `Variable`/`Call`/declaration expressions a span
+that points at the identifier's first character, so a 0-based cursor column maps
+to a 1-based span column by `+1`. No new semantics accessor was needed: the
+checked metadata (`signatures`, `expression_types`) and `Signature` fields are
+already `pub`.
+
+Go-to-definition returns a `Location` in the same document:
+
+- A top-level declaration (function/struct/enum/alias) resolves to a range over
+  its name on the declaration line (found by searching that line for the name, so
+  `pub`/`async` prefixes do not shift the column).
+- Otherwise the enclosing function is found (the last function whose span line is
+  at or before the cursor), then a `let` binding of that name resolves to the
+  `let` line, and a parameter resolves to the function's signature line. Local
+  resolution descends `while`/`for`/`loop`/`unsafe`/`try` bodies.
+
 ## Testing
 
 `crates/lullaby_lsp` carries unit tests that drive `handle_message` directly (no stdio):
@@ -79,6 +122,8 @@ Lullaby spans are single 1-based `line`/`column` points. They are converted to 0
 - `didChange` updates the stored text and republishes.
 - `didClose` drops the document and clears diagnostics.
 - `formatting` returns exactly one full-document `TextEdit` for a parseable-but-unformatted document and no edits for an unparseable one.
+- `hover` over a function name returns its signature; over a typed local returns its type; over whitespace or an unknown identifier returns `null`.
+- `definition` on a call jumps to the function declaration's name range; on a local jumps to its `let` line; on an unresolved position returns `null`.
 
 The transport module additionally tests the framed read/write loop end to end over in-memory byte buffers (initialize -> didOpen -> shutdown -> exit).
 
@@ -86,8 +131,8 @@ The transport module additionally tests the framed read/write loop end to end ov
 
 The following are intentionally out of scope for this increment and can be layered on later without changing the transport or the `handle_message` shape:
 
-- Hover, completion, signature help.
-- Go-to-definition, references, document symbols, workspace symbols.
+- Completion, signature help.
+- References, document symbols, workspace symbols. (Hover and go-to-definition are now supported; see the section above.)
 - Incremental (range) document sync.
 - Code actions / quick fixes (for example applying the formatter or diagnostic-directed edits).
 - Multi-file / project-aware analysis (imports and `lullaby.json` search directories); the server currently analyzes each open document in isolation.
