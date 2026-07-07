@@ -3,6 +3,9 @@ use std::fmt;
 use std::fs;
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::Command;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
@@ -27,7 +30,60 @@ pub fn value_type_name(value: &Value) -> String {
         Value::Func(_) => "fn".to_string(),
         Value::Ptr(_) => "ptr".to_string(),
         Value::Socket(_) => "Socket".to_string(),
+        Value::Chan(_) => "Chan".to_string(),
+        Value::Task(_) => "Task".to_string(),
+        Value::Mutex(_) => "Mutex".to_string(),
         Value::Void => "void".to_string(),
+    }
+}
+
+/// An unbounded `i64` message-passing channel handle. Built over `std::sync::mpsc`:
+/// a cloneable `Sender` and a `Receiver` shared behind an `Arc<Mutex<_>>` so the
+/// value's `Clone` shares the same underlying queue (reference semantics, like a
+/// socket handle). `Send` because every field is `Send`.
+#[derive(Debug, Clone)]
+pub struct Chan {
+    pub sender: Sender<Value>,
+    pub receiver: Arc<Mutex<Receiver<Value>>>,
+}
+
+impl PartialEq for Chan {
+    /// Two channel handles are equal when they refer to the same queue (pointer
+    /// identity of the shared receiver), mirroring how sockets compare by handle.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.receiver, &other.receiver)
+    }
+}
+
+/// The shared, take-once join slot behind a `Task`. `JoinHandle` is not `Clone`,
+/// so it lives behind an `Arc<Mutex<Option<_>>>`: `task_join` takes the handle
+/// out (leaving `None`) so a second `task_join` is a harmless no-op.
+pub type TaskHandle = Arc<Mutex<Option<JoinHandle<Result<Value, RuntimeError>>>>>;
+
+/// A spawned-thread handle. `Send` because a `JoinHandle` is `Send`.
+#[derive(Debug, Clone)]
+pub struct Task {
+    pub handle: TaskHandle,
+}
+
+impl PartialEq for Task {
+    /// Task handles compare by identity of the shared join slot.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.handle, &other.handle)
+    }
+}
+
+/// A shared mutex over one `i64`. `Arc<Mutex<i64>>`, so the value's `Clone`
+/// shares the same lock and cell across threads (reference semantics). `Send`.
+#[derive(Debug, Clone)]
+pub struct SharedMutex {
+    pub cell: Arc<Mutex<i64>>,
+}
+
+impl PartialEq for SharedMutex {
+    /// Mutex handles compare by identity of the shared cell.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
     }
 }
 
@@ -64,6 +120,12 @@ pub enum Value {
     /// `TcpStream`, or `UdpSocket`) is not `Clone`, so sockets are represented
     /// as opaque integer handles, mirroring how `Ptr` indexes the heap.
     Socket(usize),
+    /// An unbounded `i64` message-passing channel; shared on clone.
+    Chan(Chan),
+    /// A one-shot handle to a spawned detached thread; `join`ed once.
+    Task(Task),
+    /// A shared mutex over one `i64`; shared on clone.
+    Mutex(SharedMutex),
     Void,
 }
 
@@ -117,6 +179,9 @@ impl fmt::Display for Value {
             }
             Self::Func(name) => write!(formatter, "fn {name}"),
             Self::Socket(handle) => write!(formatter, "socket({handle})"),
+            Self::Chan(_) => write!(formatter, "chan"),
+            Self::Task(_) => write!(formatter, "task"),
+            Self::Mutex(_) => write!(formatter, "mutex"),
             Self::Void => write!(formatter, "void"),
         }
     }
@@ -238,6 +303,42 @@ pub fn expect_list(name: &str, value: Value) -> Result<Vec<Value>, RuntimeError>
     }
 }
 
+/// Unwrap a runtime `Value` expected to be a channel handle, reporting `L0417`
+/// otherwise.
+pub fn expect_chan(name: &str, value: Value) -> Result<Chan, RuntimeError> {
+    match value {
+        Value::Chan(chan) => Ok(chan),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a Chan but got `{other}`"),
+        )),
+    }
+}
+
+/// Unwrap a runtime `Value` expected to be a task handle, reporting `L0417`
+/// otherwise.
+pub fn expect_task(name: &str, value: Value) -> Result<Task, RuntimeError> {
+    match value {
+        Value::Task(task) => Ok(task),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a Task but got `{other}`"),
+        )),
+    }
+}
+
+/// Unwrap a runtime `Value` expected to be a mutex handle, reporting `L0417`
+/// otherwise.
+pub fn expect_mutex(name: &str, value: Value) -> Result<SharedMutex, RuntimeError> {
+    match value {
+        Value::Mutex(mutex) => Ok(mutex),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a Mutex but got `{other}`"),
+        )),
+    }
+}
+
 /// Unwrap a runtime `Value` expected to be a map, reporting `L0417` otherwise.
 pub fn expect_map(name: &str, value: Value) -> Result<Vec<(Value, Value)>, RuntimeError> {
     match value {
@@ -279,6 +380,37 @@ pub fn result_value(payload: Result<Value, Value>) -> Value {
             enum_name: "result".to_string(),
             variant: "err".to_string(),
             payload: vec![error],
+        },
+    }
+}
+
+/// Create a fresh unbounded `i64` channel as a `Value::Chan`. Shared by the AST
+/// and IR interpreters so both keep identical channel semantics.
+pub fn new_chan() -> Value {
+    let (sender, receiver) = std::sync::mpsc::channel::<Value>();
+    Value::Chan(Chan {
+        sender,
+        receiver: Arc::new(Mutex::new(receiver)),
+    })
+}
+
+/// Join a spawned thread once: take the `JoinHandle` out of the shared slot and
+/// wait for it, propagating a worker error or panic. A second `join` (the slot is
+/// already `None`) is a no-op that returns `void`. Shared by both interpreters.
+pub fn join_task(task: &Task) -> Result<Value, RuntimeError> {
+    let handle = {
+        let mut slot = task
+            .handle
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "join on a poisoned task handle"))?;
+        slot.take()
+    };
+    match handle {
+        // Already joined: joining again is a harmless no-op.
+        None => Ok(Value::Void),
+        Some(handle) => match handle.join() {
+            Ok(result) => result.map(|_| Value::Void),
+            Err(_) => Err(RuntimeError::new("L0401", "spawned thread panicked")),
         },
     }
 }
@@ -416,8 +548,22 @@ pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
 
 /// Run `main` with the running program's CLI arguments, which the `args()`
 /// builtin exposes. `run_main` is the zero-argument wrapper.
+///
+/// The program is wrapped in an `Arc<Program>` here so a detached thread created
+/// by `spawn` can own a share of the program and run Lullaby independently. The
+/// interpreter keeps its usual `&Program` borrow (from `&*arc`, which the `Arc`
+/// outlives) for normal use, and ALSO holds an owned `Arc<Program>` clone purely
+/// to hand to spawned threads. These are two separate handles to the same shared
+/// data — not a self-referential struct.
 pub fn run_main_with_args(program: &Program, args: Vec<String>) -> Result<Value, RuntimeError> {
-    let mut runtime = Runtime::new(program)?;
+    let arc = Arc::new(program.clone());
+    run_main_shared(arc, args)
+}
+
+/// Shared-program entry: build an interpreter borrowing `&*arc` while retaining
+/// an owned `Arc<Program>` clone for detached-thread spawning.
+fn run_main_shared(arc: Arc<Program>, args: Vec<String>) -> Result<Value, RuntimeError> {
+    let mut runtime = Runtime::new(&arc, Arc::clone(&arc))?;
     runtime.program_args = args;
     runtime.call_function("main", Vec::new())
 }
@@ -426,6 +572,10 @@ struct Runtime<'a> {
     /// The whole program, borrowed so a builtin can spawn sibling interpreters
     /// over the same shared `&Program` (used by `parallel_map`'s scoped threads).
     program: &'a Program,
+    /// An owned share of the same program, handed by `.clone()` to detached
+    /// threads created by `spawn` so they can build their own interpreter over
+    /// `&*arc` and outlive the `spawn` call. Separate handle, not self-referential.
+    program_arc: Arc<Program>,
     functions: HashMap<&'a str, &'a Function>,
     /// The running program's CLI arguments, exposed by the `args()` builtin.
     program_args: Vec<String>,
@@ -452,7 +602,11 @@ struct Runtime<'a> {
 }
 
 impl<'a> Runtime<'a> {
-    fn new(program: &'a Program) -> Result<Self, RuntimeError> {
+    /// Build an interpreter over the borrowed program `program` while retaining an
+    /// owned `Arc<Program>` (`program_arc`) that points at the same data, used
+    /// only to hand a share to detached `spawn`ed threads. The caller passes both
+    /// handles (e.g. `Runtime::new(&arc, Arc::clone(&arc))`).
+    fn new(program: &'a Program, program_arc: Arc<Program>) -> Result<Self, RuntimeError> {
         let functions = program
             .functions
             .iter()
@@ -508,6 +662,7 @@ impl<'a> Runtime<'a> {
 
         Ok(Self {
             program,
+            program_arc,
             functions,
             program_args: Vec::new(),
             structs,
@@ -624,6 +779,16 @@ impl<'a> Runtime<'a> {
             "env" => Self::builtin_env(args),
             "args" => self.builtin_args(args),
             "parallel_map" => self.builtin_parallel_map(args),
+            "chan_new" => Self::builtin_chan_new(args),
+            "send" => Self::builtin_send(args),
+            "recv" => Self::builtin_recv(args),
+            "try_recv" => Self::builtin_try_recv(args),
+            "spawn" => self.builtin_spawn(args),
+            "task_join" => Self::builtin_task_join(args),
+            "mutex_new" => Self::builtin_mutex_new(args),
+            "mutex_get" => Self::builtin_mutex_get(args),
+            "mutex_set" => Self::builtin_mutex_set(args),
+            "mutex_add" => Self::builtin_mutex_add(args),
             "tcp_connect" => self.builtin_tcp_connect(args),
             "tcp_listen" => self.builtin_tcp_listen(args),
             "tcp_accept" => self.builtin_tcp_accept(args),
@@ -692,14 +857,16 @@ impl<'a> Runtime<'a> {
         let arg_values = expect_list("parallel_map", elements)?;
 
         let program = self.program;
+        let program_arc = &self.program_arc;
         let results: Vec<Value> = std::thread::scope(|scope| {
             let handles: Vec<_> = arg_values
                 .iter()
                 .map(|value| {
                     let name = func_name.clone();
                     let value = value.clone();
+                    let arc = Arc::clone(program_arc);
                     scope.spawn(move || {
-                        let mut runtime = Runtime::new(program)?;
+                        let mut runtime = Runtime::new(program, arc)?;
                         runtime.call_function(&name, vec![value])
                     })
                 })
@@ -718,6 +885,158 @@ impl<'a> Runtime<'a> {
         })?;
 
         Ok(Value::Array(results))
+    }
+
+    /// `chan_new() -> Chan`: create an unbounded `i64` message-passing channel.
+    fn builtin_chan_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("chan_new", 0, args.len()))?;
+        Ok(new_chan())
+    }
+
+    /// `send(ch Chan, v i64) -> void`: enqueue `v` (never blocks; unbounded).
+    fn builtin_send(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [chan, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("send", 2, args.len()))?;
+        let chan = expect_chan("send", chan)?;
+        let value = expect_i64("send", value)?;
+        // A send fails only if every receiver has been dropped. Because a channel
+        // shares its receiver behind an `Arc`, the sender-side handle keeps it
+        // alive; report a clear runtime error rather than panicking otherwise.
+        chan.sender
+            .send(Value::I64(value))
+            .map_err(|_| RuntimeError::new("L0401", "send on a channel with no live receiver"))?;
+        Ok(Value::Void)
+    }
+
+    /// `recv(ch Chan) -> i64`: dequeue, blocking until a value is available.
+    fn builtin_recv(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [chan]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("recv", 1, args.len()))?;
+        let chan = expect_chan("recv", chan)?;
+        let receiver = chan
+            .receiver
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "recv on a poisoned channel"))?;
+        receiver
+            .recv()
+            .map_err(|_| RuntimeError::new("L0401", "recv on a closed, empty channel"))
+    }
+
+    /// `try_recv(ch Chan) -> option<i64>`: non-blocking; `some(v)` or `none`.
+    fn builtin_try_recv(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [chan]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("try_recv", 1, args.len()))?;
+        let chan = expect_chan("try_recv", chan)?;
+        let receiver = chan
+            .receiver
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "try_recv on a poisoned channel"))?;
+        Ok(option_value(receiver.try_recv().ok()))
+    }
+
+    /// `spawn(f fn(Chan, i64) -> void, ch Chan, v i64) -> Task`: run `f(ch, v)` on
+    /// a detached OS thread that owns a share of the program (an `Arc<Program>`
+    /// clone) and builds its own interpreter over `&*arc`, then returns a one-shot
+    /// `Task` handle so the thread is `join`ed exactly once.
+    fn builtin_spawn(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [callee, chan, value]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("spawn", 3, args.len()))?;
+        let func_name = match callee {
+            Value::Func(name) => name,
+            other => {
+                return Err(RuntimeError::new(
+                    "L0417",
+                    format!("spawn expects a function but got `{other}`"),
+                ));
+            }
+        };
+        // `spawn`'s fixed arg shape is `(Chan, i64)`; validate before detaching.
+        let chan = expect_chan("spawn", chan)?;
+        let value = expect_i64("spawn", value)?;
+        // Hand the detached thread an owned share of the program so it can outlive
+        // this call and build its own interpreter over `&*arc` independently.
+        let arc = Arc::clone(&self.program_arc);
+        let handle = std::thread::spawn(move || {
+            let mut runtime = Runtime::new(&arc, Arc::clone(&arc))?;
+            runtime.call_function(&func_name, vec![Value::Chan(chan), Value::I64(value)])
+        });
+        Ok(Value::Task(Task {
+            handle: Arc::new(Mutex::new(Some(handle))),
+        }))
+    }
+
+    /// `task_join(t Task) -> void`: wait for the spawned thread. A second
+    /// `task_join` on an already-joined handle is a harmless no-op. (Named
+    /// `task_join` rather than `join` because `join` is already the string-list
+    /// joiner builtin.)
+    fn builtin_task_join(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [task]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("task_join", 1, args.len()))?;
+        let task = expect_task("task_join", task)?;
+        join_task(&task)
+    }
+
+    /// `mutex_new(v i64) -> Mutex`: a shared mutex over one `i64`.
+    fn builtin_mutex_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_new", 1, args.len()))?;
+        let value = expect_i64("mutex_new", value)?;
+        Ok(Value::Mutex(SharedMutex {
+            cell: Arc::new(Mutex::new(value)),
+        }))
+    }
+
+    /// `mutex_get(m Mutex) -> i64`: lock, read, unlock.
+    fn builtin_mutex_get(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [mutex]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_get", 1, args.len()))?;
+        let mutex = expect_mutex("mutex_get", mutex)?;
+        let guard = mutex
+            .cell
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "mutex_get on a poisoned mutex"))?;
+        Ok(Value::I64(*guard))
+    }
+
+    /// `mutex_set(m Mutex, v i64) -> void`: lock, write, unlock.
+    fn builtin_mutex_set(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [mutex, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_set", 2, args.len()))?;
+        let mutex = expect_mutex("mutex_set", mutex)?;
+        let value = expect_i64("mutex_set", value)?;
+        let mut guard = mutex
+            .cell
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "mutex_set on a poisoned mutex"))?;
+        *guard = value;
+        Ok(Value::Void)
+    }
+
+    /// `mutex_add(m Mutex, delta i64) -> i64`: lock, `v += delta`, return the new
+    /// value, unlock — an atomic read-modify-write so worker threads accumulate
+    /// safely.
+    fn builtin_mutex_add(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [mutex, delta]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_add", 2, args.len()))?;
+        let mutex = expect_mutex("mutex_add", mutex)?;
+        let delta = expect_i64("mutex_add", delta)?;
+        let mut guard = mutex
+            .cell
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "mutex_add on a poisoned mutex"))?;
+        *guard = guard.wrapping_add(delta);
+        Ok(Value::I64(*guard))
     }
 
     /// Push a freshly opened socket resource into the handle table, returning its
@@ -3020,6 +3339,51 @@ mod tests {
                 Value::I64(9),
                 Value::I64(16),
             ])
+        );
+    }
+
+    #[test]
+    fn spawn_channel_round_trip_sums_deterministically() {
+        // Four detached workers each `send(ch, v * v)`; `main` joins them and
+        // sums the four received values. The total is order-independent, so it is
+        // a deterministic 30 (1 + 4 + 9 + 16) regardless of thread scheduling.
+        let source = "fn worker ch Chan v i64 -> void\n    send(ch, v * v)\n\nfn main -> i64\n    let ch Chan = chan_new()\n    let t1 Task = spawn(worker, ch, 1)\n    let t2 Task = spawn(worker, ch, 2)\n    let t3 Task = spawn(worker, ch, 3)\n    let t4 Task = spawn(worker, ch, 4)\n    task_join(t1)\n    task_join(t2)\n    task_join(t3)\n    task_join(t4)\n    let total i64 = 0\n    for i from 0 to 3\n        total += recv(ch)\n    total\n";
+        assert_eq!(run_source(source).expect("run"), Value::I64(30));
+    }
+
+    #[test]
+    fn mutex_accumulates_and_reads_back() {
+        // Exercise the mutex builtins: create, set, atomically add, and read back.
+        let source = "fn main -> i64\n    let m Mutex = mutex_new(10)\n    mutex_set(m, 5)\n    let a i64 = mutex_add(m, 3)\n    mutex_add(m, 4)\n    a + mutex_get(m)\n";
+        // set -> 5, add 3 -> 8 (returned as `a`), add 4 -> 12 (read back).
+        assert_eq!(run_source(source).expect("run"), Value::I64(20));
+    }
+
+    #[test]
+    fn mutex_shared_across_threads_via_clone() {
+        // The `Value::Mutex` handle shares its cell on clone, so accumulating from
+        // several OS threads over the same `Arc<Mutex<i64>>` is safe and yields a
+        // deterministic total. This proves cross-thread mutex sharing directly
+        // (the language `spawn`'s fixed `(Chan, i64)` shape cannot pass a mutex to
+        // a worker yet, so this is verified at the runtime level).
+        let mutex = SharedMutex {
+            cell: Arc::new(Mutex::new(0)),
+        };
+        let value = Value::Mutex(mutex);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let handle = value.clone();
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        Runtime::builtin_mutex_add(vec![handle.clone(), Value::I64(1)])
+                            .expect("mutex_add");
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            Runtime::builtin_mutex_get(vec![value]).expect("mutex_get"),
+            Value::I64(800)
         );
     }
 

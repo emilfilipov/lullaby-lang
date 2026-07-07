@@ -662,7 +662,7 @@ fn main -&gt; i64
 
       <section id="concurrency">
         <h2>Concurrency</h2>
-        <p><code>parallel_map(f fn(i64) -&gt; i64, args list&lt;i64&gt;) -&gt; list&lt;i64&gt;</code> evaluates <code>f(arg)</code> for every element of <code>args</code> concurrently on separate OS threads and returns the results in the <strong>same order as <code>args</code></strong>, so the output is deterministic regardless of thread scheduling. Each thread builds a fresh interpreter over the shared program, so heaps are per-thread with no shared mutable state and no locking; <code>f</code> must be an ordinary top-level <code>fn(i64) -&gt; i64</code>. It runs identically on the AST, IR, and bytecode backends. Wrong arity, a non-<code>fn(i64) -&gt; i64</code> first argument, or a non-<code>list&lt;i64&gt;</code> second argument report <code>L0334</code>. Detached threads (<code>spawn</code>/<code>join</code>) and channels are a deferred second increment.</p>
+        <p><code>parallel_map(f fn(i64) -&gt; i64, args list&lt;i64&gt;) -&gt; list&lt;i64&gt;</code> evaluates <code>f(arg)</code> for every element of <code>args</code> concurrently on separate OS threads and returns the results in the <strong>same order as <code>args</code></strong>, so the output is deterministic regardless of thread scheduling. Each thread builds a fresh interpreter over the shared program, so heaps are per-thread with no shared mutable state and no locking; <code>f</code> must be an ordinary top-level <code>fn(i64) -&gt; i64</code>. It runs identically on the AST, IR, and bytecode backends. Wrong arity, a non-<code>fn(i64) -&gt; i64</code> first argument, or a non-<code>list&lt;i64&gt;</code> second argument report <code>L0334</code>.</p>
         <pre data-fixture="tests/fixtures/valid/run_parallel.lby" data-mode="run"><code>fn sq x i64 -> i64
     x * x
 
@@ -678,6 +678,29 @@ fn main -> i64
         total += get(out, i)
     total</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_parallel.lby</code>. Returns <code>30</code>.</p>
+        <h3>Threads, channels, and a mutex</h3>
+        <p>Message passing with detached threads is delivered on all three backends. <code>chan_new() -&gt; Chan</code> creates an unbounded <code>i64</code> channel (a shared handle: cloning shares the same queue); <code>send(ch Chan, v i64)</code> enqueues without blocking, <code>recv(ch Chan) -&gt; i64</code> dequeues blocking, and <code>try_recv(ch Chan) -&gt; option&lt;i64&gt;</code> dequeues non-blocking. <code>spawn(f fn(Chan, i64) -&gt; void, ch Chan, v i64) -&gt; Task</code> runs <code>f(ch, v)</code> on a detached OS thread that owns a share of the program (an <code>Arc</code> clone) and returns a <code>Task</code>; <code>task_join(t Task) -&gt; void</code> waits for it (named <code>task_join</code>, not <code>join</code>, because <code>join</code> is the string-list joiner). <code>mutex_new(v i64) -&gt; Mutex</code> creates a shared mutex over one <code>i64</code>; <code>mutex_get</code>/<code>mutex_set</code>/<code>mutex_add</code> read, write, and atomically add-and-return. Because scheduling is non-deterministic, sum received values instead of asserting order. Wrong arity or a wrong-typed argument reports <code>L0337</code>. Generic channels, <code>select</code>, <code>async</code>/<code>await</code>, and cross-thread socket sharing remain deferred.</p>
+        <pre data-fixture="tests/fixtures/valid/run_spawn.lby" data-mode="run"><code>fn worker ch Chan v i64 -> void
+    send(ch, v * v)
+
+fn main -> i64
+    let ch Chan = chan_new()
+    let t1 Task = spawn(worker, ch, 1)
+    let t2 Task = spawn(worker, ch, 2)
+    let t3 Task = spawn(worker, ch, 3)
+    let t4 Task = spawn(worker, ch, 4)
+    task_join(t1)
+    task_join(t2)
+    task_join(t3)
+    task_join(t4)
+    let total i64 = 0
+    for i from 0 to 3
+        total += recv(ch)
+    let m Mutex = mutex_new(0)
+    for j from 0 to 3
+        mutex_add(m, 1)
+    total + mutex_get(m)</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_spawn.lby</code>. Returns <code>34</code> (1+4+9+16 received, plus a mutex count of 4).</p>
       </section>
 
       <section id="networking">
@@ -1011,6 +1034,7 @@ Suggested fix:
             <tr><td><code>L0334</code></td><td><code>parallel_map</code> argument type or arity mismatch: pass a <code>fn(i64) -&gt; i64</code> first argument and a <code>list&lt;i64&gt;</code> second argument.</td></tr>
             <tr><td><code>L0335</code></td><td>TCP/UDP socket builtin argument type or arity mismatch: pass a <code>string</code> host/data, an <code>i64</code> port, and a <code>Socket</code> handle from a socket builtin, matching the builtin arity.</td></tr>
             <tr><td><code>L0336</code></td><td>HTTP client builtin argument type or arity mismatch: pass a <code>string</code> url to <code>http_get</code>, and a <code>string</code> url plus a <code>string</code> body to <code>http_post</code>.</td></tr>
+            <tr><td><code>L0337</code></td><td>Concurrency builtin argument type or arity mismatch: pass a <code>Chan</code>/<code>Task</code>/<code>Mutex</code> handle where required, an <code>i64</code> value, and a <code>fn(Chan, i64) -&gt; void</code> to <code>spawn</code>, matching the builtin arity.</td></tr>
             <tr><td><code>L0373</code></td><td><code>len</code> argument is not a string or array.</td></tr>
             <tr><td><code>L0375</code></td><td>String-library builtin argument has the wrong type.</td></tr>
             <tr><td><code>L0374</code></td><td>Math builtin received a wrong or mismatched operand type.</td></tr>

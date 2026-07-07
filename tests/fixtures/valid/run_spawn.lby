@@ -1,0 +1,20 @@
+fn worker ch Chan v i64 -> void
+    send(ch, v * v)
+
+fn main -> i64
+    let ch Chan = chan_new()
+    let t1 Task = spawn(worker, ch, 1)
+    let t2 Task = spawn(worker, ch, 2)
+    let t3 Task = spawn(worker, ch, 3)
+    let t4 Task = spawn(worker, ch, 4)
+    task_join(t1)
+    task_join(t2)
+    task_join(t3)
+    task_join(t4)
+    let total i64 = 0
+    for i from 0 to 3
+        total += recv(ch)
+    let m Mutex = mutex_new(0)
+    for j from 0 to 3
+        mutex_add(m, 1)
+    total + mutex_get(m)

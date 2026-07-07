@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::Command;
+use std::sync::Arc;
 
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
@@ -9,8 +10,9 @@ use lullaby_parser::{
     TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
-    ResolvedPlace, RuntimeError, SocketResource, Value, apply_compound, char_find, expect_i64,
-    expect_list, expect_map, expect_string, get_place, http_exchange, net_err, option_value,
+    ResolvedPlace, RuntimeError, SharedMutex, SocketResource, Task, Value, apply_compound,
+    char_find, expect_chan, expect_i64, expect_list, expect_map, expect_mutex, expect_string,
+    expect_task, get_place, http_exchange, join_task, net_err, new_chan, option_value,
     result_value, scalar_order_keys, set_place, value_type_name,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
@@ -435,8 +437,21 @@ pub fn run_main(module: &IrModule) -> Result<Value, RuntimeError> {
 
 /// Run `main` on the IR interpreter with the running program's CLI arguments,
 /// which the `args()` builtin exposes. `run_main` is the zero-argument wrapper.
+///
+/// The module is wrapped in an `Arc<IrModule>` here so a detached thread created
+/// by `spawn` can own a share of the module and run Lullaby independently. The
+/// interpreter keeps its usual `&IrModule` borrow (from `&*arc`) for normal use
+/// and ALSO holds an owned `Arc<IrModule>` clone purely to hand to spawned
+/// threads — two separate handles to the same shared data, not self-referential.
 pub fn run_main_with_args(module: &IrModule, args: Vec<String>) -> Result<Value, RuntimeError> {
-    let mut runtime = IrRuntime::new(module)?;
+    let arc = Arc::new(module.clone());
+    run_main_shared(arc, args)
+}
+
+/// Shared-module entry: build an interpreter borrowing `&*arc` while retaining an
+/// owned `Arc<IrModule>` clone for detached-thread spawning.
+fn run_main_shared(arc: Arc<IrModule>, args: Vec<String>) -> Result<Value, RuntimeError> {
+    let mut runtime = IrRuntime::new(&arc, Arc::clone(&arc))?;
     runtime.program_args = args;
     runtime.call_function("main", Vec::new())
 }
@@ -3351,6 +3366,10 @@ struct IrRuntime<'a> {
     /// The whole IR module, borrowed so a builtin can spawn sibling interpreters
     /// over the same shared `&IrModule` (used by `parallel_map`'s scoped threads).
     module: &'a IrModule,
+    /// An owned share of the same module, handed by `.clone()` to detached
+    /// threads created by `spawn` so they can build their own interpreter over
+    /// `&*arc` and outlive the `spawn` call. Separate handle, not self-referential.
+    module_arc: Arc<IrModule>,
     functions: HashMap<&'a str, &'a IrFunction>,
     /// The running program's CLI arguments, exposed by the `args()` builtin.
     program_args: Vec<String>,
@@ -3371,7 +3390,11 @@ struct IrRuntime<'a> {
 }
 
 impl<'a> IrRuntime<'a> {
-    fn new(module: &'a IrModule) -> Result<Self, RuntimeError> {
+    /// Build an interpreter over the borrowed module `module` while retaining an
+    /// owned `Arc<IrModule>` (`module_arc`) that points at the same data, used
+    /// only to hand a share to detached `spawn`ed threads. The caller passes both
+    /// handles (e.g. `IrRuntime::new(&arc, Arc::clone(&arc))`).
+    fn new(module: &'a IrModule, module_arc: Arc<IrModule>) -> Result<Self, RuntimeError> {
         let functions = module
             .functions
             .iter()
@@ -3425,6 +3448,7 @@ impl<'a> IrRuntime<'a> {
 
         Ok(Self {
             module,
+            module_arc,
             functions,
             program_args: Vec::new(),
             structs,
@@ -3539,6 +3563,16 @@ impl<'a> IrRuntime<'a> {
             "env" => Self::builtin_env(args),
             "args" => self.builtin_args(args),
             "parallel_map" => self.builtin_parallel_map(args),
+            "chan_new" => Self::builtin_chan_new(args),
+            "send" => Self::builtin_send(args),
+            "recv" => Self::builtin_recv(args),
+            "try_recv" => Self::builtin_try_recv(args),
+            "spawn" => self.builtin_spawn(args),
+            "task_join" => Self::builtin_task_join(args),
+            "mutex_new" => Self::builtin_mutex_new(args),
+            "mutex_get" => Self::builtin_mutex_get(args),
+            "mutex_set" => Self::builtin_mutex_set(args),
+            "mutex_add" => Self::builtin_mutex_add(args),
             "tcp_connect" => self.builtin_tcp_connect(args),
             "tcp_listen" => self.builtin_tcp_listen(args),
             "tcp_accept" => self.builtin_tcp_accept(args),
@@ -4500,14 +4534,16 @@ impl<'a> IrRuntime<'a> {
         let arg_values = expect_list("parallel_map", elements)?;
 
         let module = self.module;
+        let module_arc = &self.module_arc;
         let results: Vec<Value> = std::thread::scope(|scope| {
             let handles: Vec<_> = arg_values
                 .iter()
                 .map(|value| {
                     let name = func_name.clone();
                     let value = value.clone();
+                    let arc = Arc::clone(module_arc);
                     scope.spawn(move || {
-                        let mut runtime = IrRuntime::new(module)?;
+                        let mut runtime = IrRuntime::new(module, arc)?;
                         runtime.call_function(&name, vec![value])
                     })
                 })
@@ -4526,6 +4562,150 @@ impl<'a> IrRuntime<'a> {
         })?;
 
         Ok(Value::Array(results))
+    }
+
+    /// `chan_new() -> Chan`: create an unbounded `i64` message-passing channel.
+    fn builtin_chan_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("chan_new", 0, args.len()))?;
+        Ok(new_chan())
+    }
+
+    /// `send(ch Chan, v i64) -> void`: enqueue `v` (never blocks; unbounded).
+    fn builtin_send(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [chan, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("send", 2, args.len()))?;
+        let chan = expect_chan("send", chan)?;
+        let value = expect_i64("send", value)?;
+        chan.sender
+            .send(Value::I64(value))
+            .map_err(|_| RuntimeError::new("L0401", "send on a channel with no live receiver"))?;
+        Ok(Value::Void)
+    }
+
+    /// `recv(ch Chan) -> i64`: dequeue, blocking until a value is available.
+    fn builtin_recv(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [chan]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("recv", 1, args.len()))?;
+        let chan = expect_chan("recv", chan)?;
+        let receiver = chan
+            .receiver
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "recv on a poisoned channel"))?;
+        receiver
+            .recv()
+            .map_err(|_| RuntimeError::new("L0401", "recv on a closed, empty channel"))
+    }
+
+    /// `try_recv(ch Chan) -> option<i64>`: non-blocking; `some(v)` or `none`.
+    fn builtin_try_recv(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [chan]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("try_recv", 1, args.len()))?;
+        let chan = expect_chan("try_recv", chan)?;
+        let receiver = chan
+            .receiver
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "try_recv on a poisoned channel"))?;
+        Ok(option_value(receiver.try_recv().ok()))
+    }
+
+    /// `spawn(f fn(Chan, i64) -> void, ch Chan, v i64) -> Task`: run `f(ch, v)` on
+    /// a detached OS thread that owns a share of the module (an `Arc<IrModule>`
+    /// clone) and builds its own interpreter over `&*arc`, then returns a one-shot
+    /// `Task` handle so the thread is `task_join`ed exactly once.
+    fn builtin_spawn(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [callee, chan, value]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("spawn", 3, args.len()))?;
+        let func_name = match callee {
+            Value::Func(name) => name,
+            other => {
+                return Err(RuntimeError::new(
+                    "L0417",
+                    format!("spawn expects a function but got `{other}`"),
+                ));
+            }
+        };
+        let chan = expect_chan("spawn", chan)?;
+        let value = expect_i64("spawn", value)?;
+        let arc = Arc::clone(&self.module_arc);
+        let handle = std::thread::spawn(move || {
+            let mut runtime = IrRuntime::new(&arc, Arc::clone(&arc))?;
+            runtime.call_function(&func_name, vec![Value::Chan(chan), Value::I64(value)])
+        });
+        Ok(Value::Task(Task {
+            handle: Arc::new(std::sync::Mutex::new(Some(handle))),
+        }))
+    }
+
+    /// `task_join(t Task) -> void`: wait for the spawned thread; a second
+    /// `task_join` on an already-joined handle is a harmless no-op.
+    fn builtin_task_join(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [task]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("task_join", 1, args.len()))?;
+        let task = expect_task("task_join", task)?;
+        join_task(&task)
+    }
+
+    /// `mutex_new(v i64) -> Mutex`: a shared mutex over one `i64`.
+    fn builtin_mutex_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_new", 1, args.len()))?;
+        let value = expect_i64("mutex_new", value)?;
+        Ok(Value::Mutex(SharedMutex {
+            cell: Arc::new(std::sync::Mutex::new(value)),
+        }))
+    }
+
+    /// `mutex_get(m Mutex) -> i64`: lock, read, unlock.
+    fn builtin_mutex_get(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [mutex]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_get", 1, args.len()))?;
+        let mutex = expect_mutex("mutex_get", mutex)?;
+        let guard = mutex
+            .cell
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "mutex_get on a poisoned mutex"))?;
+        Ok(Value::I64(*guard))
+    }
+
+    /// `mutex_set(m Mutex, v i64) -> void`: lock, write, unlock.
+    fn builtin_mutex_set(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [mutex, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_set", 2, args.len()))?;
+        let mutex = expect_mutex("mutex_set", mutex)?;
+        let value = expect_i64("mutex_set", value)?;
+        let mut guard = mutex
+            .cell
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "mutex_set on a poisoned mutex"))?;
+        *guard = value;
+        Ok(Value::Void)
+    }
+
+    /// `mutex_add(m Mutex, delta i64) -> i64`: lock, `v += delta`, return the new
+    /// value, unlock — an atomic read-modify-write so worker threads accumulate
+    /// safely.
+    fn builtin_mutex_add(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [mutex, delta]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mutex_add", 2, args.len()))?;
+        let mutex = expect_mutex("mutex_add", mutex)?;
+        let delta = expect_i64("mutex_add", delta)?;
+        let mut guard = mutex
+            .cell
+            .lock()
+            .map_err(|_| RuntimeError::new("L0401", "mutex_add on a poisoned mutex"))?;
+        *guard = guard.wrapping_add(delta);
+        Ok(Value::I64(*guard))
     }
 
     /// Push a freshly opened socket resource into the handle table, returning its
@@ -6324,6 +6504,13 @@ impl<'a> Lowerer<'a> {
             // `parallel_map(f, list<i64>)` maps `fn(i64) -> i64` over the list,
             // yielding a `list<i64>` in input order.
             "parallel_map" => generic_type("list", std::slice::from_ref(&TypeRef::new("i64"))),
+            // Concurrency builtins: opaque handle producers and readers.
+            "chan_new" => TypeRef::new("Chan"),
+            "spawn" => TypeRef::new("Task"),
+            "mutex_new" => TypeRef::new("Mutex"),
+            "recv" | "mutex_get" | "mutex_add" => TypeRef::new("i64"),
+            "try_recv" => generic_type("option", std::slice::from_ref(&TypeRef::new("i64"))),
+            "send" | "task_join" | "mutex_set" => TypeRef::new("void"),
             "sqrt" | "floor" | "ceil" | "round" => TypeRef::new("f64"),
             "abs" | "min" | "max" | "pow" => {
                 let value = args.first().ok_or_else(|| {

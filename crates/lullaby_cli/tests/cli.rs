@@ -308,6 +308,33 @@ fn runs_parallel_map_fixture_on_all_backends() {
 }
 
 #[test]
+fn runs_spawn_channel_mutex_fixture_on_all_backends() {
+    // Four detached `spawn`ed workers each `send(ch, v * v)`; `main` joins them
+    // and sums the four received squares (order-independent → 30), then a mutex
+    // loop adds 1 four times (→ 4). The deterministic total is 34 on every
+    // backend, proving spawn/channels/mutex work on AST, IR, and bytecode.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_spawn.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "34",
+            "{backend} result"
+        );
+    }
+}
+
+#[test]
 fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.lby");

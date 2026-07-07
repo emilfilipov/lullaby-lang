@@ -111,7 +111,27 @@ operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`. Integer
   top-level `fn(i64) -> i64`.
 - Wrong arity, a non-`fn(i64) -> i64` first argument, or a non-`list<i64>`
   second argument report `L0334`.
-- `spawn`/`join`/channels are a deferred second increment; see
+
+Detached threads, channels, and a shared mutex (message passing):
+
+- `chan_new() -> Chan` creates an unbounded `i64` channel. A `Chan` is a shared
+  handle: cloning the value shares the same underlying queue.
+- `send(ch Chan, v i64) -> void` enqueues a value (never blocks).
+- `recv(ch Chan) -> i64` dequeues, blocking until a value is available.
+- `try_recv(ch Chan) -> option<i64>` dequeues without blocking (`some(v)`/`none`).
+- `spawn(f fn(Chan, i64) -> void, ch Chan, v i64) -> Task` runs `f(ch, v)` on a
+  detached OS thread and returns a `Task` handle. The argument shape is fixed to
+  `(Chan, i64)` in this increment.
+- `task_join(t Task) -> void` waits for a spawned thread (a second `task_join` is
+  a no-op). It is named `task_join`, not `join`, because `join` is the
+  string-list joiner.
+- `mutex_new(v i64) -> Mutex` creates a shared mutex over one `i64` (shared on
+  clone); `mutex_get(m Mutex) -> i64` reads, `mutex_set(m Mutex, v i64) -> void`
+  writes, and `mutex_add(m Mutex, delta i64) -> i64` atomically adds `delta` and
+  returns the new value.
+- Wrong arity or a wrong-typed argument to any of these reports `L0337`.
+- Generic channels, `select`, `async`/`await`, passing a `Mutex`/`Socket` into a
+  worker, and cross-thread socket sharing remain deferred; see
   [concurrency_design.md](concurrency_design.md).
 
 ## Networking

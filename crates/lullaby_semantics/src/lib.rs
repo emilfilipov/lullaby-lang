@@ -2956,6 +2956,87 @@ impl<'a> Checker<'a> {
                 }
                 Some(list_type(&TypeRef::new("i64")))
             }
+            "chan_new" => {
+                // `chan_new() -> Chan`.
+                self.expect_concurrency_arity(name, args, 0, call_span, function)?;
+                Some(TypeRef::new("Chan"))
+            }
+            "send" => {
+                // `send(ch Chan, v i64) -> void`.
+                self.expect_concurrency_arity(name, args, 2, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Chan", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "recv" => {
+                // `recv(ch Chan) -> i64`.
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Chan", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "try_recv" => {
+                // `try_recv(ch Chan) -> option<i64>`.
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Chan", scope, function)?;
+                Some(option_type(&TypeRef::new("i64")))
+            }
+            "spawn" => {
+                // `spawn(f fn(Chan, i64) -> void, ch Chan, v i64) -> Task`.
+                self.expect_concurrency_arity(name, args, 3, call_span, function)?;
+                let expected_fn = function_type(
+                    &[TypeRef::new("Chan"), TypeRef::new("i64")],
+                    &TypeRef::new("void"),
+                );
+                let func_type = self.check_expr(&args[0], scope, function)?;
+                if func_type != expected_fn {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0337",
+                        format!(
+                            "spawn expects a `{}` as its first argument but got `{}`",
+                            expected_fn.name, func_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                }
+                self.expect_concurrency_arg(name, 2, &args[1], "Chan", scope, function)?;
+                self.expect_concurrency_arg(name, 3, &args[2], "i64", scope, function)?;
+                Some(TypeRef::new("Task"))
+            }
+            "task_join" => {
+                // `task_join(t Task) -> void` (named `task_join` because `join`
+                // is the string-list joiner builtin).
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Task", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "mutex_new" => {
+                // `mutex_new(v i64) -> Mutex`.
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "i64", scope, function)?;
+                Some(TypeRef::new("Mutex"))
+            }
+            "mutex_get" => {
+                // `mutex_get(m Mutex) -> i64`.
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Mutex", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "mutex_set" => {
+                // `mutex_set(m Mutex, v i64) -> void`.
+                self.expect_concurrency_arity(name, args, 2, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Mutex", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "mutex_add" => {
+                // `mutex_add(m Mutex, delta i64) -> i64`.
+                self.expect_concurrency_arity(name, args, 2, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "Mutex", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
             "tcp_connect" | "tcp_listen" | "udp_bind" => {
                 // `(host string, port i64) -> result<Socket, string>`.
                 self.expect_socket_arg_count(name, args, 2, function)?;
@@ -4007,6 +4088,65 @@ impl<'a> Checker<'a> {
                 ),
                 Some(function.name.clone()),
                 args.first().map(|arg| arg.span).unwrap_or(function.span),
+            ));
+            None
+        }
+    }
+
+    /// Validate a concurrency builtin argument count, reporting `L0337` on a
+    /// mismatch.
+    fn expect_concurrency_arity(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: usize,
+        call_span: Span,
+        function: &Function,
+    ) -> Option<()> {
+        if args.len() == expected {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0337",
+                format!(
+                    "concurrency builtin `{name}` expects {expected} arguments but got {}",
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                args.first().map(|arg| arg.span).unwrap_or(call_span),
+            ));
+            None
+        }
+    }
+
+    /// Validate a concurrency builtin argument type, reporting `L0337` on a
+    /// mismatch.
+    fn expect_concurrency_arg(
+        &mut self,
+        name: &str,
+        index: usize,
+        arg: &Expr,
+        expected: &str,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<()> {
+        let expected = TypeRef::new(expected);
+        let actual = self.check_expr(arg, scope, function);
+        if actual.as_ref() == Some(&expected) {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0337",
+                format!(
+                    "argument {index} for `{name}` must be `{}` but got `{}`",
+                    expected.name,
+                    actual
+                        .as_ref()
+                        .map(|ty| ty.name.as_str())
+                        .unwrap_or("<unknown>")
+                ),
+                Some(function.name.clone()),
+                arg.span,
             ));
             None
         }
@@ -5177,6 +5317,48 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0334")
+        );
+    }
+
+    #[test]
+    fn accepts_concurrency_builtins_with_matching_types() {
+        let source = "fn worker ch Chan v i64 -> void\n    send(ch, v * v)\n\nfn main -> i64\n    let ch Chan = chan_new()\n    let t Task = spawn(worker, ch, 3)\n    task_join(t)\n    let m Mutex = mutex_new(0)\n    mutex_set(m, 5)\n    mutex_add(m, 2)\n    recv(ch) + mutex_get(m)\n";
+        validate_source(source).expect("semantic");
+    }
+
+    #[test]
+    fn rejects_spawn_non_function_first_argument() {
+        // `spawn`'s first argument must be a `fn(Chan, i64) -> void`.
+        let source = "fn main -> i64\n    let ch Chan = chan_new()\n    let t Task = spawn(ch, ch, 3)\n    task_join(t)\n    0\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0337")
+        );
+    }
+
+    #[test]
+    fn rejects_send_non_chan_first_argument() {
+        // `send` requires a `Chan` handle as its first argument.
+        let source = "fn main -> void\n    send(5, 5)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0337")
+        );
+    }
+
+    #[test]
+    fn rejects_mutex_add_non_mutex_first_argument() {
+        // `mutex_add` requires a `Mutex` handle as its first argument.
+        let source = "fn main -> i64\n    mutex_add(5, 1)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0337")
         );
     }
 

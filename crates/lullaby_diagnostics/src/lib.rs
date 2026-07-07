@@ -376,6 +376,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass a `string` url to `http_get`, and a `string` url plus a `string` body to `http_post`.",
     },
     DiagnosticEntry {
+        code: "L0337",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A concurrency builtin has an argument type or arity mismatch.",
+        root_cause: "A `chan_new`/`send`/`recv`/`try_recv`/`spawn`/`task_join`/`mutex_new`/`mutex_get`/`mutex_set`/`mutex_add` call had the wrong number of arguments or an argument of the wrong type (a non-`Chan`/`Task`/`Mutex` handle, a non-`i64` value, or a `spawn` first argument that is not a `fn(Chan, i64) -> void`).",
+        suggested_fix: "Match the builtin's arity and pass a `Chan`/`Task`/`Mutex` handle where required, an `i64` value/delta, and a `fn(Chan, i64) -> void` function to `spawn`.",
+    },
+    DiagnosticEntry {
         code: "L0340",
         phase: DiagnosticPhase::Semantic,
         explanation: "A region declaration has an invalid size, alignment, or kind.",

@@ -66,12 +66,13 @@ fresh per-thread interpreters. The `run_parallel.lby` fixture returns the same
 deterministic `30` on the AST, IR, and bytecode backends and their optimized
 variants.
 
-## Second increment (deferred): `spawn`/`join` and channels
+## Second increment (delivered): `spawn`/`task_join`, channels, and a mutex
 
-The next increment is **message passing** (share by communicating) with explicit
-threads and channels. It is deferred because it requires making the program
-shareable as `Arc<Program>` so a detached thread can run Lullaby independently —
-a larger structural change than the scoped-thread borrow above.
+**Message passing** (share by communicating) with explicit detached threads and
+channels, plus a shared `Mutex` for accumulating counters, is now delivered on
+all three backends. It required making the program shareable as `Arc<Program>`
+(`Arc<IrModule>` for the IR/bytecode backends) so a detached thread can run
+Lullaby independently — the structural change the first increment deferred.
 
 ```lby
 fn worker ch Chan v i64 -> void
@@ -81,47 +82,75 @@ fn main -> i64
     let ch Chan = chan_new()
     let t1 Task = spawn(worker, ch, 2)
     let t2 Task = spawn(worker, ch, 3)
-    join(t1)
-    join(t2)
+    task_join(t1)
+    task_join(t2)
     recv(ch) + recv(ch)      # 4 + 9 in some order → 13
 ```
 
-### Deferred builtins
+### Delivered builtins
 
-- `chan_new() -> Chan` — create a channel carrying `i64` values (a single
-  channel element type for this increment; a generic `Chan<T>` follows once it is
-  proven). A channel is a **shared** handle: cloning the value shares the same
-  underlying queue (reference semantics, like `rc<T>`).
+- `chan_new() -> Chan` — create an unbounded channel carrying `i64` values (a
+  single channel element type for this increment; a generic `Chan<T>` follows
+  once it is proven). A channel is a **shared** handle: cloning the value shares
+  the same underlying queue (reference semantics, like `rc<T>`). Built on
+  `std::sync::mpsc` — a cloneable `Sender` plus an `Arc<Mutex<Receiver>>`.
 - `send(ch Chan, v i64) -> void` — enqueue a value (never blocks; unbounded).
 - `recv(ch Chan) -> i64` — dequeue, blocking until a value is available.
 - `try_recv(ch Chan) -> option<i64>` — non-blocking; `some(v)` or `none`.
 - `spawn(f fn(Chan, i64) -> void, ch Chan, v i64) -> Task` — run `f(ch, v)` on a
-  new OS thread. (The signature is fixed to `(Chan, i64)` in this increment; a
-  more general `spawn` over arbitrary argument tuples follows with capturing
-  closures.)
-- `join(t Task) -> void` — wait for a spawned thread to finish.
+  new detached OS thread. (The signature is fixed to `(Chan, i64)` in this
+  increment; a more general `spawn` over arbitrary argument tuples follows with
+  capturing closures.)
+- `task_join(t Task) -> void` — wait for a spawned thread to finish; a second
+  `task_join` on an already-joined handle is a harmless no-op. (Named
+  `task_join`, not `join`, because `join` is already the string-list joiner
+  builtin.)
+- `mutex_new(v i64) -> Mutex` — a shared mutex over one `i64` (`Arc<Mutex<i64>>`,
+  shared on clone).
+- `mutex_get(m Mutex) -> i64` — lock, read, unlock.
+- `mutex_set(m Mutex, v i64) -> void` — lock, write, unlock.
+- `mutex_add(m Mutex, delta i64) -> i64` — lock, `v += delta`, return the new
+  value, unlock (an atomic read-modify-write so worker threads accumulate
+  safely).
 
-### Why an `Arc<Program>` share is needed here
+### How the `Arc<Program>` share works
 
 A detached (non-scoped) thread outlives the `spawn` call, so it cannot borrow the
-caller's stack. The `Program`/`IrModule` becomes shareable — held as
-`Arc<Program>` so each thread owns a clone and builds its own interpreter over
-it. This is the one structural change that lets a *detached* thread run Lullaby
-independently, keeping heaps per-thread so there is nothing to lock.
+caller's stack. The top-level entry point wraps the program in an `Arc<Program>`
+(`Arc<IrModule>`). The interpreter keeps its existing `&Program`/`&IrModule`
+borrow (from `&*arc`, which the `Arc` outlives) for normal use, **and also**
+holds an owned `Arc` clone in a field purely to hand to spawned threads — two
+separate handles to the same shared data, **not a self-referential struct**.
+`spawn` hands a `.clone()` of that owned `Arc` into the thread closure; inside,
+the thread builds a fresh interpreter over `&*arc` (per-thread locals and heap)
+and calls the target function. `Value` is already `Send`. The public entry
+points (`run_main`, `run_bytecode_main`, `run_main_with_args`, …) wrap the
+program in an `Arc` internally, so no existing caller changed. No `unsafe`.
 
-### Determinism and testing (deferred increment)
+### Determinism and testing (delivered increment)
 
-Detached threads are non-deterministic in *scheduling*, so tests must be
-*order-independent*: e.g. spawn N workers that each `send` one value and have
-`main` `recv` N values and sum them — the total is deterministic regardless of
-completion order. Never assert on interleaving or per-message order. (In
-contrast, `parallel_map` is already order-deterministic by construction.)
+Detached threads are non-deterministic in *scheduling*, so tests are
+*order-independent*: the `run_spawn.lby` fixture spawns N workers that each
+`send` one value, `task_join`s them, then `recv`s N values and sums them — the
+total is deterministic regardless of completion order. It also exercises the
+mutex builtins and combines both into a single deterministic `i64` (`34`),
+identical on the AST, IR, and bytecode backends. Never assert on interleaving or
+per-message order. (In contrast, `parallel_map` is order-deterministic by
+construction.)
 
 ### Further deferred work
 
-Generic `Chan<T>`, shared mutable state via a `Mutex`/`rc` across threads,
-`select` over multiple channels, thread-pools, and `async`/`await` with an
-executor (a separate, larger effort that reuses this channel layer).
+Generic `Chan<T>`; `select` over multiple channels; thread-pools; and
+`async`/`await` with an executor (a separate, larger effort that reuses this
+channel layer). Because `spawn`'s argument shape is fixed to `(Chan, i64)` and
+first-class functions do not yet capture their environment, a worker cannot
+receive a `Mutex` (or a second channel) directly — passing shared mutable state
+into a worker waits on capturing closures or a more general `spawn`. The `Mutex`
+itself is `Send` and shared-on-clone, so it works across threads at the runtime
+level today (covered by a runtime test). A concurrent **server** additionally
+needs cross-thread socket sharing: socket handles are per-interpreter integer
+indexes into a runtime-local table, so a `Socket` cannot currently cross a
+`spawn` boundary — sharing sockets across threads is a separate follow-up.
 
 ## Why these choices
 
