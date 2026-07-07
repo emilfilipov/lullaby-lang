@@ -1,0 +1,9 @@
+# A dependency with one public and one private function. The consuming project
+# may only use the `pub` one; using `hidden_helper` across the package boundary
+# is an L0392 loader error.
+
+pub fn public_add a i64 b i64 -> i64
+    a + b
+
+fn hidden_helper n i64 -> i64
+    n + 1

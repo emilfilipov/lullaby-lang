@@ -43,7 +43,18 @@ struct Module {
 /// Load the entry file and every module it transitively imports, enforce the
 /// module rules, and return a single merged [`Program`]. On any error the whole
 /// set of diagnostics is returned; the caller renders and reports them.
-pub fn load_program(entry: &Path) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
+///
+/// `import NAME` resolves `NAME.lby`
+/// by searching, in order, the importing file's own directory and then every
+/// directory in `search_dirs` (the project's `src` directories followed by the
+/// `src` directories of each transitively resolved dependency). All module rules
+/// (`L0391`/`L0392`/`L0393`/`L0397`) apply across the whole merged set exactly as
+/// in the single-file case. Passing an empty `search_dirs` is byte-for-byte
+/// identical to the legacy single-file behavior.
+pub fn load_program_in_project(
+    entry: &Path,
+    search_dirs: &[PathBuf],
+) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
     if let Err(diagnostic) = validate_source_path(entry) {
         return Err(vec![
             DiagnosticReport::new(diagnostic.code, DiagnosticPhase::Source, diagnostic.message)
@@ -70,6 +81,7 @@ pub fn load_program(entry: &Path) -> Result<LoadedProgram, Vec<DiagnosticReport>
         &entry_name,
         entry,
         &dir,
+        search_dirs,
         &mut modules,
         &mut loaded,
         &mut visiting,
@@ -102,6 +114,76 @@ pub fn load_program(entry: &Path) -> Result<LoadedProgram, Vec<DiagnosticReport>
     })
 }
 
+/// Load *every* `.lby` module found across a project's source directories
+/// (`search_dirs`), merge them, and enforce all module rules. This is the
+/// entry-less path used by `check`/`test` on a library project: there is no
+/// executable entry, so every module in the project (and its dependencies) is
+/// loaded and validated as one merged program. Modules that only some other
+/// module imports are still included, so unused-but-broken modules are caught.
+pub fn load_library_project(
+    search_dirs: &[PathBuf],
+) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
+    let mut modules: Vec<Module> = Vec::new();
+    let mut loaded: HashMap<String, usize> = HashMap::new();
+    let mut visiting: HashSet<String> = HashSet::new();
+    let mut diagnostics: Vec<DiagnosticReport> = Vec::new();
+
+    // Collect every `.lby` file in every search dir, in a deterministic order.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for dir in search_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut in_dir: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("lby"))
+            .collect();
+        in_dir.sort();
+        roots.extend(in_dir);
+    }
+
+    for root in &roots {
+        let name = root
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("module")
+            .to_string();
+        let dir = root.parent().map(Path::to_path_buf).unwrap_or_default();
+        load_module(
+            &name,
+            root,
+            &dir,
+            search_dirs,
+            &mut modules,
+            &mut loaded,
+            &mut visiting,
+            &mut diagnostics,
+        );
+    }
+
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+
+    check_duplicate_names(&modules, &mut diagnostics);
+    check_visibility(&modules, &mut diagnostics);
+
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+
+    let merged = merge(&modules);
+    let entry_source = modules
+        .first()
+        .map(|module| module.source.clone())
+        .unwrap_or_default();
+
+    Ok(LoadedProgram {
+        program: merged,
+        entry_source,
+    })
+}
+
 /// Lex+parse one module and recurse over its imports. Cycle detection uses the
 /// active DFS stack (`visiting`); already-fully-loaded modules are skipped.
 #[allow(clippy::too_many_arguments)]
@@ -109,6 +191,7 @@ fn load_module(
     name: &str,
     path: &Path,
     dir: &Path,
+    search_dirs: &[PathBuf],
     modules: &mut Vec<Module>,
     loaded: &mut HashMap<String, usize>,
     visiting: &mut HashSet<String>,
@@ -194,11 +277,23 @@ fn load_module(
             );
             continue;
         }
-        let import_path = dir.join(format!("{import}.lby"));
+        // Resolve `import NAME` to `NAME.lby`, searching the importing file's own
+        // directory first, then every project/dependency `src` directory. The
+        // resolved module's *own* imports then resolve relative to its own
+        // directory (plus the same search dirs), so a dependency module can
+        // import its siblings without seeing the importer's directory.
+        let file_name = format!("{import}.lby");
+        let import_path = resolve_import_path(&file_name, dir, search_dirs)
+            .unwrap_or_else(|| dir.join(&file_name));
+        let import_dir = import_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dir.to_path_buf());
         load_module(
             import,
             &import_path,
-            dir,
+            &import_dir,
+            search_dirs,
             modules,
             loaded,
             visiting,
@@ -206,6 +301,24 @@ fn load_module(
         );
     }
     visiting.remove(name);
+}
+
+/// Resolve `file_name` (e.g. `math.lby`) against the importing file's directory
+/// first, then each search directory in order. Returns the first existing path,
+/// or `None` if none exists (the caller then falls back to the importer's
+/// directory so the missing-module `L0397` diagnostic points at a sensible path).
+fn resolve_import_path(file_name: &str, dir: &Path, search_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let local = dir.join(file_name);
+    if local.is_file() {
+        return Some(local);
+    }
+    for search_dir in search_dirs {
+        let candidate = search_dir.join(file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// The set of top-level declaration names (`fn`/`struct`/`enum`/`alias`) a

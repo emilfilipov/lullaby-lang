@@ -1,0 +1,8 @@
+{
+  "name": "project_demo",
+  "entry": "src/main.lby",
+  "src": ["src"],
+  "dependencies": {
+    "mathx": "../mathx"
+  }
+}

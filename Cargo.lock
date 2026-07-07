@@ -18,6 +18,8 @@ dependencies = [
  "lullaby_parser",
  "lullaby_runtime",
  "lullaby_semantics",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

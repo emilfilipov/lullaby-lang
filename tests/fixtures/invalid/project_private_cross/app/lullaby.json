@@ -1,0 +1,8 @@
+{
+  "name": "app",
+  "entry": "src/main.lby",
+  "src": ["src"],
+  "dependencies": {
+    "libp": "../libp"
+  }
+}

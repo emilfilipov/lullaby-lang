@@ -1,0 +1,10 @@
+# The executable entry of the `project_demo` project. It imports `mathx` from a
+# local path dependency and `geometry` from its own `src` directory. Both are
+# resolved by the project build across the project's and its dependencies' `src`
+# directories. Result: square(5) + cube(2) + triple(4) = 25 + 8 + 12 = 45.
+
+import mathx
+import geometry
+
+fn main -> i64
+    square(5) + cube(2) + triple(4)

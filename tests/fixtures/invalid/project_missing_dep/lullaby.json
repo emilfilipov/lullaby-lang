@@ -1,0 +1,8 @@
+{
+  "name": "project_missing_dep",
+  "entry": "src/main.lby",
+  "src": ["src"],
+  "dependencies": {
+    "ghost": "../ghost"
+  }
+}

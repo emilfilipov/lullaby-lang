@@ -20,6 +20,7 @@ use lullaby_runtime::{ErrorCategory, RuntimeError, Value, run_main_with_args, ru
 use lullaby_semantics::{CheckedProgram, validate, validate_executable};
 
 mod loader;
+mod manifest;
 
 fn main() -> ExitCode {
     match run() {
@@ -894,19 +895,101 @@ fn optimize_module(
     }
 }
 
-fn compile(path: &PathBuf, source_mode: SourceMode) -> Result<CompiledSource, CompileFailure> {
+/// What a CLI path argument resolved to.
+enum BuildTarget {
+    /// A single `.lby` file (legacy behavior) or a project with an executable
+    /// entry: load from `entry`, searching `search_dirs` for imports. The
+    /// `report_path` is what diagnostics are attributed to.
+    Entry {
+        entry: PathBuf,
+        search_dirs: Vec<PathBuf>,
+    },
+    /// A library project with no `entry`: load and validate every module across
+    /// the project's `search_dirs`. Only valid for `check`/`test`.
+    Library { search_dirs: Vec<PathBuf> },
+}
+
+/// Decide whether the CLI argument is a single `.lby` file (legacy behavior) or a
+/// project directory / `lullaby.json` manifest (multi-package build), and produce
+/// the corresponding [`BuildTarget`]. A bare `.lby` file resolves exactly as
+/// before, so single-file behavior is byte-for-byte unchanged.
+fn resolve_target(path: &Path, source_mode: SourceMode) -> Result<BuildTarget, CompileFailure> {
+    let Some((dir, manifest_path)) = manifest::manifest_path_for(path) else {
+        // Not a project: treat as a single `.lby` file exactly as before.
+        return Ok(BuildTarget::Entry {
+            entry: path.to_path_buf(),
+            search_dirs: Vec::new(),
+        });
+    };
+
+    let project =
+        manifest::load_manifest(&dir, &manifest_path).map_err(|report| CompileFailure {
+            reports: vec![*report],
+            source: None,
+        })?;
+
+    match project.entry {
+        Some(entry) => Ok(BuildTarget::Entry {
+            entry,
+            search_dirs: project.search_dirs,
+        }),
+        None => {
+            // `run`/`build`/`compile`/`wasm`/`native` need an executable entry;
+            // `check`/`test` (Library mode) can validate every module instead.
+            if source_mode == SourceMode::Executable {
+                return Err(CompileFailure {
+                    reports: vec![
+                        lullaby_diagnostics::DiagnosticReport::new(
+                            "L0343",
+                            DiagnosticPhase::Loader,
+                            format!(
+                                "project `{}` has no `entry`; add an `entry` to `{}` to run, build, or compile it",
+                                project.manifest.name,
+                                manifest_path.display()
+                            ),
+                        )
+                        .with_source_path(manifest_path.display().to_string()),
+                    ],
+                    source: None,
+                });
+            }
+            Ok(BuildTarget::Library {
+                search_dirs: project.search_dirs,
+            })
+        }
+    }
+}
+
+fn compile(path: &Path, source_mode: SourceMode) -> Result<CompiledSource, CompileFailure> {
+    let target = resolve_target(path, source_mode)?;
+
     // The module loader lexes, parses, resolves imports, enforces visibility and
     // no-shadowing, and merges every module into one flat program. A single-file
-    // program with no imports behaves exactly as a direct lex+parse would.
-    let loaded = match loader::load_program(path) {
+    // program with no imports behaves exactly as a direct lex+parse would; a
+    // project build additionally searches its `src` and dependency directories.
+    let (loaded, report_path) = match &target {
+        BuildTarget::Entry { entry, search_dirs } => (
+            loader::load_program_in_project(entry, search_dirs),
+            entry.clone(),
+        ),
+        BuildTarget::Library { search_dirs } => (
+            loader::load_library_project(search_dirs),
+            search_dirs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| path.to_path_buf()),
+        ),
+    };
+    let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(reports) => {
             // Attach the entry source when we have it so verbose rendering can
             // show source context for entry-file diagnostics.
-            let source = fs::read_to_string(path).ok();
+            let source = fs::read_to_string(&report_path).ok();
             return Err(CompileFailure { reports, source });
         }
     };
+    let path = &report_path;
     let program = loaded.program;
     let source = loaded.entry_source;
 
@@ -1276,12 +1359,15 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
     let Some(path) = args.get(cursor) else {
         return Err(usage);
     };
-    // `lullaby run <file.lby> [program args...]` passes trailing tokens to the
-    // running program, exposed through the `args()` builtin. Every other command
-    // (and `.lbc` run) keeps the strict "no trailing token" behavior.
-    let runs_source = command == "run"
-        && Path::new(path).extension().and_then(|value| value.to_str())
-            == Some(CANONICAL_EXTENSION);
+    // `lullaby run <file.lby | project-dir | lullaby.json> [program args...]`
+    // passes trailing tokens to the running program, exposed through the `args()`
+    // builtin. Every other command (and `.lbc` run) keeps the strict "no trailing
+    // token" behavior.
+    let target_path = Path::new(path);
+    let is_source =
+        target_path.extension().and_then(|value| value.to_str()) == Some(CANONICAL_EXTENSION);
+    let is_project = manifest::manifest_path_for(target_path).is_some();
+    let runs_source = command == "run" && (is_source || is_project);
     let program_args: Vec<String> = if runs_source {
         args[cursor + 1..].to_vec()
     } else {
@@ -1379,7 +1465,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby> [args...]\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby test [--verbose] <file.lby>\n  lullaby wasm [--verbose] [-o out.wasm] <file.lby>\n  lullaby native [--verbose] [-o out.exe] <file.lby>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
+        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby | project-dir | lullaby.json> [args...]\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby test [--verbose] <file.lby | project-dir | lullaby.json>\n  lullaby wasm [--verbose] [-o out.wasm] <file.lby | project-dir | lullaby.json>\n  lullaby native [--verbose] [-o out.exe] <file.lby | project-dir | lullaby.json>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version\n\nA <project-dir> is a directory containing a lullaby.json manifest; you may also\npass the lullaby.json path directly. A project may span multiple src directories\nand depend on other local Lullaby projects.",
         env!("CARGO_PKG_VERSION")
     );
 }

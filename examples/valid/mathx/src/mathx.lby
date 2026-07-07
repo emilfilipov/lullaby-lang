@@ -1,0 +1,9 @@
+# mathx — a tiny reusable math module, packaged as its own Lullaby project and
+# consumed by `project_demo` as a local path dependency. Only `pub` items are
+# importable across projects.
+
+pub fn square n i64 -> i64
+    n * n
+
+pub fn cube n i64 -> i64
+    n * n * n

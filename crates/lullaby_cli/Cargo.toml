@@ -14,3 +14,5 @@ lullaby_lexer = { path = "../lullaby_lexer" }
 lullaby_parser = { path = "../lullaby_parser" }
 lullaby_runtime = { path = "../lullaby_runtime" }
 lullaby_semantics = { path = "../lullaby_semantics" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

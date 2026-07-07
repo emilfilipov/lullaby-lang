@@ -104,13 +104,63 @@ that rejection is removed for `import` and `pub` exactly as `struct`/`enum`/
 - `L0393` — import cycle.
 - Plus a resource-style diagnostic for a missing module file.
 
+## Projects and the `lullaby.json` manifest
+
+A single file (`.lby`) still builds exactly as before. A **project** adds a
+`lullaby.json` manifest at its root so a build can span multiple source
+directories and depend on other local Lullaby projects:
+
+```json
+{
+  "name": "myapp",
+  "entry": "src/main.lby",
+  "src": ["src"],
+  "dependencies": { "mathx": "../mathx" }
+}
+```
+
+- `name` (string) — the project name.
+- `entry` (path, optional) — the executable `.lby`, relative to the manifest
+  directory. Library projects omit it.
+- `src` (array of paths, default `["."]`) — source directories, relative to the
+  manifest directory.
+- `dependencies` (object, default `{}`) — dependency name → path to another
+  project root that contains its own `lullaby.json`. **Local path dependencies
+  only**; remote/registry *fetching* is deferred.
+
+### Module resolution across a project
+
+When a project is built, `import NAME` resolves `NAME.lby` by searching, in
+order: (1) the importing file's own directory, (2) every `src` directory of the
+current project, then (3) every `src` directory of each transitively resolved
+dependency project. The existing merge-into-one-`Program`, `pub` visibility,
+no-shadowing (`L0391`), private-cross-module (`L0392`), and cycle (`L0393`) rules
+apply unchanged across the whole set — so a dependency's private item is not
+usable from the consuming project, and a name that collides across any two loaded
+modules is still an error.
+
+### CLI
+
+`lullaby run|check|build|test` accept **either** a `.lby` file (unchanged) **or**
+a directory / a `lullaby.json` path. Given a directory, the CLI looks for
+`lullaby.json` in it; given `lullaby.json`, it uses it. `run`/`build`/`compile`/
+`wasm`/`native` require an `entry`; `check`/`test` can operate on a library
+project without an `entry`, validating every module across the `src` set.
+
+### Diagnostics and errors
+
+A missing `lullaby.json`, malformed JSON, a missing/invalid `src` directory, a
+missing dependency directory or its missing `lullaby.json`, and a
+`run`/`build`/`compile` target without an `entry` all report `L0343` (loader).
+
 ## Scope and sequencing
 
 First increment: flat single-name imports in the entry directory, `pub`
 visibility on top-level declarations, unqualified merged namespace with a
-no-shadowing rule, cycle/missing detection. Deferred: dotted module paths and a
-package root, qualified access, per-field visibility, and re-exports — these
-layer on once a package manifest exists (see the packaging ticket).
+no-shadowing rule, cycle/missing detection, plus the `lullaby.json` project
+manifest with multiple `src` directories and **local path** dependencies.
+Deferred: dotted module paths, qualified access, per-field visibility,
+re-exports, and remote/registry dependency fetching.
 
 ## Why these choices
 

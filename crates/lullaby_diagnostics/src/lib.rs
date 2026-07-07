@@ -404,6 +404,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass a single `bool` condition to `assert`.",
     },
     DiagnosticEntry {
+        code: "L0343",
+        phase: DiagnosticPhase::Loader,
+        explanation: "A Lullaby project manifest (`lullaby.json`) could not be loaded or resolved.",
+        root_cause: "The manifest is missing, is not valid JSON, names a `src` directory that does not exist, or names a local path dependency whose project root or `lullaby.json` is missing.",
+        suggested_fix: "Add a `lullaby.json` at the project root, fix its JSON, and make sure every `src` directory and every dependency path points to an existing project directory that contains its own `lullaby.json`.",
+    },
+    DiagnosticEntry {
         code: "L0350",
         phase: DiagnosticPhase::Semantic,
         explanation: "A resource is used after it was freed (use-after-free or double-free).",

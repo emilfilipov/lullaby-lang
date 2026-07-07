@@ -1,0 +1,7 @@
+# Uses a private function from the `libp` dependency, which is not visible across
+# the package boundary: L0392.
+
+import libp
+
+fn main -> i64
+    hidden_helper(41)

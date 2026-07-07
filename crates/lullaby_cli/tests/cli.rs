@@ -2510,3 +2510,93 @@ fn test_runner_reports_failing_assert_and_exits_nonzero() {
     assert!(out.contains("1 passed, 1 failed"), "{out}");
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[test]
+fn runs_project_manifest_across_backends() {
+    // `project_demo` has a `lullaby.json` naming `src/main.lby` as its entry, its
+    // own `src` module (`geometry`), and a local path dependency `mathx`. The
+    // build resolves `import mathx`/`import geometry` across the project's and the
+    // dependency's `src` directories and must produce 45 on every backend, whether
+    // the argument is the project directory or the manifest path.
+    let project = workspace_root().join("examples/valid/project_demo");
+    let manifest = project.join("lullaby.json");
+    for target in [&project, &manifest] {
+        for backend in ["ast", "ir", "bytecode"] {
+            let output = lullaby()
+                .args([
+                    "run",
+                    "--backend",
+                    backend,
+                    target.to_str().expect("project path"),
+                ])
+                .output()
+                .expect("run cli");
+            assert!(output.status.success(), "{backend} {target:?}: {output:?}");
+            assert_eq!(stdout(&output).trim(), "45", "{backend} {target:?}");
+        }
+    }
+}
+
+#[test]
+fn checks_project_manifest() {
+    let project = workspace_root().join("examples/valid/project_demo");
+    let output = lullaby()
+        .args(["check", project.to_str().expect("project path")])
+        .output()
+        .expect("run cli");
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout(&output).contains("ok:"), "{}", stdout(&output));
+}
+
+#[test]
+fn checks_library_project_without_entry() {
+    // `mathx` is a library project (no `entry`): `check` validates every module.
+    let project = workspace_root().join("examples/valid/mathx");
+    let output = lullaby()
+        .args(["check", project.to_str().expect("project path")])
+        .output()
+        .expect("run cli");
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout(&output).contains("ok:"), "{}", stdout(&output));
+}
+
+#[test]
+fn rejects_malformed_manifest_with_l0343() {
+    let project = workspace_root().join("tests/fixtures/invalid/project_bad_manifest");
+    let output = lullaby()
+        .args(["check", project.to_str().expect("project path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0343 [loader error]"), "{stderr}");
+    assert!(stderr.contains("parse project manifest"), "{stderr}");
+}
+
+#[test]
+fn rejects_missing_dependency_with_l0343() {
+    let project = workspace_root().join("tests/fixtures/invalid/project_missing_dep");
+    let output = lullaby()
+        .args(["run", project.to_str().expect("project path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0343 [loader error]"), "{stderr}");
+    assert!(stderr.contains("ghost"), "{stderr}");
+}
+
+#[test]
+fn rejects_cross_package_private_use_with_l0392() {
+    // `app` imports the `libp` dependency and calls its private `hidden_helper`,
+    // which is not visible across the package boundary.
+    let project = workspace_root().join("tests/fixtures/invalid/project_private_cross/app");
+    let output = lullaby()
+        .args(["check", project.to_str().expect("project path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0392 [loader error]"), "{stderr}");
+    assert!(stderr.contains("hidden_helper"), "{stderr}");
+}
