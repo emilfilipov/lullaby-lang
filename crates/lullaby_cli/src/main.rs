@@ -18,6 +18,8 @@ use lullaby_parser::{Program, format_program, parse};
 use lullaby_runtime::{ErrorCategory, RuntimeError, Value, run_main};
 use lullaby_semantics::{CheckedProgram, validate, validate_executable};
 
+mod loader;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -539,53 +541,20 @@ fn optimize_module(
 }
 
 fn compile(path: &PathBuf, source_mode: SourceMode) -> Result<CompiledSource, CompileFailure> {
-    if let Err(diagnostic) = validate_source_path(path) {
-        return Err(CompileFailure::without_source(vec![frontend_report(
-            diagnostic,
-            DiagnosticPhase::Source,
-            path,
-        )]));
-    }
-
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => {
-            return Err(CompileFailure::without_source(vec![
-                DiagnosticReport::new(
-                    "L0002",
-                    DiagnosticPhase::Resource,
-                    format!("failed to read `{}`: {error}", path.display()),
-                )
-                .with_source_path(path.display().to_string()),
-            ]));
+    // The module loader lexes, parses, resolves imports, enforces visibility and
+    // no-shadowing, and merges every module into one flat program. A single-file
+    // program with no imports behaves exactly as a direct lex+parse would.
+    let loaded = match loader::load_program(path) {
+        Ok(loaded) => loaded,
+        Err(reports) => {
+            // Attach the entry source when we have it so verbose rendering can
+            // show source context for entry-file diagnostics.
+            let source = fs::read_to_string(path).ok();
+            return Err(CompileFailure { reports, source });
         }
     };
-
-    let tokens = match lex(&source) {
-        Ok(tokens) => tokens,
-        Err(diagnostics) => {
-            return Err(CompileFailure::with_source(
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| frontend_report(diagnostic, DiagnosticPhase::Lexer, path))
-                    .collect(),
-                source,
-            ));
-        }
-    };
-
-    let program = match parse(&tokens) {
-        Ok(program) => program,
-        Err(diagnostics) => {
-            return Err(CompileFailure::with_source(
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| frontend_report(diagnostic, DiagnosticPhase::Parser, path))
-                    .collect(),
-                source,
-            ));
-        }
-    };
+    let program = loaded.program;
+    let source = loaded.entry_source;
 
     let checked = match match source_mode {
         SourceMode::Library => validate(&program),
@@ -710,13 +679,6 @@ impl CompileFailure {
         Self {
             reports,
             source: Some(source),
-        }
-    }
-
-    fn without_source(reports: Vec<DiagnosticReport>) -> Self {
-        Self {
-            reports,
-            source: None,
         }
     }
 }

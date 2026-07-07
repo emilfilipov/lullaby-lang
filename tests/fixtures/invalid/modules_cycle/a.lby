@@ -1,0 +1,7 @@
+import b
+
+pub fn from_a n i64 -> i64
+    from_b(n)
+
+fn main -> i64
+    from_a(1)

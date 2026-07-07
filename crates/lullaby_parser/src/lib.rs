@@ -13,6 +13,11 @@ pub struct Program {
     pub structs: Vec<StructDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enums: Vec<EnumDecl>,
+    /// Module names imported at the top of this file (`import NAME`), in source
+    /// order. Empty for a single-file program with no imports. Serde-defaulted so
+    /// existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<String>,
 }
 
 /// A struct declaration: `struct NAME` followed by indented `field type` lines.
@@ -21,6 +26,10 @@ pub struct StructDecl {
     pub name: String,
     pub fields: Vec<StructField>,
     pub span: Span,
+    /// True when the declaration is exported with `pub`. Serde-defaulted to
+    /// `false` so existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +46,10 @@ pub struct EnumDecl {
     pub name: String,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
+    /// True when the declaration is exported with `pub`. Serde-defaulted to
+    /// `false` so existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +65,10 @@ pub struct AliasDecl {
     pub name: String,
     pub target: TypeRef,
     pub span: Span,
+    /// True when the declaration is exported with `pub`. Serde-defaulted to
+    /// `false` so existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +78,15 @@ pub struct Function {
     pub return_type: TypeRef,
     pub body: Vec<Stmt>,
     pub span: Span,
+    /// True when the declaration is exported with `pub`. Serde-defaulted to
+    /// `false` so existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_public: bool,
+}
+
+/// serde `skip_serializing_if` predicate for the `is_public` visibility flag.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,25 +517,48 @@ impl<'a> Parser<'a> {
         let mut aliases = Vec::new();
         let mut structs = Vec::new();
         let mut enums = Vec::new();
+        let mut imports = Vec::new();
         self.skip_newlines();
 
+        // Leading `import NAME` lines: zero or more, before any declaration.
+        while self.eat_keyword(Keyword::Import).is_some() {
+            if let Some(name) = self.expect_identifier("expected module name after `import`") {
+                imports.push(name);
+            }
+            self.expect_newline("expected newline after import");
+            self.skip_newlines();
+        }
+
         while !self.at(TokenKindRef::Eof) {
+            // An optional `pub` modifier prefixes an exported top-level
+            // declaration. It only applies to `fn`/`struct`/`enum`/`alias`.
+            let is_public = self.eat_keyword(Keyword::Pub).is_some();
             if self.eat_keyword(Keyword::Fn).is_some() {
-                if let Some(function) = self.parse_function() {
+                if let Some(function) = self.parse_function(is_public) {
                     functions.push(function);
                 }
             } else if self.eat_keyword(Keyword::Alias).is_some() {
-                if let Some(alias) = self.parse_alias() {
+                if let Some(alias) = self.parse_alias(is_public) {
                     aliases.push(alias);
                 }
             } else if self.eat_keyword(Keyword::Struct).is_some() {
-                if let Some(declaration) = self.parse_struct() {
+                if let Some(declaration) = self.parse_struct(is_public) {
                     structs.push(declaration);
                 }
             } else if self.eat_keyword(Keyword::Enum).is_some() {
-                if let Some(declaration) = self.parse_enum() {
+                if let Some(declaration) = self.parse_enum(is_public) {
                     enums.push(declaration);
                 }
+            } else if is_public {
+                // `pub` was consumed but is not followed by an exportable
+                // declaration.
+                let token = self.peek();
+                self.error(
+                    "L0201",
+                    "`pub` must prefix a `fn`, `struct`, `enum`, or `alias` declaration",
+                    token.span,
+                );
+                self.advance();
             } else if self.reject_planned_syntax().is_some() {
                 self.skip_planned_syntax();
             } else {
@@ -529,12 +578,13 @@ impl<'a> Parser<'a> {
             aliases,
             structs,
             enums,
+            imports,
         }
     }
 
     /// Parse `enum NAME` followed by an indented list of `Variant type...` lines.
     /// Each variant is a name plus zero or more positional, unnamed payload types.
-    fn parse_enum(&mut self) -> Option<EnumDecl> {
+    fn parse_enum(&mut self, is_public: bool) -> Option<EnumDecl> {
         let span = self.previous().span;
         let name = self.expect_identifier("expected enum name")?;
         self.expect_newline("expected newline after enum name");
@@ -557,11 +607,12 @@ impl<'a> Parser<'a> {
             name,
             variants,
             span,
+            is_public,
         })
     }
 
     /// Parse `struct NAME` followed by an indented list of `field type` lines.
-    fn parse_struct(&mut self) -> Option<StructDecl> {
+    fn parse_struct(&mut self, is_public: bool) -> Option<StructDecl> {
         let span = self.previous().span;
         let name = self.expect_identifier("expected struct name")?;
         self.expect_newline("expected newline after struct name");
@@ -577,11 +628,16 @@ impl<'a> Parser<'a> {
             });
         }
         self.expect(TokenKindRef::Dedent, "expected struct body dedent")?;
-        Some(StructDecl { name, fields, span })
+        Some(StructDecl {
+            name,
+            fields,
+            span,
+            is_public,
+        })
     }
 
     /// Parse `alias NAME = TYPE`.
-    fn parse_alias(&mut self) -> Option<AliasDecl> {
+    fn parse_alias(&mut self, is_public: bool) -> Option<AliasDecl> {
         let span = self.previous().span;
         let name = self.expect_identifier("expected alias name")?;
         if !self.eat_symbol("=") {
@@ -594,10 +650,15 @@ impl<'a> Parser<'a> {
         }
         let target = self.expect_type("expected alias target type")?;
         self.expect_newline("expected newline after alias declaration");
-        Some(AliasDecl { name, target, span })
+        Some(AliasDecl {
+            name,
+            target,
+            span,
+            is_public,
+        })
     }
 
-    fn parse_function(&mut self) -> Option<Function> {
+    fn parse_function(&mut self, is_public: bool) -> Option<Function> {
         let fn_span = self.previous().span;
         let name = self.expect_identifier("expected function name after `fn`")?;
         let mut params = Vec::new();
@@ -635,6 +696,7 @@ impl<'a> Parser<'a> {
             return_type,
             body,
             span: fn_span,
+            is_public,
         })
     }
 
@@ -1438,7 +1500,6 @@ fn planned_syntax_name(kind: &TokenKind) -> Option<&'static str> {
     };
     Some(match keyword {
         Keyword::Module => "module",
-        Keyword::Import => "import",
         Keyword::Package => "package",
         Keyword::Union => "union",
         Keyword::Trait => "trait",
@@ -1802,6 +1863,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_imports_and_pub_visibility() {
+        let source = concat!(
+            "import geometry\n",
+            "import util\n\n",
+            "pub struct Point\n    x i64\n    y i64\n\n",
+            "pub fn dot a Point b Point -> i64\n    a.x * b.x\n\n",
+            "fn helper n i64 -> i64\n    n\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert_eq!(program.imports, vec!["geometry", "util"]);
+        assert!(program.structs[0].is_public);
+        assert!(program.functions[0].is_public);
+        assert!(!program.functions[1].is_public);
+    }
+
+    #[test]
     fn parses_option_and_result_generic_types() {
         let source = concat!(
             "fn f a option<i64> b result<i64, string> c option<array<i64>> -> void\n",
@@ -2055,10 +2133,12 @@ mod tests {
 
     #[test]
     fn rejects_planned_top_level_syntax() {
-        let tokens = lex("import math\nfn main -> i64\n    1\n").expect("lex");
+        // `module` remains a planned keyword rejected with L0211; `import` and
+        // `pub` are now accepted (see `parses_imports_and_pub_visibility`).
+        let tokens = lex("module demo\nfn main -> i64\n    1\n").expect("lex");
         let diagnostics = parse(&tokens).expect_err("parse should fail");
         assert_eq!(diagnostics[0].code, "L0211");
-        assert!(diagnostics[0].message.contains("import"));
+        assert!(diagnostics[0].message.contains("module"));
     }
 
     #[test]

@@ -487,11 +487,7 @@ fn rejects_invalid_bytecode_artifact() {
 
 #[test]
 fn rejects_planned_unsupported_syntax_with_dedicated_diagnostic() {
-    for fixture_name in [
-        "unsupported_import.lby",
-        "unsupported_module.lby",
-        "unsupported_catch.lby",
-    ] {
+    for fixture_name in ["unsupported_module.lby", "unsupported_catch.lby"] {
         let fixture = workspace_root()
             .join("tests/fixtures/invalid")
             .join(fixture_name);
@@ -511,6 +507,64 @@ fn rejects_planned_unsupported_syntax_with_dedicated_diagnostic() {
             "{fixture_name}: {stderr}"
         );
     }
+}
+
+#[test]
+fn runs_multi_file_module_program_across_backends() {
+    // `main.lby` imports `geometry.lby` and uses its `pub` `Point`/`dot`. The
+    // merged program must run identically on every backend.
+    let entry = workspace_root().join("tests/fixtures/valid/modules/main.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                entry.to_str().expect("entry path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(stdout(&output).trim(), "25", "{backend}");
+    }
+}
+
+#[test]
+fn rejects_cross_module_private_use_with_l0392() {
+    let entry = workspace_root().join("tests/fixtures/invalid/modules_private/main.lby");
+    let output = lullaby()
+        .args(["check", entry.to_str().expect("entry path")])
+        .output()
+        .expect("check cli");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0392 [loader error]"), "{stderr}");
+    assert!(stderr.contains("priv_helper"), "{stderr}");
+}
+
+#[test]
+fn rejects_duplicate_module_name_with_l0391() {
+    let entry = workspace_root().join("tests/fixtures/invalid/modules_duplicate/main.lby");
+    let output = lullaby()
+        .args(["check", entry.to_str().expect("entry path")])
+        .output()
+        .expect("check cli");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0391 [loader error]"), "{stderr}");
+    assert!(stderr.contains("shared"), "{stderr}");
+}
+
+#[test]
+fn rejects_import_cycle_with_l0393() {
+    let entry = workspace_root().join("tests/fixtures/invalid/modules_cycle/a.lby");
+    let output = lullaby()
+        .args(["check", entry.to_str().expect("entry path")])
+        .output()
+        .expect("check cli");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0393 [loader error]"), "{stderr}");
 }
 
 #[test]

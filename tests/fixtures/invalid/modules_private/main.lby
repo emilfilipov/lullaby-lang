@@ -1,0 +1,4 @@
+import geometry
+
+fn main -> i64
+    priv_helper(5)

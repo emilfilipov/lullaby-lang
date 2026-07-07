@@ -1,0 +1,6 @@
+pub struct Point
+    x i64
+    y i64
+
+fn priv_helper n i64 -> i64
+    n * n

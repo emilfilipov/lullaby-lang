@@ -1,0 +1,5 @@
+import geometry
+
+fn main -> i64
+    let p Point = Point(3, 4)
+    dot(p, p)

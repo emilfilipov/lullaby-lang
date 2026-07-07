@@ -262,6 +262,7 @@
       <a href="#memory-builtins">Memory Builtins</a>
       <a href="#io-system">I/O And System</a>
       <a href="#string-builtins">String Builtins</a>
+      <a href="#modules">Modules</a>
       <a href="#cli">CLI</a>
       <a href="#examples">Examples</a>
       <a href="#diagnostics">Diagnostics</a>
@@ -720,6 +721,29 @@ fn main -&gt; i64
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_string.lby</code>.</p>
       </section>
 
+      <section id="modules">
+        <h2>Modules</h2>
+        <p>Each <code>.lby</code> file is a module. A top-level <code>fn</code>, <code>struct</code>, <code>enum</code>, or <code>alias</code> is private to its file unless you prefix it with <code>pub</code>, which exports it. A file pulls in another module with one or more leading <code>import NAME</code> lines placed before any declaration; <code>import NAME</code> loads <code>NAME.lby</code> from the same directory as the entry file and makes that module's <code>pub</code> items available unqualified.</p>
+        <p>A frontend-only loader lexes, parses, resolves imports (recursively), enforces visibility, and merges every module into one program before type checking, so the type checker and all three backends run unchanged. The merged namespace is flat with no shadowing.</p>
+        <pre data-planned="multi-file"><code># geometry.lby
+pub struct Point
+    x i64
+    y i64
+
+pub fn dot a Point b Point -> i64
+    a.x * b.x + a.y * b.y
+
+fn priv_helper n i64 -> i64      # private to geometry.lby
+    n * n</code></pre>
+        <pre data-planned="multi-file"><code># main.lby
+import geometry
+
+fn main -> i64
+    let p Point = Point(3, 4)
+    dot(p, p)                    # uses pub Point and dot; returns 25</code></pre>
+        <p>Running <code>lullaby run main.lby</code> loads both files and prints <code>25</code>. Using <code>priv_helper</code> from <code>main.lby</code> would report <code>L0392</code>, because it is private to <code>geometry.lby</code>. A name declared in two modules reports <code>L0391</code>, an import cycle reports <code>L0393</code>, and a missing module file reports <code>L0394</code>. Dotted module paths, qualified access, and per-field visibility are not yet implemented.</p>
+      </section>
+
       <section id="cli">
         <h2>CLI</h2>
         <table>
@@ -831,6 +855,10 @@ Suggested fix:
             <tr><td><code>L0388</code></td><td>Invalid <code>map&lt;K, V&gt;</code> builtin call, unsupported key type, or uninferable <code>map_new()</code> key/value type; use <code>i64</code>/<code>string</code> keys and annotate <code>map_new()</code> with a <code>map&lt;...&gt;</code> type.</td></tr>
             <tr><td><code>L0389</code></td><td>Invalid <code>char</code>/<code>byte</code> builtin call: <code>char_code</code>/<code>char_from</code>/<code>byte</code>/<code>byte_val</code> received the wrong argument type or arity.</td></tr>
             <tr><td><code>L0390</code></td><td>Call through a non-function local, or a function value whose <code>fn(...)</code> signature does not match the expected function type.</td></tr>
+            <tr><td><code>L0391 [loader]</code></td><td>A <code>fn</code>/<code>struct</code>/<code>enum</code>/<code>alias</code> name is declared in more than one module; the merged namespace is flat with no shadowing.</td></tr>
+            <tr><td><code>L0392 [loader]</code></td><td>A module used a name that is private in another module, or a <code>pub</code> name from a module it did not <code>import</code>.</td></tr>
+            <tr><td><code>L0393 [loader]</code></td><td>An <code>import</code> cycle was detected while loading modules.</td></tr>
+            <tr><td><code>L0394 [loader]</code></td><td>An <code>import NAME</code> could not find <code>NAME.lby</code> in the entry file's directory.</td></tr>
             <tr><td><code>L0501 [ir]</code></td><td>Typed IR lowering failed after semantic validation.</td></tr>
             <tr><td><code>L0502 [optimizer]</code></td><td><code>--optimize</code> was requested without an IR or bytecode backend.</td></tr>
             <tr><td><code>L0601 [bytecode]</code></td><td>Compiled <code>.lbc</code> artifact is malformed, unsupported, fails metadata/function table/memory operation compatibility checks, or violates the instruction contract.</td></tr>

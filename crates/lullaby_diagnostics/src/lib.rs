@@ -18,6 +18,9 @@ impl Span {
 pub enum DiagnosticPhase {
     Source,
     Lexer,
+    /// The multi-file module loader: import resolution, cross-module visibility,
+    /// and the flat-namespace no-shadowing rule, all run before semantics.
+    Loader,
     Parser,
     Semantic,
     Ir,
@@ -32,6 +35,7 @@ impl fmt::Display for DiagnosticPhase {
         match self {
             Self::Source => write!(formatter, "source"),
             Self::Lexer => write!(formatter, "lexer"),
+            Self::Loader => write!(formatter, "loader"),
             Self::Parser => write!(formatter, "parser"),
             Self::Semantic => write!(formatter, "semantic"),
             Self::Ir => write!(formatter, "ir"),
@@ -482,6 +486,34 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         explanation: "A call went through a local variable that is not a function value.",
         root_cause: "A local of a non-function type was called like a function, or a function value with the wrong `fn(...)` signature was used where a different one was expected.",
         suggested_fix: "Call only locals of a function type `fn(T) -> R`, and make sure a passed function value's signature matches the expected function type exactly.",
+    },
+    DiagnosticEntry {
+        code: "L0391",
+        phase: DiagnosticPhase::Loader,
+        explanation: "Names in a multi-file program share one flat namespace with no shadowing.",
+        root_cause: "A `fn`/`struct`/`enum`/`alias` name is declared in more than one loaded module.",
+        suggested_fix: "Rename one of the colliding declarations so every top-level name is unique across all imported modules.",
+    },
+    DiagnosticEntry {
+        code: "L0392",
+        phase: DiagnosticPhase::Loader,
+        explanation: "Only `pub` items are visible across module boundaries.",
+        root_cause: "A module referenced a name that is declared private (no `pub`) in another module, or referenced a `pub` name from a module it did not `import`.",
+        suggested_fix: "Mark the referenced declaration `pub` in its own module and `import` that module, or move the code so the private item is used only within its own file.",
+    },
+    DiagnosticEntry {
+        code: "L0393",
+        phase: DiagnosticPhase::Loader,
+        explanation: "Module imports must form an acyclic load graph.",
+        root_cause: "A cycle of `import` statements was found while loading modules (for example `a` imports `b` and `b` imports `a`).",
+        suggested_fix: "Break the import cycle by removing one direction of the dependency or factoring the shared declarations into a third module.",
+    },
+    DiagnosticEntry {
+        code: "L0394",
+        phase: DiagnosticPhase::Loader,
+        explanation: "An imported module must resolve to a `.lby` file next to the importing file.",
+        root_cause: "`import NAME` could not find `NAME.lby` in the entry file's directory.",
+        suggested_fix: "Create `NAME.lby` in the same directory as the entry file, or fix the import name to match an existing module file.",
     },
     DiagnosticEntry {
         code: "L0501",

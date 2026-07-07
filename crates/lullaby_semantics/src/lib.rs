@@ -135,6 +135,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
                 .map(|stmt| rewrite_stmt_types(stmt, &map))
                 .collect(),
             span: function.span,
+            is_public: function.is_public,
         })
         .collect();
 
@@ -152,6 +153,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
                 })
                 .collect(),
             span: declaration.span,
+            is_public: declaration.is_public,
         })
         .collect();
 
@@ -173,6 +175,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
                 })
                 .collect(),
             span: declaration.span,
+            is_public: declaration.is_public,
         })
         .collect();
 
@@ -182,6 +185,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
             aliases: program.aliases.clone(),
             structs,
             enums,
+            imports: program.imports.clone(),
         },
         diagnostics,
     )
