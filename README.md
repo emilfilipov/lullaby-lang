@@ -2,7 +2,20 @@
 
 Lullaby is an experimental compiled systems programming language focused on concise, indentation-only syntax, strong typing, memory-safety foundations, and source that is easy for LLMs to generate.
 
-The current toolchain is an Alpha 1 language surface with a Windows-first portable package. It is useful for trying the syntax, diagnostics, bytecode artifact path, offline docs, and early runtime subset. It is not yet a native-code compiler or full systems standard library.
+The toolchain runs Lullaby on three parity-checked backends — an AST interpreter, a typed-IR interpreter, and an instruction-bytecode VM (with an optimizer) — plus a versioned `.lbc` artifact path and offline docs, shipped as a Windows-first portable package. Native code generation, linking, and a full systems runtime are still future work.
+
+## Language At A Glance
+
+The implemented surface (all running identically on every backend) includes:
+
+- **Types**: `i64`, `f64`, `bool`, `string`, `char`, `byte`, `void`; `array<T>`, growable `list<T>`, `map<K, V>`; nominal `struct` and `enum` (tagged unions); `option<T>` / `result<T, E>`; function values `fn(T) -> R`; and `rc<T>`/`ref<T>`/`ptr<T>` references.
+- **Data**: struct construction (positional and named `Point(x: 3, y: 4)`), field access and mutation, UFCS method calls (`p.dist()`), enum variants with payloads.
+- **Control flow**: `if`/`elif`/`else`, `while`, range `for`, `loop`, `break`/`continue`, exhaustive `match` with payload binding, and `throw`/`try`/`catch`.
+- **Abstraction**: user-defined generic functions (`fn f<T> ...`) with call-site inference, and first-class functions passed and returned by value.
+- **Programs**: multi-file `import` with `pub` visibility; a string and math standard library, collections, and text/stream/system I/O — all documented in the [standard library catalog](documents/standard_library.md).
+- **Tooling**: strong diagnostics (concise / verbose / JSON), a canonical formatter (`lullaby fmt`), and a bytecode artifact + inspector.
+
+See the [Alpha 1 language surface](documents/alpha1_language_surface.md) for the exact, authoritative feature list.
 
 ## Install The Portable Package
 
@@ -67,6 +80,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
 - `lullaby inspect [--verbose|--format json] <file.lbc>`
 - `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>`
 - `lullaby run [--verbose|--format json] <file.lbc>`
+- `lullaby fmt [--write|--check] <file.lby>`
 - `lullaby docs`
 - `lullaby examples`
 - `lullaby help`
@@ -77,6 +91,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
 ## Documentation
 
 - [Alpha 1 language surface](documents/alpha1_language_surface.md)
+- [Standard library catalog (the prelude)](documents/standard_library.md)
 - [Language specification](documents/language_specification.md)
 - [Implementation plan](documents/implementation_plan.md)
 - [Diagnostic registry](documents/diagnostic_registry.md)
