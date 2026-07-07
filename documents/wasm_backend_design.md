@@ -207,6 +207,16 @@ surfaced as builtins — see **JS/DOM host interop (landed)**. The
 `(ptr, len)` string out of `memory` and asserts the captured `console_log`/
 `dom_set_text` strings and the exported `main` match the interpreter
 (`crates/lullaby_cli/tests/cli.rs::wasm_js_dom_interop_execution_parity_with_node`).
+Full-stack path (DEMONSTRATED): `examples/valid/fullstack/` compiles one `shared`
+domain module (kept inside the scalar+string WASM-eligible surface) two ways — a
+WASM `frontend.lby` that renders shared classification labels through
+`console_log`/`dom_set_text` (built with `lullaby wasm frontend.lby` and loaded by
+a self-contained `index.html` supplying the `env.*` imports), and a pure-Lullaby
+HTTP `backend.lby` that serves the same shared `classify`/`priority_score` values
+on `/classify`. It reuses the delivered imports without any backend change; the
+CLI tests `fullstack_frontend_wasm_matches_shared_logic` (WASM emit + node-gated
+render/score parity, `main` = 4) and `fullstack_shared_logic_round_trip` (real
+HTTP client on all three backends) prove both sides agree with the interpreter.
 Deferred: enum/tagged-union + `match` lowering (tag+payload memory, branch on
 tag), `option`/`result`, growable `list`/`map`, runtime string construction, a
 free-list allocator, and a richer DOM interop surface (reading DOM values,

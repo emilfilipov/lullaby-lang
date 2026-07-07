@@ -1,0 +1,31 @@
+# frontend — the browser side of the full-stack demo, compiled to WebAssembly
+# with `lullaby wasm frontend.lby`. It imports the SAME `shared` module the
+# HTTP backend uses, runs the shared classification/scoring on some sample task
+# titles, and renders the results into the page via the JS/DOM host imports
+# `console_log` and `dom_set_text` (supplied by index.html).
+#
+# It stays inside the WASM-eligible surface: scalars, string literals, `==`,
+# `len`, `if`, and the two host-interop builtins. `classify` and
+# priority-scoring are shared logic, so the browser shows exactly what the
+# server computes for the same title.
+
+import shared
+
+# Render one task's shared classification into the console and a DOM element.
+# `label_id` names the element that receives the classification label.
+fn render label_id string title string -> i64
+    let label string = classify(title)
+    console_log(label)
+    dom_set_text(label_id, label)
+    return priority_score(title)
+
+fn main -> i64
+    # A short title classifies as "quick"; a long one as "detailed"; the empty
+    # title as "empty". The DOM elements #task_a / #task_b / #task_c receive the
+    # shared labels, and the console mirrors them.
+    let a i64 = render("task_a", "Ship it")
+    let b i64 = render("task_b", "Write the design document")
+    let c i64 = render("task_c", "")
+    # Return the summed shared priority score so a WASM host can assert a value
+    # (quick=1 + detailed=3 + empty=0 = 4), matching the interpreter.
+    return a + b + c

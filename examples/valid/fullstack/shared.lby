@@ -1,0 +1,42 @@
+# shared — the domain module used by BOTH the WASM frontend and the Lullaby
+# HTTP backend. It is the whole point of the demo: one file of types and pure
+# logic compiled into two very different targets.
+#
+# Every function here is kept inside the WASM-eligible surface (scalars and
+# strings only: string literals, `==`, `len`, arithmetic, `if`) so the same
+# source lowers to `.wasm` for the browser AND runs unchanged in the HTTP
+# backend on the interpreters. No `+` concat, `substring`, `to_string`, `list`,
+# `map`, or `match` appears here — those would make the frontend WASM-ineligible.
+#
+# Domain: a tiny "task" model. A task has a title; the shared logic classifies
+# it into a priority label and a numeric score purely from the title length.
+
+# The length threshold above which a task title counts as "detailed".
+pub fn detail_threshold -> i64
+    12
+
+# Classify a task title into a stable priority label. Empty titles are
+# "empty", short ones "quick", long/detailed ones "detailed". Both sides render
+# this exact label, proving shared classification across front and back.
+pub fn classify title string -> string
+    let n i64 = len(title)
+    if n == 0
+        return "empty"
+    if n > detail_threshold()
+        return "detailed"
+    return "quick"
+
+# A numeric priority score derived purely from the title length: longer,
+# more-detailed titles score higher, capped so the value stays small. This is
+# the shared *scalar* computation both sides run.
+pub fn priority_score title string -> i64
+    let n i64 = len(title)
+    if n == 0
+        return 0
+    if n > detail_threshold()
+        return 3
+    return 1
+
+# Whether a title is acceptable to store: non-empty. Shared validation.
+pub fn is_valid_title title string -> bool
+    len(title) > 0

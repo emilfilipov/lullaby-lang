@@ -1,0 +1,109 @@
+# backend — the server side of the full-stack demo: a bounded HTTP/1.1 server
+# written in pure Lullaby on the TCP socket builtins, reusing the `http`
+# framework module from the http_server example AND the SAME `shared` domain
+# module the WASM frontend compiles. A request to `/classify` is answered with
+# the shared `classify` label and `priority_score` for a sample task title —
+# the exact values the browser frontend renders for that title.
+#
+# It mirrors examples/valid/http_server/server.lby (bounded accept loop, the
+# tcp_read -> respond -> tcp_shutdown -> tcp_close teardown) so it always
+# terminates and never hangs a test. Run, for example:
+#   lullaby run backend.lby 8080 3
+# then in another terminal:  curl -v 127.0.0.1:8080/classify
+
+import http
+import shared
+
+# A fixed sample title the /classify route reports on. `shared.classify` and
+# `shared.priority_score` produce the same label/score here that the WASM
+# frontend produces for the same title, proving the shared logic runs on both
+# sides.
+fn sample_title -> string
+    "Write the design document"
+
+# The response body for a path, using the shared domain logic for /classify.
+# The unqualified `classify` / `priority_score` / `is_valid_title` come from the
+# imported `shared` module; `route_body` / `crlf` come from `http`.
+fn body_for path string -> string
+    if path == "/classify"
+        return classify_body(sample_title())
+    return route_body(path)
+
+# Render the shared classification of `title` into a small text body. This uses
+# backend-only string building (`+`, `to_string`) that the frontend cannot use,
+# but the *label* and *score* themselves come from the shared module.
+fn classify_body title string -> string
+    let label string = classify(title)
+    let score i64 = priority_score(title)
+    let valid string = validity(title)
+    return "title=" + title + lf() + "label=" + label + lf() + "score=" + to_string(score) + lf() + "valid=" + valid
+
+fn validity title string -> string
+    if is_valid_title(title)
+        return "true"
+    return "false"
+
+# The status line for a path: 200 for `/classify` and every route `http`
+# already knows, 404 otherwise (delegated to the shared router seed).
+fn status_for path string -> string
+    if path == "/classify"
+        return "200 OK"
+    return route_status(path)
+
+# Build the full HTTP/1.1 response for one raw request, routing through the
+# shared-aware body/status above and the `http` response builder.
+fn handle_request raw string -> string
+    let path string = request_path(raw)
+    let status string = status_for(path)
+    let body string = body_for(path)
+    return build_response(status, body)
+
+# Return program argument `i` as a string, or `fallback` when it is absent.
+fn arg_or i i64 fallback string -> string
+    let all list<string> = args()
+    if len(all) > i
+        return get(all, i)
+    return fallback
+
+fn main -> i64
+    let port_arg string = arg_or(0, "8080")
+    let count_arg string = arg_or(1, "1")
+    let port i64 = parse_i64(port_arg)
+    let count i64 = parse_i64(count_arg)
+    let bound result<Socket, string> = tcp_listen("127.0.0.1", port)
+    match bound
+        ok(listener) -> serve(listener, count)
+        err(message) -> 0 - 1
+
+# Accept and serve `count` connections, then return the number served.
+fn serve listener Socket count i64 -> i64
+    let served i64 = 0
+    while served < count
+        let accepted result<Socket, string> = tcp_accept(listener)
+        match accepted
+            ok(conn) -> handle_conn(conn)
+            err(message) -> 0
+        served = served + 1
+    return served
+
+# Read one request, build the shared-aware response, write it, then gracefully
+# shut down the write half and close the socket.
+fn handle_conn conn Socket -> i64
+    let request result<string, string> = tcp_read(conn)
+    match request
+        ok(text) -> respond(conn, text)
+        err(message) -> close_only(conn)
+
+fn respond conn Socket text string -> i64
+    let response string = handle_request(text)
+    let sent result<i64, string> = tcp_write(conn, response)
+    tcp_shutdown(conn)
+    tcp_close(conn)
+    match sent
+        ok(count) -> count
+        err(message) -> 0 - 1
+
+fn close_only conn Socket -> i64
+    tcp_shutdown(conn)
+    tcp_close(conn)
+    return 0

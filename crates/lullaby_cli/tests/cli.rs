@@ -2652,6 +2652,234 @@ fn wasm_js_dom_interop_execution_parity_with_node() {
     assert!(out_text.contains("main=22"), "{out_text}");
 }
 
+// -- Full-stack web demo (WASM frontend + Lullaby HTTP backend, shared module) -
+
+/// Every file of the full-stack example checks: the shared domain module, the
+/// WASM frontend, the HTTP backend, and the copied `http` framework module.
+#[test]
+fn fullstack_example_files_check() {
+    let dir = workspace_root().join("examples/valid/fullstack");
+    for file in ["shared.lby", "frontend.lby", "backend.lby", "http.lby"] {
+        let output = lullaby()
+            .args(["check", dir.join(file).to_str().expect("file path")])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{file}: {output:?}");
+    }
+}
+
+/// The frontend compiles to a real `.wasm` module (shared module included), and
+/// — when `node` is present — instantiating it with capturing
+/// `env.console_log` / `env.dom_set_text` imports renders the shared labels and
+/// the exported `main` returns the summed shared priority score. The interpreter
+/// is the ground truth for both.
+#[test]
+fn fullstack_frontend_wasm_matches_shared_logic() {
+    let fixture = workspace_root().join("examples/valid/fullstack/frontend.lby");
+    let out = std::env::temp_dir().join("lullaby_fullstack_frontend.wasm");
+    let emit = lullaby()
+        .args([
+            "wasm",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    // The frontend entry and the imported shared logic all compiled.
+    let listing = stdout(&emit);
+    for name in ["main", "render", "classify", "priority_score"] {
+        assert!(
+            listing.contains(&format!("compiled {name}")),
+            "expected `{name}` compiled: {listing}"
+        );
+    }
+
+    // Valid WASM: the `\0asm` magic header plus the exported memory and the two
+    // JS/DOM host imports the shared frontend uses.
+    let bytes = std::fs::read(&out).expect("read wasm");
+    assert!(bytes.starts_with(b"\0asm"), "wasm magic header");
+    assert!(
+        contains_subslice(&bytes, b"memory"),
+        "module exports `memory`"
+    );
+    assert!(
+        contains_subslice(&bytes, b"console_log") && contains_subslice(&bytes, b"dom_set_text"),
+        "module imports the JS/DOM host functions"
+    );
+
+    // Interpreter ground truth: two console/dom lines per rendered task, then the
+    // summed shared priority score (quick=1 + detailed=3 + empty=0 = 4).
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let mut interp_lines: Vec<String> = stdout(&run)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let interp_return = interp_lines.pop();
+    assert_eq!(
+        interp_lines,
+        vec![
+            "quick",
+            "task_a=quick",
+            "detailed",
+            "task_b=detailed",
+            "empty",
+            "task_c=empty",
+        ]
+    );
+    assert_eq!(interp_return.as_deref(), Some("4"));
+
+    if !node_available() {
+        eprintln!("node not found on PATH; skipping full-stack frontend WASM parity");
+        return;
+    }
+
+    // Instantiate under node with capturing host imports and assert the rendered
+    // shared labels and the exported score match the interpreter.
+    let runner = std::env::temp_dir().join("lullaby_fullstack_frontend_runner.js");
+    let js = format!(
+        "const fs=require('fs');\
+         const bytes=fs.readFileSync({wasm:?});\
+         const logs=[];const doms=[];let mem;\
+         const dec=(ptr,len)=>Buffer.from(new Uint8Array(mem.buffer).slice(ptr+4,ptr+4+len)).toString();\
+         const imports={{env:{{\
+           log_i64:()=>{{}},\
+           console_log:(p,l)=>logs.push(dec(p,l)),\
+           dom_set_text:(ip,il,tp,tl)=>doms.push(dec(ip,il)+'='+dec(tp,tl))\
+         }}}};\
+         WebAssembly.instantiate(bytes,imports).then(r=>{{\
+           mem=r.instance.exports.memory;\
+           const main=r.instance.exports.main().toString();\
+           process.stdout.write('logs='+logs.join('|')+';doms='+doms.join('|')+';main='+main);\
+         }}).catch(err=>{{console.error('FAIL:'+err.message);process.exit(1)}});",
+        wasm = out.to_str().expect("out path")
+    );
+    std::fs::write(&runner, js).expect("write runner");
+
+    let node = Command::new("node")
+        .arg(runner.to_str().expect("runner path"))
+        .output()
+        .expect("run node");
+    assert!(
+        node.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let out_text = String::from_utf8_lossy(&node.stdout);
+    // The shared classification labels rendered to the console and the DOM.
+    assert!(out_text.contains("logs=quick|detailed|empty"), "{out_text}");
+    assert!(
+        out_text.contains("doms=task_a=quick|task_b=detailed|task_c=empty"),
+        "{out_text}"
+    );
+    // The summed shared priority score matches the interpreter.
+    assert!(out_text.contains("main=4"), "{out_text}");
+}
+
+/// Drive the full-stack backend as a real HTTP client on all three backends and
+/// assert the `/classify` body comes from the shared domain module (the same
+/// label/score the frontend renders for the sample title).
+#[test]
+fn fullstack_shared_logic_round_trip() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    fn request(port: u16, path: &str) -> String {
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        let mut stream = stream.expect("connect to lullaby backend");
+        let req = format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).expect("client write");
+        stream.flush().expect("client flush");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("client read to EOF");
+        response
+    }
+
+    let backend_path = workspace_root().join("examples/valid/fullstack/backend.lby");
+
+    for backend in ["ast", "ir", "bytecode"] {
+        let port = {
+            let probe = TcpListener::bind("127.0.0.1:0").expect("probe bind");
+            probe.local_addr().expect("addr").port()
+        };
+
+        // Serve two requests: the shared `/classify` route and an unknown path.
+        let path = backend_path.clone();
+        let port_arg = port.to_string();
+        let server = std::thread::spawn(move || {
+            lullaby()
+                .args([
+                    "run",
+                    "--backend",
+                    backend,
+                    path.to_str().expect("backend path"),
+                    &port_arg,
+                    "2",
+                ])
+                .output()
+                .expect("run cli")
+        });
+
+        // The shared route: 200 with the classification body for the sample title
+        // "Write the design document" (detailed, score 3, valid), computed by the
+        // shared module — the same values the WASM frontend renders.
+        let classify = request(port, "/classify");
+        let status_line = classify.lines().next().unwrap_or_default();
+        assert_eq!(
+            status_line, "HTTP/1.1 200 OK",
+            "{backend} status line for /classify: {classify:?}"
+        );
+        assert!(
+            classify.contains("label=detailed"),
+            "{backend} shared label for /classify: {classify:?}"
+        );
+        assert!(
+            classify.contains("score=3"),
+            "{backend} shared score for /classify: {classify:?}"
+        );
+        assert!(
+            classify.contains("valid=true"),
+            "{backend} shared validity for /classify: {classify:?}"
+        );
+        assert!(
+            classify.contains("title=Write the design document"),
+            "{backend} sample title for /classify: {classify:?}"
+        );
+
+        // Unknown route still 404s through the shared router seed.
+        let missing = request(port, "/does-not-exist");
+        let missing_status = missing.lines().next().unwrap_or_default();
+        assert_eq!(
+            missing_status, "HTTP/1.1 404 Not Found",
+            "{backend} status line for unknown path: {missing:?}"
+        );
+
+        let output = server.join().expect("server thread");
+        assert!(
+            output.status.success(),
+            "{backend} lullaby backend: {output:?}"
+        );
+    }
+}
+
 // -- Native x86-64 backend (i64-scalar subset, link-to-exe) ------------------
 
 /// Locate `rust-lld.exe` under the rustc sysroot (mirrors the CLI's discovery).

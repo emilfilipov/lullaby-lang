@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Lullaby full-stack demo — WASM frontend</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 40rem; }
+  h1 { font-size: 1.4rem; }
+  .task { padding: 0.5rem 0.75rem; margin: 0.4rem 0; border: 1px solid #ccc; border-radius: 6px; }
+  .label { font-weight: 600; }
+  code { background: #f4f4f4; padding: 0 0.25rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Lullaby full-stack demo</h1>
+<p>
+  This page loads <code>frontend.wasm</code> — compiled from
+  <code>frontend.lby</code> with <code>lullaby wasm frontend.lby</code> — and
+  supplies the two host imports the Lullaby WASM backend expects:
+  <code>env.console_log</code> and <code>env.dom_set_text</code>. The frontend
+  imports the same <code>shared.lby</code> module the HTTP backend uses, so the
+  priority labels below are computed by the identical shared logic.
+</p>
+
+<div class="task">task_a: <span class="label" id="task_a">…</span></div>
+<div class="task">task_b: <span class="label" id="task_b">…</span></div>
+<div class="task">task_c: <span class="label" id="task_c">…</span></div>
+
+<p>Open your browser console to see the same labels logged via
+   <code>console_log</code>. The exported <code>main()</code> returns the summed
+   shared priority score.</p>
+
+<script>
+  // Decode a Lullaby string out of the module's linear memory. A `string` is an
+  // i32 pointer to `[len: i32 char-count][utf8 bytes]`, so the host reads `len`
+  // bytes starting at `ptr + 4`.
+  function makeImports(getMemory) {
+    const decode = (ptr, len) => {
+      const view = new Uint8Array(getMemory().buffer);
+      return new TextDecoder().decode(view.slice(ptr + 4, ptr + 4 + len));
+    };
+    return {
+      env: {
+        // Unused by this demo but part of the standard Lullaby WASM import set.
+        log_i64: () => {},
+        // console_log(s string) -> void
+        console_log: (ptr, len) => console.log(decode(ptr, len)),
+        // dom_set_text(id string, text string) -> void
+        dom_set_text: (idPtr, idLen, textPtr, textLen) => {
+          const id = decode(idPtr, idLen);
+          const text = decode(textPtr, textLen);
+          const el = document.getElementById(id);
+          if (el) { el.textContent = text; }
+        },
+      },
+    };
+  }
+
+  // Load the module relatively (no server or network required beyond opening the
+  // file). Some browsers block fetch() over the file: scheme, so fall back to a
+  // clear message; running from any static file server (or the toolchain docs
+  // bundle) works out of the box.
+  (async () => {
+    let memory;
+    const imports = makeImports(() => memory);
+    try {
+      const response = await fetch("frontend.wasm");
+      const bytes = await response.arrayBuffer();
+      const result = await WebAssembly.instantiate(bytes, imports);
+      memory = result.instance.exports.memory;
+      const score = result.instance.exports.main();
+      console.log("shared priority score sum:", score);
+    } catch (err) {
+      console.error("Could not load frontend.wasm:", err);
+      for (const id of ["task_a", "task_b", "task_c"]) {
+        const el = document.getElementById(id);
+        if (el) { el.textContent = "(build frontend.wasm and serve this folder)"; }
+      }
+    }
+  })();
+</script>
+</body>
+</html>
