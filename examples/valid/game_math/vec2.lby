@@ -1,0 +1,21 @@
+# vec2 — a tiny 2D vector-math module, the kind of "basics wrapper" a game
+# framework is built from. Pure Lullaby: structs + functions, exported with pub.
+
+pub struct Vec2
+    x i64
+    y i64
+
+pub fn add a Vec2 b Vec2 -> Vec2
+    Vec2(a.x + b.x, a.y + b.y)
+
+pub fn sub a Vec2 b Vec2 -> Vec2
+    Vec2(a.x - b.x, a.y - b.y)
+
+pub fn scale v Vec2 k i64 -> Vec2
+    Vec2(v.x * k, v.y * k)
+
+pub fn dot a Vec2 b Vec2 -> i64
+    a.x * b.x + a.y * b.y
+
+pub fn len_sq v Vec2 -> i64
+    dot(v, v)

@@ -1,0 +1,10 @@
+# A program that imports the game-math module and uses it with method-call
+# syntax (a.add(b) desugars to add(a, b)) and chaining.
+
+import vec2
+
+fn main -> i64
+    let a Vec2 = Vec2(3, 4)
+    let b Vec2 = Vec2(1, 2)
+    let moved Vec2 = a.add(b).scale(2)
+    moved.len_sq() + dot(a, b)
