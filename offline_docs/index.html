@@ -363,6 +363,42 @@ fn main -> i64
     let h fn(i64) -> i64 = picker()
     apply(inc, 10) + g(5) + h(20) + apply(dbl, 3)</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_first_class_fn.lby</code>. Returns <code>63</code>.</p>
+        <h3>Generic functions</h3>
+        <p>A function can declare type parameters in angle brackets after its name and use each name as an ordinary type in its parameters and return type, including inside built-in generics such as <code>list&lt;T&gt;</code> and <code>option&lt;T&gt;</code>. Call sites infer the type parameters from the argument types and substitute them into the return type &mdash; <code>identity(41)</code> yields <code>i64</code>, <code>identity(&quot;hi&quot;)</code> yields <code>string</code>, and <code>wrap(1)</code> yields <code>option&lt;i64&gt;</code>. Generics are erased at runtime, so they run identically on every backend. A bare <code>T</code> value supports only universal operations (binding, passing, returning, equality between two same-<code>T</code> values, and use as a payload to a built-in generic like <code>some(x)</code>); arithmetic and ordering on a bare <code>T</code> wait on trait bounds.</p>
+        <pre data-fixture="tests/fixtures/valid/run_generics.lby" data-mode="run"><code>fn identity&lt;T&gt; x T -> T
+    x
+
+fn wrap&lt;T&gt; x T -> option&lt;T&gt;
+    some(x)
+
+fn choose&lt;T&gt; pick bool a T b T -> T
+    if pick
+        return a
+    b
+
+fn unwrap&lt;T&gt; o option&lt;T&gt; fallback T -> T
+    match o
+        some(v) -> v
+        none -> fallback
+
+fn first&lt;T&gt; xs list&lt;T&gt; -> option&lt;T&gt;
+    if len(xs) == 0
+        return none
+    some(get(xs, 0))
+
+fn main -> i64
+    let n i64 = identity(41)
+    let s string = identity(&quot;hi&quot;)
+    let picked i64 = choose(true, 10, 20)
+    let maybe option&lt;i64&gt; = wrap(1)
+    let nums list&lt;i64&gt; = list_new()
+    nums = push(nums, 5)
+    nums = push(nums, 9)
+    let head i64 = unwrap(first(nums), 0)
+    let empty list&lt;i64&gt; = list_new()
+    let none_head i64 = unwrap(first(empty), 100)
+    n + picked + len(s) + unwrap(maybe, 0) + head + none_head</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_generics.lby</code>. Returns <code>159</code>.</p>
       </section>
 
       <section id="variables-assignment">
@@ -741,7 +777,7 @@ import geometry
 fn main -> i64
     let p Point = Point(3, 4)
     dot(p, p)                    # uses pub Point and dot; returns 25</code></pre>
-        <p>Running <code>lullaby run main.lby</code> loads both files and prints <code>25</code>. Using <code>priv_helper</code> from <code>main.lby</code> would report <code>L0392</code>, because it is private to <code>geometry.lby</code>. A name declared in two modules reports <code>L0391</code>, an import cycle reports <code>L0393</code>, and a missing module file reports <code>L0394</code>. Dotted module paths, qualified access, and per-field visibility are not yet implemented.</p>
+        <p>Running <code>lullaby run main.lby</code> loads both files and prints <code>25</code>. Using <code>priv_helper</code> from <code>main.lby</code> would report <code>L0392</code>, because it is private to <code>geometry.lby</code>. A name declared in two modules reports <code>L0391</code>, an import cycle reports <code>L0393</code>, and a missing module file reports <code>L0397</code>. Dotted module paths, qualified access, and per-field visibility are not yet implemented.</p>
       </section>
 
       <section id="cli">
@@ -858,7 +894,10 @@ Suggested fix:
             <tr><td><code>L0391 [loader]</code></td><td>A <code>fn</code>/<code>struct</code>/<code>enum</code>/<code>alias</code> name is declared in more than one module; the merged namespace is flat with no shadowing.</td></tr>
             <tr><td><code>L0392 [loader]</code></td><td>A module used a name that is private in another module, or a <code>pub</code> name from a module it did not <code>import</code>.</td></tr>
             <tr><td><code>L0393 [loader]</code></td><td>An <code>import</code> cycle was detected while loading modules.</td></tr>
-            <tr><td><code>L0394 [loader]</code></td><td>An <code>import NAME</code> could not find <code>NAME.lby</code> in the entry file's directory.</td></tr>
+            <tr><td><code>L0394 [parser]</code></td><td>A function type-parameter list <code>&lt;T, U&gt;</code> repeated a name or shadowed a built-in type.</td></tr>
+            <tr><td><code>L0395</code></td><td>Conflicting inference: two arguments forced a generic type parameter to two different concrete types.</td></tr>
+            <tr><td><code>L0396</code></td><td>A generic type parameter appears only in the return type and cannot be inferred from the arguments.</td></tr>
+            <tr><td><code>L0397 [loader]</code></td><td>An <code>import NAME</code> could not find <code>NAME.lby</code> in the entry file's directory.</td></tr>
             <tr><td><code>L0501 [ir]</code></td><td>Typed IR lowering failed after semantic validation.</td></tr>
             <tr><td><code>L0502 [optimizer]</code></td><td><code>--optimize</code> was requested without an IR or bytecode backend.</td></tr>
             <tr><td><code>L0601 [bytecode]</code></td><td>Compiled <code>.lbc</code> artifact is malformed, unsupported, fails metadata/function table/memory operation compatibility checks, or violates the instruction contract.</td></tr>

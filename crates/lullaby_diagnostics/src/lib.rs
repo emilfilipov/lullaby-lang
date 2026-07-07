@@ -510,6 +510,27 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
     },
     DiagnosticEntry {
         code: "L0394",
+        phase: DiagnosticPhase::Parser,
+        explanation: "A function type-parameter list `<T, U>` must use distinct, non-built-in names.",
+        root_cause: "A `<...>` type-parameter list repeated a name or used a name that is a built-in primitive or generic-type constructor.",
+        suggested_fix: "Give each type parameter a unique name that is not a built-in type such as `i64`, `string`, `array`, `list`, `option`, or `result`.",
+    },
+    DiagnosticEntry {
+        code: "L0395",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A generic type parameter must resolve to a single concrete type at a call site.",
+        root_cause: "Two arguments bound the same type parameter to different concrete types (for example `same(1, \"x\")` for `fn same<T> a T b T`).",
+        suggested_fix: "Pass arguments whose types agree for every occurrence of the same type parameter.",
+    },
+    DiagnosticEntry {
+        code: "L0396",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "Every generic type parameter must be inferable from a call's arguments.",
+        root_cause: "A type parameter appears only in the return type with no argument to pin it, and explicit type arguments are not yet supported.",
+        suggested_fix: "Give the function a parameter that uses the type parameter so it can be inferred from an argument.",
+    },
+    DiagnosticEntry {
+        code: "L0397",
         phase: DiagnosticPhase::Loader,
         explanation: "An imported module must resolve to a `.lby` file next to the importing file.",
         root_cause: "`import NAME` could not find `NAME.lby` in the entry file's directory.",

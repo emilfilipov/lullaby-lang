@@ -5555,13 +5555,29 @@ impl<'a> Lowerer<'a> {
                     IrLoweringError::new("ptr_read call argument is not a pointer", Some(span))
                 })?
             }
-            _ => self
-                .signatures
-                .get(name)
-                .map(|signature| signature.return_type.clone())
-                .ok_or_else(|| {
+            _ => {
+                let signature = self.signatures.get(name).ok_or_else(|| {
                     IrLoweringError::new(format!("unknown function `{name}`"), Some(span))
-                })?,
+                })?;
+                if signature.type_params.is_empty() {
+                    signature.return_type.clone()
+                } else {
+                    // Generic function: re-run the same call-site inference as
+                    // semantics against the lowered argument types so the IR
+                    // result type matches. Generics are erased, so this only
+                    // determines the static result type; the emitted call is an
+                    // ordinary call by name.
+                    let arg_types: Vec<TypeRef> = args.iter().map(|arg| arg.ty.clone()).collect();
+                    lullaby_semantics::infer_generic_return(signature, &arg_types).map_err(
+                        |error| {
+                            IrLoweringError::new(
+                                format!("generic call `{name}` inference failed: {error:?}"),
+                                Some(span),
+                            )
+                        },
+                    )?
+                }
+            }
         })
     }
 }

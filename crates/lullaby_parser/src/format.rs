@@ -71,6 +71,9 @@ fn render_enum(decl: &EnumDecl) -> String {
 
 fn render_function(function: &Function) -> String {
     let mut header = format!("fn {}", function.name);
+    if !function.type_params.is_empty() {
+        header.push_str(&format!("<{}>", function.type_params.join(", ")));
+    }
     for param in &function.params {
         header.push_str(&format!(" {} {}", param.name, param.ty.name));
     }
@@ -487,6 +490,15 @@ mod tests {
         let source = concat!(
             "enum Shape\n    Circle i64\n    Empty\n\n",
             "fn area s Shape -> i64\n    match s\n        Circle(r) -> r * r\n        Empty -> 0\n",
+        );
+        assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn formats_generic_function_header() {
+        let source = concat!(
+            "fn choose<T, U> pick bool a T b U -> T\n    a\n\n",
+            "fn identity<T> x T -> T\n    x\n",
         );
         assert_eq!(fmt(source), source);
     }

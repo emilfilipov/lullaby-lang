@@ -120,6 +120,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
         .iter()
         .map(|function| Function {
             name: function.name.clone(),
+            type_params: function.type_params.clone(),
             params: function
                 .params
                 .iter()
@@ -215,6 +216,158 @@ fn chain_is_cyclic(name: &str, map: &HashMap<String, TypeRef>) -> bool {
 /// generic enums.
 fn is_builtin_variant(name: &str) -> bool {
     matches!(name, "some" | "none" | "ok" | "err")
+}
+
+/// The outcome of unifying a call's arguments against a generic function's
+/// parameter types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenericInferenceError {
+    /// A type variable received two different concrete types (`L0395`).
+    Conflict {
+        param: String,
+        first: TypeRef,
+        second: TypeRef,
+    },
+    /// A type variable in the return type was never pinned by an argument
+    /// (`L0396`).
+    Unresolved { param: String },
+}
+
+/// Split a `ctor<...>` spelling into `(ctor, args)` when it is a compound
+/// generic type. Recognizes every built-in generic constructor plus function
+/// types spelled `fn(...) -> R`. Returns `None` for a plain type name.
+fn decompose_generic(ty: &TypeRef) -> Option<(String, Vec<TypeRef>)> {
+    if let Some((params, ret)) = ty.function_signature() {
+        let mut args = params;
+        args.push(ret);
+        return Some(("fn".to_string(), args));
+    }
+    for ctor in [
+        "array", "list", "option", "result", "map", "ptr", "ref", "rc",
+    ] {
+        if let Some(args) = ty.generic_args(ctor) {
+            return Some((ctor.to_string(), args));
+        }
+    }
+    None
+}
+
+/// Structurally unify a parameter type (which may contain type variables drawn
+/// from `type_params`) against a concrete argument type, extending `subst`.
+///
+/// - A parameter type that is exactly a type-variable name binds that variable
+///   to the whole argument type, reporting `L0395` on a conflicting rebinding.
+/// - A compound parameter type (`list<T>`, `option<T>`, `fn(T) -> U`, ...)
+///   unifies argument-wise against a same-constructor argument type.
+/// - Any non-variable, non-compound parameter type is a fixed type and is not
+///   unified here (ordinary argument type checking already validates it).
+pub fn unify_param(
+    param: &TypeRef,
+    actual: &TypeRef,
+    type_params: &[String],
+    subst: &mut HashMap<String, TypeRef>,
+) -> Result<(), GenericInferenceError> {
+    if type_params.iter().any(|name| name == &param.name) {
+        // `param` is a bare type variable: bind it to the whole actual type.
+        match subst.get(&param.name) {
+            Some(existing) if existing != actual => {
+                return Err(GenericInferenceError::Conflict {
+                    param: param.name.clone(),
+                    first: existing.clone(),
+                    second: actual.clone(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                subst.insert(param.name.clone(), actual.clone());
+            }
+        }
+        return Ok(());
+    }
+
+    // A compound parameter type unifies component-wise when the argument shares
+    // its constructor and arity. If the argument does not match structurally the
+    // ordinary argument type check reports the mismatch, so we simply stop.
+    if let (Some((param_ctor, param_args)), Some((actual_ctor, actual_args))) =
+        (decompose_generic(param), decompose_generic(actual))
+        && param_ctor == actual_ctor
+        && param_args.len() == actual_args.len()
+    {
+        for (p, a) in param_args.iter().zip(actual_args.iter()) {
+            unify_param(p, a, type_params, subst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Substitute inferred type variables into a declared type. Applies to a bare
+/// type variable and recursively into compound types (`option<T>`, `fn(T) -> U`,
+/// ...). Type variables with no binding are left as-is; the caller detects those
+/// via `unresolved_type_vars`.
+pub fn substitute_type(ty: &TypeRef, subst: &HashMap<String, TypeRef>) -> TypeRef {
+    if let Some(bound) = subst.get(&ty.name) {
+        return bound.clone();
+    }
+    if let Some((ctor, args)) = decompose_generic(ty) {
+        let mapped: Vec<TypeRef> = args.iter().map(|arg| substitute_type(arg, subst)).collect();
+        if ctor == "fn" {
+            let (params, ret) = mapped.split_at(mapped.len() - 1);
+            return function_type(params, &ret[0]);
+        }
+        return generic_type(&ctor, &mapped);
+    }
+    ty.clone()
+}
+
+/// Report the first declared type parameter that still appears unbound in `ty`
+/// after substitution (`L0396`). Recurses into compound types.
+pub fn first_unresolved_type_var(
+    ty: &TypeRef,
+    type_params: &[String],
+    subst: &HashMap<String, TypeRef>,
+) -> Option<String> {
+    if type_params.iter().any(|name| name == &ty.name) && !subst.contains_key(&ty.name) {
+        return Some(ty.name.clone());
+    }
+    if let Some((_, args)) = decompose_generic(ty) {
+        for arg in &args {
+            if let Some(found) = first_unresolved_type_var(arg, type_params, subst) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// True when `ty` mentions the type variable `var` anywhere (as the whole type
+/// or nested inside a compound type).
+fn type_contains_var(ty: &TypeRef, var: &str) -> bool {
+    if ty.name == var {
+        return true;
+    }
+    if let Some((_, args)) = decompose_generic(ty) {
+        return args.iter().any(|arg| type_contains_var(arg, var));
+    }
+    false
+}
+
+/// Run full call-site inference for a generic function: unify every argument
+/// against the corresponding parameter, then substitute into the return type.
+/// Returns the concrete return type, or the first inference error.
+pub fn infer_generic_return(
+    signature: &Signature,
+    arg_types: &[TypeRef],
+) -> Result<TypeRef, GenericInferenceError> {
+    let mut subst: HashMap<String, TypeRef> = HashMap::new();
+    for (param, actual) in signature.params.iter().zip(arg_types.iter()) {
+        unify_param(param, actual, &signature.type_params, &mut subst)?;
+    }
+    if let Some(param) =
+        first_unresolved_type_var(&signature.return_type, &signature.type_params, &subst)
+    {
+        return Err(GenericInferenceError::Unresolved { param });
+    }
+    Ok(substitute_type(&signature.return_type, &subst))
 }
 
 /// Canonical `option<T>` type spelling.
@@ -616,6 +769,7 @@ impl<'a> Checker<'a> {
                         .map(|param| param.ty.clone())
                         .collect(),
                     return_type: function.return_type.clone(),
+                    type_params: function.type_params.clone(),
                 },
             );
         }
@@ -2363,30 +2517,142 @@ impl<'a> Checker<'a> {
                     return None;
                 }
 
-                for (index, (arg, expected)) in args.iter().zip(signature.params.iter()).enumerate()
-                {
-                    let actual = self.check_expr(arg, scope, function);
-                    if actual.as_ref() != Some(expected) {
+                if signature.type_params.is_empty() {
+                    // Non-generic call: every argument must match its declared
+                    // parameter type exactly.
+                    for (index, (arg, expected)) in
+                        args.iter().zip(signature.params.iter()).enumerate()
+                    {
+                        let actual = self.check_expr(arg, scope, function);
+                        if actual.as_ref() != Some(expected) {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0313",
+                                format!(
+                                    "argument {} for `{name}` must be `{}` but got `{}`",
+                                    index + 1,
+                                    expected.name,
+                                    actual
+                                        .as_ref()
+                                        .map(|ty| ty.name.as_str())
+                                        .unwrap_or("<unknown>")
+                                ),
+                                Some(function.name.clone()),
+                                arg.span,
+                            ));
+                        }
+                    }
+                    return Some(signature.return_type);
+                }
+
+                self.check_generic_call(name, args, &signature, call_span, scope, function)
+            }
+        }
+    }
+
+    /// Check a call to a user-defined generic function. Each argument is checked
+    /// for its own type, then unified against the (possibly type-variable
+    /// containing) parameter type to build a substitution; the substitution is
+    /// applied to the declared return type to yield the call's result type.
+    ///
+    /// - A type variable bound to two different concrete types is `L0395`.
+    /// - A type variable that appears only in the return type and is never
+    ///   pinned by an argument is `L0396`.
+    ///
+    /// Concrete (non-variable) parts of a parameter type are still validated by
+    /// the same structural unifier: a mismatch there leaves the variable unbound
+    /// or produces a fixed-vs-fixed disagreement, which surfaces as an ordinary
+    /// argument-type error via the fixed-part check below.
+    fn check_generic_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        signature: &Signature,
+        call_span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let mut subst: HashMap<String, TypeRef> = HashMap::new();
+        let mut arg_types: Vec<Option<TypeRef>> = Vec::with_capacity(args.len());
+        for (arg, param) in args.iter().zip(signature.params.iter()) {
+            // Pass the parameter type as the expected type so context-directed
+            // builtins (`none`/`ok`/`err`/`list_new`) that flow into a generic
+            // slot still infer, when the parameter is a concrete generic type.
+            let expected = if signature
+                .type_params
+                .iter()
+                .any(|tp| type_contains_var(param, tp))
+            {
+                None
+            } else {
+                Some(param.clone())
+            };
+            let actual = self.check_expr_expected(arg, expected.as_ref(), scope, function);
+            if let Some(actual_ty) = &actual {
+                match unify_param(param, actual_ty, &signature.type_params, &mut subst) {
+                    Ok(()) => {}
+                    Err(GenericInferenceError::Conflict {
+                        param: tp,
+                        first,
+                        second,
+                    }) => {
                         self.diagnostics.push(SemanticDiagnostic::at(
-                            "L0313",
+                            "L0395",
                             format!(
-                                "argument {} for `{name}` must be `{}` but got `{}`",
-                                index + 1,
-                                expected.name,
-                                actual
-                                    .as_ref()
-                                    .map(|ty| ty.name.as_str())
-                                    .unwrap_or("<unknown>")
+                                "type parameter `{tp}` of `{name}` is inferred as both `{}` and `{}`",
+                                first.name, second.name
                             ),
                             Some(function.name.clone()),
                             arg.span,
                         ));
                     }
+                    Err(GenericInferenceError::Unresolved { .. }) => {}
                 }
+            }
+            arg_types.push(actual);
+        }
 
-                Some(signature.return_type)
+        // Validate the fixed (non-type-variable) portions of each parameter type
+        // against the argument: after substitution the parameter must equal the
+        // argument type. This catches a `list<i64>` argument passed where
+        // `option<T>` is expected, and a concrete parameter mismatch.
+        for (index, (arg_ty, param)) in arg_types.iter().zip(signature.params.iter()).enumerate() {
+            let Some(arg_ty) = arg_ty else { continue };
+            let expected = substitute_type(param, &subst);
+            // Skip when the expected type still holds an unbound variable; that
+            // is reported below as `L0396` (or was a conflict already).
+            if first_unresolved_type_var(&expected, &signature.type_params, &subst).is_some() {
+                continue;
+            }
+            if &expected != arg_ty {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0313",
+                    format!(
+                        "argument {} for `{name}` must be `{}` but got `{}`",
+                        index + 1,
+                        expected.name,
+                        arg_ty.name
+                    ),
+                    Some(function.name.clone()),
+                    args[index].span,
+                ));
             }
         }
+
+        if let Some(tp) =
+            first_unresolved_type_var(&signature.return_type, &signature.type_params, &subst)
+        {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0396",
+                format!(
+                    "type parameter `{tp}` of `{name}` cannot be inferred from the arguments; explicit type arguments are not yet supported"
+                ),
+                Some(function.name.clone()),
+                call_span,
+            ));
+            return None;
+        }
+
+        Some(substitute_type(&signature.return_type, &subst))
     }
 
     /// Walk a struct field path from `root`, returning the type of the final
@@ -3029,6 +3295,10 @@ impl<'a> Checker<'a> {
 pub struct Signature {
     pub params: Vec<TypeRef>,
     pub return_type: TypeRef,
+    /// Declared type-parameter names `<T, U>`. Empty for a non-generic function.
+    /// When non-empty, a call site infers each name from the argument types by
+    /// unification and substitutes the result into `return_type`.
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4274,6 +4544,173 @@ mod tests {
         assert!(
             diagnostics.iter().any(|d| d.code == "L0382"),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn validates_generic_functions_at_several_types() {
+        let source = concat!(
+            "fn identity<T> x T -> T\n",
+            "    x\n\n",
+            "fn wrap<T> x T -> option<T>\n",
+            "    some(x)\n\n",
+            "fn choose<T> pick bool a T b T -> T\n",
+            "    if pick\n",
+            "        return a\n",
+            "    b\n\n",
+            "fn main -> i64\n",
+            "    let n i64 = identity(41)\n",
+            "    let s string = identity(\"hi\")\n",
+            "    let picked i64 = choose(true, 10, 20)\n",
+            "    let maybe option<i64> = wrap(1)\n",
+            "    n + picked + len(s)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn generic_identity_return_type_is_the_argument_type() {
+        // A `let string = identity("hi")` binding proves the call inferred and
+        // substituted `T = string` into the return type; a mismatch would be an
+        // `L0301`/binding error.
+        let source = concat!(
+            "fn identity<T> x T -> T\n",
+            "    x\n\n",
+            "fn main -> string\n",
+            "    let s string = identity(\"hi\")\n",
+            "    s\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_conflicting_generic_inference() {
+        // `same(1, "x")` binds `T` to both `i64` and `string`: `L0395`.
+        let source = concat!(
+            "fn same<T> a T b T -> T\n",
+            "    a\n\n",
+            "fn main -> i64\n",
+            "    same(1, \"x\")\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0395"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_arithmetic_on_bare_type_parameter() {
+        // `a + b` where both are the bare type variable `T` has no bounds, so
+        // arithmetic is rejected (`L0307`).
+        let source = concat!(
+            "fn plus<T> a T b T -> T\n",
+            "    a + b\n\n",
+            "fn main -> i64\n",
+            "    plus(1, 2)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_ordering_on_bare_type_parameter() {
+        let source = concat!(
+            "fn less<T> a T b T -> bool\n",
+            "    a < b\n\n",
+            "fn main -> bool\n",
+            "    less(1, 2)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0327"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn allows_equality_between_two_same_type_parameters() {
+        let source = concat!(
+            "fn eq<T> a T b T -> bool\n",
+            "    a == b\n\n",
+            "fn main -> bool\n",
+            "    eq(1, 1)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_duplicate_type_parameter_list() {
+        // A duplicate `<T, T>` list is caught at parse time as `L0394`, so the
+        // program never reaches semantics.
+        let source = concat!(
+            "fn dup<T, T> a T -> T\n",
+            "    a\n\n",
+            "fn main -> i64\n",
+            "    dup(1)\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let diagnostics = parse(&tokens).expect_err("parse");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0394"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_type_parameter_shadowing_builtin_type() {
+        let source = concat!(
+            "fn bad<i64> a i64 -> i64\n",
+            "    a\n\n",
+            "fn main -> i64\n",
+            "    bad(1)\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let diagnostics = parse(&tokens).expect_err("parse");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0394"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_return_only_type_parameter() {
+        // `T` appears only in the return type; nothing pins it: `L0396`.
+        let source = concat!(
+            "fn make<T> -> option<T>\n",
+            "    none\n\n",
+            "fn main -> i64\n",
+            "    let _v option<i64> = make()\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0396"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_generic_over_list_argument() {
+        let source = concat!(
+            "fn first<T> xs list<T> -> option<T>\n",
+            "    if len(xs) == 0\n",
+            "        return none\n",
+            "    some(get(xs, 0))\n\n",
+            "fn main -> i64\n",
+            "    let xs list<i64> = list_new()\n",
+            "    let ys list<i64> = push(xs, 7)\n",
+            "    match first(ys)\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source).err()
         );
     }
 }

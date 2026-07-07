@@ -74,6 +74,13 @@ pub struct AliasDecl {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     pub name: String,
+    /// Declared type parameters `<T, U>` that follow the function name, in source
+    /// order. Empty for a non-generic function. Serde-defaulted to an empty list
+    /// so existing single-file artifacts and AST snapshots stay valid. A
+    /// type-parameter name is in scope as a type variable within this function's
+    /// signature and body only, where it is spelled as an ordinary `TypeRef`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_params: Vec<String>,
     pub params: Vec<Param>,
     pub return_type: TypeRef,
     pub body: Vec<Stmt>,
@@ -230,6 +237,29 @@ pub fn function_type(params: &[TypeRef], return_type: &TypeRef) -> TypeRef {
         .collect::<Vec<_>>()
         .join(", ");
     TypeRef::new(format!("fn({joined}) -> {}", return_type.name))
+}
+
+/// True for a type name that is a built-in primitive, scalar, or generic-type
+/// constructor. A user-declared type parameter may not shadow one of these.
+pub fn is_builtin_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "i64"
+            | "f64"
+            | "bool"
+            | "string"
+            | "char"
+            | "byte"
+            | "void"
+            | "array"
+            | "list"
+            | "map"
+            | "option"
+            | "result"
+            | "ptr"
+            | "ref"
+            | "rc"
+    )
 }
 
 /// Build the canonical spelling of a generic type `ctor<a, b, ...>`. This is the
@@ -661,6 +691,7 @@ impl<'a> Parser<'a> {
     fn parse_function(&mut self, is_public: bool) -> Option<Function> {
         let fn_span = self.previous().span;
         let name = self.expect_identifier("expected function name after `fn`")?;
+        let type_params = self.parse_type_params(fn_span)?;
         let mut params = Vec::new();
 
         while !self.at(TokenKindRef::Arrow)
@@ -692,12 +723,58 @@ impl<'a> Parser<'a> {
 
         Some(Function {
             name,
+            type_params,
             params,
             return_type,
             body,
             span: fn_span,
             is_public,
         })
+    }
+
+    /// Parse an optional `<T, U>` type-parameter list that follows a function
+    /// name. Returns an empty list when no `<` follows. Each name must be a fresh
+    /// identifier that is not a duplicate in the list and does not shadow a known
+    /// primitive or built-in type; either violation is `L0394`.
+    fn parse_type_params(&mut self, fn_span: Span) -> Option<Vec<String>> {
+        if !self.eat_symbol("<") {
+            return Some(Vec::new());
+        }
+        let mut names = Vec::new();
+        loop {
+            let param_span = self.peek().span;
+            let name = self.expect_identifier("expected type parameter name")?;
+            if is_builtin_type_name(&name) {
+                self.error(
+                    "L0394",
+                    format!(
+                        "type parameter `{name}` shadows a built-in type; choose a distinct name"
+                    ),
+                    param_span,
+                );
+            } else if names.contains(&name) {
+                self.error(
+                    "L0394",
+                    format!("duplicate type parameter `{name}` in the `<...>` list"),
+                    param_span,
+                );
+            } else {
+                names.push(name);
+            }
+            if self.eat_symbol(">") {
+                break;
+            }
+            if !self.eat_symbol(",") {
+                self.error(
+                    "L0394",
+                    "expected `,` or `>` in the type parameter list",
+                    self.peek().span,
+                );
+                return None;
+            }
+        }
+        let _ = fn_span;
+        Some(names)
     }
 
     fn parse_block(&mut self, ends: &[BlockEnd]) -> Vec<Stmt> {
@@ -2106,6 +2183,42 @@ mod tests {
             program.functions[0].body[1],
             Stmt::For { step: Some(_), .. }
         ));
+    }
+
+    #[test]
+    fn parses_generic_type_parameters() {
+        let source = "fn choose<T, U> pick bool a T b U -> T\n    a\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert_eq!(
+            program.functions[0].type_params,
+            vec!["T".to_string(), "U".to_string()]
+        );
+        // A type-parameter name is spelled as an ordinary `TypeRef`.
+        assert_eq!(program.functions[0].params[1].ty.name, "T");
+        assert_eq!(program.functions[0].return_type.name, "T");
+    }
+
+    #[test]
+    fn non_generic_function_has_empty_type_params() {
+        let source = "fn add a i64 b i64 -> i64\n    a + b\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert!(program.functions[0].type_params.is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_type_parameter() {
+        let tokens = lex("fn dup<T, T> a T -> T\n    a\n").expect("lex");
+        let diagnostics = parse(&tokens).expect_err("parse should fail");
+        assert!(diagnostics.iter().any(|d| d.code == "L0394"));
+    }
+
+    #[test]
+    fn rejects_type_parameter_that_shadows_builtin() {
+        let tokens = lex("fn bad<i64> a i64 -> i64\n    a\n").expect("lex");
+        let diagnostics = parse(&tokens).expect_err("parse should fail");
+        assert!(diagnostics.iter().any(|d| d.code == "L0394"));
     }
 
     #[test]

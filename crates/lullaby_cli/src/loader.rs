@@ -10,7 +10,7 @@
 //! It lexes and parses the entry file plus every transitively imported module,
 //! enforces the flat-namespace no-shadowing rule (`L0391`), cross-module
 //! visibility (`L0392`), import-cycle rejection (`L0393`), and missing-module
-//! resolution (`L0394`), then merges every module's declarations into a single
+//! resolution (`L0397`), then merges every module's declarations into a single
 //! flat [`Program`]. Because the merged program is an ordinary single `Program`,
 //! the semantic analyzer and all three backends run unchanged.
 
@@ -123,7 +123,7 @@ fn load_module(
         Err(error) => {
             diagnostics.push(
                 DiagnosticReport::new(
-                    "L0394",
+                    "L0397",
                     DiagnosticPhase::Loader,
                     format!(
                         "failed to read module `{name}` at `{}`: {error}",

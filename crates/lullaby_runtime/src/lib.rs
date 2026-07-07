@@ -2400,4 +2400,32 @@ mod tests {
         };
         assert_eq!(payload.to_string(), "Circle(2)");
     }
+
+    #[test]
+    fn runs_generic_identity_at_two_types() {
+        // A single erased generic function called at `i64` and `string`; the
+        // string result is measured with `len` so `main` stays `i64`.
+        let source = concat!(
+            "fn identity<T> x T -> T\n",
+            "    x\n\n",
+            "fn main -> i64\n",
+            "    let n i64 = identity(41)\n",
+            "    let s string = identity(\"abc\")\n",
+            "    n + len(s)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(44));
+    }
+
+    #[test]
+    fn runs_generic_choose_selecting_by_flag() {
+        let source = concat!(
+            "fn choose<T> pick bool a T b T -> T\n",
+            "    if pick\n",
+            "        return a\n",
+            "    b\n\n",
+            "fn main -> i64\n",
+            "    choose(true, 10, 20) + choose(false, 3, 7)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(17));
+    }
 }

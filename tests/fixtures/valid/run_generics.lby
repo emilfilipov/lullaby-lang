@@ -1,0 +1,33 @@
+fn identity<T> x T -> T
+    x
+
+fn wrap<T> x T -> option<T>
+    some(x)
+
+fn choose<T> pick bool a T b T -> T
+    if pick
+        return a
+    b
+
+fn unwrap<T> o option<T> fallback T -> T
+    match o
+        some(v) -> v
+        none -> fallback
+
+fn first<T> xs list<T> -> option<T>
+    if len(xs) == 0
+        return none
+    some(get(xs, 0))
+
+fn main -> i64
+    let n i64 = identity(41)
+    let s string = identity("hi")
+    let picked i64 = choose(true, 10, 20)
+    let maybe option<i64> = wrap(1)
+    let nums list<i64> = list_new()
+    nums = push(nums, 5)
+    nums = push(nums, 9)
+    let head i64 = unwrap(first(nums), 0)
+    let empty list<i64> = list_new()
+    let none_head i64 = unwrap(first(empty), 100)
+    n + picked + len(s) + unwrap(maybe, 0) + head + none_head
