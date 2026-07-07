@@ -1,0 +1,18 @@
+struct Point
+    x i64
+    y i64
+
+fn main -> i64
+    let p Point = Point(3, 4)
+    let q Point = Point(y: 10, x: 20)
+    p.x = p.x + 5
+    let corner i64 = p.x + q.y
+
+    let xs array<i64> = [1, 2, 3, 4]
+    xs[0] = 10
+    xs[3] += 6
+    let total i64 = 0
+    for i from 0 to len(xs) - 1
+        total += xs[i]
+
+    return corner + total

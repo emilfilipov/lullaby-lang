@@ -3,12 +3,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use lullaby_parser::{AssignOp, BinaryOp};
+use lullaby_parser::{AssignOp, BinaryOp, TypeRef};
 
 use crate::native_contract::{NativeObjectFormat, NativeTarget, alpha1_native_backend_contract};
 use crate::{
     BytecodeExpr, BytecodeExprKind, BytecodeFunction, BytecodeIfBranch, BytecodeInstruction,
-    BytecodeModule,
+    BytecodeModule, BytecodePlace, IrStructDef,
 };
 
 const AMD64_MACHINE: u16 = 0x8664;
@@ -682,7 +682,7 @@ pub fn emit_alpha1_native_program(
                 .iter()
                 .find(|f| &f.name == name)
                 .expect("eligible name exists");
-            match lower_native_function(function, &callable) {
+            match lower_native_function(function, &callable, &module.structs) {
                 Ok(l) => lowered.push(l),
                 Err(reason) => {
                     demoted = Some(NativeSkippedFunction {
@@ -760,6 +760,94 @@ fn native_signature_eligibility(function: &BytecodeFunction) -> Result<(), Strin
     Ok(())
 }
 
+// -- Stack aggregate layout (all-i64 structs and fixed i64 arrays) -----------
+//
+// Locals in the extended subset may be an `i64` scalar, an all-i64 (possibly
+// nested) struct, or a fixed-length array of any supported element type. Each
+// such value is laid out contiguously in the function's stack frame as a run of
+// 8-byte words: scalars occupy one word, a struct the concatenation of its
+// (recursively flattened) field words, and an array `len` copies of its element
+// layout. Aggregates never live in a register; instead operations resolve the
+// `[rbp - slot]` displacement of an individual scalar word and load/store it.
+
+/// The stack layout of a native local value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeType {
+    /// A single 8-byte integer word.
+    I64,
+    /// A named struct whose fields are all supported native types, in order.
+    Struct {
+        name: String,
+        fields: Vec<(String, NativeType)>,
+    },
+    /// A fixed-length array of a supported element type.
+    Array { elem: Box<NativeType>, len: usize },
+}
+
+impl NativeType {
+    /// The number of 8-byte words this value occupies on the stack.
+    fn words(&self) -> usize {
+        match self {
+            NativeType::I64 => 1,
+            NativeType::Struct { fields, .. } => fields.iter().map(|(_, t)| t.words()).sum(),
+            NativeType::Array { elem, len } => elem.words() * len,
+        }
+    }
+}
+
+/// Resolve a declared `TypeRef` into a `NativeType`. Arrays are not resolvable
+/// from the type alone (their length is not encoded in `array<T>`); array
+/// locals derive their layout from their initializer instead, so a bare
+/// `array<...>` type reaching here is an error the caller turns into a skip.
+fn resolve_native_type(ty: &TypeRef, structs: &[IrStructDef]) -> Result<NativeType, String> {
+    match ty.name.as_str() {
+        "i64" => Ok(NativeType::I64),
+        name if name.starts_with("array<") => Err(format!(
+            "array length for `{name}` is unknown from its type"
+        )),
+        name => {
+            let def = structs
+                .iter()
+                .find(|s| s.name == name)
+                .ok_or_else(|| format!("type `{name}` is not in the native stack subset"))?;
+            let mut fields = Vec::with_capacity(def.fields.len());
+            for (field_name, field_ty) in &def.fields {
+                let native = resolve_native_type(field_ty, structs).map_err(|_| {
+                    format!("struct `{name}` field `{field_name}` is not an all-i64 native type")
+                })?;
+                fields.push((field_name.clone(), native));
+            }
+            Ok(NativeType::Struct {
+                name: name.to_string(),
+                fields,
+            })
+        }
+    }
+}
+
+/// Infer the `NativeType` of an initializer expression, using its static type
+/// plus (for array literals) the literal element count. This is how array
+/// lengths enter the layout, since `array<T>` carries no length.
+fn native_type_of_init(expr: &BytecodeExpr, structs: &[IrStructDef]) -> Result<NativeType, String> {
+    if let BytecodeExprKind::Array(elements) = &expr.kind {
+        let first = elements
+            .first()
+            .ok_or("empty array literals are not in the native stack subset")?;
+        let elem = native_type_of_init(first, structs)?;
+        for other in &elements[1..] {
+            let other_ty = native_type_of_init(other, structs)?;
+            if other_ty != elem {
+                return Err("array literal elements have differing native layouts".to_string());
+            }
+        }
+        return Ok(NativeType::Array {
+            elem: Box::new(elem),
+            len: elements.len(),
+        });
+    }
+    resolve_native_type(&expr.ty, structs)
+}
+
 /// A function lowered to x86-64: its symbol name, machine-code bytes, and the
 /// relocations (at byte offsets within the code) that reference other symbols.
 struct LoweredNativeFunction {
@@ -777,10 +865,20 @@ struct CodeRelocation {
     symbol: String,
 }
 
+/// A local's stack placement: its `NativeType` layout and the `[rbp - slot]`
+/// displacement of its first word. Additional words follow at `slot - 8`,
+/// `slot - 16`, ... (i.e. lower displacements — the frame grows downward but we
+/// key by positive displacement from `rbp`, so word `k` is at `slot - 8*k`).
+#[derive(Debug, Clone)]
+struct NativeLocal {
+    slot: i32,
+    ty: NativeType,
+}
+
 /// Per-function native lowering state (a stack-machine codegen over `rax`).
 struct NativeCtx<'a> {
-    /// name -> rbp-relative slot displacement (positive; slot is at `[rbp - d]`).
-    locals: HashMap<String, i32>,
+    /// name -> local placement (base slot displacement + layout).
+    locals: HashMap<String, NativeLocal>,
     /// Total local stack bytes reserved (16-byte aligned, incl. shadow space).
     frame_size: i32,
     /// The set of function names that can be called (compiled functions).
@@ -790,24 +888,33 @@ struct NativeCtx<'a> {
 }
 
 impl<'a> NativeCtx<'a> {
-    /// Plan the stack frame: assign a slot to every parameter and `let`/`for`
-    /// local, reserving 8 bytes each, plus 32 bytes of Win64 shadow space when
-    /// the function makes calls. All slots are `[rbp - displacement]`.
+    /// Plan the stack frame: assign contiguous 8-byte-word slots to every
+    /// parameter and `let`/`for` local (aggregates reserve one word per
+    /// flattened scalar), plus 32 bytes of Win64 shadow space when the function
+    /// makes calls. All slots are `[rbp - displacement]`.
     fn plan(
         function: &'a BytecodeFunction,
         callable: &'a std::collections::HashSet<&'a str>,
+        structs: &'a [IrStructDef],
     ) -> Result<Self, String> {
-        let mut locals: HashMap<String, i32> = HashMap::new();
+        let mut locals: HashMap<String, NativeLocal> = HashMap::new();
         let mut next_slot: i32 = 0;
 
         // Parameters first (they will be spilled from registers in the prologue).
+        // Aggregate parameters are deferred, so every param is a single i64 word.
         for param in &function.params {
             next_slot += 8;
-            locals.insert(param.name.clone(), next_slot);
+            locals.insert(
+                param.name.clone(),
+                NativeLocal {
+                    slot: next_slot,
+                    ty: NativeType::I64,
+                },
+            );
         }
 
         // Then `let` and `for` induction locals discovered anywhere in the body.
-        collect_native_locals(&function.instructions, &mut locals, &mut next_slot);
+        collect_native_locals(&function.instructions, structs, &mut locals, &mut next_slot)?;
 
         let has_call = body_has_call(&function.instructions);
         // Reserve local slots plus (if calling) 32 bytes of shadow space.
@@ -825,32 +932,80 @@ impl<'a> NativeCtx<'a> {
         })
     }
 
+    /// The base-word slot displacement of a local (its first `[rbp - slot]`).
     fn local_slot(&self, name: &str) -> Result<i32, String> {
         self.locals
             .get(name)
-            .copied()
+            .map(|local| local.slot)
+            .ok_or_else(|| format!("unknown native local `{name}`"))
+    }
+
+    /// The `(slot, layout)` of a local.
+    fn local(&self, name: &str) -> Result<&NativeLocal, String> {
+        self.locals
+            .get(name)
             .ok_or_else(|| format!("unknown native local `{name}`"))
     }
 }
 
-/// Recursively collect `let`/`for` locals, assigning each a fresh 8-byte slot.
+/// A resolved scalar destination inside an aggregate. A scalar word lives at
+/// `[rbp - disp]` where `disp = base_slot + 8 * (const_words + dynamic_words)`;
+/// `dynamic_words` is `elem_words * index` computed at runtime when the path
+/// crossed a runtime array index, else zero.
+enum ScalarPlace {
+    /// A fully static scalar word at `[rbp - slot]`.
+    Const { slot: i32 },
+    /// A dynamic scalar word. `base_slot` is the enclosing local's first word;
+    /// `const_words` accumulates the static word offset from field hops and
+    /// constant indices; `elem_words` is the per-element word stride of the
+    /// dynamic array; and the runtime index expression selects the element.
+    Dynamic {
+        base_slot: i32,
+        const_words: i64,
+        elem_words: i64,
+        index: BytecodeExpr,
+    },
+}
+
+/// Recursively collect `let`/`for` locals, assigning each contiguous 8-byte-word
+/// slots sized by its `NativeType`. `let` locals with an aggregate layout reserve
+/// one word per flattened scalar; `for` counters and their hidden bound/step are
+/// single i64 words.
 fn collect_native_locals(
     body: &[BytecodeInstruction],
-    locals: &mut HashMap<String, i32>,
+    structs: &[IrStructDef],
+    locals: &mut HashMap<String, NativeLocal>,
     next_slot: &mut i32,
-) {
+) -> Result<(), String> {
     for instruction in body {
         match instruction {
-            BytecodeInstruction::Let { name, .. } => {
-                locals.entry(name.clone()).or_insert_with(|| {
-                    *next_slot += 8;
-                    *next_slot
-                });
+            BytecodeInstruction::Let {
+                name, ty, value, ..
+            } => {
+                if !locals.contains_key(name) {
+                    let native = if ty.name.starts_with("array<") {
+                        native_type_of_init(value, structs)?
+                    } else {
+                        resolve_native_type(ty, structs)?
+                    };
+                    let words = native.words() as i32;
+                    *next_slot += words * 8;
+                    locals.insert(
+                        name.clone(),
+                        NativeLocal {
+                            slot: *next_slot - (words - 1) * 8,
+                            ty: native,
+                        },
+                    );
+                }
             }
             BytecodeInstruction::For { name, body, .. } => {
                 locals.entry(name.clone()).or_insert_with(|| {
                     *next_slot += 8;
-                    *next_slot
+                    NativeLocal {
+                        slot: *next_slot,
+                        ty: NativeType::I64,
+                    }
                 });
                 // Two hidden slots per `for`: the loop bound and the step. Keyed
                 // by the counter name so `lower_native_for` finds the same slots.
@@ -858,10 +1013,13 @@ fn collect_native_locals(
                     let key = format!("{name}{suffix}");
                     locals.entry(key).or_insert_with(|| {
                         *next_slot += 8;
-                        *next_slot
+                        NativeLocal {
+                            slot: *next_slot,
+                            ty: NativeType::I64,
+                        }
                     });
                 }
-                collect_native_locals(body, locals, next_slot);
+                collect_native_locals(body, structs, locals, next_slot)?;
             }
             BytecodeInstruction::If {
                 branches,
@@ -869,16 +1027,17 @@ fn collect_native_locals(
                 ..
             } => {
                 for branch in branches {
-                    collect_native_locals(&branch.body, locals, next_slot);
+                    collect_native_locals(&branch.body, structs, locals, next_slot)?;
                 }
-                collect_native_locals(else_body, locals, next_slot);
+                collect_native_locals(else_body, structs, locals, next_slot)?;
             }
             BytecodeInstruction::While { body, .. } | BytecodeInstruction::Loop { body, .. } => {
-                collect_native_locals(body, locals, next_slot);
+                collect_native_locals(body, structs, locals, next_slot)?;
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// Whether any instruction in a body issues a call (so the frame needs shadow
@@ -957,8 +1116,9 @@ struct NativeLoop {
 fn lower_native_function(
     function: &BytecodeFunction,
     callable: &std::collections::HashSet<&str>,
+    structs: &[IrStructDef],
 ) -> Result<LoweredNativeFunction, String> {
-    let mut ctx = NativeCtx::plan(function, callable)?;
+    let mut ctx = NativeCtx::plan(function, callable, structs)?;
     let mut code = Vec::new();
 
     // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size.
@@ -1060,15 +1220,18 @@ fn lower_native_stmt(
     loops: &mut Vec<NativeLoop>,
 ) -> Result<(), String> {
     match stmt {
-        BytecodeInstruction::Let {
-            name, ty, value, ..
-        } => {
-            if ty.name != "i64" {
-                return Err(format!("`let {name}` has non-i64 type `{}`", ty.name));
+        BytecodeInstruction::Let { name, value, .. } => {
+            // A scalar `let` uses the register path; an aggregate `let`
+            // materializes each flattened scalar word directly into its slots.
+            if matches!(ctx.local(name)?.ty, NativeType::I64) {
+                lower_native_expr(ctx, value, code)?;
+                let slot = ctx.local_slot(name)?;
+                store_local(code, slot); // mov [rbp - slot], rax
+            } else {
+                let base = ctx.local(name)?.slot;
+                let ty = ctx.local(name)?.ty.clone();
+                lower_aggregate_init(ctx, base, &ty, value, code)?;
             }
-            lower_native_expr(ctx, value, code)?;
-            let slot = ctx.local_slot(name)?;
-            store_local(code, slot); // mov [rbp - slot], rax
             Ok(())
         }
         BytecodeInstruction::Assign {
@@ -1078,19 +1241,25 @@ fn lower_native_stmt(
             value,
             ..
         } => {
-            if !path.is_empty() {
-                return Err("field/index assignment is not in the native subset".to_string());
-            }
-            let slot = ctx.local_slot(name)?;
+            let place = resolve_scalar_place(ctx, name, path)?;
             match op {
                 AssignOp::Replace => {
-                    lower_native_expr(ctx, value, code)?;
+                    // Evaluate the RHS, then store into the resolved scalar slot.
+                    match place {
+                        ScalarPlace::Const { slot } => {
+                            lower_native_expr(ctx, value, code)?;
+                            store_local(code, slot);
+                        }
+                        ScalarPlace::Dynamic { .. } => {
+                            lower_native_expr(ctx, value, code)?;
+                            code.push(0x50); // push rax (value)
+                            emit_dynamic_addr_into_rcx(ctx, &place, code)?; // rcx = &slot
+                            code.push(0x58); // pop rax (value)
+                            code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                        }
+                    }
                 }
                 other => {
-                    // rax = local <op> value
-                    load_local(code, slot); // mov rax, [rbp - slot]
-                    code.push(0x50); // push rax (left)
-                    lower_native_expr(ctx, value, code)?; // rax = right
                     let bin = match other {
                         AssignOp::Add => BinaryOp::Add,
                         AssignOp::Subtract => BinaryOp::Subtract,
@@ -1098,10 +1267,28 @@ fn lower_native_stmt(
                         AssignOp::Divide => BinaryOp::Divide,
                         AssignOp::Replace => unreachable!(),
                     };
-                    emit_i64_binop_from_stack(code, bin)?;
+                    match place {
+                        ScalarPlace::Const { slot } => {
+                            load_local(code, slot); // rax = current
+                            code.push(0x50); // push rax (left)
+                            lower_native_expr(ctx, value, code)?; // rax = right
+                            emit_i64_binop_from_stack(code, bin)?;
+                            store_local(code, slot);
+                        }
+                        ScalarPlace::Dynamic { .. } => {
+                            // Compute &slot into rcx and keep it across the op.
+                            emit_dynamic_addr_into_rcx(ctx, &place, code)?;
+                            code.push(0x51); // push rcx (address)
+                            code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx] (left)
+                            code.push(0x50); // push rax (left)
+                            lower_native_expr(ctx, value, code)?; // rax = right
+                            emit_i64_binop_from_stack(code, bin)?; // rax = left <op> right
+                            code.push(0x59); // pop rcx (address)
+                            code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                        }
+                    }
                 }
             }
-            store_local(code, slot);
             Ok(())
         }
         BytecodeInstruction::Return(Some(expr)) => {
@@ -1163,6 +1350,275 @@ fn lower_native_stmt(
         }
         BytecodeInstruction::Match { .. } => Err("match is not in the native subset".to_string()),
     }
+}
+
+// -- Stack aggregate lowering (init, place resolution, addressing) -----------
+
+/// Materialize an aggregate value into the contiguous stack words beginning at
+/// `base_slot`. Three initializer shapes are supported, mirroring how the IR
+/// lowerer represents construction:
+///   * an array literal `[e0, e1, ...]` -> each element materialized in turn;
+///   * a struct constructor `Call { name: StructName, args }` -> each field in
+///     declared order (the IR already reorders named fields);
+///   * an aggregate variable `x` -> a word-by-word copy of another local.
+fn lower_aggregate_init(
+    ctx: &mut NativeCtx,
+    base_slot: i32,
+    ty: &NativeType,
+    value: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    match (&value.kind, ty) {
+        (BytecodeExprKind::Array(elements), NativeType::Array { elem, len }) => {
+            if elements.len() != *len {
+                return Err("array literal length does not match layout".to_string());
+            }
+            let stride = elem.words() as i32;
+            for (index, element) in elements.iter().enumerate() {
+                let word = base_slot + index as i32 * stride * 8;
+                lower_value_into(ctx, word, elem, element, code)?;
+            }
+            Ok(())
+        }
+        (
+            BytecodeExprKind::Call { name, args },
+            NativeType::Struct {
+                name: sname,
+                fields,
+            },
+        ) => {
+            if name != sname {
+                return Err(format!(
+                    "constructor `{name}` does not match struct layout `{sname}`"
+                ));
+            }
+            if args.len() != fields.len() {
+                return Err(format!("constructor `{name}` has wrong field count"));
+            }
+            let mut word = base_slot;
+            for (arg, (_, field_ty)) in args.iter().zip(fields.iter()) {
+                lower_value_into(ctx, word, field_ty, arg, code)?;
+                word += field_ty.words() as i32 * 8;
+            }
+            Ok(())
+        }
+        (BytecodeExprKind::Variable(source), _) => {
+            // Aggregate copy: duplicate the source local word-by-word.
+            let src = ctx.local(source)?;
+            if &src.ty != ty {
+                return Err("aggregate copy between differing layouts".to_string());
+            }
+            let src_slot = src.slot;
+            for word in 0..ty.words() as i32 {
+                load_local(code, src_slot + word * 8);
+                store_local(code, base_slot + word * 8);
+            }
+            Ok(())
+        }
+        _ => Err("initializer is not a native aggregate constructor".to_string()),
+    }
+}
+
+/// Materialize `value` (of layout `ty`) into the stack word(s) at `word_slot`.
+/// Scalars go through the register path; nested aggregates recurse.
+fn lower_value_into(
+    ctx: &mut NativeCtx,
+    word_slot: i32,
+    ty: &NativeType,
+    value: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    match ty {
+        NativeType::I64 => {
+            lower_native_expr(ctx, value, code)?;
+            store_local(code, word_slot);
+            Ok(())
+        }
+        _ => lower_aggregate_init(ctx, word_slot, ty, value, code),
+    }
+}
+
+/// One hop of an aggregate access path: a struct field name or an array index
+/// expression. Shared between statement-side (`Assign` path) and read-side
+/// (`Field`/`Index` expression) resolution.
+enum PathStep<'a> {
+    Field(&'a str),
+    Index(&'a BytecodeExpr),
+}
+
+/// Walk a root local plus a list of field/index steps down to a single scalar
+/// word, accumulating a constant word offset and, if a runtime index is
+/// encountered, deferring to a `Dynamic` place. A constant integer-literal index
+/// folds into the constant offset (so `xs[2]` stays static); any other index
+/// expression makes the place dynamic. The final layout must be `i64`.
+fn resolve_place_steps(
+    ctx: &NativeCtx,
+    root: &str,
+    steps: &[PathStep],
+) -> Result<ScalarPlace, String> {
+    let local = ctx.local(root)?;
+    let base_slot = local.slot;
+    let mut ty = local.ty.clone();
+    let mut const_words: i64 = 0;
+    let mut dynamic: Option<(i64, BytecodeExpr)> = None;
+
+    for step in steps {
+        match (step, &ty) {
+            (PathStep::Field(field), NativeType::Struct { fields, .. }) => {
+                let mut offset = 0i64;
+                let mut found = None;
+                for (fname, fty) in fields {
+                    if fname == *field {
+                        found = Some(fty.clone());
+                        break;
+                    }
+                    offset += fty.words() as i64;
+                }
+                let fty = found.ok_or_else(|| format!("unknown field `{field}`"))?;
+                const_words += offset;
+                ty = fty;
+            }
+            (PathStep::Index(index), NativeType::Array { elem, .. }) => {
+                let stride = elem.words() as i64;
+                if let BytecodeExprKind::Integer(literal) = index.kind {
+                    const_words += literal * stride;
+                } else if dynamic.is_none() {
+                    dynamic = Some((stride, (*index).clone()));
+                } else {
+                    return Err(
+                        "at most one runtime array index is supported per access".to_string()
+                    );
+                }
+                ty = (**elem).clone();
+            }
+            (PathStep::Field(_), _) => {
+                return Err("field access on a non-struct native value".to_string());
+            }
+            (PathStep::Index(_), _) => {
+                return Err("index access on a non-array native value".to_string());
+            }
+        }
+    }
+
+    if ty != NativeType::I64 {
+        return Err("native access must resolve to an i64 scalar".to_string());
+    }
+
+    match dynamic {
+        None => Ok(ScalarPlace::Const {
+            slot: base_slot + const_words as i32 * 8,
+        }),
+        Some((elem_words, index)) => Ok(ScalarPlace::Dynamic {
+            base_slot,
+            const_words,
+            elem_words,
+            index,
+        }),
+    }
+}
+
+/// Resolve an assignment target `(name, path)` to a scalar place.
+fn resolve_scalar_place(
+    ctx: &NativeCtx,
+    name: &str,
+    path: &[BytecodePlace],
+) -> Result<ScalarPlace, String> {
+    let steps: Vec<PathStep> = path
+        .iter()
+        .map(|place| match place {
+            BytecodePlace::Field(field) => PathStep::Field(field.as_str()),
+            BytecodePlace::Index(index) => PathStep::Index(index),
+        })
+        .collect();
+    resolve_place_steps(ctx, name, &steps)
+}
+
+/// Decompose a nested `Field`/`Index` read expression into a root variable and
+/// an ordered list of steps, then resolve it to a scalar place. Returns `None`
+/// (as an `Err`) if the expression is not an aggregate-rooted lvalue.
+fn resolve_read_place(ctx: &NativeCtx, expr: &BytecodeExpr) -> Result<ScalarPlace, String> {
+    let mut steps: Vec<PathStep> = Vec::new();
+    let mut cursor = expr;
+    let root = loop {
+        match &cursor.kind {
+            BytecodeExprKind::Variable(name) => break name.as_str(),
+            BytecodeExprKind::Field { target, field } => {
+                steps.push(PathStep::Field(field.as_str()));
+                cursor = target;
+            }
+            BytecodeExprKind::Index { target, index } => {
+                steps.push(PathStep::Index(index));
+                cursor = target;
+            }
+            _ => return Err("native access must be rooted at a local variable".to_string()),
+        }
+    };
+    steps.reverse();
+    resolve_place_steps(ctx, root, &steps)
+}
+
+/// Load the i64 scalar at a resolved place into `rax`.
+fn emit_load_place(
+    ctx: &mut NativeCtx,
+    place: &ScalarPlace,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    match place {
+        ScalarPlace::Const { slot } => {
+            load_local(code, *slot);
+            Ok(())
+        }
+        ScalarPlace::Dynamic { .. } => {
+            emit_dynamic_addr_into_rcx(ctx, place, code)?; // rcx = &word
+            code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+            Ok(())
+        }
+    }
+}
+
+/// Compute the effective address of a dynamic scalar word into `rcx`:
+/// `rcx = rbp - (base_slot + 8*const_words) - 8*elem_words*index`.
+/// Leaves the stack balanced.
+fn emit_dynamic_addr_into_rcx(
+    ctx: &mut NativeCtx,
+    place: &ScalarPlace,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let ScalarPlace::Dynamic {
+        base_slot,
+        const_words,
+        elem_words,
+        index,
+    } = place
+    else {
+        return Err("expected a dynamic place".to_string());
+    };
+    // rax = index
+    lower_native_expr(ctx, index, code)?;
+    // rax = index * elem_words   (imul rax, rax, imm32)
+    emit_imul_rax_imm(code, *elem_words);
+    // rax = rax * 8  -> byte stride  (shl rax, 3)
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]);
+    // rcx = rbp
+    code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+    // rcx = rcx - rax  (subtract the dynamic byte offset)
+    code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+    // rcx = rcx - (base_slot + 8*const_words)  (the static displacement)
+    let static_disp = *base_slot + (*const_words as i32) * 8;
+    emit_sub_rcx_imm(code, static_disp);
+    Ok(())
+}
+
+/// `imul rax, rax, imm32`.
+fn emit_imul_rax_imm(code: &mut Vec<u8>, imm: i64) {
+    code.extend_from_slice(&[0x48, 0x69, 0xC0]);
+    code.extend_from_slice(&(imm as i32).to_le_bytes());
+}
+
+/// `sub rcx, imm32` (imm may be any i32; encodes the 32-bit immediate form).
+fn emit_sub_rcx_imm(code: &mut Vec<u8>, imm: i32) {
+    code.extend_from_slice(&[0x48, 0x81, 0xE9]);
+    code.extend_from_slice(&imm.to_le_bytes());
 }
 
 /// Lower an `if`/`elif`/`else` chain. Each branch: evaluate condition into rax,
@@ -1398,6 +1854,17 @@ fn lower_native_expr(
             lower_native_binary(ctx, left, *op, right, code)
         }
         BytecodeExprKind::Call { name, args } => {
+            // `len(arr)` over a fixed native array folds to a compile-time
+            // constant (arrays never grow in the native subset).
+            if name == "len"
+                && args.len() == 1
+                && let BytecodeExprKind::Variable(var) = &args[0].kind
+                && let Ok(local) = ctx.local(var)
+                && let NativeType::Array { len, .. } = &local.ty
+            {
+                emit_mov_rax_imm(code, *len as i64);
+                return Ok(());
+            }
             if !ctx.callable.contains(name.as_str()) {
                 return Err(format!(
                     "call to non-i64-scalar or unknown function `{name}`"
@@ -1435,13 +1902,17 @@ fn lower_native_expr(
             });
             Ok(())
         }
+        BytecodeExprKind::Field { .. } | BytecodeExprKind::Index { .. } => {
+            // A struct-field or array-index read yielding an i64 scalar. Resolve
+            // the access to a stack word and load it into rax.
+            let place = resolve_read_place(ctx, expr)?;
+            emit_load_place(ctx, &place, code)
+        }
         BytecodeExprKind::Bool(_)
         | BytecodeExprKind::Float(_)
         | BytecodeExprKind::Char(_)
         | BytecodeExprKind::String(_)
-        | BytecodeExprKind::Array(_)
-        | BytecodeExprKind::Index { .. }
-        | BytecodeExprKind::Field { .. } => {
+        | BytecodeExprKind::Array(_) => {
             Err("expression is not in the native i64-scalar subset".to_string())
         }
     }
@@ -2142,5 +2613,80 @@ mod native_program_tests {
                 .any(|w| w == b"accumulate_total"),
             "long symbol name stored"
         );
+    }
+
+    #[test]
+    fn compiles_all_i64_struct_locals() {
+        // A `main` that builds a struct positionally and by name, mutates a
+        // field, and reads fields is eligible: it compiles with no skips.
+        let program = emit_alpha1_native_program(&module_for(
+            "struct Point\n    x i64\n    y i64\n\nfn main -> i64\n    let p Point = Point(3, 4)\n    let q Point = Point(y: 10, x: 20)\n    p.x = p.x + 5\n    return p.x + q.y\n",
+        ))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(
+            program.skipped.is_empty(),
+            "no skips: {:?}",
+            program.skipped
+        );
+    }
+
+    #[test]
+    fn compiles_fixed_i64_array_with_const_and_dynamic_index() {
+        // Fixed array: constant-index write, compound-index write, `len`, and a
+        // dynamic-index read inside a `for` loop. All in the native subset.
+        let program = emit_alpha1_native_program(&module_for(
+            "fn main -> i64\n    let xs array<i64> = [1, 2, 3, 4]\n    xs[0] = 10\n    xs[3] += 6\n    let total i64 = 0\n    for i from 0 to len(xs) - 1\n        total += xs[i]\n    return total\n",
+        ))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(
+            program.skipped.is_empty(),
+            "no skips: {:?}",
+            program.skipped
+        );
+    }
+
+    #[test]
+    fn skips_struct_with_non_i64_field() {
+        // A struct with a `string` field is not an all-i64 native type; a `main`
+        // that constructs it is demoted to skipped, and since nothing else is
+        // eligible the emitter reports `L0339`.
+        let err = emit_alpha1_native_program(&module_for(
+            "struct Tagged\n    id i64\n    name string\n\nfn main -> i64\n    let t Tagged = Tagged(1, \"x\")\n    return t.id\n",
+        ))
+        .expect_err("string-field struct is not native");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(err.skipped.iter().any(|s| s.name == "main"));
+    }
+
+    #[test]
+    fn native_type_words_flatten_nested_aggregates() {
+        // Layout sizing: a nested all-i64 struct and a fixed array flatten to the
+        // expected word counts.
+        let structs = vec![
+            IrStructDef {
+                name: "Pair".to_string(),
+                fields: vec![
+                    ("a".to_string(), TypeRef::new("i64")),
+                    ("b".to_string(), TypeRef::new("i64")),
+                ],
+            },
+            IrStructDef {
+                name: "Line".to_string(),
+                fields: vec![
+                    ("start".to_string(), TypeRef::new("Pair")),
+                    ("end".to_string(), TypeRef::new("Pair")),
+                ],
+            },
+        ];
+        let line = resolve_native_type(&TypeRef::new("Line"), &structs).expect("resolve Line");
+        assert_eq!(line.words(), 4, "Line flattens to four i64 words");
+
+        let array = NativeType::Array {
+            elem: Box::new(NativeType::I64),
+            len: 5,
+        };
+        assert_eq!(array.words(), 5);
     }
 }

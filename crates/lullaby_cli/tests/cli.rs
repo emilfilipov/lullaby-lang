@@ -2572,6 +2572,61 @@ fn native_execution_parity_when_linkable() {
     );
 }
 
+/// Best-effort execution parity for the stack-aggregate subset: native-compile
+/// a program that builds a struct and sums a fixed i64 array, then assert the
+/// linked `.exe`'s exit code equals the interpreter's `main` result (mod 256).
+/// Gated on `rust-lld` + `kernel32.lib` exactly like the scalar parity test.
+#[test]
+fn native_aggregates_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/native_aggregates.lby");
+    let out = std::env::temp_dir().join("lullaby_native_aggregates_parity.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    // `main` uses only i64 scalars, an all-i64 struct, and a fixed i64 array, so
+    // it is eligible for native codegen.
+    assert!(
+        stdout(&emit).contains("compiled main"),
+        "expected `main` compiled: {}",
+        stdout(&emit)
+    );
+
+    // Interpreter ground truth for `main`.
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 43, "aggregates fixture main computes 43");
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib (via the LIB env var) not available; \
+             skipping native aggregates link+run parity"
+        );
+        return;
+    }
+
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(
+        exit,
+        (interp.rem_euclid(256)) as i32,
+        "native exit code must equal the interpreter result (mod 256)"
+    );
+}
+
 #[test]
 fn test_runner_passes_on_demo_suite() {
     // The user-facing demo test suite has four `test_*` functions that all pass
