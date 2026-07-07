@@ -14,7 +14,7 @@ use lullaby_ir::{
     run_main as run_ir_main,
 };
 use lullaby_lexer::{Diagnostic, lex, validate_source_path};
-use lullaby_parser::{Program, parse};
+use lullaby_parser::{Program, format_program, parse};
 use lullaby_runtime::{ErrorCategory, RuntimeError, Value, run_main};
 use lullaby_semantics::{CheckedProgram, validate, validate_executable};
 
@@ -44,6 +44,7 @@ fn run() -> Result<(), String> {
         ),
         CommandName::Docs => docs(),
         CommandName::Examples => examples(),
+        CommandName::Fmt => fmt_file(invocation.path, invocation.write),
         CommandName::Inspect => inspect_bytecode_artifact(invocation.path, invocation.mode),
         CommandName::Run => run_file(
             invocation.path,
@@ -60,6 +61,51 @@ fn run() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Format a `.lby` source file: print the canonical rendering to stdout, or
+/// rewrite the file in place with `--write`.
+fn fmt_file(path: PathBuf, write: bool) -> Result<(), String> {
+    if let Err(diagnostic) = validate_source_path(&path) {
+        return Err(format_reports(
+            &[frontend_report(diagnostic, DiagnosticPhase::Source, &path)],
+            OutputMode::Concise,
+            None,
+        ));
+    }
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    let tokens = lex(&source).map_err(|diagnostics| {
+        format_reports(
+            &diagnostics
+                .into_iter()
+                .map(|diagnostic| frontend_report(diagnostic, DiagnosticPhase::Lexer, &path))
+                .collect::<Vec<_>>(),
+            OutputMode::Concise,
+            Some(&source),
+        )
+    })?;
+    let program = parse(&tokens).map_err(|diagnostics| {
+        format_reports(
+            &diagnostics
+                .into_iter()
+                .map(|diagnostic| frontend_report(diagnostic, DiagnosticPhase::Parser, &path))
+                .collect::<Vec<_>>(),
+            OutputMode::Concise,
+            Some(&source),
+        )
+    })?;
+    let formatted = format_program(&program);
+    if write {
+        if formatted != source {
+            fs::write(&path, &formatted)
+                .map_err(|error| format!("failed to write `{}`: {error}", path.display()))?;
+            println!("formatted {}", path.display());
+        }
+    } else {
+        print!("{formatted}");
+    }
+    Ok(())
 }
 
 fn examples() -> Result<(), String> {
@@ -672,6 +718,8 @@ struct Invocation {
     mode: OutputMode,
     backend: Backend,
     optimization: OptimizationMode,
+    /// `fmt --write`: rewrite the file in place instead of printing to stdout.
+    write: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -681,6 +729,7 @@ enum CommandName {
     Compile,
     Docs,
     Examples,
+    Fmt,
     Inspect,
     Run,
     Version,
@@ -747,6 +796,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
+                    write: false,
                 }))
             } else {
                 Err("usage: lullaby --version".to_string())
@@ -761,6 +811,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
+                    write: false,
                 }))
             } else {
                 Err("usage: lullaby --help".to_string())
@@ -775,6 +826,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
+                    write: false,
                 }))
             } else {
                 Err("usage: lullaby docs".to_string())
@@ -789,6 +841,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
+                    write: false,
                 }))
             } else {
                 Err("usage: lullaby examples".to_string())
@@ -797,6 +850,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
         "build" | "check" | "compile" | "inspect" | "run" => {
             parse_file_command(command, &args[1..])
         }
+        "fmt" => parse_fmt_command(&args[1..]),
         other => Err(format!("unknown command `{other}`\n\nrun `lullaby --help`")),
     }
 }
@@ -902,6 +956,40 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
         mode,
         backend,
         optimization,
+        write: false,
+    }))
+}
+
+fn parse_fmt_command(args: &[String]) -> Result<Option<Invocation>, String> {
+    let usage = "usage: lullaby fmt [--write] <file.lby>".to_string();
+    let mut write = false;
+    let mut cursor = 0;
+    while let Some(arg) = args.get(cursor) {
+        match arg.as_str() {
+            "--write" | "-w" => {
+                if write {
+                    return Err(usage);
+                }
+                write = true;
+                cursor += 1;
+            }
+            _ => break,
+        }
+    }
+    let Some(path) = args.get(cursor) else {
+        return Err(usage);
+    };
+    if args.get(cursor + 1).is_some() {
+        return Err(usage);
+    }
+    Ok(Some(Invocation {
+        command: CommandName::Fmt,
+        path: PathBuf::from(path),
+        output: None,
+        mode: OutputMode::Concise,
+        backend: Backend::Ast,
+        optimization: OptimizationMode::None,
+        write,
     }))
 }
 
@@ -917,7 +1005,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
+        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby fmt [--write] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
         env!("CARGO_PKG_VERSION")
     );
 }

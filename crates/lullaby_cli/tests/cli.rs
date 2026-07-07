@@ -34,6 +34,39 @@ fn checks_valid_fixture() {
 }
 
 #[test]
+fn fmt_prints_canonical_source_and_is_idempotent() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_match.lby");
+    let first = lullaby()
+        .args(["fmt", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(first.status.success(), "{first:?}");
+    let formatted = stdout(&first);
+    assert!(formatted.contains("match s"), "{formatted}");
+
+    // Formatting an already-canonical fixture is a no-op, and re-formatting the
+    // output through a temp file yields identical text.
+    let tmp = std::env::temp_dir().join("lullaby_fmt_roundtrip.lby");
+    std::fs::write(&tmp, &formatted).expect("write temp");
+    let second = lullaby()
+        .args(["fmt", tmp.to_str().expect("temp path")])
+        .output()
+        .expect("run cli");
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(formatted, stdout(&second));
+}
+
+#[test]
+fn fmt_rejects_non_lby_extension() {
+    let output = lullaby()
+        .args(["fmt", "does_not_exist.txt"])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("L0001"), "{}", stderr(&output));
+}
+
+#[test]
 fn checks_valid_fixture_as_json() {
     let fixture = workspace_root().join("tests/fixtures/valid/add.lby");
     let output = lullaby()

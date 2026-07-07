@@ -1,6 +1,9 @@
 use lullaby_lexer::{Diagnostic, Keyword, Span, Token, TokenKind};
 use serde::{Deserialize, Serialize};
 
+mod format;
+pub use format::format_program;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     pub functions: Vec<Function>,
