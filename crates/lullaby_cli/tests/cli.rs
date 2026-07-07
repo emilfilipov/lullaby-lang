@@ -1553,3 +1553,125 @@ fn run_env_builtin_reads_process_environment() {
 
     let _ = std::fs::remove_file(&prog);
 }
+
+/// A fresh temp directory for a file-system test, using forward slashes so the
+/// path can be embedded in a `.lby` string literal on every platform (Windows
+/// accepts `/` in `std::fs` paths). The directory is recreated empty.
+fn fs_temp_dir(test_name: &str) -> (std::path::PathBuf, String) {
+    let dir = std::env::temp_dir().join(format!("lullaby_cli_{test_name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let lby = dir.to_string_lossy().replace('\\', "/");
+    (dir, lby)
+}
+
+#[test]
+fn run_write_bytes_read_bytes_round_trip_on_all_backends() {
+    // Write raw bytes, read them back, and reconstruct their numeric sum. The
+    // program is deterministic and each backend runs against its own file.
+    for backend in ["ast", "ir", "bytecode"] {
+        let (dir, base) = fs_temp_dir(&format!("bytes_{backend}"));
+        let path = format!("{base}/data.bin");
+        let source = format!(
+            "fn main -> i64\n    \
+             let data list<byte> = list_new()\n    \
+             data = push(data, byte(72))\n    \
+             data = push(data, byte(105))\n    \
+             data = push(data, byte(33))\n    \
+             write_bytes(\"{path}\", data)\n    \
+             let back list<byte> = read_bytes(\"{path}\")\n    \
+             byte_val(get(back, 0)) + byte_val(get(back, 1)) + byte_val(get(back, 2)) + len(back)\n"
+        );
+        let prog = dir.join("prog.lby");
+        std::fs::write(&prog, source).expect("write program");
+
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                prog.to_str().expect("program path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // 72 + 105 + 33 + 3 == 213
+        assert_eq!(stdout(&output).trim(), "213", "{backend}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn run_read_lines_and_file_size_on_all_backends() {
+    for backend in ["ast", "ir", "bytecode"] {
+        let (dir, base) = fs_temp_dir(&format!("lines_{backend}"));
+        let path = format!("{base}/notes.txt");
+        // Seed the file from the harness (a `.lby` string literal cannot hold a
+        // raw newline). "a\nbb\nccc" is 8 bytes and three lines.
+        std::fs::write(dir.join("notes.txt"), "a\nbb\nccc").expect("seed file");
+        let source = format!(
+            "fn main -> i64\n    \
+             let lines list<string> = read_lines(\"{path}\")\n    \
+             let size i64 = file_size(\"{path}\")\n    \
+             len(lines) * 100 + size\n"
+        );
+        let prog = dir.join("prog.lby");
+        std::fs::write(&prog, source).expect("write program");
+
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                prog.to_str().expect("program path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // 3 lines * 100 + 8 bytes == 308
+        assert_eq!(stdout(&output).trim(), "308", "{backend}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn run_directory_builtins_on_all_backends() {
+    for backend in ["ast", "ir", "bytecode"] {
+        let (dir, base) = fs_temp_dir(&format!("dirs_{backend}"));
+        let sub = format!("{base}/nested");
+        let file = format!("{sub}/one.txt");
+        // Create a directory, put one file in it, list it, then tear it down.
+        let source = format!(
+            "fn flag b bool -> i64\n    if b\n        1\n    else\n        0\n\n\
+             fn main -> i64\n    \
+             make_dir(\"{sub}\")\n    \
+             write_file(\"{file}\", \"x\")\n    \
+             let is_d bool = is_dir(\"{sub}\")\n    \
+             let is_f bool = is_file(\"{file}\")\n    \
+             let entries list<string> = list_dir(\"{sub}\")\n    \
+             remove_file(\"{file}\")\n    \
+             remove_dir(\"{sub}\")\n    \
+             let gone bool = is_dir(\"{sub}\")\n    \
+             flag(is_d) * 1000 + flag(is_f) * 100 + len(entries) * 10 + flag(gone)\n"
+        );
+        let prog = dir.join("prog.lby");
+        std::fs::write(&prog, source).expect("write program");
+
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                prog.to_str().expect("program path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // is_dir=1 -> 1000, is_file=1 -> 100, 1 entry -> 10, gone=false -> 0 == 1110
+        assert_eq!(stdout(&output).trim(), "1110", "{backend}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -2436,6 +2436,37 @@ impl<'a> Checker<'a> {
                 self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
                 Some(TypeRef::new("bool"))
             }
+            "read_lines" | "list_dir" => {
+                self.expect_fs_arg_count(name, args, 1, function)?;
+                self.expect_fs_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("list<string>"))
+            }
+            "read_bytes" => {
+                self.expect_fs_arg_count(name, args, 1, function)?;
+                self.expect_fs_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("list<byte>"))
+            }
+            "write_bytes" => {
+                self.expect_fs_arg_count(name, args, 2, function)?;
+                self.expect_fs_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_fs_arg_type(name, 2, &args[1], "list<byte>", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "file_size" => {
+                self.expect_fs_arg_count(name, args, 1, function)?;
+                self.expect_fs_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "is_file" | "is_dir" => {
+                self.expect_fs_arg_count(name, args, 1, function)?;
+                self.expect_fs_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("bool"))
+            }
+            "make_dir" | "remove_file" | "remove_dir" => {
+                self.expect_fs_arg_count(name, args, 1, function)?;
+                self.expect_fs_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
             "sys_status" | "sys_output" => {
                 self.expect_arg_count(name, args, 2, function)?;
                 self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
@@ -3745,6 +3776,64 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Validate a file-system builtin argument count, reporting `L0333` on a
+    /// mismatch.
+    fn expect_fs_arg_count(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: usize,
+        function: &Function,
+    ) -> Option<()> {
+        if args.len() == expected {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0333",
+                format!(
+                    "file-system builtin `{name}` expects {expected} arguments but got {}",
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                args.first().map(|arg| arg.span).unwrap_or(function.span),
+            ));
+            None
+        }
+    }
+
+    /// Validate a file-system builtin argument type, reporting `L0333` on a
+    /// mismatch.
+    fn expect_fs_arg_type(
+        &mut self,
+        name: &str,
+        index: usize,
+        arg: &Expr,
+        expected: &str,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<()> {
+        let expected = TypeRef::new(expected);
+        let actual = self.check_expr(arg, scope, function);
+        if actual.as_ref() == Some(&expected) {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0333",
+                format!(
+                    "argument {index} for `{name}` must be `{}` but got `{}`",
+                    expected.name,
+                    actual
+                        .as_ref()
+                        .map(|ty| ty.name.as_str())
+                        .unwrap_or("<unknown>")
+                ),
+                Some(function.name.clone()),
+                arg.span,
+            ));
+            None
+        }
+    }
+
     /// Validate a `char`/`byte` builtin argument against an expected type,
     /// reporting `L0389` on a mismatch.
     fn expect_scalar_builtin_arg(
@@ -4765,6 +4854,44 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0313")
+        );
+    }
+
+    #[test]
+    fn catches_fs_builtin_argument_type_mismatch() {
+        // A non-`string` path to a file-system builtin reports the dedicated
+        // `L0333` code.
+        let diagnostics =
+            validate_source("fn bad -> i64\n    file_size(1)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0333")
+        );
+    }
+
+    #[test]
+    fn catches_fs_builtin_arity_mismatch() {
+        // Wrong arity for a file-system builtin also reports `L0333`.
+        let diagnostics =
+            validate_source("fn bad -> void\n    make_dir()\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0333")
+        );
+    }
+
+    #[test]
+    fn catches_write_bytes_data_type_mismatch() {
+        // `write_bytes` requires a `list<byte>` data argument.
+        let diagnostics =
+            validate_source("fn bad -> void\n    write_bytes(\"p\", \"not bytes\")\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0333")
         );
     }
 

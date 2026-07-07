@@ -3471,6 +3471,16 @@ impl<'a> IrRuntime<'a> {
             "write_file" => self.builtin_write_file(args),
             "append_file" => self.builtin_append_file(args),
             "file_exists" => self.builtin_file_exists(args),
+            "read_lines" => self.builtin_read_lines(args),
+            "read_bytes" => self.builtin_read_bytes(args),
+            "write_bytes" => self.builtin_write_bytes(args),
+            "file_size" => self.builtin_file_size(args),
+            "is_file" => self.builtin_is_file(args),
+            "is_dir" => self.builtin_is_dir(args),
+            "list_dir" => self.builtin_list_dir(args),
+            "make_dir" => self.builtin_make_dir(args),
+            "remove_file" => self.builtin_remove_file(args),
+            "remove_dir" => self.builtin_remove_dir(args),
             "sys_status" => self.builtin_sys_status(args),
             "sys_output" => self.builtin_sys_output(args),
             "print" => self.builtin_print("print", args, false),
@@ -4087,6 +4097,156 @@ impl<'a> IrRuntime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("file_exists", 1, args.len()))?;
         Ok(Value::Bool(fs::metadata(path.as_string()?).is_ok()))
+    }
+
+    fn builtin_read_lines(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("read_lines", 1, args.len()))?;
+        let path = path.as_string()?;
+        let contents = fs::read_to_string(&path).map_err(|error| {
+            RuntimeError::resource("L0414", format!("failed to read `{path}`: {error}"))
+        })?;
+        Ok(Value::Array(
+            contents
+                .lines()
+                .map(|line| Value::String(line.to_string()))
+                .collect(),
+        ))
+    }
+
+    fn builtin_read_bytes(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("read_bytes", 1, args.len()))?;
+        let path = path.as_string()?;
+        let bytes = fs::read(&path).map_err(|error| {
+            RuntimeError::resource("L0414", format!("failed to read `{path}`: {error}"))
+        })?;
+        Ok(Value::Array(bytes.into_iter().map(Value::Byte).collect()))
+    }
+
+    fn builtin_write_bytes(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path, data]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("write_bytes", 2, args.len()))?;
+        let path = path.as_string()?;
+        let bytes = Self::value_to_bytes("write_bytes", data)?;
+        fs::write(&path, bytes)
+            .map(|()| Value::Void)
+            .map_err(|error| {
+                RuntimeError::resource("L0415", format!("failed to write `{path}`: {error}"))
+            })
+    }
+
+    /// Convert a `list<byte>` (`Value::Array` of `Value::Byte`) to raw bytes,
+    /// erroring on a non-array or a non-byte element.
+    fn value_to_bytes(name: &str, value: Value) -> Result<Vec<u8>, RuntimeError> {
+        let Value::Array(values) = value else {
+            return Err(RuntimeError::new(
+                "L0418",
+                format!("{name} expects a `list<byte>` value"),
+            ));
+        };
+        values
+            .into_iter()
+            .map(|element| match element {
+                Value::Byte(b) => Ok(b),
+                other => Err(RuntimeError::new(
+                    "L0418",
+                    format!("{name} expects `list<byte>` but found `{other}`"),
+                )),
+            })
+            .collect()
+    }
+
+    fn builtin_file_size(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("file_size", 1, args.len()))?;
+        let path = path.as_string()?;
+        let metadata = fs::metadata(&path).map_err(|error| {
+            RuntimeError::resource("L0414", format!("failed to read `{path}`: {error}"))
+        })?;
+        Ok(Value::I64(metadata.len() as i64))
+    }
+
+    fn builtin_is_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("is_file", 1, args.len()))?;
+        Ok(Value::Bool(
+            fs::metadata(path.as_string()?)
+                .map(|m| m.is_file())
+                .unwrap_or(false),
+        ))
+    }
+
+    fn builtin_is_dir(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("is_dir", 1, args.len()))?;
+        Ok(Value::Bool(
+            fs::metadata(path.as_string()?)
+                .map(|m| m.is_dir())
+                .unwrap_or(false),
+        ))
+    }
+
+    fn builtin_list_dir(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_dir", 1, args.len()))?;
+        let path = path.as_string()?;
+        let entries = fs::read_dir(&path).map_err(|error| {
+            RuntimeError::resource("L0414", format!("failed to read `{path}`: {error}"))
+        })?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                RuntimeError::resource("L0414", format!("failed to read `{path}`: {error}"))
+            })?;
+            names.push(Value::String(
+                entry.file_name().to_string_lossy().to_string(),
+            ));
+        }
+        Ok(Value::Array(names))
+    }
+
+    fn builtin_make_dir(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("make_dir", 1, args.len()))?;
+        let path = path.as_string()?;
+        fs::create_dir_all(&path)
+            .map(|()| Value::Void)
+            .map_err(|error| {
+                RuntimeError::resource("L0415", format!("failed to create `{path}`: {error}"))
+            })
+    }
+
+    fn builtin_remove_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("remove_file", 1, args.len()))?;
+        let path = path.as_string()?;
+        fs::remove_file(&path)
+            .map(|()| Value::Void)
+            .map_err(|error| {
+                RuntimeError::resource("L0415", format!("failed to remove `{path}`: {error}"))
+            })
+    }
+
+    fn builtin_remove_dir(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [path]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("remove_dir", 1, args.len()))?;
+        let path = path.as_string()?;
+        fs::remove_dir(&path)
+            .map(|()| Value::Void)
+            .map_err(|error| {
+                RuntimeError::resource("L0415", format!("failed to remove `{path}`: {error}"))
+            })
     }
 
     fn builtin_sys_status(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -5676,12 +5836,17 @@ impl<'a> Lowerer<'a> {
                         IrLoweringError::new("load call argument is not a pointer", Some(span))
                     })?
             }
-            "store" | "dealloc" | "write_file" | "append_file" | "print" | "println" | "warn"
-            | "flush" | "rc_release" | "ptr_write" | "region_create" => TypeRef::new("void"),
+            "store" | "dealloc" | "write_file" | "append_file" | "write_bytes" | "make_dir"
+            | "remove_file" | "remove_dir" | "print" | "println" | "warn" | "flush"
+            | "rc_release" | "ptr_write" | "region_create" => TypeRef::new("void"),
             "read_file" | "sys_output" | "to_string" | "substring" | "join" | "trim"
             | "replace" | "upper" | "lower" => TypeRef::new("string"),
-            "file_exists" | "contains" | "map_has" => TypeRef::new("bool"),
-            "sys_status" | "len" | "find" | "map_len" | "char_code" | "byte_val" => {
+            "read_lines" | "list_dir" => {
+                generic_type("list", std::slice::from_ref(&TypeRef::new("string")))
+            }
+            "read_bytes" => generic_type("list", std::slice::from_ref(&TypeRef::new("byte"))),
+            "file_exists" | "is_file" | "is_dir" | "contains" | "map_has" => TypeRef::new("bool"),
+            "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val" => {
                 TypeRef::new("i64")
             }
             "char_from" => TypeRef::new("char"),
@@ -6692,6 +6857,30 @@ mod tests {
         let (ast, ir, bytecode) = run_all_backends(source);
         assert_eq!(ir, ast);
         assert_eq!(bytecode, ast);
+    }
+
+    #[test]
+    fn write_bytes_read_bytes_round_trip_matches_across_backends() {
+        // Each backend writes and reads back the same file sequentially, so the
+        // fixed path is deterministic. The program reconstructs the byte sum.
+        let path = "target/lullaby_ir_bytes_roundtrip.bin";
+        let _ = fs::create_dir_all("target");
+        let _ = fs::remove_file(path);
+        let source = format!(
+            "fn main -> i64\n    \
+             let data list<byte> = list_new()\n    \
+             data = push(data, byte(7))\n    \
+             data = push(data, byte(11))\n    \
+             write_bytes(\"{path}\", data)\n    \
+             let back list<byte> = read_bytes(\"{path}\")\n    \
+             byte_val(get(back, 0)) + byte_val(get(back, 1)) + len(back)\n"
+        );
+        let (ast, ir, bytecode) = run_all_backends(&source);
+        // 7 + 11 + 2 == 20
+        assert_eq!(ast, Value::I64(20));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        let _ = fs::remove_file(path);
     }
 
     #[test]

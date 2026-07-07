@@ -757,7 +757,7 @@ fn main -&gt; i64
 
       <section id="io-system">
         <h2>I/O And System Builtins</h2>
-        <p>The alpha runtime includes flat text file I/O builtins and a conservative system command abstraction. Dotted <code>io.*</code> APIs, streams, binary I/O, memory mapping, async, sockets, and IPC are planned rather than current syntax.</p>
+        <p>The alpha runtime includes flat text and binary file I/O builtins, directory operations, and a conservative system command abstraction. All file-system builtins are one-shot: dotted <code>io.*</code> APIs, stateful file handles, seeking, buffered streams, memory mapping, async, sockets, and IPC are planned rather than current syntax.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -767,6 +767,14 @@ fn main -&gt; i64
             <tr><td><code>write_file(path, content)</code></td><td>Writes text to a file, replacing existing contents.</td></tr>
             <tr><td><code>append_file(path, content)</code></td><td>Appends text to a file, creating it if needed.</td></tr>
             <tr><td><code>file_exists(path)</code></td><td>Returns whether host metadata for the path can be read.</td></tr>
+            <tr><td><code>read_lines(path)</code></td><td>Reads a UTF-8 text file into a <code>list&lt;string&gt;</code> of lines (no trailing newline per element).</td></tr>
+            <tr><td><code>read_bytes(path)</code></td><td>Reads a file into a <code>list&lt;byte&gt;</code>.</td></tr>
+            <tr><td><code>write_bytes(path, data)</code></td><td>Writes a <code>list&lt;byte&gt;</code> to a file, replacing existing contents.</td></tr>
+            <tr><td><code>file_size(path)</code></td><td>Returns the file size in bytes as an <code>i64</code>.</td></tr>
+            <tr><td><code>is_file(path)</code> / <code>is_dir(path)</code></td><td>Returns whether the path is a regular file / a directory (<code>false</code> when it does not exist).</td></tr>
+            <tr><td><code>list_dir(path)</code></td><td>Returns a directory's entry names (not full paths) as a <code>list&lt;string&gt;</code>.</td></tr>
+            <tr><td><code>make_dir(path)</code></td><td>Creates a directory, including any missing parent directories.</td></tr>
+            <tr><td><code>remove_file(path)</code> / <code>remove_dir(path)</code></td><td>Removes a file / an empty directory.</td></tr>
             <tr><td><code>sys_status(program, args)</code></td><td>Runs a program directly with an <code>array&lt;string&gt;</code> argv and returns its exit status.</td></tr>
             <tr><td><code>sys_output(program, args)</code></td><td>Runs a program directly with an <code>array&lt;string&gt;</code> argv and returns stdout.</td></tr>
             <tr><td><code>env(name)</code></td><td>Reads an environment variable, returning <code>option&lt;string&gt;</code> (<code>some(value)</code> when set, <code>none</code> otherwise).</td></tr>
@@ -938,6 +946,7 @@ Suggested fix:
             <tr><td><code>L0328</code></td><td><code>store</code> value type does not match the pointer element type.</td></tr>
             <tr><td><code>L0329</code></td><td>Executable source passed to <code>compile</code>, <code>build</code>, or source <code>run</code> is missing zero-argument <code>main</code>.</td></tr>
             <tr><td><code>L0332</code></td><td>Process builtin argument type or arity mismatch: <code>env</code> needs one <code>string</code> and <code>args()</code> takes no arguments.</td></tr>
+            <tr><td><code>L0333</code></td><td>File-system builtin argument type or arity mismatch: pass a <code>string</code> path (and a <code>list&lt;byte&gt;</code> to <code>write_bytes</code>) and match the builtin arity.</td></tr>
             <tr><td><code>L0373</code></td><td><code>len</code> argument is not a string or array.</td></tr>
             <tr><td><code>L0375</code></td><td>String-library builtin argument has the wrong type.</td></tr>
             <tr><td><code>L0374</code></td><td>Math builtin received a wrong or mismatched operand type.</td></tr>

@@ -348,6 +348,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass an `rc<T>` to rc builtins, a `ref<T>` to `ref_get`, or a raw pointer to `ptr_read`/`ptr_write`.",
     },
     DiagnosticEntry {
+        code: "L0333",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A file-system builtin argument type or arity mismatch.",
+        root_cause: "A `read_lines`/`read_bytes`/`write_bytes`/`file_size`/`is_file`/`is_dir`/`list_dir`/`make_dir`/`remove_file`/`remove_dir` call had the wrong number of arguments, a non-`string` path, or a non-`list<byte>` data argument.",
+        suggested_fix: "Pass a `string` path (and, for `write_bytes`, a `list<byte>` value) and match the builtin arity.",
+    },
+    DiagnosticEntry {
         code: "L0340",
         phase: DiagnosticPhase::Semantic,
         explanation: "A region declaration has an invalid size, alignment, or kind.",

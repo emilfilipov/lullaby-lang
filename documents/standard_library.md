@@ -78,6 +78,17 @@ operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`. Integer
 - Streams: `print(text)`, `println(text)`, `warn(text)` (stderr), `flush()` — each `-> void`.
 - Text files: `read_file(path) -> string`, `write_file(path, content) -> void`,
   `append_file(path, content) -> void`, `file_exists(path) -> bool`.
+- Lines and bytes: `read_lines(path) -> list<string>` (lines with no trailing
+  newline per element), `read_bytes(path) -> list<byte>`,
+  `write_bytes(path, data list<byte>) -> void` (truncating), `file_size(path) -> i64`.
+- Filesystem queries and directories: `is_file(path) -> bool`,
+  `is_dir(path) -> bool`, `list_dir(path) -> list<string>` (entry names, not full
+  paths), `make_dir(path) -> void` (creates parent directories),
+  `remove_file(path) -> void`, `remove_dir(path) -> void` (empty directory only).
+- These file-system builtins are one-shot; stateful file handles, seeking, and
+  buffered streams are deferred. Wrong argument types or arities report `L0333`;
+  a failed read/metadata query reports `L0414`; a failed write/create/remove
+  reports `L0415`.
 - System commands: `sys_status(program, args array<string>) -> i64`,
   `sys_output(program, args array<string>) -> string` (no shell).
 

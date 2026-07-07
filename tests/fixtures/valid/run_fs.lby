@@ -1,0 +1,12 @@
+fn flag b bool -> i64
+    if b
+        1
+    else
+        0
+
+fn main -> i64
+    let missing string = "target/lullaby_definitely_missing_path_xyz"
+    let no_dir bool = is_dir(missing)
+    let no_file bool = is_file(missing)
+    let no_exist bool = file_exists(missing)
+    flag(no_dir) + flag(no_file) + flag(no_exist)
