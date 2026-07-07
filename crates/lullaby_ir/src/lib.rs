@@ -5,7 +5,7 @@ use std::process::Command;
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
     AssignOp, BinaryOp, Expr, ExprKind, Function, MatchArm, MatchPattern, Place, Program, Stmt,
-    TypeRef, UnaryOp, generic_type,
+    TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
     ResolvedPlace, RuntimeError, Value, apply_compound, char_find, expect_i64, expect_list,
@@ -3691,6 +3691,10 @@ impl<'a> IrRuntime<'a> {
                             variant: name.clone(),
                             payload: Vec::new(),
                         })
+                    } else if self.functions.contains_key(name.as_str()) {
+                        // A bare name that is a known top-level function evaluates
+                        // to a first-class function value.
+                        Ok(Value::Func(name.clone()))
                     } else {
                         Err(error)
                     }
@@ -3755,7 +3759,13 @@ impl<'a> IrRuntime<'a> {
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.call_function(name, values)
+                // A call name that is a local holding a function value dispatches
+                // through that value: invoke the referenced top-level function.
+                if let Ok(Value::Func(target)) = env.get(name) {
+                    self.call_function(&target, values)
+                } else {
+                    self.call_function(name, values)
+                }
             }
         };
         result.map_err(|error| self.annotate_error(error, expr.span))
@@ -5130,6 +5140,15 @@ impl<'a> Lowerer<'a> {
                         },
                         TypeRef::new(enum_name),
                     )
+                } else if let Some(signature) = self.signatures.get(name) {
+                    // A bare name that is a declared top-level function lowers to a
+                    // first-class function value of type `fn(params) -> ret`. It
+                    // stays a `Variable`, so the interpreter and VM turn it into a
+                    // `Value::Func`.
+                    (
+                        IrExprKind::Variable(name.clone()),
+                        function_type(&signature.params, &signature.return_type),
+                    )
                 } else {
                     return Err(IrLoweringError::new(
                         format!("unknown variable `{name}`"),
@@ -5195,7 +5214,14 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|arg| self.lower_expr(arg, scope))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ty = self.call_return_type(name, &args, expr.span)?;
+                // A call whose name is a function-typed local dispatches through
+                // that function value; its result type is the function type's
+                // return type. The `Call` stays name-based so the interpreter and
+                // VM resolve the held `Value::Func` at runtime.
+                let ty = match scope.get(name).and_then(TypeRef::function_signature) {
+                    Some((_, return_type)) => return_type,
+                    None => self.call_return_type(name, &args, expr.span)?,
+                };
                 (
                     IrExprKind::Call {
                         name: name.clone(),

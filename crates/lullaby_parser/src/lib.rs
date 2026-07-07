@@ -154,6 +154,56 @@ impl TypeRef {
     pub fn is_safe_reference(&self) -> bool {
         self.reference_target().is_some() || self.rc_target().is_some()
     }
+
+    /// The `(param types, return type)` of a function type spelled
+    /// `fn(T1, T2) -> R`, if this is a function type. `fn() -> void` yields an
+    /// empty parameter list. Parsing is nesting-aware so `fn(array<i64>) -> i64`
+    /// splits correctly.
+    pub fn function_signature(&self) -> Option<(Vec<TypeRef>, TypeRef)> {
+        let rest = self.name.strip_prefix("fn(")?;
+        // Find the `)` that closes the parameter list, honoring nested `<...>`
+        // and `(...)` so a nested function type does not end the scan early.
+        let mut depth = 0usize;
+        let mut close = None;
+        for (index, ch) in rest.char_indices() {
+            match ch {
+                '<' | '(' => depth += 1,
+                '>' | ')' if depth > 0 => depth -= 1,
+                ')' => {
+                    close = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let close = close?;
+        let params_text = &rest[..close];
+        let after = rest[close + 1..].strip_prefix(" -> ")?;
+        let params = if params_text.is_empty() {
+            Vec::new()
+        } else {
+            split_generic_args(params_text)
+        };
+        Some((params, TypeRef::new(after)))
+    }
+
+    /// True when this type is a function type `fn(...) -> R`.
+    pub fn is_function(&self) -> bool {
+        self.function_signature().is_some()
+    }
+}
+
+/// Build the canonical spelling of a function type `fn(a, b) -> r`. This is the
+/// single source of truth for function-type text so string-based `TypeRef`
+/// equality holds across the parser, semantics, runtime, and IR. Parameter
+/// types are joined with `", "`.
+pub fn function_type(params: &[TypeRef], return_type: &TypeRef) -> TypeRef {
+    let joined = params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    TypeRef::new(format!("fn({joined}) -> {}", return_type.name))
 }
 
 /// Build the canonical spelling of a generic type `ctor<a, b, ...>`. This is the
@@ -1115,6 +1165,45 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Void) => {
                 self.advance();
                 Some(TypeRef::new("void"))
+            }
+            // Function type `fn(T1, T2) -> R`. Zero or more parameter types, then
+            // an arrow and a return type. Emitted in the canonical spelling so
+            // string-based `TypeRef` equality holds everywhere.
+            TokenKind::Keyword(Keyword::Fn) => {
+                self.advance();
+                if !self.eat_symbol("(") {
+                    self.error(
+                        "L0203",
+                        "expected `(` after `fn` in a function type",
+                        self.peek().span,
+                    );
+                    return None;
+                }
+                let mut params = Vec::new();
+                if !self.at_symbol(")") {
+                    params.push(self.expect_type("expected function-type parameter type")?);
+                    while self.eat_symbol(",") {
+                        params.push(self.expect_type("expected function-type parameter type")?);
+                    }
+                }
+                if !self.eat_symbol(")") {
+                    self.error(
+                        "L0203",
+                        "expected `)` after function-type parameters",
+                        self.peek().span,
+                    );
+                    return None;
+                }
+                if !self.eat(TokenKindRef::Arrow) {
+                    self.error(
+                        "L0203",
+                        "expected `->` in a function type",
+                        self.peek().span,
+                    );
+                    return None;
+                }
+                let return_type = self.expect_type("expected function-type return type")?;
+                Some(function_type(&params, &return_type))
             }
             _ => {
                 self.error("L0203", message, self.peek().span);

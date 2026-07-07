@@ -4,7 +4,7 @@ use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AssignOp, BinaryOp, EnumDecl, EnumVariant, Expr, ExprKind, Function, IfBranch, MatchArm,
     MatchPattern, Param, Place, Program, RegionDecl, Stmt, StructDecl, StructField, TypeRef,
-    UnaryOp, generic_type,
+    UnaryOp, function_type, generic_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1243,6 +1243,11 @@ impl<'a> Checker<'a> {
                             ));
                             None
                         }
+                    } else if let Some(signature) = self.signatures.get(name) {
+                        // A bare name that is not a local but is a declared
+                        // top-level function evaluates to a function value of
+                        // type `fn(params) -> ret`.
+                        Some(function_type(&signature.params, &signature.return_type))
                     } else {
                         self.diagnostics.push(SemanticDiagnostic::at(
                             "L0306",
@@ -1384,7 +1389,19 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Call { name, args } => {
-                if self.variants.contains_key(name) {
+                // A call whose name is a local variable dispatches through the
+                // held value: a function-typed local calls the referenced
+                // function; any other local is not callable (`L0390`).
+                if let Some(local_type) = scope.locals.get(name).cloned() {
+                    self.check_call_through_local(
+                        name,
+                        &local_type,
+                        args,
+                        expr.span,
+                        scope,
+                        function,
+                    )
+                } else if self.variants.contains_key(name) {
                     self.check_enum_construction(name, args, expr.span, scope, function)
                 } else if self.structs.contains_key(name) {
                     self.check_struct_construction(name, args, expr.span, scope, function)
@@ -1747,6 +1764,69 @@ impl<'a> Checker<'a> {
         }
 
         Some(TypeRef::new(format!("array<{}>", element_type.name)))
+    }
+
+    /// Check a call whose name resolves to a local variable. A function-typed
+    /// local (`fn(A...) -> R`) is invoked: argument arity and types are checked
+    /// against the function-type parameters and the call yields `R`. A local
+    /// that is not of function type is not callable and reports `L0390`.
+    fn check_call_through_local(
+        &mut self,
+        name: &str,
+        local_type: &TypeRef,
+        args: &[Expr],
+        call_span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let Some((params, return_type)) = local_type.function_signature() else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0390",
+                format!(
+                    "local `{name}` has type `{}`, which is not a function and cannot be called",
+                    local_type.name
+                ),
+                Some(function.name.clone()),
+                call_span,
+            ));
+            return None;
+        };
+
+        if params.len() != args.len() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0312",
+                format!(
+                    "function value `{name}` expects {} arguments but got {}",
+                    params.len(),
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                call_span,
+            ));
+            return None;
+        }
+
+        for (index, (arg, expected)) in args.iter().zip(params.iter()).enumerate() {
+            let actual = self.check_expr(arg, scope, function);
+            if actual.as_ref() != Some(expected) {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0313",
+                    format!(
+                        "argument {} for `{name}` must be `{}` but got `{}`",
+                        index + 1,
+                        expected.name,
+                        actual
+                            .as_ref()
+                            .map(|ty| ty.name.as_str())
+                            .unwrap_or("<unknown>")
+                    ),
+                    Some(function.name.clone()),
+                    arg.span,
+                ));
+            }
+        }
+
+        Some(return_type)
     }
 
     fn check_call(
@@ -3092,6 +3172,69 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0303")
+        );
+    }
+
+    #[test]
+    fn accepts_first_class_function_values() {
+        let source = concat!(
+            "fn inc x i64 -> i64\n",
+            "    x + 1\n\n",
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn main -> i64\n",
+            "    let g fn(i64) -> i64 = inc\n",
+            "    apply(inc, 10) + g(5)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn function_name_is_a_function_value() {
+        let source = concat!(
+            "fn inc x i64 -> i64\n",
+            "    x + 1\n\n",
+            "fn main -> fn(i64) -> i64\n",
+            "    inc\n",
+        );
+        let checked = validate_source(source).expect("semantic");
+        assert_eq!(
+            checked
+                .info
+                .signatures
+                .get("main")
+                .expect("main")
+                .return_type,
+            TypeRef::new("fn(i64) -> i64")
+        );
+    }
+
+    #[test]
+    fn rejects_calling_a_non_function_local() {
+        let source = concat!("fn main -> i64\n", "    let x i64 = 3\n", "    x(1)\n",);
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0390")
+        );
+    }
+
+    #[test]
+    fn rejects_passing_a_wrong_signature_function() {
+        let source = concat!(
+            "fn two x i64 y i64 -> i64\n",
+            "    x + y\n\n",
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn main -> i64\n",
+            "    apply(two, 10)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0313")
         );
     }
 

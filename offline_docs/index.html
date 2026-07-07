@@ -343,6 +343,25 @@ cargo run -p lullaby_cli -- run hello.lbc</code></pre>
     dealloc(ptr)
     return</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_release_void.lby</code>.</p>
+        <h3>First-class functions</h3>
+        <p>A function type is spelled <code>fn(T1, T2) -> R</code>. A bare top-level function name is a value of that type, so a function can be stored in a <code>let</code>, passed to another function, returned, and called through a local. Capturing closures (lambda literals) are not yet implemented. Calling a non-function local, or passing a function value with the wrong signature, reports <code>L0390</code>.</p>
+        <pre data-fixture="tests/fixtures/valid/run_first_class_fn.lby" data-mode="run"><code>fn inc x i64 -> i64
+    x + 1
+
+fn dbl x i64 -> i64
+    x * 2
+
+fn apply f fn(i64) -> i64 v i64 -> i64
+    f(v)
+
+fn picker -> fn(i64) -> i64
+    dbl
+
+fn main -> i64
+    let g fn(i64) -> i64 = inc
+    let h fn(i64) -> i64 = picker()
+    apply(inc, 10) + g(5) + h(20) + apply(dbl, 3)</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_first_class_fn.lby</code>. Returns <code>63</code>.</p>
       </section>
 
       <section id="variables-assignment">
@@ -811,6 +830,7 @@ Suggested fix:
             <tr><td><code>L0387</code></td><td>Invalid <code>list&lt;T&gt;</code> builtin call or uninferable <code>list_new()</code> element type; pass a <code>list&lt;T&gt;</code> and matching <code>T</code>, and annotate <code>list_new()</code> with a <code>list&lt;...&gt;</code> type.</td></tr>
             <tr><td><code>L0388</code></td><td>Invalid <code>map&lt;K, V&gt;</code> builtin call, unsupported key type, or uninferable <code>map_new()</code> key/value type; use <code>i64</code>/<code>string</code> keys and annotate <code>map_new()</code> with a <code>map&lt;...&gt;</code> type.</td></tr>
             <tr><td><code>L0389</code></td><td>Invalid <code>char</code>/<code>byte</code> builtin call: <code>char_code</code>/<code>char_from</code>/<code>byte</code>/<code>byte_val</code> received the wrong argument type or arity.</td></tr>
+            <tr><td><code>L0390</code></td><td>Call through a non-function local, or a function value whose <code>fn(...)</code> signature does not match the expected function type.</td></tr>
             <tr><td><code>L0501 [ir]</code></td><td>Typed IR lowering failed after semantic validation.</td></tr>
             <tr><td><code>L0502 [optimizer]</code></td><td><code>--optimize</code> was requested without an IR or bytecode backend.</td></tr>
             <tr><td><code>L0601 [bytecode]</code></td><td>Compiled <code>.lbc</code> artifact is malformed, unsupported, fails metadata/function table/memory operation compatibility checks, or violates the instruction contract.</td></tr>

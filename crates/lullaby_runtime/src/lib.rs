@@ -34,6 +34,9 @@ pub enum Value {
     /// A `map<K, V>`: an insertion-ordered association list. Lookup and insert
     /// are linear scans using `Value` equality.
     Map(Vec<(Value, Value)>),
+    /// A first-class function value: a handle to a top-level function by name.
+    /// No environment is captured in this increment.
+    Func(String),
     Void,
 }
 
@@ -85,6 +88,7 @@ impl fmt::Display for Value {
                     .join(", ");
                 write!(formatter, "{{{rendered}}}")
             }
+            Self::Func(name) => write!(formatter, "fn {name}"),
             Self::Void => write!(formatter, "void"),
         }
     }
@@ -700,6 +704,10 @@ impl<'a> Runtime<'a> {
                             variant: name.clone(),
                             payload: Vec::new(),
                         })
+                    } else if self.functions.contains_key(name.as_str()) {
+                        // A bare name that is a known top-level function evaluates
+                        // to a first-class function value.
+                        Ok(Value::Func(name.clone()))
                     } else {
                         Err(error)
                     }
@@ -753,7 +761,13 @@ impl<'a> Runtime<'a> {
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.call_function(name, values)
+                // A call name that is a local holding a function value dispatches
+                // through that value: invoke the referenced top-level function.
+                if let Ok(Value::Func(target)) = env.get(name) {
+                    self.call_function(&target, values)
+                } else {
+                    self.call_function(name, values)
+                }
             }
             ExprKind::StructLiteral { name, fields } => {
                 // Evaluate in source order, then reorder to the declared field
@@ -1875,6 +1889,26 @@ mod tests {
     fn runs_function_calls_and_arithmetic() {
         let source = "fn add x i64 y i64 -> i64\n    x + y\n\nfn main -> i64\n    let value i64 = add(40, 2)\n    value\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(42));
+    }
+
+    #[test]
+    fn runs_higher_order_function_call() {
+        let source = concat!(
+            "fn inc x i64 -> i64\n",
+            "    x + 1\n\n",
+            "fn dbl x i64 -> i64\n",
+            "    x * 2\n\n",
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn picker -> fn(i64) -> i64\n",
+            "    dbl\n\n",
+            "fn main -> i64\n",
+            "    let g fn(i64) -> i64 = inc\n",
+            "    let h fn(i64) -> i64 = picker()\n",
+            "    apply(inc, 10) + g(5) + h(20) + apply(dbl, 3)\n",
+        );
+        // apply(inc,10)=11 + g(5)=6 + h=dbl,h(20)=40 + apply(dbl,3)=6 = 63.
+        assert_eq!(run_source(source).expect("run"), Value::I64(63));
     }
 
     #[test]

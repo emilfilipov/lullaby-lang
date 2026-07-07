@@ -477,6 +477,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Call `char_code(c char)`/`char_from(i i64)`/`byte(i i64)`/`byte_val(b byte)` with a single argument of the required type.",
     },
     DiagnosticEntry {
+        code: "L0390",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A call went through a local variable that is not a function value.",
+        root_cause: "A local of a non-function type was called like a function, or a function value with the wrong `fn(...)` signature was used where a different one was expected.",
+        suggested_fix: "Call only locals of a function type `fn(T) -> R`, and make sure a passed function value's signature matches the expected function type exactly.",
+    },
+    DiagnosticEntry {
         code: "L0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",
