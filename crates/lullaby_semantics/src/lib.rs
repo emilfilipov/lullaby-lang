@@ -139,6 +139,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
             is_public: function.is_public,
             is_async: function.is_async,
             is_extern: function.is_extern,
+            is_export: function.is_export,
         })
         .collect();
 
@@ -247,6 +248,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
                             is_public: function.is_public,
                             is_async: function.is_async,
                             is_extern: function.is_extern,
+                            is_export: function.is_export,
                         })
                         .collect(),
                     span: decl.span,
@@ -739,6 +741,14 @@ impl<'a> Checker<'a> {
             if function.is_extern {
                 continue;
             }
+            // An `export fn` is exposed under its plain C name as a native symbol.
+            // The first increment supports only the Win64 integer convention, so
+            // its parameters and return type must all be `i64`. Reject anything
+            // else up front (`L0424`) rather than silently demoting it to a native
+            // skip, since `export` is an explicit user request.
+            if function.is_export {
+                self.check_export_signature(function);
+            }
             self.validate_function(function);
         }
         self.validate_impls();
@@ -749,6 +759,48 @@ impl<'a> Checker<'a> {
             for method in &decl.methods {
                 self.validate_function(method);
             }
+        }
+    }
+
+    /// Check that an `export fn` has an i64-scalar C-callable signature. The first
+    /// increment exposes exports across the Win64 integer convention only, so
+    /// every parameter and the return type must be `i64`; anything else is
+    /// `L0424`. Generic exports are also rejected (a C symbol is monomorphic).
+    fn check_export_signature(&mut self, function: &Function) {
+        if !function.type_params.is_empty() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0424",
+                format!(
+                    "`export fn {}` cannot be generic; the first increment exports only i64-scalar functions",
+                    function.name
+                ),
+                Some(function.name.clone()),
+                function.span,
+            ));
+        }
+        for param in &function.params {
+            if param.ty.name != "i64" {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0424",
+                    format!(
+                        "`export fn {}` parameter `{}` has type `{}`; the first increment exports only i64 parameters and return type",
+                        function.name, param.name, param.ty.name
+                    ),
+                    Some(function.name.clone()),
+                    function.span,
+                ));
+            }
+        }
+        if function.return_type.name != "i64" {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0424",
+                format!(
+                    "`export fn {}` returns `{}`; the first increment exports only functions returning i64",
+                    function.name, function.return_type.name
+                ),
+                Some(function.name.clone()),
+                function.span,
+            ));
         }
     }
 
@@ -4585,6 +4637,33 @@ mod tests {
             .expect("extern function present");
         assert!(extern_fn.is_extern, "llabs is marked extern");
         assert!(extern_fn.body.is_empty(), "extern function has no body");
+    }
+
+    #[test]
+    fn validates_export_i64_scalar_function() {
+        // An `export fn` with an all-i64 signature and a body type-checks like any
+        // ordinary function; the `is_export` marker is preserved.
+        let source = "export fn add_seven x i64 -> i64\n    x + 7\n";
+        let checked = validate_source(source).expect("i64 export type-checks");
+        let export_fn = checked
+            .program
+            .functions
+            .iter()
+            .find(|f| f.name == "add_seven")
+            .expect("export function present");
+        assert!(export_fn.is_export, "add_seven is marked export");
+    }
+
+    #[test]
+    fn rejects_export_with_non_i64_signature() {
+        // The first export increment supports only i64 params/return; a string
+        // return is `L0424`.
+        let source = "export fn label x i64 -> string\n    to_string(x)\n";
+        let diagnostics = validate_source(source).expect_err("non-i64 export rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0424"),
+            "expected L0424: {diagnostics:?}"
+        );
     }
 
     #[test]

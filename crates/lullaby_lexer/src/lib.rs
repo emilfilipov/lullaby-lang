@@ -81,6 +81,7 @@ pub enum Keyword {
     Region,
     Alias,
     Extern,
+    Export,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -451,6 +452,7 @@ fn keyword(text: &str) -> Option<Keyword> {
         "region" => Keyword::Region,
         "alias" => Keyword::Alias,
         "extern" => Keyword::Extern,
+        "export" => Keyword::Export,
         _ => return None,
     })
 }

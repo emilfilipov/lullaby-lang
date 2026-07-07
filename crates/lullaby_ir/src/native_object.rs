@@ -749,13 +749,21 @@ pub fn emit_alpha1_native_program(
             continue;
         }
 
-        if lowered.is_empty() || !lowered.iter().any(|f| f.name == "main") {
-            // The entry stub requires `main`. If `main` is not eligible there is
-            // nothing runnable to emit.
+        let has_main = lowered.iter().any(|f| f.name == "main");
+        // Whether any compiled function is a C-callable export. An export-only
+        // program (no `main`) is a *library object*: it has no entry stub, so a C
+        // (or other) `main` can link against it and call the exported symbols.
+        let has_export = lowered
+            .iter()
+            .any(|f| module.export_functions.contains(&f.name));
+
+        if lowered.is_empty() || (!has_main && !has_export) {
+            // Nothing runnable and nothing exported: there is nothing to emit.
             let reason = if lowered.is_empty() {
                 "no functions were eligible for the native i64-scalar subset".to_string()
             } else {
-                "`main` is not eligible for the native i64-scalar subset".to_string()
+                "neither `main` nor an `export fn` is eligible for the native i64-scalar subset"
+                    .to_string()
             };
             return Err(NativeProgramError {
                 code: NATIVE_NO_ELIGIBLE_CODE,
@@ -765,7 +773,10 @@ pub fn emit_alpha1_native_program(
         }
 
         let compiled: Vec<String> = lowered.iter().map(|f| f.name.clone()).collect();
-        let bytes = write_native_program_object(&lowered, &strings);
+        // Emit the entry stub only when a `main` is present. A pure export library
+        // (no `main`) omits the stub entirely, so it carries no `ExitProcess`
+        // dependency and does not collide with a C `main` at link time.
+        let bytes = write_native_program_object(&lowered, &strings, has_main);
         // When the program declares any `extern fn`, the C runtime import library
         // must be linked so the external C symbols resolve.
         let import_libs = if module.extern_functions.is_empty() {
@@ -773,10 +784,17 @@ pub fn emit_alpha1_native_program(
         } else {
             vec![C_RUNTIME_IMPORT_LIB.to_string()]
         };
+        // A library object (no stub) has no `/entry:` symbol; the C runtime
+        // provides the entry point when it is linked with a C `main`.
+        let entry_symbol = if has_main {
+            NATIVE_ENTRY_SYMBOL.to_string()
+        } else {
+            String::new()
+        };
         return Ok(NativeProgram {
             target,
             bytes,
-            entry_symbol: NATIVE_ENTRY_SYMBOL.to_string(),
+            entry_symbol,
             compiled,
             skipped,
             import_libs,
@@ -2220,45 +2238,53 @@ fn patch_rel32_to(code: &mut [u8], site: usize, target: usize) {
 fn write_native_program_object(
     functions: &[LoweredNativeFunction],
     strings: &StringPool,
+    emit_stub: bool,
 ) -> Vec<u8> {
     if strings.is_empty() {
-        write_text_only_object(functions)
+        write_text_only_object(functions, emit_stub)
     } else {
-        write_object_with_data(functions, strings)
+        write_object_with_data(functions, strings, emit_stub)
     }
 }
 
 /// Assemble the whole `.text` blob (entry stub + functions) and the section
 /// relocations, then write the COFF headers, section data, symbol table, and
 /// string table.
-fn write_text_only_object(functions: &[LoweredNativeFunction]) -> Vec<u8> {
+///
+/// When `emit_stub` is true the object leads with the `_lullaby_start` entry stub
+/// that calls `main` and forwards its result to `ExitProcess` (a runnable
+/// program). When false, no stub is emitted and no `ExitProcess` dependency is
+/// introduced: the object is a *library* whose exported functions a C `main` (or
+/// another object) links against and calls. A string-free stubbed program keeps
+/// its exact prior byte-for-byte layout.
+fn write_text_only_object(functions: &[LoweredNativeFunction], emit_stub: bool) -> Vec<u8> {
     // Lay out `.text`: entry stub first, then each function. Record each
     // function's start offset so relocations resolve.
     let mut text: Vec<u8> = Vec::new();
     let mut relocations: Vec<TextRelocation> = Vec::new();
 
-    // Entry stub: sub rsp, 40 (align + shadow); call main; mov ecx, eax;
-    // call ExitProcess; (int3 padding). The `sub rsp,40` keeps rsp 16-aligned at
-    // each `call` (return address makes 8; 40 = 0x28 restores alignment).
-    let stub_start = text.len();
-    text.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 40
-    text.push(0xE8); // call main (rel32)
-    relocations.push(TextRelocation {
-        offset: (text.len()) as u32,
-        symbol_index: 0, // filled after we know the symbol order (main is known)
-        symbol_name: "main".to_string(),
-    });
-    text.extend_from_slice(&[0, 0, 0, 0]);
-    text.extend_from_slice(&[0x89, 0xC1]); // mov ecx, eax (exit code = main's result)
-    text.push(0xE8); // call ExitProcess (rel32)
-    relocations.push(TextRelocation {
-        offset: (text.len()) as u32,
-        symbol_index: 0,
-        symbol_name: EXIT_PROCESS_SYMBOL.to_string(),
-    });
-    text.extend_from_slice(&[0, 0, 0, 0]);
-    text.push(0xCC); // int3 (unreachable; ExitProcess does not return)
-    let _ = stub_start;
+    if emit_stub {
+        // Entry stub: sub rsp, 40 (align + shadow); call main; mov ecx, eax;
+        // call ExitProcess; (int3 padding). The `sub rsp,40` keeps rsp 16-aligned
+        // at each `call` (return address makes 8; 40 = 0x28 restores alignment).
+        text.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 40
+        text.push(0xE8); // call main (rel32)
+        relocations.push(TextRelocation {
+            offset: (text.len()) as u32,
+            symbol_index: 0, // filled after we know the symbol order (main is known)
+            symbol_name: "main".to_string(),
+        });
+        text.extend_from_slice(&[0, 0, 0, 0]);
+        text.extend_from_slice(&[0x89, 0xC1]); // mov ecx, eax (exit code = main's result)
+        text.push(0xE8); // call ExitProcess (rel32)
+        relocations.push(TextRelocation {
+            offset: (text.len()) as u32,
+            symbol_index: 0,
+            symbol_name: EXIT_PROCESS_SYMBOL.to_string(),
+        });
+        text.extend_from_slice(&[0, 0, 0, 0]);
+        text.push(0xCC); // int3 (unreachable; ExitProcess does not return)
+    }
 
     // Each compiled function, remembering its start offset for symbol addresses.
     let mut func_offsets: HashMap<String, u32> = HashMap::new();
@@ -2292,11 +2318,13 @@ fn write_text_only_object(functions: &[LoweredNativeFunction]) -> Vec<u8> {
     }
 
     let mut symbols: Vec<SymbolDef> = Vec::new();
-    symbols.push(SymbolDef {
-        name: NATIVE_ENTRY_SYMBOL.to_string(),
-        section_number: 1,
-        value: 0,
-    });
+    if emit_stub {
+        symbols.push(SymbolDef {
+            name: NATIVE_ENTRY_SYMBOL.to_string(),
+            section_number: 1,
+            value: 0,
+        });
+    }
     for function in functions {
         symbols.push(SymbolDef {
             name: function.name.clone(),
@@ -2304,11 +2332,13 @@ fn write_text_only_object(functions: &[LoweredNativeFunction]) -> Vec<u8> {
             value: *func_offsets.get(&function.name).expect("function offset"),
         });
     }
-    symbols.push(SymbolDef {
-        name: EXIT_PROCESS_SYMBOL.to_string(),
-        section_number: 0,
-        value: 0,
-    });
+    if emit_stub {
+        symbols.push(SymbolDef {
+            name: EXIT_PROCESS_SYMBOL.to_string(),
+            section_number: 0,
+            value: 0,
+        });
+    }
     // Any relocation target not defined above is an undefined external symbol —
     // an `extern fn` C function bound by the linker (section 0), exactly like
     // `ExitProcess`. Add each such symbol once.
@@ -2592,29 +2622,35 @@ fn emit_short_jmp_back(code: &mut Vec<u8>, target: usize) {
 
 /// Write the extended COFF object with `.text`, `.rdata`, and `.bss` sections.
 /// Used only when the program references string constants.
-fn write_object_with_data(functions: &[LoweredNativeFunction], strings: &StringPool) -> Vec<u8> {
+fn write_object_with_data(
+    functions: &[LoweredNativeFunction],
+    strings: &StringPool,
+    emit_stub: bool,
+) -> Vec<u8> {
     // -- Build .text: entry stub, user functions, heap helpers ---------------
     let mut text: Vec<u8> = Vec::new();
     let mut relocations: Vec<TextRelocation> = Vec::new();
 
-    // Entry stub (identical to the text-only path).
-    text.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 40
-    text.push(0xE8); // call main
-    relocations.push(TextRelocation {
-        offset: text.len() as u32,
-        symbol_index: 0,
-        symbol_name: "main".to_string(),
-    });
-    text.extend_from_slice(&[0, 0, 0, 0]);
-    text.extend_from_slice(&[0x89, 0xC1]); // mov ecx, eax
-    text.push(0xE8); // call ExitProcess
-    relocations.push(TextRelocation {
-        offset: text.len() as u32,
-        symbol_index: 0,
-        symbol_name: EXIT_PROCESS_SYMBOL.to_string(),
-    });
-    text.extend_from_slice(&[0, 0, 0, 0]);
-    text.push(0xCC);
+    if emit_stub {
+        // Entry stub (identical to the text-only path).
+        text.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 40
+        text.push(0xE8); // call main
+        relocations.push(TextRelocation {
+            offset: text.len() as u32,
+            symbol_index: 0,
+            symbol_name: "main".to_string(),
+        });
+        text.extend_from_slice(&[0, 0, 0, 0]);
+        text.extend_from_slice(&[0x89, 0xC1]); // mov ecx, eax
+        text.push(0xE8); // call ExitProcess
+        relocations.push(TextRelocation {
+            offset: text.len() as u32,
+            symbol_index: 0,
+            symbol_name: EXIT_PROCESS_SYMBOL.to_string(),
+        });
+        text.extend_from_slice(&[0, 0, 0, 0]);
+        text.push(0xCC);
+    }
 
     let mut func_offsets: HashMap<String, u32> = HashMap::new();
 
@@ -2689,12 +2725,14 @@ fn write_object_with_data(functions: &[LoweredNativeFunction], strings: &StringP
     }
 
     let mut symbols: Vec<SymbolDef> = Vec::new();
-    symbols.push(SymbolDef {
-        name: NATIVE_ENTRY_SYMBOL.to_string(),
-        section_number: 1,
-        value: 0,
-        is_function: true,
-    });
+    if emit_stub {
+        symbols.push(SymbolDef {
+            name: NATIVE_ENTRY_SYMBOL.to_string(),
+            section_number: 1,
+            value: 0,
+            is_function: true,
+        });
+    }
     for function in functions {
         symbols.push(SymbolDef {
             name: function.name.clone(),
@@ -2711,12 +2749,14 @@ fn write_object_with_data(functions: &[LoweredNativeFunction], strings: &StringP
             is_function: true,
         });
     }
-    symbols.push(SymbolDef {
-        name: EXIT_PROCESS_SYMBOL.to_string(),
-        section_number: 0,
-        value: 0,
-        is_function: true,
-    });
+    if emit_stub {
+        symbols.push(SymbolDef {
+            name: EXIT_PROCESS_SYMBOL.to_string(),
+            section_number: 0,
+            value: 0,
+            is_function: true,
+        });
+    }
     for (index, offset) in str_offsets.iter().enumerate() {
         symbols.push(SymbolDef {
             name: format!("__str{index}"),
@@ -2926,6 +2966,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            export_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -2982,6 +3023,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            export_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -3043,6 +3085,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            export_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -3081,6 +3124,53 @@ mod native_program_tests {
         let checked = validate_executable(&program).expect("semantic");
         let ir = lower(&checked).expect("lower");
         lower_to_bytecode(&ir)
+    }
+
+    /// Compile source as a *library* (no `main` required) into a `BytecodeModule`.
+    /// Used for the C-callable-export path where the program may have only
+    /// `export fn` functions.
+    fn library_module_for(source: &str) -> BytecodeModule {
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let checked = lullaby_semantics::validate(&program).expect("semantic");
+        let ir = lower(&checked).expect("lower");
+        lower_to_bytecode(&ir)
+    }
+
+    /// Walk the COFF symbol table, returning `(section_number, storage_class)` for
+    /// the first symbol whose name matches `name`. The COFF header stores the
+    /// symbol-table pointer at byte 8 and the symbol count at byte 12; each record
+    /// is 18 bytes (8-byte name, u32 value, i16 section, u16 type, u8 storage
+    /// class, u8 aux count). A name <= 8 bytes is stored inline; a longer name is
+    /// stored in the string table (which follows the symbol records) and its
+    /// record's name field is four zero bytes then a u32 offset into that table.
+    fn coff_symbol(bytes: &[u8], name: &str) -> Option<(i16, u8)> {
+        let sym_table = read_u32(bytes, 8) as usize;
+        let count = read_u32(bytes, 12) as usize;
+        let string_table = sym_table + count * 18;
+        for i in 0..count {
+            let rec = sym_table + i * 18;
+            let matches = if name.len() <= 8 {
+                let mut padded = [0u8; 8];
+                padded[..name.len()].copy_from_slice(name.as_bytes());
+                bytes[rec..rec + 8] == padded
+            } else if bytes[rec..rec + 4] == [0, 0, 0, 0] {
+                let str_offset = read_u32(bytes, rec + 4) as usize;
+                let start = string_table + str_offset;
+                let end = start + name.len();
+                end <= bytes.len()
+                    && bytes[start..end] == *name.as_bytes()
+                    && bytes.get(end) == Some(&0)
+            } else {
+                false
+            };
+            if matches {
+                let section = i16::from_le_bytes(bytes[rec + 12..rec + 14].try_into().unwrap());
+                let storage = bytes[rec + 16];
+                return Some((section, storage));
+            }
+        }
+        None
     }
 
     /// Parse the little-endian u32 at `offset` in `bytes`.
@@ -3392,5 +3482,68 @@ mod native_program_tests {
             len: 5,
         };
         assert_eq!(array.words(), 5);
+    }
+
+    #[test]
+    fn exports_function_as_external_defined_text_symbol() {
+        // An `export fn` with a body, no `main`. It compiles as a library object:
+        // no entry stub, and the exported function appears in the COFF symbol
+        // table as an EXTERNAL (storage class 2) symbol DEFINED in `.text`
+        // (section number 1) under its plain C name, so a C caller declaring
+        // `extern long long add_seven(long long);` links against it.
+        let program = emit_alpha1_native_program(&library_module_for(
+            "export fn add_seven x i64 -> i64\n    x + 7\n",
+        ))
+        .expect("emit native program");
+
+        assert_eq!(program.compiled, vec!["add_seven".to_string()]);
+        assert!(
+            program.skipped.is_empty(),
+            "no skips: {:?}",
+            program.skipped
+        );
+        // A library object has no entry point.
+        assert!(
+            program.entry_symbol.is_empty(),
+            "an export-only object is a library with no entry symbol"
+        );
+
+        // The exported symbol is external + defined in `.text`.
+        let (section, storage) =
+            coff_symbol(&program.bytes, "add_seven").expect("add_seven symbol present");
+        assert_eq!(section, 1, "add_seven is defined in `.text` (section 1)");
+        assert_eq!(storage, 2, "add_seven has EXTERNAL storage class");
+
+        // No entry stub / ExitProcess symbol exists in a library object.
+        assert!(
+            coff_symbol(&program.bytes, NATIVE_ENTRY_SYMBOL).is_none(),
+            "a library object omits the `_lullaby_start` entry stub"
+        );
+        assert!(
+            coff_symbol(&program.bytes, EXIT_PROCESS_SYMBOL).is_none(),
+            "a library object has no `ExitProcess` dependency"
+        );
+    }
+
+    #[test]
+    fn export_alongside_main_keeps_the_entry_stub() {
+        // When a program has both `main` and an `export fn`, the entry stub is
+        // still emitted (a runnable program) and the export is additionally
+        // external + defined in `.text`.
+        let program = emit_alpha1_native_program(&module_for(
+            "export fn doubled x i64 -> i64\n    x * 2\n\nfn main -> i64\n    doubled(21)\n",
+        ))
+        .expect("emit native program");
+
+        assert_eq!(program.entry_symbol, NATIVE_ENTRY_SYMBOL);
+        let (section, storage) =
+            coff_symbol(&program.bytes, "doubled").expect("doubled symbol present");
+        assert_eq!(section, 1, "export defined in `.text`");
+        assert_eq!(storage, 2, "export is EXTERNAL");
+        // The stub is present because `main` exists.
+        assert!(
+            coff_symbol(&program.bytes, NATIVE_ENTRY_SYMBOL).is_some(),
+            "entry stub present when `main` exists"
+        );
     }
 }

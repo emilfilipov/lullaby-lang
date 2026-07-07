@@ -2969,6 +2969,133 @@ fn ffi_calls_c_abs_when_linkable() {
     assert_eq!(exit, 7, "llabs(-7) via C FFI must exit 7");
 }
 
+/// Discover a C compiler for the export-into-Lullaby execution test: prefer
+/// MSVC `cl.exe` (present in a Developer Command Prompt, alongside `kernel32.lib`
+/// on `LIB`), else `clang`. Returns the compiler program name when it runs.
+fn find_c_compiler() -> Option<&'static str> {
+    for candidate in ["cl", "clang"] {
+        let ok = Command::new(candidate)
+            .arg(if candidate == "cl" { "/?" } else { "--version" })
+            .output()
+            .map(|out| out.status.success() || candidate == "cl")
+            .unwrap_or(false);
+        if ok {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// C-calls-into-Lullaby FFI: an `export fn add_seven x i64 -> i64` is compiled to
+/// a *library* COFF object (no `main`, no entry stub) whose `add_seven` symbol is
+/// externally visible and defined in `.text`. A tiny C program declares
+/// `extern long long add_seven(long long);`, calls it, and returns the result;
+/// compiled and linked against the Lullaby object, the `.exe` exits with the
+/// value `add_seven` computes. Gated on a discoverable C compiler; skips
+/// gracefully otherwise (the object emission part always runs).
+#[test]
+fn c_calls_into_exported_lullaby_function_when_compilable() {
+    let fixture = workspace_root().join("tests/fixtures/native_only/export_add_seven.lby");
+
+    // `check` validates the export declaration and body (i64-scalar signature).
+    let check = lullaby()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(check.status.success(), "{}", stderr(&check));
+
+    // Native codegen: emit the library object. `add_seven` compiles; there is no
+    // `main`, so the CLI reports a C-callable library object rather than an exe.
+    // The CLI derives the object path from the `-o` exe path (same stem, `.obj`).
+    let exe_arg = std::env::temp_dir().join("lullaby_export_add_seven.exe");
+    let obj = exe_arg.with_extension("obj");
+    let _ = std::fs::remove_file(&obj);
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            exe_arg.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    assert!(
+        stdout(&emit).contains("compiled add_seven"),
+        "expected `add_seven` compiled: {}",
+        stdout(&emit)
+    );
+    assert!(
+        stdout(&emit).contains("C-callable library object"),
+        "expected a C-callable library object report: {}",
+        stdout(&emit)
+    );
+    assert!(obj.is_file(), "expected object at {}", obj.display());
+
+    let Some(cc) = find_c_compiler() else {
+        eprintln!("no C compiler (cl/clang) found; skipping C-calls-into-Lullaby execution");
+        return;
+    };
+
+    // A tiny C caller that calls the exported Lullaby function.
+    let c_src = std::env::temp_dir().join("lullaby_export_caller.c");
+    std::fs::write(
+        &c_src,
+        "extern long long add_seven(long long);\nint main(void){ return (int)add_seven(35); }\n",
+    )
+    .expect("write c caller");
+    let out_exe = std::env::temp_dir().join("lullaby_export_caller.exe");
+    let _ = std::fs::remove_file(&out_exe);
+
+    let link = if cc == "cl" {
+        // cl caller.c lullaby.obj /Fe:out.exe (MSVC driver links the CRT + obj).
+        Command::new("cl")
+            .args(["/nologo"])
+            .arg(&c_src)
+            .arg(&obj)
+            .arg(format!("/Fe:{}", out_exe.display()))
+            .current_dir(std::env::temp_dir())
+            .output()
+    } else {
+        Command::new("clang")
+            .arg(&c_src)
+            .arg(&obj)
+            .arg("-o")
+            .arg(&out_exe)
+            .output()
+    };
+    let link = match link {
+        Ok(out) if out.status.success() => out,
+        Ok(out) => {
+            eprintln!(
+                "C compiler `{cc}` could not link the export object; skipping run:\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        Err(error) => {
+            eprintln!("could not run C compiler `{cc}`: {error}; skipping run");
+            return;
+        }
+    };
+    let _ = link;
+
+    assert!(
+        out_exe.is_file(),
+        "expected linked exe at {}",
+        out_exe.display()
+    );
+    let run = Command::new(&out_exe).output().expect("run c caller exe");
+    let exit = run.status.code().expect("c caller exit code");
+    // add_seven(35) == 42; the C `main` returns it as the process exit code.
+    assert_eq!(
+        exit, 42,
+        "C caller into Lullaby `add_seven(35)` must exit 42"
+    );
+}
+
 #[test]
 fn test_runner_passes_on_demo_suite() {
     // The user-facing demo test suite has four `test_*` functions that all pass

@@ -676,6 +676,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         root_cause: "The AST, IR, and bytecode interpreters have no way to invoke a linked C function; an extern function only has meaning after native codegen and linking.",
         suggested_fix: "Compile the program with `lullaby native` to emit an object, link it against the C runtime, and run the resulting `.exe`.",
     },
+    DiagnosticEntry {
+        code: "L0424",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "An `export fn` (C-callable export) has a signature the first FFI-export increment does not support.",
+        root_cause: "Exposing a Lullaby function to C currently covers only the Win64 integer convention, so every parameter and the return type must be `i64` and the function must not be generic.",
+        suggested_fix: "Restrict the exported function to `i64` parameters and an `i64` return type, or remove the `export` marker until wider export types land.",
+    },
 ];
 
 pub fn render_concise(report: &DiagnosticReport) -> String {

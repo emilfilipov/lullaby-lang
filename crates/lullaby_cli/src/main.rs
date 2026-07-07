@@ -332,7 +332,11 @@ fn wasm_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Result
 /// unavailable rather than failing. `--verbose` lists compiled/skipped functions
 /// and the linker command.
 fn native_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Result<(), String> {
-    let compiled = match compile(&path, SourceMode::Executable) {
+    // Library mode: a `main` is not required. A program with `main` still emits a
+    // runnable executable; an export-only program (only `export fn` functions)
+    // emits a C-callable library object. `emit_alpha1_native_program` requires at
+    // least a `main` or an eligible `export fn`, reporting `L0339` otherwise.
+    let compiled = match compile(&path, SourceMode::Library) {
         Ok(compiled) => compiled,
         Err(failure) => {
             return Err(format_reports(
@@ -386,13 +390,21 @@ fn native_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Resu
     }
 
     // Best-effort link. Extra C import libraries (e.g. `ucrt.lib`) are required
-    // when the program calls `extern fn` C functions.
-    let link = link_native_object(
-        &obj_output,
-        &exe_output,
-        &program.entry_symbol,
-        &program.import_libs,
-    );
+    // when the program calls `extern fn` C functions. A program with no `main`
+    // (only `export fn` functions) is a *library object* with no entry point:
+    // there is nothing to link into a standalone `.exe`, so the CLI stops at the
+    // object and reports that it is C-callable.
+    let is_library = program.entry_symbol.is_empty();
+    let link = if is_library {
+        None
+    } else {
+        Some(link_native_object(
+            &obj_output,
+            &exe_output,
+            &program.entry_symbol,
+            &program.import_libs,
+        ))
+    };
 
     if mode == OutputMode::Json {
         println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
@@ -401,12 +413,17 @@ fn native_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Resu
 
     println!("native object: {}", obj_output.display());
     match &link {
-        LinkOutcome::Linked => println!("native exe: {}", exe_output.display()),
-        LinkOutcome::Unavailable(reason) => {
+        None => {
+            println!(
+                "C-callable library object (no `main`): link it against a C program that calls the exported function(s)"
+            );
+        }
+        Some(LinkOutcome::Linked) => println!("native exe: {}", exe_output.display()),
+        Some(LinkOutcome::Unavailable(reason)) => {
             println!("linking unavailable: {reason}");
             println!("emitted object only (link manually with rust-lld + kernel32.lib)");
         }
-        LinkOutcome::Failed(reason) => {
+        Some(LinkOutcome::Failed(reason)) => {
             println!("linking failed: {reason}");
         }
     }

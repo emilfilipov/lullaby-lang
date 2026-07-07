@@ -161,6 +161,9 @@ fn render_function(function: &Function) -> String {
     if function.is_extern {
         header.push_str("extern ");
     }
+    if function.is_export {
+        header.push_str("export ");
+    }
     header.push_str(&format!("fn {}", function.name));
     header.push_str(&render_type_params(&function.type_params));
     for param in &function.params {

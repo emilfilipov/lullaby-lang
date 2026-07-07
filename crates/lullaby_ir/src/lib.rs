@@ -62,6 +62,13 @@ pub struct IrModule {
     /// Serde-defaulted so existing artifacts and snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extern_functions: Vec<String>,
+    /// Names of `export fn` functions — normal Lullaby functions additionally
+    /// exposed under their plain C name as externally visible, defined native
+    /// symbols so C can call into them. `export` is meaningful only to native
+    /// codegen; on the interpreters an export runs like an ordinary function.
+    /// Serde-defaulted so existing artifacts and snapshots stay valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_functions: Vec<String>,
 }
 
 /// One trait impl method in the IR: the implementing type name, the method name,
@@ -811,6 +818,12 @@ pub struct BytecodeModule {
     /// with `L0423`. Serde-defaulted for compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extern_functions: Vec<String>,
+    /// Names of `export fn` functions, carried through so the native backend
+    /// emits an externally visible, defined symbol under the plain C name. Purely
+    /// a native-codegen concern; the bytecode VM runs an export like any function.
+    /// Serde-defaulted for compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_functions: Vec<String>,
 }
 
 /// One trait impl method in the bytecode module: the implementing type name, the
@@ -1494,6 +1507,7 @@ pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
         trait_methods: module.trait_methods.clone(),
         async_functions: module.async_functions.clone(),
         extern_functions: module.extern_functions.clone(),
+        export_functions: module.export_functions.clone(),
     }
 }
 
@@ -1528,6 +1542,7 @@ pub fn run_bytecode_main_with_args(
         trait_methods: module.trait_methods.clone(),
         async_functions: module.async_functions.clone(),
         extern_functions: module.extern_functions.clone(),
+        export_functions: module.export_functions.clone(),
     };
     run_main_with_args(&ir, args)
 }
@@ -1901,6 +1916,7 @@ impl ConstantFolder {
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
+            export_functions: module.export_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2221,6 +2237,7 @@ impl CommonSubexpressionEliminator {
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
+            export_functions: module.export_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2596,6 +2613,7 @@ impl LoopInvariantMover {
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
+            export_functions: module.export_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2996,6 +3014,7 @@ impl CopyPropagator {
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
+            export_functions: module.export_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -3341,6 +3360,7 @@ impl DeadCodeEliminator {
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
+            export_functions: module.export_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -5874,6 +5894,17 @@ impl<'a> Lowerer<'a> {
             .filter(|function| function.is_extern)
             .map(|function| function.name.clone())
             .collect();
+        // Record every `export fn` so the native backend emits an externally
+        // visible, defined symbol for it under its plain C name. The function is
+        // lowered like any ordinary function (it has a body); `export` only
+        // affects native symbol visibility.
+        let export_functions = self
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.is_export)
+            .map(|function| function.name.clone())
+            .collect();
         Ok(IrModule {
             functions,
             structs,
@@ -5882,6 +5913,7 @@ impl<'a> Lowerer<'a> {
             trait_methods,
             async_functions,
             extern_functions,
+            export_functions,
         })
     }
 
@@ -7710,6 +7742,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            export_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: vec![IrParam {
@@ -7745,6 +7778,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            export_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),

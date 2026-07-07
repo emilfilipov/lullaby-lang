@@ -148,6 +148,15 @@ pub struct Function {
     /// valid.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_extern: bool,
+    /// True when the function is declared `export fn` — a normal Lullaby function
+    /// (with a body) that is additionally exposed under its plain C name as an
+    /// externally visible, defined native symbol so C (or another object) can call
+    /// into it. `export` is meaningful only to native codegen: on the
+    /// interpreters an `export fn` runs exactly like an ordinary `fn`.
+    /// Serde-defaulted to `false` so existing artifacts and AST snapshots stay
+    /// valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_export: bool,
 }
 
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.
@@ -715,6 +724,12 @@ impl<'a> Parser<'a> {
             // of a C-ABI function imported at link time. `extern` only applies to
             // functions and is mutually exclusive with `async`.
             let is_extern = self.eat_keyword(Keyword::Extern).is_some();
+            // An optional `export` modifier prefixes a normal (bodied) `fn`
+            // declaration and exposes it under its plain C name as an externally
+            // visible native symbol so C can call into it. `export` only applies
+            // to functions and is mutually exclusive with `extern` (which imports
+            // a body-less C symbol) and `async`.
+            let is_export = self.eat_keyword(Keyword::Export).is_some();
             if is_extern && is_async {
                 let token = self.peek();
                 self.error(
@@ -723,18 +738,40 @@ impl<'a> Parser<'a> {
                     token.span,
                 );
             }
+            if is_export && is_extern {
+                let token = self.peek();
+                self.error(
+                    "L0201",
+                    "`export` and `extern` cannot be combined on a `fn` declaration",
+                    token.span,
+                );
+            }
+            if is_export && is_async {
+                let token = self.peek();
+                self.error(
+                    "L0201",
+                    "`export` and `async` cannot be combined on a `fn` declaration",
+                    token.span,
+                );
+            }
             if self.eat_keyword(Keyword::Fn).is_some() {
                 let function = if is_extern {
                     self.parse_extern_function(is_public)
                 } else {
-                    self.parse_function(is_public, is_async)
+                    self.parse_function(is_public, is_async, is_export)
                 };
                 if let Some(function) = function {
                     functions.push(function);
                 }
-            } else if is_async || is_extern {
+            } else if is_async || is_extern || is_export {
                 let token = self.peek();
-                let modifier = if is_extern { "extern" } else { "async" };
+                let modifier = if is_extern {
+                    "extern"
+                } else if is_export {
+                    "export"
+                } else {
+                    "async"
+                };
                 self.error(
                     "L0201",
                     format!("`{modifier}` must prefix a `fn` declaration"),
@@ -965,6 +1002,7 @@ impl<'a> Parser<'a> {
             is_public: false,
             is_async: false,
             is_extern: false,
+            is_export: false,
         })
     }
 
@@ -1044,7 +1082,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_function(&mut self, is_public: bool, is_async: bool) -> Option<Function> {
+    fn parse_function(
+        &mut self,
+        is_public: bool,
+        is_async: bool,
+        is_export: bool,
+    ) -> Option<Function> {
         let fn_span = self.previous().span;
         let name = self.expect_identifier("expected function name after `fn`")?;
         let type_params = self.parse_type_params(fn_span)?;
@@ -1087,6 +1130,7 @@ impl<'a> Parser<'a> {
             is_public,
             is_async,
             is_extern: false,
+            is_export,
         })
     }
 
@@ -1130,6 +1174,7 @@ impl<'a> Parser<'a> {
             is_public,
             is_async: false,
             is_extern: true,
+            is_export: false,
         })
     }
 
@@ -2381,6 +2426,35 @@ mod tests {
         assert!(
             formatted.contains("extern fn llabs x i64 -> i64"),
             "formatter renders extern signature: {formatted}"
+        );
+    }
+
+    #[test]
+    fn parses_export_function_with_body() {
+        let source = "export fn add_seven x i64 -> i64\n    x + 7\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let export_fn = &program.functions[0];
+        assert_eq!(export_fn.name, "add_seven");
+        assert!(export_fn.is_export, "export flag set");
+        assert!(!export_fn.is_extern, "export is not extern");
+        assert!(!export_fn.body.is_empty(), "export declaration has a body");
+        // The export marker round-trips through the canonical formatter.
+        let formatted = format_program(&program);
+        assert!(
+            formatted.contains("export fn add_seven x i64 -> i64"),
+            "formatter renders export signature: {formatted}"
+        );
+    }
+
+    #[test]
+    fn rejects_export_combined_with_extern() {
+        let source = "export extern fn f x i64 -> i64\n";
+        let tokens = lex(source).expect("lex");
+        let diagnostics = parse(&tokens).expect_err("combining export and extern is rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0201"),
+            "expected L0201: {diagnostics:?}"
         );
     }
 

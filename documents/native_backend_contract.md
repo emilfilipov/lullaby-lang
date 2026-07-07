@@ -19,6 +19,7 @@ Implemented now:
 - **Stack-allocated scalar aggregates** on top of the i64-scalar subset: all-i64 (optionally nested) structs and fixed-length `i64` arrays as function locals, laid out contiguously in the stack frame. See "Stack-Allocated Scalar Structs And Fixed Arrays" below.
 - **First heap step: string constants + a bump heap.** String literals used by `len("...")` are emitted into a read-only `.rdata` section, referenced by REL32 relocations, copied into a `.bss` bump-allocated heap region at runtime, and scanned for their byte length so `main` can derive an i64 from string data. See "First Heap Step: String Constants And Bump Allocator" below.
 - **C-ABI FFI (calling C).** A body-less `extern fn NAME params -> Ret` declares an imported C function; a call lowers to a `call` of an undefined external symbol (Win64 integer registers, result in `rax`) and links against the C runtime (`ucrt.lib`). Calling an extern on an interpreter is `L0423`. See "C-ABI FFI (calling C)" below.
+- **C-ABI FFI (exposing Lullaby to C).** An `export fn NAME params -> Ret` is a normal (bodied) Lullaby function additionally exposed under its plain C name as an externally visible, defined `.text` symbol so C (or another object) can call **into** Lullaby. The first increment restricts an export to an i64-scalar signature (`L0424` otherwise). An export-only program (no `main`) emits a library object with no entry stub. See "C-ABI FFI (exposing Lullaby to C)" below.
 
 Not implemented yet:
 
@@ -195,7 +196,42 @@ The AST, IR, and bytecode interpreters cannot execute real C FFI. Calling an `ex
 
 ### Deferred FFI work
 
-Deferred beyond this increment: exposing Lullaby functions **to** C (callbacks / C calling Lullaby), non-scalar/pointer/struct C parameter and return types, `f64`/floating and 32-bit `int`/`long` C types, variadic C functions, callbacks and function-pointer arguments, string/buffer marshalling, and non-Windows C ABIs (System V on Linux/macOS).
+Deferred beyond this increment: non-scalar/pointer/struct C parameter and return types, `f64`/floating and 32-bit `int`/`long` C types, variadic C functions, callbacks and function-pointer arguments, string/buffer marshalling, and non-Windows C ABIs (System V on Linux/macOS). Exposing Lullaby functions **to** C is now delivered for the i64-scalar case — see below.
+
+## C-ABI FFI (exposing Lullaby to C) (DELIVERED, first increment)
+
+The native backend can expose a Lullaby function to C across the Win64 C ABI — the other FFI direction, C (or another object) calling **into** Lullaby.
+
+### The `export` surface
+
+An `export fn` marks a normal (bodied) Lullaby function as C-callable:
+
+```lullaby
+export fn add_seven x i64 -> i64
+    x + 7
+```
+
+Rules:
+
+- `export` prefixes a `fn` declaration (an optional `pub` may precede it: `pub export fn`). Unlike `extern`, an export **has a body** and is a full Lullaby function; `export` is mutually exclusive with `extern` (which imports a body-less C symbol) and with `async`.
+- The Lullaby function name **is** the exported C symbol name. A C caller declares `extern <ret> NAME(<args>);` and links against the emitted object.
+- First increment: parameters and the return type must all be `i64` (the Win64 integer-register subset). A non-i64 or generic export signature is rejected at check time with **`L0424`** rather than silently demoted.
+- `export` is meaningful only to native codegen. On the AST/IR/bytecode interpreters an `export fn` runs exactly like an ordinary `fn`; the interpreters, IR, and bytecode execution are unchanged. `export_functions` on `IrModule`/`BytecodeModule` carries the export names (serde-defaulted for artifact compatibility).
+
+### Win64 mapping and COFF symbol visibility
+
+- An exported function is lowered like any i64-scalar function (standard Win64 prologue/epilogue, params in `rcx`/`rdx`/`r8`/`r9`, result in `rax`). No wrapper or thunk is generated — the plain Lullaby body *is* the C entry point.
+- The COFF symbol table already emits every compiled function as storage-class `EXTERNAL` **defined** in `.text` (section number 1) under its plain, unmangled name. An export therefore surfaces to the linker exactly as `extern <ret> NAME(<args>);` expects. (`export` records user intent and gates the i64-scalar check; the symbol mechanism is the existing external-defined function symbol.)
+- **Library objects.** An export-only program (no `main`) emits a *library object*: the emitter omits the `_lullaby_start` entry stub and its `ExitProcess` dependency entirely, so the object carries only the exported (and any called) function symbols. This lets a C `main` link against it without colliding on `main` or dragging in a second entry point. A program that has both `main` and exports keeps the entry stub (a runnable program) and additionally exposes the exports. `NativeProgram.entry_symbol` is empty for a library object; `lullaby native` then writes the object and reports it as a C-callable library rather than attempting to link an `.exe`.
+
+### Testing
+
+- **Structural (always runs):** `exports_function_as_external_defined_text_symbol` in `crates/lullaby_ir/src/native_object.rs` emits a native program for `export fn add_seven x i64 -> i64` and asserts the COFF symbol table holds `add_seven` as an `EXTERNAL` (storage class 2) symbol defined in `.text` (section 1), with no `_lullaby_start`/`ExitProcess` in the library object. `export_alongside_main_keeps_the_entry_stub` checks the mixed case.
+- **Execution (gated, skips gracefully):** `c_calls_into_exported_lullaby_function_when_compilable` in `crates/lullaby_cli/tests/cli.rs` native-compiles `tests/fixtures/native_only/export_add_seven.lby` to a library object, then — if a C compiler (`cl` or `clang`) is discoverable — compiles a tiny C program (`extern long long add_seven(long long); int main(void){ return (int)add_seven(35); }`), links it against the Lullaby object, runs the result, and asserts exit code `42`. It skips the compile+link+run with a message when no C compiler is found.
+
+### Deferred export work
+
+Deferred beyond this increment: non-scalar/pointer/struct/`f64`/32-bit export parameter and return types, callbacks (a Lullaby function value handed to C as a function pointer), string/buffer marshalling across the boundary, and non-Windows C ABIs.
 
 ## Deferred Native Work
 
