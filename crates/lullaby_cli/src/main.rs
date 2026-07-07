@@ -10,8 +10,8 @@ use lullaby_diagnostics::{
 use lullaby_ir::{
     BYTECODE_ARTIFACT_EXTENSION, BytecodeArtifact, BytecodeArtifactError, IrCleanupRole,
     IrMemoryOperation, IrMemoryOperationKind, OptimizationConfig, decode_bytecode_artifact,
-    encode_bytecode_artifact, lower, lower_to_bytecode, optimize, run_bytecode_main,
-    run_bytecode_main_with_args, run_main_with_args as run_ir_main_with_args,
+    emit_wasm_module, encode_bytecode_artifact, lower, lower_to_bytecode, optimize,
+    run_bytecode_main, run_bytecode_main_with_args, run_main_with_args as run_ir_main_with_args,
 };
 use lullaby_lexer::{CANONICAL_EXTENSION, Diagnostic, lex, validate_source_path};
 use lullaby_parser::{Program, format_program, parse};
@@ -55,6 +55,7 @@ fn run() -> Result<(), String> {
             invocation.optimization,
             invocation.program_args,
         ),
+        CommandName::Wasm => wasm_file(invocation.path, invocation.output, invocation.mode),
         CommandName::Version => {
             println!("lullaby {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -227,6 +228,80 @@ fn compile_file(
         println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
     } else {
         println!("compiled: {}", output.display());
+    }
+    Ok(())
+}
+
+/// Compile the scalar-subset functions of a `.lby` source file to a binary
+/// `.wasm` module. Validates and lowers to IR exactly as `compile` does, then
+/// runs the WASM emitter. `--verbose` prints which functions compiled and which
+/// were skipped (and why).
+fn wasm_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Result<(), String> {
+    let compiled = match compile(&path, SourceMode::Executable) {
+        Ok(compiled) => compiled,
+        Err(failure) => {
+            return Err(format_reports(
+                &failure.reports,
+                mode,
+                failure.source.as_deref(),
+            ));
+        }
+    };
+
+    let module = lower(&compiled.checked).map_err(|error| {
+        format_reports(
+            &[ir_report(error, &compiled.path)],
+            mode,
+            Some(&compiled.source),
+        )
+    })?;
+
+    let artifact = match emit_wasm_module(&module) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            // No function was eligible for the scalar subset: report L0338 and,
+            // in verbose mode, list every skipped function with its reason.
+            let mut report = DiagnosticReport::new(error.code, DiagnosticPhase::Ir, error.message)
+                .with_source_path(compiled.path.display().to_string());
+            report = report.with_note(
+                "the WebAssembly backend compiles only scalar functions (i64/f64/bool/char/byte)",
+            );
+            let mut rendered = format_reports(&[report], mode, Some(&compiled.source));
+            if mode == OutputMode::Verbose {
+                for skip in &error.skipped {
+                    rendered.push_str(&format!("\nskipped {}: {}", skip.name, skip.reason));
+                }
+            }
+            return Err(rendered);
+        }
+    };
+
+    let output = output.unwrap_or_else(|| compiled.path.with_extension("wasm"));
+    if let Err(error) = fs::write(&output, &artifact.bytes) {
+        return Err(format_reports(
+            &[DiagnosticReport::new(
+                "L0003",
+                DiagnosticPhase::Resource,
+                format!("failed to write `{}`: {error}", output.display()),
+            )
+            .with_source_path(output.display().to_string())],
+            mode,
+            None,
+        ));
+    }
+
+    if mode == OutputMode::Json {
+        println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
+    } else {
+        println!("wasm: {}", output.display());
+        if mode == OutputMode::Verbose {
+            for name in &artifact.compiled {
+                println!("compiled {name}");
+            }
+            for skip in &artifact.skipped {
+                println!("skipped {}: {}", skip.name, skip.reason);
+            }
+        }
     }
     Ok(())
 }
@@ -720,6 +795,7 @@ enum CommandName {
     Fmt,
     Inspect,
     Run,
+    Wasm,
     Version,
     Help,
 }
@@ -839,7 +915,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 Err("usage: lullaby examples".to_string())
             }
         }
-        "build" | "check" | "compile" | "inspect" | "run" => {
+        "build" | "check" | "compile" | "inspect" | "run" | "wasm" => {
             parse_file_command(command, &args[1..])
         }
         "fmt" => parse_fmt_command(&args[1..]),
@@ -898,7 +974,9 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
                 cursor += 2;
             }
             "--output" | "-o" => {
-                if (command != "compile" && command != "build") || output.is_some() {
+                if (command != "compile" && command != "build" && command != "wasm")
+                    || output.is_some()
+                {
                     return Err(usage);
                 }
                 let Some(value) = args.get(cursor + 1) else {
@@ -952,6 +1030,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
             "check" => CommandName::Check,
             "compile" => CommandName::Compile,
             "inspect" => CommandName::Inspect,
+            "wasm" => CommandName::Wasm,
             _ => CommandName::Run,
         },
         path: PathBuf::from(path),
@@ -1004,6 +1083,7 @@ fn command_usage(command: &str) -> String {
         "build" => "usage: lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>".to_string(),
         "compile" => "usage: lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>".to_string(),
         "inspect" => "usage: lullaby inspect [--verbose|--format json] <file.lbc>".to_string(),
+        "wasm" => "usage: lullaby wasm [--verbose] [-o out.wasm] <file.lby>".to_string(),
         "run" => "usage: lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby> [args...]\n       lullaby run [--verbose|--format json] <file.lbc>".to_string(),
         _ => "usage: lullaby check [--verbose|--format json] <file.lby>".to_string(),
     }
@@ -1011,7 +1091,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby> [args...]\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
+        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby> [args...]\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby wasm [--verbose] [-o out.wasm] <file.lby>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
         env!("CARGO_PKG_VERSION")
     );
 }

@@ -8,6 +8,18 @@ path: a `.wasm` module runs in every browser and in server-side WASM runtimes.
 The interpreters remain the correctness ground truth; the WASM backend must
 produce the same results.
 
+## Status
+
+**The scalar-subset first increment is DELIVERED.** It ships as a `wasm` module
+in `crates/lullaby_ir` (`crates/lullaby_ir/src/wasm.rs`, `emit_wasm_module`), the
+`lullaby wasm [--verbose] [-o out.wasm] <file.lby>` CLI command, structural
+encoder unit tests, and node-gated execution-parity tests against the
+interpreter (`crates/lullaby_cli/tests/cli.rs`). The encoder writes the module
+header, the Type/Function/Export/Code sections, LEB128 integers, and the
+stack-machine opcodes it needs — using the Rust standard library only, no
+external crate. When no function is eligible, the CLI reports diagnostic
+`L0338`. The linear-memory/heap phase below remains deferred.
+
 ## First increment — the scalar subset
 
 WASM has a clean core (functions, `i32`/`i64`/`f32`/`f64`, structured control
@@ -75,8 +87,8 @@ execution wherever a runtime exists (CI can install one).
 
 ## Scope and sequencing
 
-First increment: the scalar subset above, binary `.wasm` output, the `wasm` CLI
-command, structural encoder tests, and node/wasmtime-gated execution parity.
+First increment (DELIVERED): the scalar subset above, binary `.wasm` output, the
+`wasm` CLI command, structural encoder tests, and node-gated execution parity.
 Deferred (linear-memory phase): `string`/`struct`/`enum`/`array` layout, a bump
 or free-list allocator in linear memory, `match` lowering, collections, and a
 JS/DOM interop layer (imports for `console.log`/DOM) that builds on this.

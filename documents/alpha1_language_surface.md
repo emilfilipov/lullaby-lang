@@ -101,11 +101,13 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
   - `lullaby inspect [--verbose|--format json] <file.lbc>`
   - `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby> [args...]`
   - `lullaby run [--verbose|--format json] <file.lbc>`
+  - `lullaby wasm [--verbose] [-o out.wasm] <file.lby>`
   - `lullaby fmt [--write|--check] <file.lby>`
   - `lullaby docs`
   - `lullaby examples`
   - `lullaby --version`
 - `--diagnostic-format json` is accepted as a JSON diagnostics alias.
+- `lullaby wasm` compiles the source's scalar functions to a binary `.wasm` module (default output `<stem>.wasm`). Only top-level functions whose parameter and return types are all scalars (`i64`/`f64`/`bool`/`char`/`byte`) are compiled and exported by name; any function that uses a non-scalar type, heap value, `match`, or a builtin is skipped and still runs on the interpreters. `--verbose` lists which functions compiled and which were skipped and why. When no function is eligible, it reports `L0338`. This is the first (scalar-subset) increment of the WebAssembly backend; string/struct/enum/collection support via linear memory is deferred.
 - `lullaby compile`, `lullaby build`, and source `lullaby run` require a zero-argument `main` entry point before lowering or execution. Invalid executable entry points report `L0329`.
 - `lullaby compile` and its artifact-generation alias `lullaby build` write a versioned `.lbc` instruction-bytecode artifact with a format marker, artifact version, metadata, entry point, function table, ordered memory operation metadata, compatibility checks, and bytecode module instructions. `lullaby inspect` prints artifact metadata, function signatures, and memory operation counts without executing the program.
 

@@ -1,0 +1,27 @@
+fn add a i64 b i64 -> i64
+    a + b
+
+fn fib n i64 -> i64
+    if n < 2
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn is_even n i64 -> bool
+    let half i64 = n / 2
+    return half * 2 == n
+
+fn sum_to n i64 -> i64
+    let total i64 = 0
+    for i from 1 to n
+        total += i
+    return total
+
+fn main -> i64
+    let a i64 = add(20, 22)
+    let f i64 = fib(10)
+    let s i64 = sum_to(10)
+    let e bool = is_even(f)
+    let flag i64 = 0
+    if e
+        flag = 1
+    return a + f + s + flag

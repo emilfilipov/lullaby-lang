@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use std::process::Command;
 
 fn workspace_root() -> PathBuf {
@@ -310,8 +310,8 @@ fn runs_parallel_map_fixture_on_all_backends() {
 #[test]
 fn runs_spawn_channel_mutex_fixture_on_all_backends() {
     // Four detached `spawn`ed workers each `send(ch, v * v)`; `main` joins them
-    // and sums the four received squares (order-independent → 30), then a mutex
-    // loop adds 1 four times (→ 4). The deterministic total is 34 on every
+    // and sums the four received squares (order-independent â†’ 30), then a mutex
+    // loop adds 1 four times (â†’ 4). The deterministic total is 34 on every
     // backend, proving spawn/channels/mutex work on AST, IR, and bytecode.
     let fixture = workspace_root().join("tests/fixtures/valid/run_spawn.lby");
     for backend in ["ast", "ir", "bytecode"] {
@@ -2111,7 +2111,7 @@ fn http_post_round_trip_on_all_backends() {
 /// written in pure Lullaby (`examples/valid/http_server/server.lby`) on top of
 /// the socket builtins plus `tcp_shutdown`. A Rust `TcpStream` HTTP client
 /// sends a real request and reads the full response to EOF, asserting the
-/// status line and body — proving a graceful teardown delivers the buffered
+/// status line and body â€” proving a graceful teardown delivers the buffered
 /// response (no "Empty reply"). Runs on every backend.
 #[test]
 fn http_server_round_trip_on_all_backends() {
@@ -2199,4 +2199,153 @@ fn http_server_round_trip_on_all_backends() {
             "{backend} lullaby server: {output:?}"
         );
     }
+}
+
+// -- WebAssembly backend (scalar subset) -------------------------------------
+
+/// Whether `node` is available on this machine (its result runs the emitted
+/// `.wasm` for execution parity). Returns `false` if `node --version` cannot run.
+fn node_available() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn wasm_emits_module_and_lists_functions() {
+    // The scalar fixture: an arithmetic function, a recursive `if` function, a
+    // bool-returning comparison, a `for`-loop function, plus a `main` the
+    // interpreter uses for ground truth. Every function is in the scalar subset.
+    let fixture = workspace_root().join("tests/fixtures/valid/wasm_scalars.lby");
+    let out = std::env::temp_dir().join("lullaby_wasm_scalars.wasm");
+    let output = lullaby()
+        .args([
+            "wasm",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let listing = stdout(&output);
+    for name in ["add", "fib", "is_even", "sum_to", "main"] {
+        assert!(
+            listing.contains(&format!("compiled {name}")),
+            "expected `{name}` compiled: {listing}"
+        );
+    }
+
+    // The emitted file starts with the WASM magic + version 1.
+    let bytes = std::fs::read(&out).expect("read wasm");
+    assert_eq!(
+        &bytes[0..8],
+        &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+        "wasm header"
+    );
+}
+
+#[test]
+fn wasm_reports_no_eligible_functions() {
+    // A file whose only function uses a non-scalar type: nothing is eligible, so
+    // the WASM backend reports L0338.
+    // `wasm` reuses the executable pipeline, which requires `main`; make `main`
+    // itself non-scalar (returns `string`) so nothing is eligible and the
+    // emitter reports L0338 rather than compiling anything.
+    let source = "fn main -> string\n    \"hi\"\n";
+    let tmp = std::env::temp_dir().join("lullaby_wasm_none.lby");
+    std::fs::write(&tmp, source).expect("write temp");
+    let output = lullaby()
+        .args(["wasm", "--verbose", tmp.to_str().expect("temp path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success());
+    let rendered = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(rendered.contains("L0338"), "expected L0338: {rendered}");
+    assert!(
+        rendered.contains("skipped main"),
+        "expected verbose skip reason: {rendered}"
+    );
+}
+
+#[test]
+fn wasm_execution_parity_with_node() {
+    // Emit the module, then (if `node` is available) instantiate it and assert
+    // each exported function matches the interpreter's ground truth.
+    let fixture = workspace_root().join("tests/fixtures/valid/wasm_scalars.lby");
+    let out = std::env::temp_dir().join("lullaby_wasm_parity.wasm");
+    let emit = lullaby()
+        .args([
+            "wasm",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    // Interpreter ground truth for `main` (which calls the others).
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp_main = stdout(&run).trim().to_string();
+    assert_eq!(interp_main, "152");
+
+    if !node_available() {
+        eprintln!("node not found on PATH; skipping WASM execution parity");
+        return;
+    }
+
+    // A tiny JS runner: print several exported results. i64 params/returns are
+    // BigInt in JS, so pass `10n` and stringify the BigInt result.
+    let runner = std::env::temp_dir().join("lullaby_wasm_runner.js");
+    let js = format!(
+        "const fs=require('fs');\
+         const bytes=fs.readFileSync({wasm:?});\
+         WebAssembly.instantiate(bytes).then(r=>{{\
+           const e=r.instance.exports;\
+           const lines=[\
+             'add='+e.add(20n,22n).toString(),\
+             'fib='+e.fib(10n).toString(),\
+             'is_even10='+e.is_even(10n).toString(),\
+             'is_even55='+e.is_even(55n).toString(),\
+             'sum='+e.sum_to(10n).toString(),\
+             'main='+e.main().toString()\
+           ];\
+           process.stdout.write(lines.join(';'));\
+         }}).catch(err=>{{console.error('FAIL:'+err.message);process.exit(1)}});",
+        wasm = out.to_str().expect("out path")
+    );
+    std::fs::write(&runner, js).expect("write runner");
+
+    let node = Command::new("node")
+        .arg(runner.to_str().expect("runner path"))
+        .output()
+        .expect("run node");
+    assert!(
+        node.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let out_text = String::from_utf8_lossy(&node.stdout);
+    // Arithmetic function.
+    assert!(out_text.contains("add=42"), "{out_text}");
+    // Recursive function with `if`.
+    assert!(out_text.contains("fib=55"), "{out_text}");
+    // Bool-returning comparison exports as i32 0/1.
+    assert!(out_text.contains("is_even10=1"), "{out_text}");
+    assert!(out_text.contains("is_even55=0"), "{out_text}");
+    // `for`-loop function.
+    assert!(out_text.contains("sum=55"), "{out_text}");
+    // Whole-program `main` matches the interpreter.
+    assert!(
+        out_text.contains(&format!("main={interp_main}")),
+        "{out_text}"
+    );
 }

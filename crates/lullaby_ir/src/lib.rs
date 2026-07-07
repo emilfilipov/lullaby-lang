@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 pub mod frame_layout;
 pub mod native_contract;
 pub mod native_object;
+pub mod wasm;
+
+pub use wasm::{SkippedFunction, WasmArtifact, WasmError, emit_wasm_module};
 
 pub const BYTECODE_ARTIFACT_FORMAT: &str = "lullaby-bytecode";
 pub const BYTECODE_ARTIFACT_EXTENSION: &str = "lbc";
