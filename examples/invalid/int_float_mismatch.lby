@@ -1,0 +1,6 @@
+# int_float_mismatch.lby — intentionally fails type checking.
+# Mixing an i64 and an f64 in one expression is a type error;
+# `lullaby check` reports it instead of producing a binary.
+fn main -> void
+    let x i64 = 1 + 2.0
+    println(to_string(x))

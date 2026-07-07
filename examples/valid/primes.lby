@@ -1,0 +1,24 @@
+# primes.lby — count the prime numbers below 50 with trial division.
+# Composes helper functions, a while loop, and if/return control flow.
+# Run: lullaby run examples/valid/primes.lby
+
+# Lullaby has no modulo operator, so define remainder via truncating division.
+fn rem a i64 b i64 -> i64
+    a - (a / b) * b
+
+fn is_prime n i64 -> bool
+    if n < 2
+        return false
+    let d i64 = 2
+    while d * d <= n
+        if rem(n, d) == 0
+            return false
+        d += 1
+    true
+
+fn main -> void
+    let count i64 = 0
+    for n from 2 to 49
+        if is_prime(n)
+            count += 1
+    println("primes below 50: " + to_string(count))

@@ -1,0 +1,31 @@
+# collatz.lby — Collatz stopping times for a few starting integers.
+# Each step: even -> n/2, odd -> 3n+1; count steps until n reaches 1.
+# Integer-only; composes helpers, a while loop, and if/else.
+# Run: lullaby run examples/valid/collatz.lby
+
+# Remainder via truncating division (Lullaby has no modulo operator).
+fn rem a i64 b i64 -> i64
+    a - (a / b) * b
+
+fn is_even n i64 -> bool
+    rem(n, 2) == 0
+
+fn stopping_time start i64 -> i64
+    let n i64 = start
+    let steps i64 = 0
+    while n > 1
+        if is_even(n)
+            n = n / 2
+        else
+            n = 3 * n + 1
+        steps += 1
+    steps
+
+fn report start i64 -> void
+    println("collatz(" + to_string(start) + ") = " + to_string(stopping_time(start)))
+
+fn main -> void
+    report(6)
+    report(7)
+    report(27)
+    report(97)
