@@ -5,6 +5,7 @@ members = [
     "crates/lullaby_diagnostics",
     "crates/lullaby_ir",
     "crates/lullaby_lexer",
+    "crates/lullaby_lsp",
     "crates/lullaby_parser",
     "crates/lullaby_runtime",
     "crates/lullaby_semantics",

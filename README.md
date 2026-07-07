@@ -13,7 +13,7 @@ The implemented surface (all running identically on every backend) includes:
 - **Control flow**: `if`/`elif`/`else`, `while`, range `for`, `loop`, `break`/`continue`, exhaustive `match` with payload binding, and `throw`/`try`/`catch`.
 - **Abstraction**: user-defined generic functions (`fn f<T> ...`) with call-site inference, traits with `impl` and bounded generics (`<T: Show>`), and first-class functions passed and returned by value.
 - **Programs**: multi-file `import` with `pub` visibility; a string and math standard library, collections, and text/stream/system I/O — all documented in the [standard library catalog](documents/standard_library.md).
-- **Tooling**: strong diagnostics (concise / verbose / JSON), a canonical formatter (`lullaby fmt`), and a bytecode artifact + inspector.
+- **Tooling**: strong diagnostics (concise / verbose / JSON), a canonical formatter (`lullaby fmt`), an editor language server (`lullaby lsp`), and a bytecode artifact + inspector.
 
 See the [Alpha 1 language surface](documents/alpha1_language_surface.md) for the exact, authoritative feature list.
 
@@ -81,6 +81,7 @@ powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
 - `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>`
 - `lullaby run [--verbose|--format json] <file.lbc>`
 - `lullaby fmt [--write|--check] <file.lby>`
+- `lullaby lsp`
 - `lullaby docs`
 - `lullaby examples`
 - `lullaby help`

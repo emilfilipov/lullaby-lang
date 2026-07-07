@@ -15,6 +15,7 @@ dependencies = [
  "lullaby_diagnostics",
  "lullaby_ir",
  "lullaby_lexer",
+ "lullaby_lsp",
  "lullaby_parser",
  "lullaby_runtime",
  "lullaby_semantics",
@@ -47,6 +48,16 @@ name = "lullaby_lexer"
 version = "0.1.0-alpha.2"
 dependencies = [
  "lullaby_diagnostics",
+]
+
+[[package]]
+name = "lullaby_lsp"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "lullaby_lexer",
+ "lullaby_parser",
+ "lullaby_semantics",
+ "serde_json",
 ]
 
 [[package]]
