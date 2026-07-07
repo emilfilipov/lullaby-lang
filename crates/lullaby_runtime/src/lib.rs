@@ -27,6 +27,9 @@ pub enum Value {
         variant: String,
         payload: Vec<Value>,
     },
+    /// A `map<K, V>`: an insertion-ordered association list. Lookup and insert
+    /// are linear scans using `Value` equality.
+    Map(Vec<(Value, Value)>),
     Void,
 }
 
@@ -67,6 +70,14 @@ impl fmt::Display for Value {
                         .join(", ");
                     write!(formatter, "{variant}({rendered})")
                 }
+            }
+            Self::Map(entries) => {
+                let rendered = entries
+                    .iter()
+                    .map(|(key, value)| format!("{key}: {value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(formatter, "{{{rendered}}}")
             }
             Self::Void => write!(formatter, "void"),
         }
@@ -175,6 +186,34 @@ pub fn expect_list(name: &str, value: Value) -> Result<Vec<Value>, RuntimeError>
             "L0417",
             format!("{name} expects a list but got `{other}`"),
         )),
+    }
+}
+
+/// Unwrap a runtime `Value` expected to be a map, reporting `L0417` otherwise.
+pub fn expect_map(name: &str, value: Value) -> Result<Vec<(Value, Value)>, RuntimeError> {
+    match value {
+        Value::Map(entries) => Ok(entries),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a map but got `{other}`"),
+        )),
+    }
+}
+
+/// Build an `option<V>` runtime value using the shared `Value::Enum` option
+/// representation (`some(v)` or `none`).
+pub fn option_value(payload: Option<Value>) -> Value {
+    match payload {
+        Some(value) => Value::Enum {
+            enum_name: "option".to_string(),
+            variant: "some".to_string(),
+            payload: vec![value],
+        },
+        None => Value::Enum {
+            enum_name: "option".to_string(),
+            variant: "none".to_string(),
+            payload: Vec::new(),
+        },
     }
 }
 
@@ -292,6 +331,12 @@ impl<'a> Runtime<'a> {
             "get" => Self::builtin_get(args),
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
+            "map_new" => Self::builtin_map_new(args),
+            "map_set" => Self::builtin_map_set(args),
+            "map_get" => Self::builtin_map_get(args),
+            "map_has" => Self::builtin_map_has(args),
+            "map_len" => Self::builtin_map_len(args),
+            "map_del" => Self::builtin_map_del(args),
             "substring" => Self::builtin_substring(args),
             "find" => Self::builtin_find(args),
             "contains" => Self::builtin_contains(args),
@@ -1072,6 +1117,65 @@ impl<'a> Runtime<'a> {
         Ok(Value::Array(values))
     }
 
+    /// `map_new() -> map<K, V>`: a fresh empty map.
+    fn builtin_map_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_new", 0, args.len()))?;
+        Ok(Value::Map(Vec::new()))
+    }
+
+    /// `map_set(m, k, v) -> map<K, V>`: a new map with `k` mapped to `v`.
+    fn builtin_map_set(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key, value]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_set", 3, args.len()))?;
+        let mut entries = expect_map("map_set", map)?;
+        match entries.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => entry.1 = value,
+            None => entries.push((key, value)),
+        }
+        Ok(Value::Map(entries))
+    }
+
+    /// `map_get(m, k) -> option<V>`: `some(v)` if present, else `none`.
+    fn builtin_map_get(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_get", 2, args.len()))?;
+        let entries = expect_map("map_get", map)?;
+        let found = entries.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+        Ok(option_value(found))
+    }
+
+    /// `map_has(m, k) -> bool`.
+    fn builtin_map_has(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_has", 2, args.len()))?;
+        let entries = expect_map("map_has", map)?;
+        Ok(Value::Bool(entries.iter().any(|(k, _)| *k == key)))
+    }
+
+    /// `map_len(m) -> i64`.
+    fn builtin_map_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_len", 1, args.len()))?;
+        let entries = expect_map("map_len", map)?;
+        Ok(Value::I64(entries.len() as i64))
+    }
+
+    /// `map_del(m, k) -> map<K, V>`: a new map without key `k`.
+    fn builtin_map_del(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_del", 2, args.len()))?;
+        let mut entries = expect_map("map_del", map)?;
+        entries.retain(|(k, _)| *k != key);
+        Ok(Value::Map(entries))
+    }
+
     fn builtin_substring(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [text, start, end]: [Value; 3] = args
             .try_into()
@@ -1714,6 +1818,35 @@ mod tests {
         );
         let error = run_source(source).expect_err("run");
         assert_eq!(error.code, "L0413");
+    }
+
+    #[test]
+    fn map_set_get_round_trips_via_option() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let m map<string, i64> = map_new()\n",
+            "    m = map_set(m, \"x\", 41)\n",
+            "    m = map_set(m, \"x\", 42)\n",
+            "    match map_get(m, \"x\")\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n",
+        );
+        // Insert then replace `x`; `map_get` returns `some(42)`, unwrapped to 42.
+        assert_eq!(run_source(source).expect("run"), Value::I64(42));
+    }
+
+    #[test]
+    fn map_get_missing_key_returns_none() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let m map<string, i64> = map_new()\n",
+            "    m = map_set(m, \"x\", 1)\n",
+            "    m = map_del(m, \"x\")\n",
+            "    match map_get(m, \"x\")\n",
+            "        some(v) -> v\n",
+            "        none -> 7\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(7));
     }
 
     #[test]

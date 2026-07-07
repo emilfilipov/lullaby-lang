@@ -1087,7 +1087,7 @@ impl<'a> Parser<'a> {
                     name.as_str(),
                     "array" | "ptr" | "ref" | "rc" | "option" | "list"
                 );
-                let is_multi = name.as_str() == "result";
+                let is_multi = matches!(name.as_str(), "result" | "map");
                 if (is_single || is_multi) && self.eat_symbol("<") {
                     let mut args = vec![self.expect_type("expected generic type argument")?];
                     if is_multi {

@@ -9,7 +9,7 @@ use lullaby_parser::{
 };
 use lullaby_runtime::{
     ResolvedPlace, RuntimeError, Value, apply_compound, char_find, expect_i64, expect_list,
-    expect_string, get_place, set_place,
+    expect_map, expect_string, get_place, option_value, set_place,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -3343,6 +3343,12 @@ impl<'a> IrRuntime<'a> {
             "get" => Self::builtin_get(args),
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
+            "map_new" => Self::builtin_map_new(args),
+            "map_set" => Self::builtin_map_set(args),
+            "map_get" => Self::builtin_map_get(args),
+            "map_has" => Self::builtin_map_has(args),
+            "map_len" => Self::builtin_map_len(args),
+            "map_del" => Self::builtin_map_del(args),
             "substring" => Self::builtin_substring(args),
             "find" => Self::builtin_find(args),
             "contains" => Self::builtin_contains(args),
@@ -4071,6 +4077,65 @@ impl<'a> IrRuntime<'a> {
             return Err(RuntimeError::new("L0413", "cannot pop from an empty list"));
         }
         Ok(Value::Array(values))
+    }
+
+    /// `map_new() -> map<K, V>`: a fresh empty map.
+    fn builtin_map_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_new", 0, args.len()))?;
+        Ok(Value::Map(Vec::new()))
+    }
+
+    /// `map_set(m, k, v) -> map<K, V>`: a new map with `k` mapped to `v`.
+    fn builtin_map_set(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key, value]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_set", 3, args.len()))?;
+        let mut entries = expect_map("map_set", map)?;
+        match entries.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => entry.1 = value,
+            None => entries.push((key, value)),
+        }
+        Ok(Value::Map(entries))
+    }
+
+    /// `map_get(m, k) -> option<V>`: `some(v)` if present, else `none`.
+    fn builtin_map_get(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_get", 2, args.len()))?;
+        let entries = expect_map("map_get", map)?;
+        let found = entries.into_iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+        Ok(option_value(found))
+    }
+
+    /// `map_has(m, k) -> bool`.
+    fn builtin_map_has(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_has", 2, args.len()))?;
+        let entries = expect_map("map_has", map)?;
+        Ok(Value::Bool(entries.iter().any(|(k, _)| *k == key)))
+    }
+
+    /// `map_len(m) -> i64`.
+    fn builtin_map_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_len", 1, args.len()))?;
+        let entries = expect_map("map_len", map)?;
+        Ok(Value::I64(entries.len() as i64))
+    }
+
+    /// `map_del(m, k) -> map<K, V>`: a new map without key `k`.
+    fn builtin_map_del(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map, key]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_del", 2, args.len()))?;
+        let mut entries = expect_map("map_del", map)?;
+        entries.retain(|(k, _)| *k != key);
+        Ok(Value::Map(entries))
     }
 
     fn builtin_substring(args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -5158,6 +5223,31 @@ impl<'a> Lowerer<'a> {
             }));
         }
 
+        // `map_new()` mirrors `list_new()`: its key/value types come solely from
+        // the expected `map<...>` type. Semantics has already validated it.
+        if let ExprKind::Call { name, args } = &expr.kind
+            && name == "map_new"
+            && args.is_empty()
+        {
+            let ty = match expected.cloned() {
+                Some(ty) if ty.generic_args("map").is_some() => ty,
+                _ => {
+                    return Some(Err(IrLoweringError::new(
+                        "cannot infer the key/value types of `map_new` without an expected `map<...>` type",
+                        Some(expr.span),
+                    )));
+                }
+            };
+            return Some(Ok(IrExpr {
+                kind: IrExprKind::Call {
+                    name: name.clone(),
+                    args: Vec::new(),
+                },
+                ty,
+                span: expr.span,
+            }));
+        }
+
         let (name, payload_expr) = match &expr.kind {
             // Bare `none` (not shadowed by a local) is unit-variant construction.
             ExprKind::Variable(name) if name == "none" && !scope.contains_key(name) => {
@@ -5260,8 +5350,8 @@ impl<'a> Lowerer<'a> {
             | "flush" | "rc_release" | "ptr_write" | "region_create" => TypeRef::new("void"),
             "read_file" | "sys_output" | "to_string" | "substring" | "join" | "trim"
             | "replace" | "upper" | "lower" => TypeRef::new("string"),
-            "file_exists" | "contains" => TypeRef::new("bool"),
-            "sys_status" | "len" | "find" => TypeRef::new("i64"),
+            "file_exists" | "contains" | "map_has" => TypeRef::new("bool"),
+            "sys_status" | "len" | "find" | "map_len" => TypeRef::new("i64"),
             // `push`/`set`/`pop` return a new `list<T>` of the same type as their
             // list argument (already spelled `list<T>`).
             "push" | "set" | "pop" => {
@@ -5281,6 +5371,27 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| {
                         IrLoweringError::new("get call argument is not a list", Some(span))
                     })?
+            }
+            // `map_set`/`map_del` return a new `map<K, V>` of the same type as
+            // their map argument (already spelled `map<K, V>`).
+            "map_set" | "map_del" => args.first().map(|map| map.ty.clone()).ok_or_else(|| {
+                IrLoweringError::new(format!("{name} call missing map argument"), Some(span))
+            })?,
+            // `map_get(m, k)` returns `option<V>` where `V` is the value type of
+            // its `map<K, V>` argument.
+            "map_get" => {
+                let map = args.first().ok_or_else(|| {
+                    IrLoweringError::new("map_get call missing map argument", Some(span))
+                })?;
+                let value = map
+                    .ty
+                    .generic_args("map")
+                    .filter(|args| args.len() == 2)
+                    .map(|mut args| args.remove(1))
+                    .ok_or_else(|| {
+                        IrLoweringError::new("map_get call argument is not a map", Some(span))
+                    })?;
+                generic_type("option", std::slice::from_ref(&value))
             }
             "split" => TypeRef::new("array<string>"),
             "sqrt" | "floor" | "ceil" | "round" => TypeRef::new("f64"),

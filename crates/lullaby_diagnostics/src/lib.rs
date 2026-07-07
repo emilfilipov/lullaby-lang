@@ -456,6 +456,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass a `list<T>` and matching `T` element, and give `list_new()` a `list<...>` annotation or return type so its element type is known.",
     },
     DiagnosticEntry {
+        code: "L0388",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A `map<K, V>` builtin call had a wrong argument, an unsupported key type, or an uninferable key/value type.",
+        root_cause: "A `map_new`/`map_set`/`map_get`/`map_has`/`map_len`/`map_del` call used the wrong argument type or arity, used a key type other than `i64`/`string`, or `map_new` had no expected `map<...>` type to fix its key/value types.",
+        suggested_fix: "Pass a `map<K, V>` with `i64`/`string` keys and matching `K`/`V` arguments, and give `map_new()` a `map<...>` annotation or return type so its key/value types are known.",
+    },
+    DiagnosticEntry {
         code: "L0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",

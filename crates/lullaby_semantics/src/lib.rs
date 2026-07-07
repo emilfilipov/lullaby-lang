@@ -235,6 +235,27 @@ fn list_element(ty: &TypeRef) -> Option<TypeRef> {
         .map(|mut args| args.remove(0))
 }
 
+/// Canonical `map<K, V>` type spelling.
+fn map_type(key: &TypeRef, value: &TypeRef) -> TypeRef {
+    generic_type("map", &[key.clone(), value.clone()])
+}
+
+/// A `map<K, V>` key type is restricted to `i64` or `string`.
+fn map_key_ok(key: &TypeRef) -> bool {
+    matches!(key.name.as_str(), "i64" | "string")
+}
+
+/// The `(K, V)` type pair of a `map<K, V>` spelling, if any.
+fn map_kv(ty: &TypeRef) -> Option<(TypeRef, TypeRef)> {
+    ty.generic_args("map")
+        .filter(|args| args.len() == 2)
+        .map(|mut args| {
+            let value = args.remove(1);
+            let key = args.remove(0);
+            (key, value)
+        })
+}
+
 fn render_place_path(path: &[Place]) -> String {
     let mut out = String::new();
     for place in path {
@@ -1448,6 +1469,11 @@ impl<'a> Checker<'a> {
             ExprKind::Call { name, args } if name == "list_new" => {
                 Some(self.check_list_new(args, expected, expr.span, function))
             }
+            // `map_new()` has no argument to infer `K`/`V` from, so its key and
+            // value types come from the contextual expected `map<...>` type.
+            ExprKind::Call { name, args } if name == "map_new" => {
+                Some(self.check_map_new(args, expected, expr.span, function))
+            }
             _ => None,
         }
     }
@@ -1483,6 +1509,59 @@ impl<'a> Checker<'a> {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0387",
                     "cannot infer the element type of `list_new`; add a `list<...>` annotation or return type",
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    fn check_map_new(
+        &mut self,
+        args: &[Expr],
+        expected: Option<&TypeRef>,
+        span: Span,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        if !args.is_empty() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0388",
+                format!("`map_new` expects 0 arguments but got {}", args.len()),
+                Some(function.name.clone()),
+                span,
+            ));
+            return None;
+        }
+        match expected {
+            Some(ty) => match map_kv(ty) {
+                Some((key, _value)) if map_key_ok(&key) => Some(ty.clone()),
+                Some((key, _value)) => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!(
+                            "`map` keys must be `i64` or `string` but got `{}`",
+                            key.name
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                    None
+                }
+                None => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!("`map_new` has `map` type but `{}` was expected", ty.name),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                    None
+                }
+            },
+            None => {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0388",
+                    "cannot infer the key/value types of `map_new`; add a `map<...>` annotation or return type",
                     Some(function.name.clone()),
                     span,
                 ));
@@ -1861,6 +1940,101 @@ impl<'a> Checker<'a> {
                 let list_ty = self.check_expr(&args[0], scope, function)?;
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
                 Some(list_type(&element))
+            }
+            "map_set" => {
+                self.expect_arg_count(name, args, 3, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                let key_type = self.check_expr(&args[1], scope, function)?;
+                if key_type != key {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!(
+                            "`map_set` key must be `{}` but got `{}`",
+                            key.name, key_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                let value_type = self.check_expr(&args[2], scope, function)?;
+                if value_type != value {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!(
+                            "`map_set` value must be `{}` but got `{}`",
+                            value.name, value_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[2].span,
+                    ));
+                    return None;
+                }
+                Some(map_type(&key, &value))
+            }
+            "map_get" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                let key_type = self.check_expr(&args[1], scope, function)?;
+                if key_type != key {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!(
+                            "`map_get` key must be `{}` but got `{}`",
+                            key.name, key_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(option_type(&value))
+            }
+            "map_has" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (key, _value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                let key_type = self.check_expr(&args[1], scope, function)?;
+                if key_type != key {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!(
+                            "`map_has` key must be `{}` but got `{}`",
+                            key.name, key_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new("bool"))
+            }
+            "map_len" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "map_del" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                let key_type = self.check_expr(&args[1], scope, function)?;
+                if key_type != key {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0388",
+                        format!(
+                            "`map_del` key must be `{}` but got `{}`",
+                            key.name, key_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(map_type(&key, &value))
             }
             "substring" => {
                 self.expect_arg_count(name, args, 3, function)?;
@@ -2549,6 +2723,28 @@ impl<'a> Checker<'a> {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0387",
                     format!("`{name}` expects a `list<T>` value but got `{}`", ty.name),
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    /// Verify `ty` is a `map<K, V>` and return its `(K, V)` pair.
+    fn expect_map_arg(
+        &mut self,
+        name: &str,
+        ty: &TypeRef,
+        span: Span,
+        function: &Function,
+    ) -> Option<(TypeRef, TypeRef)> {
+        match map_kv(ty) {
+            Some(pair) => Some(pair),
+            None => {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0388",
+                    format!("`{name}` expects a `map<K, V>` value but got `{}`", ty.name),
                     Some(function.name.clone()),
                     span,
                 ));
@@ -3739,6 +3935,54 @@ mod tests {
         let diagnostics = validate_source(source).expect_err("semantic");
         assert!(
             diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_map_builtins() {
+        let source = concat!(
+            "fn lookup m map<string, i64> k string -> i64\n",
+            "    match map_get(m, k)\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n\n",
+            "fn main -> i64\n",
+            "    let m map<string, i64> = map_new()\n",
+            "    m = map_set(m, \"a\", 1)\n",
+            "    let has i64 = 0\n",
+            "    if map_has(m, \"a\")\n",
+            "        has = 1\n",
+            "    let n i64 = map_len(m)\n",
+            "    m = map_del(m, \"a\")\n",
+            "    has + n + lookup(m, \"a\") + map_len(m)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_map_new_without_expected_type() {
+        let source = concat!("fn main -> i64\n", "    let m = map_new()\n", "    0\n");
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0388"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_map_with_unsupported_key_type() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let m map<bool, i64> = map_new()\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0388"),
             "{diagnostics:?}"
         );
     }

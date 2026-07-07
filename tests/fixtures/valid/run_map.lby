@@ -1,0 +1,28 @@
+fn build -> map<string, i64>
+    let m map<string, i64> = map_new()
+    m = map_set(m, "a", 10)
+    m = map_set(m, "b", 20)
+    m = map_set(m, "a", 15)
+    m
+
+fn lookup m map<string, i64> k string -> i64
+    match map_get(m, k)
+        some(v) -> v
+        none -> 0
+
+fn flag_score m map<string, i64> k string -> i64
+    if map_has(m, k)
+        return 100
+    0
+
+fn main -> i64
+    let m map<string, i64> = build()
+    let n0 i64 = map_len(m)
+    let a i64 = lookup(m, "a")
+    let b i64 = lookup(m, "b")
+    let missing i64 = lookup(m, "z")
+    let has_a i64 = flag_score(m, "a")
+    let m2 map<string, i64> = map_del(m, "b")
+    let n1 i64 = map_len(m2)
+    let b2 i64 = lookup(m2, "b")
+    n0 + a + b + missing + has_a + n1 + b2
