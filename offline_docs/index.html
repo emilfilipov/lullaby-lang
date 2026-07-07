@@ -547,7 +547,7 @@ fn main -&gt; i64
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_option_result.lby</code>.</p>
         <ul>
           <li>Type spelling reuses the generic form with a comma-separated argument list: <code>option&lt;i64&gt;</code>, <code>result&lt;i64, string&gt;</code>, <code>option&lt;array&lt;i64&gt;&gt;</code>.</li>
-          <li>Building <code>none</code>/<code>ok</code>/<code>err</code> without a known <code>option</code>/<code>result</code> type from context reports <code>L0386</code>; a payload whose type disagrees with the annotation reports <code>L0303</code>.</li>
+          <li>Building <code>none</code>/<code>ok</code>/<code>err</code> takes its type from context — a <code>let</code> annotation, a function return type, a <code>match</code> scrutinee, or a call argument's parameter type (so <code>describe(ok(5))</code> and <code>f(none)</code> infer without a separate annotated <code>let</code>). Without any such context it reports <code>L0386</code>; a payload whose type disagrees with the annotation reports <code>L0303</code>.</li>
           <li><code>match</code> over an <code>option&lt;U&gt;</code> covers <code>some</code> + <code>none</code> (or <code>_</code>); over a <code>result&lt;T, E&gt;</code> it covers <code>ok</code> + <code>err</code> (or <code>_</code>), reusing <code>L0384</code>/<code>L0385</code>.</li>
           <li><code>option</code>/<code>result</code> construct and match identically across the AST, IR, and bytecode backends, including under optimization.</li>
         </ul>
@@ -572,7 +572,7 @@ fn main -&gt; i64
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_list.lby</code> (prints <code>70</code>).</p>
         <ul>
           <li><code>list&lt;T&gt;</code> is a growable, value-semantic list. Its "mutating" builtins are functional and return a new list, so the idiom is <code>l = push(l, x)</code>.</li>
-          <li><code>list_new()</code> builds an empty list and takes its element type from the expected <code>list&lt;...&gt;</code> type (a <code>let</code> annotation or function return type); missing that context reports <code>L0387</code>.</li>
+          <li><code>list_new()</code> builds an empty list and takes its element type from the expected <code>list&lt;...&gt;</code> type (a <code>let</code> annotation, a function return type, or a call argument's parameter type — so <code>push(list_new(), byte(65))</code> inside a <code>let list&lt;byte&gt;</code> infers <code>list&lt;byte&gt;</code>); missing that context reports <code>L0387</code>.</li>
           <li><code>push(l, x)</code> appends, <code>get(l, i)</code> reads (bounds-checked, <code>L0413</code>), <code>set(l, i, x)</code> replaces at an index, <code>pop(l)</code> drops the last element, and <code>len(l)</code> returns the <code>i64</code> length. Wrong argument types or arities report <code>L0387</code>.</li>
         </ul>
         <h3>Hash maps (<code>map&lt;K, V&gt;</code>)</h3>
@@ -607,7 +607,7 @@ fn main -&gt; i64
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_map.lby</code> (prints <code>138</code>).</p>
         <ul>
           <li><code>map&lt;K, V&gt;</code> is an insertion-ordered, value-semantic hash map with keys restricted to <code>i64</code> or <code>string</code>. Its "mutating" builtins are functional and return a new map, so the idiom is <code>m = map_set(m, k, v)</code>.</li>
-          <li><code>map_new()</code> builds an empty map and takes its key/value types from the expected <code>map&lt;...&gt;</code> type (a <code>let</code> annotation or function return type); missing that context, an unsupported key type, or a wrong argument reports <code>L0388</code>.</li>
+          <li><code>map_new()</code> builds an empty map and takes its key/value types from the expected <code>map&lt;...&gt;</code> type (a <code>let</code> annotation, a function return type, or a call argument's parameter type — so <code>map_set(map_new(), "x", 7)</code> inside a <code>let map&lt;string, i64&gt;</code> infers <code>map&lt;string, i64&gt;</code>); missing that context, an unsupported key type, or a wrong argument reports <code>L0388</code>.</li>
           <li><code>map_get(m, k)</code> returns <code>option&lt;V&gt;</code> (<code>some(v)</code> or <code>none</code>), <code>map_has(m, k)</code> returns a <code>bool</code>, <code>map_len(m)</code> returns the <code>i64</code> entry count, and <code>map_del(m, k)</code> removes a key. Reads are unwrapped with <code>match</code>.</li>
         </ul>
       </section>

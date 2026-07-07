@@ -40,7 +40,14 @@ flows from exactly these sites (this is the generics foundation):
 1. a `let name TYPE = init` annotation → `TYPE` is expected for `init`;
 2. a function's declared return type → expected for `return EXPR` and for the
    function's final expression;
-3. a `match` scrutinee's type → used to type variant payload bindings.
+3. a `match` scrutinee's type → used to type variant payload bindings;
+4. a **call argument's parameter type** → expected for that argument, so a
+   nested constructor infers from the callee. A user call propagates each
+   concrete parameter type (`describe(ok(5))`, `f(none)`); a collection-growing
+   builtin (`push`/`set`/`pop`/`map_set`/`map_del`) that returns the container
+   type propagates the outer expected container type into its container argument
+   and the resolved element/key/value type into its value arguments
+   (`push(list_new(), byte(65))` inside a `let list<byte>`).
 
 Inference rules (given optional expected type `X`):
 
@@ -57,8 +64,11 @@ Inference rules (given optional expected type `X`):
 return type". This keeps the first increment honest: where the type is
 determinable it just works; where it is not, the user adds an annotation.
 
-Argument-position and other expected-type sites are deferred; annotate the
-`let`/return when needed.
+Argument-position inference is now supported (site 4 above), so a nested
+`none`/`ok`/`err`/`list_new`/`map_new` in a call argument no longer needs a
+separate annotated `let`. Other expected-type sites (e.g. array-element
+position) remain deferred; annotate the `let`/return when the type is still not
+determinable from context.
 
 ## Pattern matching
 
@@ -113,6 +123,8 @@ fn describe r result<i64, string> -> string
 ## Scope
 
 First increment: the two types, construction with context inference at
-`let`/return, `match` support, all backends at parity. Deferred: expected-type
-inference in argument position, `?`-style propagation sugar, and generic
-`map`/`list` (separate tickets), all of which reuse this foundation.
+`let`/return, `match` support, all backends at parity. Generic `map`/`list` and
+argument-position expected-type inference now reuse this foundation and are
+implemented (a nested constructor in a call argument infers from the callee's
+parameter type, mirrored in the IR lowerer for backend parity). Deferred:
+`?`-style propagation sugar.

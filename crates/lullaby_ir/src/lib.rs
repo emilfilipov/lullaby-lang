@@ -5618,10 +5618,7 @@ impl<'a> Lowerer<'a> {
                 )
             }
             ExprKind::Call { name, args } => {
-                let args = args
-                    .iter()
-                    .map(|arg| self.lower_expr(arg, scope))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let args = self.lower_call_args(name, args, expected, scope)?;
                 // A call whose name is a function-typed local dispatches through
                 // that function value; its result type is the function type's
                 // return type. The `Call` stays name-based so the interpreter and
@@ -5845,6 +5842,87 @@ impl<'a> Lowerer<'a> {
         }))
     }
 
+    /// Lower a call's arguments, propagating context-directed expected types into
+    /// argument position so a nested `list_new`/`map_new`/`none`/`ok`/`err` (or a
+    /// value flowing into a collection element/key/value slot) re-derives the
+    /// same type semantics assigned. Mirrors the argument-position inference in
+    /// `lullaby_semantics::Analyzer::check_call`.
+    fn lower_call_args(
+        &self,
+        name: &str,
+        args: &[Expr],
+        expected: Option<&TypeRef>,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Result<Vec<IrExpr>, IrLoweringError> {
+        // Collection-growing builtins return the container type, so the outer
+        // expected container type flows into the container argument and the
+        // resolved element/key/value types flow into the value arguments.
+        match name {
+            "push" if args.len() == 2 => {
+                let list = self.lower_expr_expected(&args[0], expected, scope)?;
+                let element = list_element_type(&list.ty);
+                let value = self.lower_expr_expected(&args[1], element.as_ref(), scope)?;
+                return Ok(vec![list, value]);
+            }
+            "set" if args.len() == 3 => {
+                let list = self.lower_expr_expected(&args[0], expected, scope)?;
+                let index = self.lower_expr(&args[1], scope)?;
+                let element = list_element_type(&list.ty);
+                let value = self.lower_expr_expected(&args[2], element.as_ref(), scope)?;
+                return Ok(vec![list, index, value]);
+            }
+            "pop" if args.len() == 1 => {
+                return Ok(vec![self.lower_expr_expected(&args[0], expected, scope)?]);
+            }
+            "map_set" if args.len() == 3 => {
+                let map = self.lower_expr_expected(&args[0], expected, scope)?;
+                let (key_ty, value_ty) = map_kv_types(&map.ty);
+                let key = self.lower_expr_expected(&args[1], key_ty.as_ref(), scope)?;
+                let value = self.lower_expr_expected(&args[2], value_ty.as_ref(), scope)?;
+                return Ok(vec![map, key, value]);
+            }
+            "map_del" if args.len() == 2 => {
+                let map = self.lower_expr_expected(&args[0], expected, scope)?;
+                let key = self.lower_expr(&args[1], scope)?;
+                return Ok(vec![map, key]);
+            }
+            _ => {}
+        }
+        // A function-typed local: propagate its declared parameter types.
+        if let Some((params, _)) = scope.get(name).and_then(TypeRef::function_signature) {
+            if params.len() == args.len() {
+                return args
+                    .iter()
+                    .zip(params.iter())
+                    .map(|(arg, param)| self.lower_expr_expected(arg, Some(param), scope))
+                    .collect();
+            }
+        } else if let Some(signature) = self.signatures.get(name) {
+            // A user function: propagate each concrete (non-type-variable)
+            // parameter type. A parameter that mentions a type variable is left
+            // uncontextualized, matching `check_generic_call`.
+            if signature.params.len() == args.len() {
+                let empty = HashMap::new();
+                return args
+                    .iter()
+                    .zip(signature.params.iter())
+                    .map(|(arg, param)| {
+                        let has_var = lullaby_semantics::first_unresolved_type_var(
+                            param,
+                            &signature.type_params,
+                            &empty,
+                        )
+                        .is_some();
+                        let expected = if has_var { None } else { Some(param) };
+                        self.lower_expr_expected(arg, expected, scope)
+                    })
+                    .collect();
+            }
+        }
+        // Default: no contextual expected type for any argument.
+        args.iter().map(|arg| self.lower_expr(arg, scope)).collect()
+    }
+
     fn call_return_type(
         &self,
         name: &str,
@@ -6016,6 +6094,25 @@ impl<'a> Lowerer<'a> {
 /// Canonical `option<T>` type spelling.
 fn option_type(payload: &TypeRef) -> TypeRef {
     generic_type("option", std::slice::from_ref(payload))
+}
+
+/// The element type `T` of a `list<T>` spelling, if any.
+fn list_element_type(ty: &TypeRef) -> Option<TypeRef> {
+    ty.generic_args("list")
+        .filter(|args| args.len() == 1)
+        .map(|mut args| args.remove(0))
+}
+
+/// The `(K, V)` type pair of a `map<K, V>` spelling, split into optional parts.
+fn map_kv_types(ty: &TypeRef) -> (Option<TypeRef>, Option<TypeRef>) {
+    match ty.generic_args("map").filter(|args| args.len() == 2) {
+        Some(mut args) => {
+            let value = args.remove(1);
+            let key = args.remove(0);
+            (Some(key), Some(value))
+        }
+        None => (None, None),
+    }
 }
 
 /// Extract the inner type `T` of the first argument's `<ctor><T>` reference type.
@@ -6986,6 +7083,41 @@ mod tests {
         assert!(covered.contains(&"run_store.lby".to_string()));
         assert!(covered.contains(&"run_for_step.lby".to_string()));
         assert!(covered.contains(&"run_option_result.lby".to_string()));
+    }
+
+    #[test]
+    fn lowers_nested_constructor_in_call_argument_position() {
+        // The IR lowerer re-derives types, so a nested `list_new()` in argument
+        // position must take its element type from the surrounding context (the
+        // outer `list<byte>` flowing through `push`), and all backends agree.
+        let source = concat!(
+            "fn count o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n\n",
+            "fn main -> i64\n",
+            "    let data list<byte> = push(list_new(), byte(65))\n",
+            "    let a i64 = count(none)\n",
+            "    byte_val(get(data, 0)) + a\n",
+        );
+        let module = lower_source(source);
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        let IrStmt::Let { value, .. } = &main.body[0] else {
+            panic!("expected list binding");
+        };
+        // The nested `list_new()` inferred `list<byte>`, so `push` returns it.
+        assert_eq!(value.ty, TypeRef::new("list<byte>"));
+
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
     }
 
     #[test]

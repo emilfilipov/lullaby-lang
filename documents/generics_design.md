@@ -74,6 +74,17 @@ increment sound without a trait system.
   mirrors the existing context-inference threading — no new runtime value.
 - **Runtime / bytecode**: unchanged; `T` is `Value`.
 
+Context-directed inference also flows into **argument position**: when a call
+argument's parameter type is known (a concrete parameter of a user function, or
+the container/element/key/value type of a collection-growing builtin), that type
+is propagated as the argument's expected type. This lets a nested nullary or
+partial constructor (`list_new`/`map_new`/`none`/`ok`/`err`) take its type from
+the surrounding call — e.g. `push(list_new(), byte(65))` inside a
+`let list<byte>`, or `describe(ok(5))`. The IR lowerer (`lower_call_args`)
+performs the identical propagation so both backends re-derive the same types.
+A parameter that is itself an unresolved type variable is left uncontextualized
+(its type is inferred from the argument, not the reverse).
+
 ## Backends and parity
 
 Because generics are erased, a `run_generics.lby` fixture (calling generic

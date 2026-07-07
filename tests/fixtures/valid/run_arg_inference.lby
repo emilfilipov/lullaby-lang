@@ -1,0 +1,26 @@
+fn describe r result<i64, string> -> i64
+    match r
+        ok(v) -> v
+        err(m) -> 0 - len(m)
+
+fn count o option<i64> -> i64
+    match o
+        some(v) -> v
+        none -> 0
+
+fn main -> i64
+    # `list_new()` nested as the container argument of `push` infers `list<byte>`
+    # from the surrounding `let` annotation (argument-position inference), and
+    # `byte(65)` flows into the element slot.
+    let data list<byte> = push(list_new(), byte(65))
+    let first_byte i64 = byte_val(get(data, 0))
+    # `map_new()` nested as the container argument of `map_set` infers
+    # `map<string, i64>` the same way; the key/value args take their types too.
+    let m map<string, i64> = map_set(map_new(), "x", 7)
+    let stored i64 = count(map_get(m, "x"))
+    # `ok(...)` / `none` / `some(...)` nested in a call argument infer their
+    # `result`/`option` type from the callee's parameter type.
+    let a i64 = describe(ok(5))
+    let b i64 = count(none)
+    let c i64 = count(some(20))
+    first_byte + stored + a + b + c

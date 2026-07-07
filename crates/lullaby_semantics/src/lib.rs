@@ -1911,7 +1911,7 @@ impl<'a> Checker<'a> {
                 } else if self.structs.contains_key(name) {
                     self.check_struct_construction(name, args, expr.span, scope, function)
                 } else {
-                    self.check_call(name, args, expr.span, scope, function)
+                    self.check_call(name, args, expr.span, expected, scope, function)
                 }
             }
             ExprKind::StructLiteral { name, fields } => {
@@ -2312,7 +2312,9 @@ impl<'a> Checker<'a> {
         }
 
         for (index, (arg, expected)) in args.iter().zip(params.iter()).enumerate() {
-            let actual = self.check_expr(arg, scope, function);
+            // Propagate the function value's declared parameter type so a nested
+            // context-directed constructor in argument position infers from it.
+            let actual = self.check_expr_expected(arg, Some(expected), scope, function);
             if actual.as_ref() != Some(expected) {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0313",
@@ -2334,11 +2336,21 @@ impl<'a> Checker<'a> {
         Some(return_type)
     }
 
+    /// Type-check a call. `expected` is the contextual expected type of the whole
+    /// call expression (from a `let` annotation, a `return`, or an enclosing
+    /// call's parameter type). It is used for argument-position inference: a
+    /// collection-growing builtin (`push`/`set`/`pop`/`map_set`/`map_del`) whose
+    /// result type equals the container type propagates `expected` into its
+    /// container argument, so a nested `list_new()`/`map_new()` there infers its
+    /// element/key/value types; the resolved element/key/value type is then
+    /// propagated into the value arguments so a nested `none`/`ok`/`err` infers
+    /// too. User-function calls propagate each concrete parameter type similarly.
     fn check_call(
         &mut self,
         name: &str,
         args: &[Expr],
         call_span: Span,
+        expected: Option<&TypeRef>,
         scope: &Scope,
         function: &Function,
     ) -> Option<TypeRef> {
@@ -2530,9 +2542,13 @@ impl<'a> Checker<'a> {
             }
             "push" => {
                 self.expect_arg_count(name, args, 2, function)?;
-                let list_ty = self.check_expr(&args[0], scope, function)?;
+                // `push` returns `list<T>`, so the outer expected `list<T>` flows
+                // into the list argument (inferring a nested `list_new()`), and
+                // the resolved element type flows into the value argument.
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
-                let value_type = self.check_expr(&args[1], scope, function)?;
+                let value_type =
+                    self.check_expr_expected(&args[1], Some(&element), scope, function)?;
                 if value_type != element {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0387",
@@ -2556,10 +2572,11 @@ impl<'a> Checker<'a> {
             }
             "set" => {
                 self.expect_arg_count(name, args, 3, function)?;
-                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
                 self.expect_arg_type(name, 2, &args[1], "i64", scope, function)?;
-                let value_type = self.check_expr(&args[2], scope, function)?;
+                let value_type =
+                    self.check_expr_expected(&args[2], Some(&element), scope, function)?;
                 if value_type != element {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0387",
@@ -2576,15 +2593,18 @@ impl<'a> Checker<'a> {
             }
             "pop" => {
                 self.expect_arg_count(name, args, 1, function)?;
-                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
                 Some(list_type(&element))
             }
             "map_set" => {
                 self.expect_arg_count(name, args, 3, function)?;
-                let map_ty = self.check_expr(&args[0], scope, function)?;
+                // `map_set` returns `map<K, V>`, so the outer expected `map<K, V>`
+                // flows into the map argument (inferring a nested `map_new()`),
+                // and the resolved key/value types flow into the key/value args.
+                let map_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
                 let (key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
-                let key_type = self.check_expr(&args[1], scope, function)?;
+                let key_type = self.check_expr_expected(&args[1], Some(&key), scope, function)?;
                 if key_type != key {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0388",
@@ -2597,7 +2617,8 @@ impl<'a> Checker<'a> {
                     ));
                     return None;
                 }
-                let value_type = self.check_expr(&args[2], scope, function)?;
+                let value_type =
+                    self.check_expr_expected(&args[2], Some(&value), scope, function)?;
                 if value_type != value {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0388",
@@ -2658,7 +2679,7 @@ impl<'a> Checker<'a> {
             }
             "map_del" => {
                 self.expect_arg_count(name, args, 2, function)?;
-                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let map_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
                 let (key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
                 let key_type = self.check_expr(&args[1], scope, function)?;
                 if key_type != key {
@@ -2962,11 +2983,14 @@ impl<'a> Checker<'a> {
 
                 if signature.type_params.is_empty() {
                     // Non-generic call: every argument must match its declared
-                    // parameter type exactly.
+                    // parameter type exactly. The declared parameter type is
+                    // propagated as the expected type so a nested context-directed
+                    // constructor (`none`/`ok`/`err`/`list_new`/`map_new`) in
+                    // argument position infers from it.
                     for (index, (arg, expected)) in
                         args.iter().zip(signature.params.iter()).enumerate()
                     {
-                        let actual = self.check_expr(arg, scope, function);
+                        let actual = self.check_expr_expected(arg, Some(expected), scope, function);
                         if actual.as_ref() != Some(expected) {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0313",
@@ -5280,6 +5304,34 @@ mod tests {
         assert!(
             diagnostics.iter().any(|d| d.code == "L0387"),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn infers_nested_constructor_in_call_argument_position() {
+        // Argument-position inference: a nested `list_new()`/`map_new()` inside a
+        // collection-growing builtin, and a nested `ok`/`none`/`some` inside a
+        // user call, take their type from the surrounding context.
+        let source = concat!(
+            "fn describe r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn count o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n\n",
+            "fn main -> i64\n",
+            "    let data list<byte> = push(list_new(), byte(65))\n",
+            "    let m map<string, i64> = map_set(map_new(), \"x\", 7)\n",
+            "    let a i64 = describe(ok(5))\n",
+            "    let b i64 = count(none)\n",
+            "    byte_val(get(data, 0)) + map_len(m) + a + b\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
         );
     }
 
