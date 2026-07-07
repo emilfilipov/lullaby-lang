@@ -36,13 +36,18 @@
 //! still runs on the interpreters).
 //!
 //! Linear-memory infrastructure: the module exports a `"memory"` (min 1 page),
-//! imports the host function `env.log_i64 (func (param i64))` and exposes it as
-//! `wasm_log`, declares a mutable `i32` global bump pointer, writes a Data section
-//! seeding the reserved region and the string-literal pool, and emits an internal
+//! imports the host functions `env.log_i64 (func (param i64))` (surfaced as
+//! `wasm_log`), `env.console_log (func (param i32 i32))` (surfaced as
+//! `console_log`), and `env.dom_set_text (func (param i32 i32 i32 i32))`
+//! (surfaced as `dom_set_text`) — the JS/DOM browser-host interop layer —
+//! declares a mutable `i32` global bump pointer, writes a Data section seeding the
+//! reserved region and the string-literal pool, and emits an internal
 //! `__alloc(size i32) -> i32` bump-allocator helper used to build structs/arrays
 //! at runtime. Imported functions occupy the LOW function indices, so every
 //! internally-defined function's index is shifted by the import count; call
-//! targets and exports are fixed up accordingly. Enums/`match` remain deferred.
+//! targets and exports are fixed up accordingly. The string host imports take a
+//! `(ptr, len)` pair per string decoded out of `memory`. Enums/`match` remain
+//! deferred.
 
 use std::collections::HashMap;
 
@@ -53,13 +58,29 @@ use crate::{IrExpr, IrExprKind, IrFunction, IrModule, IrStmt, IrStructDef};
 /// The Lullaby builtin that lowers to the imported host log function.
 const WASM_LOG: &str = "wasm_log";
 
-/// Number of imported functions. They occupy WASM function indices `0..IMPORTS`,
-/// so every internally-defined function's index is offset by this amount.
-const IMPORT_FUNC_COUNT: u32 = 1;
+/// The Lullaby builtin that lowers to the imported host `env.console_log`.
+const CONSOLE_LOG: &str = "console_log";
 
-/// WASM function index of the imported `env.log_i64` (the first, and only,
-/// import). Internal functions are numbered from `IMPORT_FUNC_COUNT` up.
+/// The Lullaby builtin that lowers to the imported host `env.dom_set_text`.
+const DOM_SET_TEXT: &str = "dom_set_text";
+
+/// Number of imported functions. They occupy WASM function indices `0..IMPORTS`,
+/// so every internally-defined function's index is offset by this amount. The
+/// imports are, in order: `env.log_i64`, `env.console_log`, `env.dom_set_text`.
+const IMPORT_FUNC_COUNT: u32 = 3;
+
+/// WASM function index of the imported `env.log_i64` (the first import).
+/// Internal functions are numbered from `IMPORT_FUNC_COUNT` up.
 const LOG_I64_FUNC_INDEX: u32 = 0;
+
+/// WASM function index of the imported `env.console_log(ptr i32, len i32)`
+/// (the second import) — the JS/DOM console host primitive.
+const CONSOLE_LOG_FUNC_INDEX: u32 = 1;
+
+/// WASM function index of the imported
+/// `env.dom_set_text(id_ptr i32, id_len i32, text_ptr i32, text_len i32)`
+/// (the third import) — the DOM-write host primitive.
+const DOM_SET_TEXT_FUNC_INDEX: u32 = 2;
 
 /// The first byte offset in linear memory reserved before any user data. Bytes
 /// below this are a reserved region (seeded by the Data section) so a pointer is
@@ -966,6 +987,39 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &IrExpr, out: &mut Vec<u8>) -> Result<()
                 write_uleb(out, LOG_I64_FUNC_INDEX as u64);
                 return Ok(());
             }
+            // `console_log(s)` lowers to `env.console_log(ptr, len)`: push the
+            // string's linear-memory pointer and its length header, then call the
+            // imported host function. A browser host implements it as
+            // `console.log` over the (ptr, len) slice of `memory`.
+            if name == CONSOLE_LOG {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "console_log expects 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                lower_string_ptr_len(ctx, &args[0], out)?;
+                out.push(0x10); // call
+                write_uleb(out, CONSOLE_LOG_FUNC_INDEX as u64);
+                return Ok(());
+            }
+            // `dom_set_text(id, text)` lowers to
+            // `env.dom_set_text(id_ptr, id_len, text_ptr, text_len)`: push each
+            // string's pointer and length, then call the import. A browser host
+            // implements it as `document.getElementById(id).textContent = text`.
+            if name == DOM_SET_TEXT {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "dom_set_text expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                lower_string_ptr_len(ctx, &args[0], out)?;
+                lower_string_ptr_len(ctx, &args[1], out)?;
+                out.push(0x10); // call
+                write_uleb(out, DOM_SET_TEXT_FUNC_INDEX as u64);
+                return Ok(());
+            }
             // `len(s)`/`len(a)` reads the leading i32 length header at the pointer.
             if name == LEN_BUILTIN {
                 return lower_len(ctx, args, out);
@@ -987,6 +1041,30 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &IrExpr, out: &mut Vec<u8>) -> Result<()
         }
         IrExprKind::Await { .. } => Err("await is not supported by the WASM backend".to_string()),
     }
+}
+
+/// Lower a `string` argument to the two host-import operands `[ptr, len]`: push
+/// the string's linear-memory pointer, then its length header. The pointer is
+/// evaluated once into a scratch `i32` local so a non-trivial string expression
+/// is not lowered twice; the length is the leading `i32` header of the interned
+/// `[len i32][utf8 bytes]` layout (the char count, equal to the byte length for
+/// ASCII, which is what the host decodes out of `memory`).
+fn lower_string_ptr_len(ctx: &mut LowerCtx, arg: &IrExpr, out: &mut Vec<u8>) -> Result<(), String> {
+    if value_val_type(&arg.ty, ctx.structs) != Some(WasmValType::I32) || arg.ty.name != "string" {
+        return Err(format!(
+            "console_log/dom_set_text expect a string but got `{}`",
+            arg.ty.name
+        ));
+    }
+    lower_expr(ctx, arg, out)?; // string pointer (i32)
+    let ptr = ctx.add_local(WasmValType::I32);
+    set_local(out, ptr);
+    get_local(out, ptr); // operand: ptr
+    get_local(out, ptr); // base for the length load
+    out.push(0x28); // i32.load
+    out.push(0x02); // align 2 (4-byte)
+    write_uleb(out, 0); // offset 0 (the length header) -> operand: len
+    Ok(())
 }
 
 /// Lower `len(x)` where `x` is a `string` or `array`: load the leading `i32`
@@ -1488,6 +1566,39 @@ fn alloc_helper() -> LoweredFunction {
     }
 }
 
+/// The `env`-module field names of the imported host functions, in the order
+/// that fixes their low WASM function indices (must match `*_FUNC_INDEX`).
+const IMPORT_FIELD_NAMES: [&str; IMPORT_FUNC_COUNT as usize] =
+    ["log_i64", "console_log", "dom_set_text"];
+
+/// The signatures of the imported host functions, one per low function index,
+/// reserved as the leading entries of the Type section so the Import section can
+/// reference them by their index.
+fn import_func_types() -> Vec<FuncType> {
+    vec![
+        // 0: env.log_i64(i64) -> void
+        FuncType {
+            params: vec![WasmValType::I64],
+            result: None,
+        },
+        // 1: env.console_log(ptr i32, len i32) -> void
+        FuncType {
+            params: vec![WasmValType::I32, WasmValType::I32],
+            result: None,
+        },
+        // 2: env.dom_set_text(id_ptr i32, id_len i32, text_ptr i32, text_len i32) -> void
+        FuncType {
+            params: vec![
+                WasmValType::I32,
+                WasmValType::I32,
+                WasmValType::I32,
+                WasmValType::I32,
+            ],
+            result: None,
+        },
+    ]
+}
+
 /// Index of the mutable `i32` bump-pointer global.
 const BUMP_GLOBAL_INDEX: u32 = 0;
 
@@ -1498,9 +1609,10 @@ const ALLOC_HELPER_NAME: &str = "__alloc";
 /// Encode the whole module: header + Type, Import, Function, Memory, Global,
 /// Export, Code, and Data sections.
 ///
-/// The single import (`env.log_i64`) occupies WASM function index 0, so every
-/// internally-defined function is numbered from `IMPORT_FUNC_COUNT` up; the
-/// caller already assigned those shifted indices. The internal `__alloc` helper
+/// The imports (`env.log_i64`, `env.console_log`, `env.dom_set_text`) occupy WASM
+/// function indices `0..IMPORT_FUNC_COUNT`, so every internally-defined function
+/// is numbered from `IMPORT_FUNC_COUNT` up; the caller already assigned those
+/// shifted indices. The internal `__alloc` helper
 /// is appended after the user functions. `pool` supplies the interned
 /// string-literal bytes seeded into the Data section and fixes the bump global's
 /// initial value (past the reserved region and the whole literal pool).
@@ -1510,13 +1622,13 @@ fn encode_module(user_functions: &[LoweredFunction], pool: &StringPool) -> Vec<u
     let mut functions: Vec<LoweredFunction> = user_functions.to_vec();
     functions.push(alloc_helper());
 
-    // Type table. Entry 0 is reserved for the imported `env.log_i64`'s signature
-    // `(i64) -> void`; internal functions dedup against the rest.
-    let log_sig = FuncType {
-        params: vec![WasmValType::I64],
-        result: None,
-    };
-    let mut types: Vec<FuncType> = vec![log_sig];
+    // Type table. Entries 0..IMPORT_FUNC_COUNT are reserved for the imported host
+    // functions' signatures (so the Import section references them by index);
+    // internal functions dedup against the whole table.
+    //   0: env.log_i64      (i64) -> void
+    //   1: env.console_log  (i32, i32) -> void
+    //   2: env.dom_set_text (i32, i32, i32, i32) -> void
+    let mut types: Vec<FuncType> = import_func_types();
     let mut type_of_func: Vec<u32> = Vec::with_capacity(functions.len());
     for f in &functions {
         let sig = FuncType {
@@ -1558,14 +1670,18 @@ fn encode_module(user_functions: &[LoweredFunction], pool: &StringPool) -> Vec<u
         push_section(&mut module, 1, &section);
     }
 
-    // Import section (id 2): the host log function `env.log_i64`, type index 0.
+    // Import section (id 2): the host functions from module `env`, in the fixed
+    // order that defines their low WASM function indices (0, 1, 2). Each
+    // references the reserved type-table entry with the same index.
     {
         let mut section = Vec::new();
         write_uleb(&mut section, IMPORT_FUNC_COUNT as u64);
-        write_name(&mut section, "env");
-        write_name(&mut section, "log_i64");
-        section.push(0x00); // import kind: func
-        write_uleb(&mut section, 0); // type index 0 = (i64) -> void
+        for (i, field) in IMPORT_FIELD_NAMES.iter().enumerate() {
+            write_name(&mut section, "env");
+            write_name(&mut section, field);
+            section.push(0x00); // import kind: func
+            write_uleb(&mut section, i as u64); // reserved type index
+        }
         push_section(&mut module, 2, &section);
     }
 
@@ -1726,25 +1842,28 @@ mod tests {
     }
 
     #[test]
-    fn imports_the_host_log_function() {
-        // The Import section (id 2) declares exactly one import.
+    fn imports_the_host_functions() {
+        // The Import section (id 2) declares the three host imports: the log
+        // primitive and the JS/DOM interop primitives.
         let source = "fn add a i64 b i64 -> i64\n    a + b\n";
         let artifact = emit_wasm_module(&module_for(source)).expect("emit");
         let import = section_body(&artifact.bytes, 2).expect("import section");
         let (count, _) = read_uleb(&import);
-        assert_eq!(count, 1, "one import");
-        // The import names are `env`.`log_i64`.
+        assert_eq!(count, 3, "three host imports");
+        // The import names include `env`, `log_i64`, `console_log`, `dom_set_text`.
         assert!(
             find_subslice(&import, b"env").is_some()
-                && find_subslice(&import, b"log_i64").is_some(),
-            "env.log_i64 import names present"
+                && find_subslice(&import, b"log_i64").is_some()
+                && find_subslice(&import, b"console_log").is_some()
+                && find_subslice(&import, b"dom_set_text").is_some(),
+            "env host import names present"
         );
     }
 
     #[test]
     fn function_section_counts_internal_functions() {
         // Two user functions plus the internal `__alloc` helper => 3 entries in
-        // the Function section; the single import is NOT counted there.
+        // the Function section; the host imports are NOT counted there.
         let source =
             "fn add a i64 b i64 -> i64\n    a + b\n\nfn neg n i64 -> i64\n    return 0 - n\n";
         let artifact = emit_wasm_module(&module_for(source)).expect("emit");
@@ -1778,10 +1897,39 @@ mod tests {
         let source = "fn shout n i64 -> void\n    wasm_log(n)\n    wasm_log(n + 1)\n";
         let artifact = emit_wasm_module(&module_for(source)).expect("emit");
         assert!(artifact.compiled.contains(&"shout".to_string()));
-        // The whole module still has the import present.
+        // The whole module still has the host imports present.
         let import = section_body(&artifact.bytes, 2).expect("import section");
         let (count, _) = read_uleb(&import);
-        assert_eq!(count, 1);
+        assert_eq!(count, IMPORT_FUNC_COUNT as u64);
+    }
+
+    #[test]
+    fn console_log_and_dom_set_text_call_their_imports() {
+        // A function that calls the JS/DOM host builtins is eligible; its body
+        // targets `env.console_log` (index 1) and `env.dom_set_text` (index 2).
+        let source = concat!(
+            "fn ui -> void\n",
+            "    console_log(\"hi\")\n",
+            "    dom_set_text(\"out\", \"done\")\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(artifact.compiled.contains(&"ui".to_string()));
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        assert!(
+            find_subslice(&code, &[0x10, CONSOLE_LOG_FUNC_INDEX as u8]).is_some(),
+            "console_log lowers to a call of its host import"
+        );
+        assert!(
+            find_subslice(&code, &[0x10, DOM_SET_TEXT_FUNC_INDEX as u8]).is_some(),
+            "dom_set_text lowers to a call of its host import"
+        );
+        // The string literals are seeded into the Data section.
+        assert!(
+            find_subslice(&artifact.bytes, b"hi").is_some()
+                && find_subslice(&artifact.bytes, b"out").is_some()
+                && find_subslice(&artifact.bytes, b"done").is_some(),
+            "interop string literals seeded into the data section"
+        );
     }
 
     #[test]
@@ -1794,11 +1942,11 @@ mod tests {
             artifact.compiled,
             vec!["helper".to_string(), "use_it".to_string()]
         );
-        // `helper` is user function 0 => WASM index 1 (past the single import).
-        // The code for `use_it` must contain `call 1` (0x10 0x01).
+        // `helper` is user function 0 => WASM index IMPORT_FUNC_COUNT (past the
+        // host imports). The code for `use_it` must contain `call IMPORT_FUNC_COUNT`.
         let code = section_body(&artifact.bytes, 10).expect("code section");
         assert!(
-            find_subslice(&code, &[0x10, 0x01]).is_some(),
+            find_subslice(&code, &[0x10, IMPORT_FUNC_COUNT as u8]).is_some(),
             "call targets the shifted (post-import) index"
         );
     }

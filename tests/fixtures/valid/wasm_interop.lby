@@ -1,0 +1,14 @@
+fn label b bool -> string
+    if b
+        return "ready"
+    return "idle"
+
+fn ui -> void
+    console_log(label(true))
+    console_log(label(false))
+    dom_set_text("status", label(true))
+    dom_set_text("count", "42")
+
+fn main -> i64
+    ui()
+    return len(label(true)) + len(label(false)) + len("status") + len("count") + len("42")

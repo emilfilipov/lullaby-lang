@@ -11,8 +11,9 @@ produce the same results.
 ## Status
 
 **DELIVERED: the scalar subset, the linear-memory step (memory/data/import +
-`wasm_log`), and heap types — strings and fixed aggregates — laid out in linear
-memory.** It ships as a `wasm` module in `crates/lullaby_ir`
+`wasm_log`), heap types — strings and fixed aggregates — laid out in linear
+memory, and the JS/DOM host interop layer (`console_log`, `dom_set_text`).** It
+ships as a `wasm` module in `crates/lullaby_ir`
 (`crates/lullaby_ir/src/wasm.rs`, `emit_wasm_module`), the
 `lullaby wasm [--verbose] [-o out.wasm] <file.lby>` CLI command, structural
 encoder unit tests, and node-gated execution-parity tests against the
@@ -35,17 +36,51 @@ the CLI reports diagnostic `L0338`.
 - An internal `__alloc(size i32) -> i32` bump-allocator helper reads the global,
   advances it by `size`, and returns the old offset. Struct and array
   construction call it to reserve their layout.
-- **Import section (id 2)** imports the host function
-  `env.log_i64 (func (param i64))` and exposes it to Lullaby as the builtin
-  `wasm_log(x i64) -> void`. A `wasm_log(n)` call lowers to a `call` of the
-  imported function, which makes eligible functions side-effecting. On the
-  interpreters (AST/IR/bytecode) `wasm_log` prints the value as a stdout line, so
+- **Import section (id 2)** imports three host functions from module `env`, in a
+  fixed order that defines their low WASM function indices:
+  - `env.log_i64 (func (param i64))` (index 0), exposed as the builtin
+    `wasm_log(x i64) -> void`.
+  - `env.console_log (func (param i32 i32))` (index 1), exposed as
+    `console_log(s string) -> void` — see **JS/DOM host interop** below.
+  - `env.dom_set_text (func (param i32 i32 i32 i32))` (index 2), exposed as
+    `dom_set_text(id string, text string) -> void`.
+  Each import references a reserved leading entry of the Type section (type index
+  == function index). A `wasm_log`/`console_log`/`dom_set_text` call lowers to a
+  `call` of the matching import, which makes eligible functions side-effecting.
+  On the interpreters (AST/IR/bytecode) they print deterministically, so
   cross-backend parity holds.
 - **Import index fix-up:** imported functions occupy the LOW WASM function
-  indices (`0..IMPORT_FUNC_COUNT`), so every internally-defined function is
-  numbered from `IMPORT_FUNC_COUNT` up. Call targets between compiled functions
-  and the function-export indices are shifted by the import count; the imported
-  `env.log_i64` is index `0`.
+  indices (`0..IMPORT_FUNC_COUNT`, now 3), so every internally-defined function is
+  numbered from `IMPORT_FUNC_COUNT` up. Adding an import shifts every internal
+  function index, call target, and function-export index by one; the fix-up is
+  driven entirely by `IMPORT_FUNC_COUNT` (the eligibility pass assigns internal
+  indices starting at `IMPORT_FUNC_COUNT`, and the Export section writes
+  `IMPORT_FUNC_COUNT + i`), so extending it from one to three imports needed only
+  the new constants and the extra import/type entries.
+
+### JS/DOM host interop (landed)
+
+The web-frontend interop layer builds on the same import mechanism as `wasm_log`:
+a browser (or any WASM host) supplies the imports, and WASM-compiled Lullaby calls
+them to talk to JavaScript and the DOM.
+
+- `console_log(s string) -> void` lowers to `env.console_log(ptr i32, len i32)`:
+  it pushes the string's linear-memory pointer and its length header, then calls
+  the import. A browser host implements it as `console.log`.
+- `dom_set_text(id string, text string) -> void` lowers to
+  `env.dom_set_text(id_ptr i32, id_len i32, text_ptr i32, text_len i32)`: it
+  pushes each string's pointer and length in order, then calls the import. A
+  browser host implements it as
+  `document.getElementById(id).textContent = text`.
+- Each string operand is evaluated once into a scratch `i32` local, then pushed as
+  `(ptr, len)` where `len` is the `i32` length header of the interned
+  `[len i32][utf8 bytes]` layout (the char count, equal to the byte length for
+  ASCII). The host decodes the bytes out of `memory` starting at `ptr + 4`.
+- On the interpreters, `console_log` prints the string as a stdout line and
+  `dom_set_text` prints `id=text`, so all backends observe the same side effect
+  and the parity harness stays green. Functions calling these builtins are
+  eligible for WASM (the eligibility gate accepts them alongside `wasm_log` and
+  `len`).
 
 ### Heap types (landed)
 
@@ -102,9 +137,11 @@ second phase. So the first increment compiles the **scalar subset** only:
 - A function that uses an enum/`match`, `option`/`result`/`list`/`map`, a runtime
   string builder, or any type still outside the supported set is **rejected for
   WASM** with a clear diagnostic (it still runs on the interpreters). The allowed
-  builtins are `wasm_log(x i64) -> void` (the host log import above) and
-  `len(string|array) -> i64`; every other builtin is still rejected. Strings,
-  structs, and fixed arrays are now supported — see **Heap types (landed)** above.
+  builtins are `wasm_log(x i64) -> void` (the host log import above),
+  `console_log(s string) -> void` and `dom_set_text(id string, text string) ->
+  void` (the JS/DOM host imports above), and `len(string|array) -> i64`; every
+  other builtin is still rejected. Strings, structs, and fixed arrays are now
+  supported — see **Heap types (landed)** above.
 
 ## From IR to WASM
 
@@ -163,10 +200,17 @@ section, `struct` and fixed `array` construction/field/index load-store through
 `tests/fixtures/valid/wasm_heap.lby` fixture runs on all interpreters (`main` =
 133) and, under node, its exports and the interned string layout in `memory`
 match (`crates/lullaby_cli/tests/cli.rs::wasm_heap_types_execution_parity_with_node`).
+JS/DOM host interop (DELIVERED): the `console_log`/`dom_set_text` host imports
+surfaced as builtins — see **JS/DOM host interop (landed)**. The
+`tests/fixtures/valid/wasm_interop.lby` fixture runs on all interpreters (`main` =
+22, printing the console/dom lines) and, under node, the harness decodes each
+`(ptr, len)` string out of `memory` and asserts the captured `console_log`/
+`dom_set_text` strings and the exported `main` match the interpreter
+(`crates/lullaby_cli/tests/cli.rs::wasm_js_dom_interop_execution_parity_with_node`).
 Deferred: enum/tagged-union + `match` lowering (tag+payload memory, branch on
 tag), `option`/`result`, growable `list`/`map`, runtime string construction, a
-free-list allocator, and a richer JS/DOM interop layer (imports for
-`console.log`/DOM) that builds on `wasm_log`.
+free-list allocator, and a richer DOM interop surface (reading DOM values,
+events) that builds on these imports.
 
 ## Why these choices
 

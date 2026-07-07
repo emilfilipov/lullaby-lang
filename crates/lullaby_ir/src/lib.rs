@@ -3653,6 +3653,8 @@ impl<'a> IrRuntime<'a> {
             "println" => self.builtin_print("println", args, true),
             "warn" => self.builtin_warn(args),
             "wasm_log" => self.builtin_wasm_log(args),
+            "console_log" => self.builtin_console_log(args),
+            "dom_set_text" => self.builtin_dom_set_text(args),
             "flush" => self.builtin_flush(args),
             "assert" => Self::builtin_assert(args),
             "to_string" => Self::builtin_to_string(args),
@@ -4561,6 +4563,45 @@ impl<'a> IrRuntime<'a> {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         writeln!(handle, "{value}").map_err(|error| {
+            RuntimeError::resource("L0419", format!("failed to write to stdout: {error}"))
+        })?;
+        Ok(Value::Void)
+    }
+
+    /// `console_log(s string) -> void`: the JS/DOM host console builtin. On the
+    /// WASM backend it lowers to a `call` of the imported
+    /// `env.console_log(ptr, len)`; on the interpreters it prints the string as a
+    /// stdout line, kept at parity with the AST runtime so all backends observe
+    /// the same side effect.
+    fn builtin_console_log(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Write;
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("console_log", 1, args.len()))?;
+        let text = text.as_string()?;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        writeln!(handle, "{text}").map_err(|error| {
+            RuntimeError::resource("L0419", format!("failed to write to stdout: {error}"))
+        })?;
+        Ok(Value::Void)
+    }
+
+    /// `dom_set_text(id string, text string) -> void`: the DOM-write primitive. On
+    /// the WASM backend it lowers to a `call` of the imported
+    /// `env.dom_set_text(id_ptr, id_len, text_ptr, text_len)`; on the interpreters
+    /// it prints the deterministic line `id=text`, kept at parity with the AST
+    /// runtime so all backends observe the same side effect.
+    fn builtin_dom_set_text(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Write;
+        let [id, text]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("dom_set_text", 2, args.len()))?;
+        let id = id.as_string()?;
+        let text = text.as_string()?;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        writeln!(handle, "{id}={text}").map_err(|error| {
             RuntimeError::resource("L0419", format!("failed to write to stdout: {error}"))
         })?;
         Ok(Value::Void)
@@ -6731,8 +6772,8 @@ impl<'a> Lowerer<'a> {
             }
             "store" | "dealloc" | "write_file" | "append_file" | "write_bytes" | "make_dir"
             | "remove_file" | "remove_dir" | "print" | "println" | "warn" | "wasm_log"
-            | "flush" | "assert" | "rc_release" | "ptr_write" | "region_create" | "tcp_close"
-            | "tcp_shutdown" => TypeRef::new("void"),
+            | "console_log" | "dom_set_text" | "flush" | "assert" | "rc_release" | "ptr_write"
+            | "region_create" | "tcp_close" | "tcp_shutdown" => TypeRef::new("void"),
             // Network builtins report failures as runtime `result` values.
             "tcp_connect" | "tcp_listen" | "tcp_accept" | "udp_bind" => {
                 generic_type("result", &[TypeRef::new("Socket"), TypeRef::new("string")])

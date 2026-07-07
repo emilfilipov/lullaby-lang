@@ -2535,6 +2535,26 @@ impl<'a> Checker<'a> {
                 self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
                 Some(TypeRef::new("void"))
             }
+            "console_log" => {
+                // `console_log(s string) -> void`: a JS/DOM host call. On the
+                // interpreters it prints the string as a stdout line so
+                // cross-backend parity holds; on the WASM backend it lowers to a
+                // `call` of the imported host function `env.console_log(ptr, len)`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "dom_set_text" => {
+                // `dom_set_text(id string, text string) -> void`: the DOM-write
+                // primitive. On the interpreters it prints a deterministic
+                // `id=text` line so cross-backend parity holds; on the WASM backend
+                // it lowers to a `call` of the imported host function
+                // `env.dom_set_text(id_ptr, id_len, text_ptr, text_len)`.
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_arg_type(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
             "flush" => {
                 self.expect_arg_count(name, args, 0, function)?;
                 Some(TypeRef::new("void"))

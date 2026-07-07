@@ -2316,12 +2316,13 @@ fn wasm_execution_parity_with_node() {
     // A tiny JS runner: print several exported results. i64 params/returns are
     // BigInt in JS, so pass `10n` and stringify the BigInt result.
     let runner = std::env::temp_dir().join("lullaby_wasm_runner.js");
-    // The module now imports `env.log_i64`, so instantiation must supply it even
-    // though these scalar functions do not call it.
+    // The module imports the host functions `env.log_i64`, `env.console_log`, and
+    // `env.dom_set_text`, so instantiation must supply all three even though these
+    // scalar functions do not call them.
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
-         const imports={{env:{{log_i64:()=>{{}}}}}};\
+         const imports={{env:{{log_i64:()=>{{}},console_log:()=>{{}},dom_set_text:()=>{{}}}}}};\
          WebAssembly.instantiate(bytes,imports).then(r=>{{\
            const e=r.instance.exports;\
            const lines=[\
@@ -2421,7 +2422,7 @@ fn wasm_log_import_execution_parity_with_node() {
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
          const logged=[];\
-         const imports={{env:{{log_i64:(x)=>logged.push(x.toString())}}}};\
+         const imports={{env:{{log_i64:(x)=>logged.push(x.toString()),console_log:()=>{{}},dom_set_text:()=>{{}}}}}};\
          WebAssembly.instantiate(bytes,imports).then(r=>{{\
            r.instance.exports.emit();\
            process.stdout.write(logged.join(';'));\
@@ -2503,7 +2504,7 @@ fn wasm_heap_types_execution_parity_with_node() {
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
-         const imports={{env:{{log_i64:()=>{{}}}}}};\
+         const imports={{env:{{log_i64:()=>{{}},console_log:()=>{{}},dom_set_text:()=>{{}}}}}};\
          WebAssembly.instantiate(bytes,imports).then(r=>{{\
            const e=r.instance.exports;\
            const dv=new DataView(e.memory.buffer);\
@@ -2548,6 +2549,107 @@ fn wasm_heap_types_execution_parity_with_node() {
     );
     // The interned string layout in `memory` decodes back to the literal.
     assert!(out_text.contains("str=hello/5"), "{out_text}");
+}
+
+#[test]
+fn wasm_js_dom_interop_execution_parity_with_node() {
+    // The JS/DOM interop step: a program whose exported function calls the
+    // `console_log(s)` and `dom_set_text(id, text)` host imports with computed
+    // strings. The generated JS harness supplies `env.console_log` and
+    // `env.dom_set_text`, decodes each (ptr, len) string out of `memory`, and
+    // captures them; the captured strings must equal what the interpreter prints,
+    // and the exported `main` must equal the interpreter's `main`.
+    let fixture = workspace_root().join("tests/fixtures/valid/wasm_interop.lby");
+    let out = std::env::temp_dir().join("lullaby_wasm_interop.wasm");
+    let emit = lullaby()
+        .args([
+            "wasm",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    // The emitted module exports `memory` and seeds the interop string literals.
+    let bytes = std::fs::read(&out).expect("read wasm");
+    assert!(
+        contains_subslice(&bytes, b"memory"),
+        "module exports `memory`"
+    );
+    assert!(
+        contains_subslice(&bytes, b"console_log") && contains_subslice(&bytes, b"dom_set_text"),
+        "module imports the JS/DOM host functions"
+    );
+
+    // Interpreter ground truth. `main` calls `ui()` (which logs two console lines
+    // and two dom lines) then returns 22, printed as the final line. Split the
+    // side-effect lines from the return value.
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let mut interp_lines: Vec<String> = stdout(&run)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let interp_return = interp_lines.pop();
+    // console_log prints the string; dom_set_text prints `id=text`.
+    assert_eq!(
+        interp_lines,
+        vec!["ready", "idle", "status=ready", "count=42"]
+    );
+    assert_eq!(interp_return.as_deref(), Some("22"));
+
+    if !node_available() {
+        eprintln!("node not found on PATH; skipping WASM JS/DOM interop execution parity");
+        return;
+    }
+
+    // The harness decodes each string from the `[len i32][utf8]` layout at
+    // `ptr`, captures console/dom calls, and prints the whole-program `main`.
+    let runner = std::env::temp_dir().join("lullaby_wasm_interop_runner.js");
+    let js = format!(
+        "const fs=require('fs');\
+         const bytes=fs.readFileSync({wasm:?});\
+         const logs=[];const doms=[];let mem;\
+         const dec=(ptr,len)=>Buffer.from(new Uint8Array(mem.buffer).slice(ptr+4,ptr+4+len)).toString();\
+         const imports={{env:{{\
+           log_i64:()=>{{}},\
+           console_log:(p,l)=>logs.push(dec(p,l)),\
+           dom_set_text:(ip,il,tp,tl)=>doms.push(dec(ip,il)+'='+dec(tp,tl))\
+         }}}};\
+         WebAssembly.instantiate(bytes,imports).then(r=>{{\
+           mem=r.instance.exports.memory;\
+           const main=r.instance.exports.main().toString();\
+           process.stdout.write('logs='+logs.join('|')+';doms='+doms.join('|')+';main='+main);\
+         }}).catch(err=>{{console.error('FAIL:'+err.message);process.exit(1)}});",
+        wasm = out.to_str().expect("out path")
+    );
+    std::fs::write(&runner, js).expect("write runner");
+
+    let node = Command::new("node")
+        .arg(runner.to_str().expect("runner path"))
+        .output()
+        .expect("run node");
+    assert!(
+        node.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let out_text = String::from_utf8_lossy(&node.stdout);
+    // The captured `console_log` sequence equals the interpreter's stdout lines.
+    assert!(out_text.contains("logs=ready|idle"), "{out_text}");
+    // The captured `dom_set_text` `id=text` sequence equals the interpreter's.
+    assert!(
+        out_text.contains("doms=status=ready|count=42"),
+        "{out_text}"
+    );
+    // Whole-program `main` matches the interpreter.
+    assert!(out_text.contains("main=22"), "{out_text}");
 }
 
 // -- Native x86-64 backend (i64-scalar subset, link-to-exe) ------------------

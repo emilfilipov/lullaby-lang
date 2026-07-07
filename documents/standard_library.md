@@ -91,6 +91,23 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   eligible exported function report values to its host. Because it is understood
   by the WASM backend, a function that calls only `wasm_log` (and the scalar
   subset) still compiles to `.wasm`.
+- JS/DOM host interop (the browser-host layer, built on the same import
+  mechanism as `wasm_log`):
+  - `console_log(s string) -> void` — on the interpreters it prints the string as
+    a stdout line; on the WebAssembly backend it lowers to a call of the imported
+    host function `env.console_log(ptr i32, len i32)`, passing the string's
+    linear-memory pointer and length. A browser host implements it as
+    `console.log`.
+  - `dom_set_text(id string, text string) -> void` — on the interpreters it
+    prints the deterministic line `id=text`; on the WebAssembly backend it lowers
+    to a call of the imported host function
+    `env.dom_set_text(id_ptr i32, id_len i32, text_ptr i32, text_len i32)`. A
+    browser host implements it as
+    `document.getElementById(id).textContent = text`.
+  - Both are understood by the WASM backend, so a function that calls them (over
+    the scalar/heap subset) still compiles to `.wasm`. The host decodes each
+    string out of `memory` from the `[len i32][utf8 bytes]` layout at the pointer;
+    the length passed is the header count (equal to the byte length for ASCII).
 - Text files: `read_file(path) -> string`, `write_file(path, content) -> void`,
   `append_file(path, content) -> void`, `file_exists(path) -> bool`.
 - Lines and bytes: `read_lines(path) -> list<string>` (lines with no trailing

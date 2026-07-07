@@ -863,6 +863,8 @@ impl<'a> Runtime<'a> {
             "println" => self.builtin_print("println", args, true),
             "warn" => self.builtin_warn(args),
             "wasm_log" => self.builtin_wasm_log(args),
+            "console_log" => self.builtin_console_log(args),
+            "dom_set_text" => self.builtin_dom_set_text(args),
             "flush" => self.builtin_flush(args),
             "assert" => Self::builtin_assert(args),
             "to_string" => Self::builtin_to_string(args),
@@ -2314,6 +2316,47 @@ impl<'a> Runtime<'a> {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         writeln!(handle, "{value}").map_err(|error| {
+            RuntimeError::resource("L0419", format!("failed to write to stdout: {error}"))
+        })?;
+        Ok(Value::Void)
+    }
+
+    /// `console_log(s string) -> void`: the JS/DOM host console builtin. On the
+    /// WASM backend it lowers to a `call` of the imported
+    /// `env.console_log(ptr, len)` (a browser host implements it as
+    /// `console.log`); on the interpreters it prints the string as a stdout line
+    /// so all backends observe the same side effect and the parity harness stays
+    /// green.
+    fn builtin_console_log(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Write;
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("console_log", 1, args.len()))?;
+        let text = text.as_string()?;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        writeln!(handle, "{text}").map_err(|error| {
+            RuntimeError::resource("L0419", format!("failed to write to stdout: {error}"))
+        })?;
+        Ok(Value::Void)
+    }
+
+    /// `dom_set_text(id string, text string) -> void`: the DOM-write primitive. On
+    /// the WASM backend it lowers to a `call` of the imported
+    /// `env.dom_set_text(id_ptr, id_len, text_ptr, text_len)` (a browser host
+    /// implements it as `document.getElementById(id).textContent = text`); on the
+    /// interpreters it prints the deterministic line `id=text` so all backends
+    /// observe the same side effect and the parity harness stays green.
+    fn builtin_dom_set_text(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Write;
+        let [id, text]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("dom_set_text", 2, args.len()))?;
+        let id = id.as_string()?;
+        let text = text.as_string()?;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        writeln!(handle, "{id}={text}").map_err(|error| {
             RuntimeError::resource("L0419", format!("failed to write to stdout: {error}"))
         })?;
         Ok(Value::Void)
