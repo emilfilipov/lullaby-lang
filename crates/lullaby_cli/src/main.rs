@@ -44,7 +44,7 @@ fn run() -> Result<(), String> {
         ),
         CommandName::Docs => docs(),
         CommandName::Examples => examples(),
-        CommandName::Fmt => fmt_file(invocation.path, invocation.write),
+        CommandName::Fmt => fmt_file(invocation.path, invocation.fmt_mode),
         CommandName::Inspect => inspect_bytecode_artifact(invocation.path, invocation.mode),
         CommandName::Run => run_file(
             invocation.path,
@@ -63,9 +63,10 @@ fn run() -> Result<(), String> {
     }
 }
 
-/// Format a `.lby` source file: print the canonical rendering to stdout, or
-/// rewrite the file in place with `--write`.
-fn fmt_file(path: PathBuf, write: bool) -> Result<(), String> {
+/// Format a `.lby` source file: print the canonical rendering to stdout
+/// (default), rewrite it in place (`--write`), or verify it is already
+/// canonical and exit non-zero otherwise (`--check`).
+fn fmt_file(path: PathBuf, fmt_mode: FmtMode) -> Result<(), String> {
     if let Err(diagnostic) = validate_source_path(&path) {
         return Err(format_reports(
             &[frontend_report(diagnostic, DiagnosticPhase::Source, &path)],
@@ -96,14 +97,24 @@ fn fmt_file(path: PathBuf, write: bool) -> Result<(), String> {
         )
     })?;
     let formatted = format_program(&program);
-    if write {
-        if formatted != source {
-            fs::write(&path, &formatted)
-                .map_err(|error| format!("failed to write `{}`: {error}", path.display()))?;
-            println!("formatted {}", path.display());
+    match fmt_mode {
+        FmtMode::Print => print!("{formatted}"),
+        FmtMode::Write => {
+            if formatted != source {
+                fs::write(&path, &formatted)
+                    .map_err(|error| format!("failed to write `{}`: {error}", path.display()))?;
+                println!("formatted {}", path.display());
+            }
         }
-    } else {
-        print!("{formatted}");
+        FmtMode::Check => {
+            if formatted != source {
+                return Err(format!(
+                    "{} is not canonically formatted; run `lullaby fmt --write {}`",
+                    path.display(),
+                    path.display()
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -718,8 +729,18 @@ struct Invocation {
     mode: OutputMode,
     backend: Backend,
     optimization: OptimizationMode,
-    /// `fmt --write`: rewrite the file in place instead of printing to stdout.
-    write: bool,
+    /// How `fmt` emits its result (ignored by other commands).
+    fmt_mode: FmtMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FmtMode {
+    /// Print the canonical formatting to stdout (default).
+    Print,
+    /// Rewrite the file in place.
+    Write,
+    /// Do not write; exit non-zero if the file is not already canonical.
+    Check,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -796,7 +817,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
-                    write: false,
+                    fmt_mode: FmtMode::Print,
                 }))
             } else {
                 Err("usage: lullaby --version".to_string())
@@ -811,7 +832,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
-                    write: false,
+                    fmt_mode: FmtMode::Print,
                 }))
             } else {
                 Err("usage: lullaby --help".to_string())
@@ -826,7 +847,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
-                    write: false,
+                    fmt_mode: FmtMode::Print,
                 }))
             } else {
                 Err("usage: lullaby docs".to_string())
@@ -841,7 +862,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     mode: OutputMode::Concise,
                     backend: Backend::Ast,
                     optimization: OptimizationMode::None,
-                    write: false,
+                    fmt_mode: FmtMode::Print,
                 }))
             } else {
                 Err("usage: lullaby examples".to_string())
@@ -956,25 +977,26 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
         mode,
         backend,
         optimization,
-        write: false,
+        fmt_mode: FmtMode::Print,
     }))
 }
 
 fn parse_fmt_command(args: &[String]) -> Result<Option<Invocation>, String> {
-    let usage = "usage: lullaby fmt [--write] <file.lby>".to_string();
-    let mut write = false;
+    let usage = "usage: lullaby fmt [--write|--check] <file.lby>".to_string();
+    let mut fmt_mode = FmtMode::Print;
     let mut cursor = 0;
     while let Some(arg) = args.get(cursor) {
-        match arg.as_str() {
-            "--write" | "-w" => {
-                if write {
-                    return Err(usage);
-                }
-                write = true;
-                cursor += 1;
-            }
+        let next = match arg.as_str() {
+            "--write" | "-w" => FmtMode::Write,
+            "--check" => FmtMode::Check,
             _ => break,
+        };
+        // `--write` and `--check` are mutually exclusive and each allowed once.
+        if fmt_mode != FmtMode::Print {
+            return Err(usage);
         }
+        fmt_mode = next;
+        cursor += 1;
     }
     let Some(path) = args.get(cursor) else {
         return Err(usage);
@@ -989,7 +1011,7 @@ fn parse_fmt_command(args: &[String]) -> Result<Option<Invocation>, String> {
         mode: OutputMode::Concise,
         backend: Backend::Ast,
         optimization: OptimizationMode::None,
-        write,
+        fmt_mode,
     }))
 }
 
@@ -1005,7 +1027,7 @@ fn command_usage(command: &str) -> String {
 
 fn print_help() {
     println!(
-        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby fmt [--write] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
+        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby>\n  lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby docs\n  lullaby examples\n  lullaby --version",
         env!("CARGO_PKG_VERSION")
     );
 }

@@ -85,7 +85,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
   - `lullaby inspect [--verbose|--format json] <file.lbc>`
   - `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>`
   - `lullaby run [--verbose|--format json] <file.lbc>`
-  - `lullaby fmt [--write] <file.lby>`
+  - `lullaby fmt [--write|--check] <file.lby>`
   - `lullaby docs`
   - `lullaby examples`
   - `lullaby --version`

@@ -94,7 +94,7 @@ The implementation is a Rust workspace. Unless changed by an explicit architectu
 - `cargo clippy --all-targets --all-features -- -D warnings`: lint all crates and integration tests.
 - `cargo build --release -p lullaby_cli`: build the release `lullaby.exe` binary.
 - `cargo run -p lullaby_cli -- check tests/fixtures/valid/add.lby`: check a valid fixture through source validation, lexing, parsing, and semantic validation.
-- `cargo run -p lullaby_cli -- fmt tests/fixtures/valid/run_match.lby`: print the canonical, idempotent formatting of a `.lby` source file to stdout; `fmt --write <file.lby>` rewrites the file in place.
+- `cargo run -p lullaby_cli -- fmt tests/fixtures/valid/run_match.lby`: print the canonical, idempotent formatting of a `.lby` source file to stdout; `fmt --write <file.lby>` rewrites in place; `fmt --check <file.lby>` exits non-zero if the file is not already canonical (CI-friendly).
 - `cargo run -p lullaby_cli -- check --verbose tests/fixtures/invalid/brace.lby`: print verbose source excerpt, root-cause, and suggested-fix diagnostics.
 - `cargo run -p lullaby_cli -- check --format json tests/fixtures/invalid/type_mismatch.lby`: print deterministic JSON diagnostics. `--diagnostic-format json` is also accepted.
 - `cargo run -p lullaby_cli -- run --verbose tests/fixtures/invalid/array_index_out_of_bounds.lby`: print runtime diagnostics with source context and traceback frames.

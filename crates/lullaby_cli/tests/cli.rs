@@ -57,6 +57,34 @@ fn fmt_prints_canonical_source_and_is_idempotent() {
 }
 
 #[test]
+fn fmt_check_passes_on_canonical_fixture() {
+    // Fixtures are kept canonical, so --check succeeds with no output.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_showcase.lby");
+    let output = lullaby()
+        .args(["fmt", "--check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(output.status.success(), "{}", stderr(&output));
+}
+
+#[test]
+fn fmt_check_fails_on_unformatted_input() {
+    // A deliberately non-canonical file (extra spacing collapses on format).
+    let tmp = std::env::temp_dir().join("lullaby_fmt_check_bad.lby");
+    std::fs::write(&tmp, "fn main -> i64\n    1 +  2\n").expect("write temp");
+    let output = lullaby()
+        .args(["fmt", "--check", tmp.to_str().expect("temp path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("not canonically formatted"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn fmt_rejects_non_lby_extension() {
     let output = lullaby()
         .args(["fmt", "does_not_exist.txt"])
