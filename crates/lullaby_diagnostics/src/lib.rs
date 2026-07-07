@@ -355,6 +355,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass a `string` path (and, for `write_bytes`, a `list<byte>` value) and match the builtin arity.",
     },
     DiagnosticEntry {
+        code: "L0334",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A `parallel_map` call has an argument type or arity mismatch.",
+        root_cause: "A `parallel_map` call did not receive exactly a `fn(i64) -> i64` first argument and a `list<i64>` second argument.",
+        suggested_fix: "Pass a `fn(i64) -> i64` function value and a `list<i64>` of arguments to `parallel_map`.",
+    },
+    DiagnosticEntry {
         code: "L0340",
         phase: DiagnosticPhase::Semantic,
         explanation: "A region declaration has an invalid size, alignment, or kind.",

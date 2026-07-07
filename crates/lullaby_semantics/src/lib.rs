@@ -2892,6 +2892,49 @@ impl<'a> Checker<'a> {
                 self.expect_process_arg_count(name, args, 0, call_span, function)?;
                 Some(list_type(&TypeRef::new("string")))
             }
+            "parallel_map" => {
+                // `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>`:
+                // apply `f` to each element on a separate OS thread, returning
+                // the mapped values in input order.
+                if args.len() != 2 {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0334",
+                        format!("parallel_map expects 2 arguments but got {}", args.len()),
+                        Some(function.name.clone()),
+                        call_span,
+                    ));
+                    return None;
+                }
+                let expected_fn = function_type(&[TypeRef::new("i64")], &TypeRef::new("i64"));
+                let func_type = self.check_expr(&args[0], scope, function)?;
+                if func_type != expected_fn {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0334",
+                        format!(
+                            "parallel_map expects a `{}` as its first argument but got `{}`",
+                            expected_fn.name, func_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                }
+                let expected_list = list_type(&TypeRef::new("i64"));
+                let list_arg_type = self.check_expr(&args[1], scope, function)?;
+                if list_arg_type != expected_list {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0334",
+                        format!(
+                            "parallel_map expects a `{}` as its second argument but got `{}`",
+                            expected_list.name, list_arg_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(list_type(&TypeRef::new("i64")))
+            }
             _ => {
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     self.diagnostics.push(SemanticDiagnostic::at(
@@ -4879,6 +4922,37 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0333")
+        );
+    }
+
+    #[test]
+    fn accepts_parallel_map_with_matching_types() {
+        let source = "fn sq x i64 -> i64\n    x * x\n\nfn main -> list<i64>\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    parallel_map(sq, base)\n";
+        validate_source(source).expect("semantic");
+    }
+
+    #[test]
+    fn rejects_parallel_map_non_function_first_argument() {
+        // The first argument must be a `fn(i64) -> i64`, not a plain list.
+        let source = "fn main -> list<i64>\n    let base list<i64> = list_new()\n    parallel_map(base, base)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0334")
+        );
+    }
+
+    #[test]
+    fn rejects_parallel_map_non_list_second_argument() {
+        // The second argument must be a `list<i64>`, not an `i64`.
+        let source =
+            "fn sq x i64 -> i64\n    x * x\n\nfn main -> list<i64>\n    parallel_map(sq, 5)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0334")
         );
     }
 

@@ -279,6 +279,9 @@ pub fn run_main_with_args(program: &Program, args: Vec<String>) -> Result<Value,
 }
 
 struct Runtime<'a> {
+    /// The whole program, borrowed so a builtin can spawn sibling interpreters
+    /// over the same shared `&Program` (used by `parallel_map`'s scoped threads).
+    program: &'a Program,
     functions: HashMap<&'a str, &'a Function>,
     /// The running program's CLI arguments, exposed by the `args()` builtin.
     program_args: Vec<String>,
@@ -357,6 +360,7 @@ impl<'a> Runtime<'a> {
         }
 
         Ok(Self {
+            program,
             functions,
             program_args: Vec::new(),
             structs,
@@ -471,6 +475,7 @@ impl<'a> Runtime<'a> {
             "ptr_write" => self.builtin_store(args),
             "env" => Self::builtin_env(args),
             "args" => self.builtin_args(args),
+            "parallel_map" => self.builtin_parallel_map(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("L0401", format!("unknown function `{name}`"))
@@ -503,6 +508,56 @@ impl<'a> Runtime<'a> {
                 .map(Value::String)
                 .collect(),
         ))
+    }
+
+    /// `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>`: evaluate
+    /// `f(arg)` for every element of `args` concurrently on separate OS threads,
+    /// returning the results in the SAME order as `args`. Each thread builds a
+    /// fresh sibling interpreter over the shared `&Program` (heaps are per-thread,
+    /// so there is no shared mutable state and no locking). Output order follows
+    /// input order, so results are fully deterministic regardless of scheduling.
+    fn builtin_parallel_map(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [callee, elements]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parallel_map", 2, args.len()))?;
+        let func_name = match callee {
+            Value::Func(name) => name,
+            other => {
+                return Err(RuntimeError::new(
+                    "L0417",
+                    format!("parallel_map expects a function but got `{other}`"),
+                ));
+            }
+        };
+        let arg_values = expect_list("parallel_map", elements)?;
+
+        let program = self.program;
+        let results: Vec<Value> = std::thread::scope(|scope| {
+            let handles: Vec<_> = arg_values
+                .iter()
+                .map(|value| {
+                    let name = func_name.clone();
+                    let value = value.clone();
+                    scope.spawn(move || {
+                        let mut runtime = Runtime::new(program)?;
+                        runtime.call_function(&name, vec![value])
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(RuntimeError::new(
+                            "L0401",
+                            "parallel_map worker thread panicked",
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+
+        Ok(Value::Array(results))
     }
 
     /// Execute a user function (or trait impl method) with the given argument
@@ -2526,6 +2581,22 @@ mod tests {
         let source = "fn main -> i64\n    let handle rc<i64> = rc_new(1)\n    if true\n        rc_release(handle)\n    rc_get(handle)\n";
         let error = run_source(source).expect_err("runtime error");
         assert_eq!(error.code, "L0406");
+    }
+
+    #[test]
+    fn parallel_map_returns_mapped_list_in_order() {
+        // Each element is squared on its own OS thread; results come back in the
+        // same order as the input, so the mapped list is deterministic.
+        let source = "fn sq x i64 -> i64\n    x * x\n\nfn main -> list<i64>\n    let base list<i64> = list_new()\n    base = push(base, 1)\n    base = push(base, 2)\n    base = push(base, 3)\n    base = push(base, 4)\n    parallel_map(sq, base)\n";
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::Array(vec![
+                Value::I64(1),
+                Value::I64(4),
+                Value::I64(9),
+                Value::I64(16),
+            ])
+        );
     }
 
     #[test]

@@ -1,0 +1,14 @@
+fn sq x i64 -> i64
+    x * x
+
+fn main -> i64
+    let base list<i64> = list_new()
+    base = push(base, 1)
+    base = push(base, 2)
+    base = push(base, 3)
+    base = push(base, 4)
+    let out list<i64> = parallel_map(sq, base)
+    let total i64 = 0
+    for i from 0 to 3
+        total += get(out, i)
+    total

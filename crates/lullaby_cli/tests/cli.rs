@@ -282,6 +282,32 @@ fn runs_inferred_let_fixture_on_all_backends() {
 }
 
 #[test]
+fn runs_parallel_map_fixture_on_all_backends() {
+    // `parallel_map` runs `sq` on separate OS threads and returns the mapped
+    // list in input order, so the sum is a deterministic 30 (1+4+9+16) on every
+    // backend.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_parallel.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "30",
+            "{backend} result"
+        );
+    }
+}
+
+#[test]
 fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.lby");

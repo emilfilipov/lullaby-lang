@@ -101,6 +101,19 @@ operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`. Integer
   trailing tokens after the source path as those program arguments.
 - Wrong argument types or arities to `env`/`args` report `L0332`.
 
+## Concurrency
+
+- `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>` evaluates
+  `f(arg)` for every element of `args` concurrently on separate OS threads and
+  returns the results in the **same order as `args`** (deterministic regardless
+  of scheduling). Each thread runs a fresh interpreter over the shared program,
+  so heaps are per-thread with no shared mutable state; `f` must be an ordinary
+  top-level `fn(i64) -> i64`.
+- Wrong arity, a non-`fn(i64) -> i64` first argument, or a non-`list<i64>`
+  second argument report `L0334`.
+- `spawn`/`join`/channels are a deferred second increment; see
+  [concurrency_design.md](concurrency_design.md).
+
 ## Memory and references
 
 - Heap: `alloc(value)`, `load(ptr)`, `store(ptr, value)`, `dealloc(ptr)`.

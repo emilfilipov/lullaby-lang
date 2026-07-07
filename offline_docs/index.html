@@ -257,6 +257,7 @@
       <a href="#match">Pattern Matching</a>
       <a href="#option-result">option and result</a>
       <a href="#traits">Traits</a>
+      <a href="#concurrency">Concurrency</a>
       <a href="#control-flow">Control Flow</a>
       <a href="#boolean-logic">Boolean Logic</a>
       <a href="#math-builtins">Math Builtins</a>
@@ -658,6 +659,26 @@ fn main -&gt; i64
         </ul>
       </section>
 
+      <section id="concurrency">
+        <h2>Concurrency</h2>
+        <p><code>parallel_map(f fn(i64) -&gt; i64, args list&lt;i64&gt;) -&gt; list&lt;i64&gt;</code> evaluates <code>f(arg)</code> for every element of <code>args</code> concurrently on separate OS threads and returns the results in the <strong>same order as <code>args</code></strong>, so the output is deterministic regardless of thread scheduling. Each thread builds a fresh interpreter over the shared program, so heaps are per-thread with no shared mutable state and no locking; <code>f</code> must be an ordinary top-level <code>fn(i64) -&gt; i64</code>. It runs identically on the AST, IR, and bytecode backends. Wrong arity, a non-<code>fn(i64) -&gt; i64</code> first argument, or a non-<code>list&lt;i64&gt;</code> second argument report <code>L0334</code>. Detached threads (<code>spawn</code>/<code>join</code>) and channels are a deferred second increment.</p>
+        <pre data-fixture="tests/fixtures/valid/run_parallel.lby" data-mode="run"><code>fn sq x i64 -> i64
+    x * x
+
+fn main -> i64
+    let base list&lt;i64&gt; = list_new()
+    base = push(base, 1)
+    base = push(base, 2)
+    base = push(base, 3)
+    base = push(base, 4)
+    let out list&lt;i64&gt; = parallel_map(sq, base)
+    let total i64 = 0
+    for i from 0 to 3
+        total += get(out, i)
+    total</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_parallel.lby</code>. Returns <code>30</code>.</p>
+      </section>
+
       <section id="control-flow">
         <h2>Control Flow</h2>
         <h3>If, elif, else</h3>
@@ -947,6 +968,7 @@ Suggested fix:
             <tr><td><code>L0329</code></td><td>Executable source passed to <code>compile</code>, <code>build</code>, or source <code>run</code> is missing zero-argument <code>main</code>.</td></tr>
             <tr><td><code>L0332</code></td><td>Process builtin argument type or arity mismatch: <code>env</code> needs one <code>string</code> and <code>args()</code> takes no arguments.</td></tr>
             <tr><td><code>L0333</code></td><td>File-system builtin argument type or arity mismatch: pass a <code>string</code> path (and a <code>list&lt;byte&gt;</code> to <code>write_bytes</code>) and match the builtin arity.</td></tr>
+            <tr><td><code>L0334</code></td><td><code>parallel_map</code> argument type or arity mismatch: pass a <code>fn(i64) -&gt; i64</code> first argument and a <code>list&lt;i64&gt;</code> second argument.</td></tr>
             <tr><td><code>L0373</code></td><td><code>len</code> argument is not a string or array.</td></tr>
             <tr><td><code>L0375</code></td><td>String-library builtin argument has the wrong type.</td></tr>
             <tr><td><code>L0374</code></td><td>Math builtin received a wrong or mismatched operand type.</td></tr>
