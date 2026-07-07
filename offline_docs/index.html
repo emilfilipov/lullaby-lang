@@ -426,6 +426,7 @@ fn main -> i64
     total *= 42
     total</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_count_assignment.lby</code>.</p>
+        <p>Numeric literals may use <code>_</code> as a digit separator between digits for readability &mdash; <code>1_000_000</code> and <code>3.141_592</code> &mdash; which does not change the value. A leading, trailing, doubled, or <code>.</code>-adjacent underscore is a malformed-literal parse error, and <code>lullaby fmt</code> renders literals without separators.</p>
       </section>
 
       <section id="arrays">

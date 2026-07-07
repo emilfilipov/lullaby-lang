@@ -46,13 +46,16 @@ IDENT =
     alpha_or_underscore { alpha_or_digit_or_underscore } ;
 
 NUMBER =
-    digit { digit } ;
+    digit { digit_or_separator } [ "." digit { digit_or_separator } ] ;
+
+digit_or_separator =
+    digit | "_" ;
 
 STRING =
     '"' { string_character } '"' ;
 ```
 
-The current lexer emits integer number text only. Negative numbers are parsed as unary minus over an expression and represented in the AST as `0 - expression`.
+The lexer emits integer and floating-point number text (a `.` marks an `f64` literal). A `_` may appear between digits as a cosmetic separator (`1_000_000`, `3.141_592`); the parser validates its placement and strips it, rejecting a leading, trailing, doubled, or `.`-adjacent underscore as a malformed literal. Negative numbers are parsed as unary minus over an expression and represented in the AST as `0 - expression`.
 
 ## Indentation Tokens
 

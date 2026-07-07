@@ -1,0 +1,12 @@
+fn main -> i64
+    # `_` digit separators are allowed between digits in integer and float
+    # literals. They are purely cosmetic — the parsed value is unchanged, so
+    # `3.141_592` equals `3.141592` and `1_000_000` equals `1000000`.
+    let million i64 = 1_000_000
+    let step i64 = 1_000
+    let pi f64 = 3.141_592
+    let plain f64 = 3.141592
+    let same i64 = 0
+    if pi == plain
+        same = 1
+    million / step + same

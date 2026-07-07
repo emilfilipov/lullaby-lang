@@ -616,6 +616,29 @@ pub enum BinaryOp {
     Or,
 }
 
+/// Validate and remove `_` digit separators from a numeric literal. A separator
+/// is only valid between two ASCII digits (`1_000`, `3.141_592`), so a leading,
+/// trailing, doubled, or `.`-adjacent underscore is rejected. Returns the
+/// separator-free text, or `None` when a separator is misplaced.
+fn normalize_number_literal(value: &str) -> Option<String> {
+    if !value.contains('_') {
+        return Some(value.to_string());
+    }
+    let bytes = value.as_bytes();
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'_' {
+            let prev_digit = index
+                .checked_sub(1)
+                .is_some_and(|prev| bytes[prev].is_ascii_digit());
+            let next_digit = bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
+            if !(prev_digit && next_digit) {
+                return None;
+            }
+        }
+    }
+    Some(value.chars().filter(|ch| *ch != '_').collect())
+}
+
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
@@ -1494,7 +1517,7 @@ impl<'a> Parser<'a> {
     fn expect_number(&mut self, message: &'static str) -> Option<i64> {
         match &self.peek().kind {
             TokenKind::Number(value) => {
-                let parsed = value.parse::<i64>().ok();
+                let parsed = normalize_number_literal(value).and_then(|v| v.parse::<i64>().ok());
                 self.advance();
                 match parsed {
                     Some(number) => Some(number),
@@ -2022,14 +2045,17 @@ impl<'a> ExprParser<'a> {
         self.cursor += 1;
         match token.kind {
             TokenKind::Number(value) => {
+                // Validate and strip `_` digit separators before parsing.
+                let normalized = normalize_number_literal(&value)
+                    .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
                 // A `.` in the literal marks a floating-point (`f64`) literal.
-                let kind = if value.contains('.') {
-                    let parsed = value
+                let kind = if normalized.contains('.') {
+                    let parsed = normalized
                         .parse::<f64>()
                         .map_err(|_| format!("invalid float literal `{value}`"))?;
                     ExprKind::Float(parsed)
                 } else {
-                    let parsed = value
+                    let parsed = normalized
                         .parse::<i64>()
                         .map_err(|_| format!("invalid integer literal `{value}`"))?;
                     ExprKind::Integer(parsed)
@@ -2400,6 +2426,48 @@ mod tests {
             panic!("expected expression statement");
         };
         assert!(matches!(expr.kind, ExprKind::Float(value) if (value - 2.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn parses_digit_separators_in_integer_and_float_literals() {
+        let tokens = lex("fn main -> i64\n    1_000_000\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(matches!(expr.kind, ExprKind::Integer(1_000_000)));
+
+        let tokens = lex("fn main -> f64\n    1_234.567_8\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(matches!(expr.kind, ExprKind::Float(value) if (value - 1_234.567_8).abs() < 1e-9));
+    }
+
+    #[test]
+    fn rejects_misplaced_digit_separators() {
+        for bad in ["1__000", "1_000_", "3._14", "3_.14"] {
+            let source = format!("fn main -> i64\n    {bad}\n");
+            let tokens = lex(&source).expect("lex");
+            assert!(
+                parse(&tokens).is_err(),
+                "expected `{bad}` to be rejected as a malformed literal"
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_number_literals() {
+        assert_eq!(normalize_number_literal("42").as_deref(), Some("42"));
+        assert_eq!(normalize_number_literal("1_000").as_deref(), Some("1000"));
+        assert_eq!(
+            normalize_number_literal("3.141_592").as_deref(),
+            Some("3.141592")
+        );
+        assert_eq!(normalize_number_literal("_1").as_deref(), None);
+        assert_eq!(normalize_number_literal("1_").as_deref(), None);
+        assert_eq!(normalize_number_literal("1__0").as_deref(), None);
     }
 
     #[test]

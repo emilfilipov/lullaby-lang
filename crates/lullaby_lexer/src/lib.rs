@@ -255,8 +255,12 @@ impl<'a> Lexer<'a> {
 
             if ch.is_ascii_digit() {
                 let start = index;
+                // `_` is accepted as a digit separator inside the literal (e.g.
+                // `1_000_000`); the parser validates its placement and strips it.
                 while index < chars.len()
-                    && (chars[index].is_ascii_alphanumeric() || chars[index] == '.')
+                    && (chars[index].is_ascii_alphanumeric()
+                        || chars[index] == '.'
+                        || chars[index] == '_')
                 {
                     index += 1;
                 }
@@ -495,6 +499,17 @@ mod tests {
             tokens
                 .iter()
                 .any(|token| token.kind == TokenKind::Keyword(Keyword::Catch))
+        );
+    }
+
+    #[test]
+    fn number_with_digit_separators_is_one_token() {
+        let tokens = lex("fn main -> i64\n    1_000_000\n").expect("lex");
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Number("1_000_000".to_string())),
+            "expected a single `1_000_000` number token, got {tokens:?}"
         );
     }
 
