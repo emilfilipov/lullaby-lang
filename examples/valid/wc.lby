@@ -1,0 +1,29 @@
+# wc.lby — a line/word/character counter, a real CLI tool in Lullaby.
+# Run: lullaby run examples/valid/wc.lby <file>
+# Composes args() + file I/O + the string library + list + control flow.
+
+fn words_in line string -> i64
+    let t string = trim(line)
+    if len(t) == 0
+        return 0
+    len(split(t, " "))
+
+fn main -> i64
+    let a list<string> = args()
+    if len(a) == 0
+        println("usage: wc <file>")
+        return 0 - 1
+    let path string = get(a, 0)
+    let lines list<string> = read_lines(path)
+    let n_lines i64 = len(lines)
+    let n_words i64 = 0
+    let n_chars i64 = 0
+    if n_lines > 0
+        for i from 0 to n_lines - 1
+            let line string = get(lines, i)
+            n_words += words_in(line)
+            n_chars += len(line)
+    println("lines: " + to_string(n_lines))
+    println("words: " + to_string(n_words))
+    println("chars: " + to_string(n_chars))
+    n_lines
