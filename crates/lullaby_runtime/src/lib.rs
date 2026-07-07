@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::Command;
 
 use lullaby_diagnostics::{Span, TraceFrame};
@@ -25,6 +26,7 @@ pub fn value_type_name(value: &Value) -> String {
         Value::Map(_) => "map".to_string(),
         Value::Func(_) => "fn".to_string(),
         Value::Ptr(_) => "ptr".to_string(),
+        Value::Socket(_) => "Socket".to_string(),
         Value::Void => "void".to_string(),
     }
 }
@@ -57,6 +59,11 @@ pub enum Value {
     /// A first-class function value: a handle to a top-level function by name.
     /// No environment is captured in this increment.
     Func(String),
+    /// A network socket handle: an index into the interpreter's per-runtime
+    /// `sockets` table. The underlying OS resource (a `TcpListener`,
+    /// `TcpStream`, or `UdpSocket`) is not `Clone`, so sockets are represented
+    /// as opaque integer handles, mirroring how `Ptr` indexes the heap.
+    Socket(usize),
     Void,
 }
 
@@ -109,6 +116,7 @@ impl fmt::Display for Value {
                 write!(formatter, "{{{rendered}}}")
             }
             Self::Func(name) => write!(formatter, "fn {name}"),
+            Self::Socket(handle) => write!(formatter, "socket({handle})"),
             Self::Void => write!(formatter, "void"),
         }
     }
@@ -258,6 +266,40 @@ pub fn option_value(payload: Option<Value>) -> Value {
     }
 }
 
+/// Build a `result<T, E>` runtime value using the shared `Value::Enum` result
+/// representation (`ok(v)` or `err(e)`).
+pub fn result_value(payload: Result<Value, Value>) -> Value {
+    match payload {
+        Ok(value) => Value::Enum {
+            enum_name: "result".to_string(),
+            variant: "ok".to_string(),
+            payload: vec![value],
+        },
+        Err(error) => Value::Enum {
+            enum_name: "result".to_string(),
+            variant: "err".to_string(),
+            payload: vec![error],
+        },
+    }
+}
+
+/// Build an `err(string)` result whose payload is the display form of an I/O or
+/// network error. Network builtins report failures as runtime `result` values
+/// rather than propagating a `RuntimeError`.
+pub fn net_err(error: &std::io::Error) -> Value {
+    result_value(Err(Value::String(error.to_string())))
+}
+
+/// An open network resource held behind a socket handle. Not `Clone`, which is
+/// why sockets are surfaced to Lullaby as opaque integer handles. Shared by the
+/// AST interpreter and the IR interpreter so both keep identical socket
+/// semantics.
+pub enum SocketResource {
+    Listener(TcpListener),
+    Stream(TcpStream),
+    Udp(UdpSocket),
+}
+
 /// First character index of `needle` in `text`, or `-1` when absent.
 pub fn char_find(text: &str, needle: &str) -> i64 {
     match text.find(needle) {
@@ -295,6 +337,9 @@ struct Runtime<'a> {
     /// Ownership counts for reference-counted (`rc<T>`) heap slots, keyed by
     /// slot index. Slots not present here are raw pointers / plain allocations.
     refcounts: HashMap<usize, usize>,
+    /// Per-runtime table of open network sockets. A `Value::Socket(i)` indexes
+    /// this vector; closing a socket sets its slot to `None`, mirroring the heap.
+    sockets: Vec<Option<SocketResource>>,
     call_stack: Vec<TraceFrame>,
     /// Trait-method dispatch table: `(receiver type name, method name)` -> the
     /// impl function. Built once from every `impl Trait for Type` block.
@@ -367,6 +412,7 @@ impl<'a> Runtime<'a> {
             variants,
             heap: Vec::new(),
             refcounts: HashMap::new(),
+            sockets: Vec::new(),
             call_stack: Vec::new(),
             impl_methods,
             trait_method_names,
@@ -476,6 +522,15 @@ impl<'a> Runtime<'a> {
             "env" => Self::builtin_env(args),
             "args" => self.builtin_args(args),
             "parallel_map" => self.builtin_parallel_map(args),
+            "tcp_connect" => self.builtin_tcp_connect(args),
+            "tcp_listen" => self.builtin_tcp_listen(args),
+            "tcp_accept" => self.builtin_tcp_accept(args),
+            "tcp_read" => self.builtin_tcp_read(args),
+            "tcp_write" => self.builtin_tcp_write(args),
+            "tcp_close" => self.builtin_socket_close(args),
+            "udp_bind" => self.builtin_udp_bind(args),
+            "udp_send_to" => self.builtin_udp_send_to(args),
+            "udp_recv" => self.builtin_udp_recv(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("L0401", format!("unknown function `{name}`"))
@@ -558,6 +613,226 @@ impl<'a> Runtime<'a> {
         })?;
 
         Ok(Value::Array(results))
+    }
+
+    /// Push a freshly opened socket resource into the handle table, returning its
+    /// index wrapped as a `Value::Socket`.
+    fn register_socket(&mut self, resource: SocketResource) -> Value {
+        self.sockets.push(Some(resource));
+        Value::Socket(self.sockets.len() - 1)
+    }
+
+    /// Resolve a socket handle argument to its live slot index, reporting a
+    /// wrong-argument-type error for a non-socket value and a stale-handle error
+    /// for a closed or invalid slot.
+    fn socket_slot(&self, name: &str, value: &Value) -> Result<usize, RuntimeError> {
+        let Value::Socket(handle) = value else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a Socket but got `{value}`"),
+            ));
+        };
+        match self.sockets.get(*handle) {
+            Some(Some(_)) => Ok(*handle),
+            _ => Err(RuntimeError::new(
+                "L0406",
+                format!("{name} received a closed or invalid socket `{handle}`"),
+            )),
+        }
+    }
+
+    /// `tcp_connect(host string, port i64) -> result<Socket, string>`.
+    fn builtin_tcp_connect(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [host, port]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("tcp_connect", 2, args.len()))?;
+        let host = expect_string("tcp_connect", host)?;
+        let port = expect_i64("tcp_connect", port)?;
+        match TcpStream::connect((host.as_str(), port as u16)) {
+            Ok(stream) => {
+                let socket = self.register_socket(SocketResource::Stream(stream));
+                Ok(result_value(Ok(socket)))
+            }
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `tcp_listen(host string, port i64) -> result<Socket, string>`.
+    fn builtin_tcp_listen(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [host, port]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("tcp_listen", 2, args.len()))?;
+        let host = expect_string("tcp_listen", host)?;
+        let port = expect_i64("tcp_listen", port)?;
+        match TcpListener::bind((host.as_str(), port as u16)) {
+            Ok(listener) => {
+                let socket = self.register_socket(SocketResource::Listener(listener));
+                Ok(result_value(Ok(socket)))
+            }
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `tcp_accept(listener Socket) -> result<Socket, string>`: block for a
+    /// connection and register the accepted stream as a new handle.
+    fn builtin_tcp_accept(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [listener]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("tcp_accept", 1, args.len()))?;
+        let slot = self.socket_slot("tcp_accept", &listener)?;
+        let accepted = match &self.sockets[slot] {
+            Some(SocketResource::Listener(listener)) => listener.accept(),
+            _ => {
+                return Ok(result_value(Err(Value::String(
+                    "tcp_accept requires a listening socket".to_string(),
+                ))));
+            }
+        };
+        match accepted {
+            Ok((stream, _addr)) => {
+                let socket = self.register_socket(SocketResource::Stream(stream));
+                Ok(result_value(Ok(socket)))
+            }
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `tcp_read(conn Socket) -> result<string, string>`: read up to 4096 bytes
+    /// and return them as a lossy UTF-8 string (empty on clean EOF).
+    fn builtin_tcp_read(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [conn]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("tcp_read", 1, args.len()))?;
+        let slot = self.socket_slot("tcp_read", &conn)?;
+        let mut buffer = [0u8; 4096];
+        let read = match &mut self.sockets[slot] {
+            Some(SocketResource::Stream(stream)) => stream.read(&mut buffer),
+            _ => {
+                return Ok(result_value(Err(Value::String(
+                    "tcp_read requires a connected stream socket".to_string(),
+                ))));
+            }
+        };
+        match read {
+            Ok(count) => Ok(result_value(Ok(Value::String(
+                String::from_utf8_lossy(&buffer[..count]).into_owned(),
+            )))),
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `tcp_write(conn Socket, data string) -> result<i64, string>`: write the
+    /// string's bytes and return the number of bytes written.
+    fn builtin_tcp_write(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Write;
+        let [conn, data]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("tcp_write", 2, args.len()))?;
+        let slot = self.socket_slot("tcp_write", &conn)?;
+        let data = expect_string("tcp_write", data)?;
+        let written = match &mut self.sockets[slot] {
+            Some(SocketResource::Stream(stream)) => {
+                stream.write(data.as_bytes()).and_then(|count| {
+                    stream.flush()?;
+                    Ok(count)
+                })
+            }
+            _ => {
+                return Ok(result_value(Err(Value::String(
+                    "tcp_write requires a connected stream socket".to_string(),
+                ))));
+            }
+        };
+        match written {
+            Ok(count) => Ok(result_value(Ok(Value::I64(count as i64)))),
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `tcp_close(conn Socket) -> void` / `udp_close`: drop the handle, freeing
+    /// its table slot. Closing an already-closed handle is a no-op.
+    fn builtin_socket_close(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [socket]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("tcp_close", 1, args.len()))?;
+        if let Value::Socket(handle) = socket {
+            if let Some(slot) = self.sockets.get_mut(handle) {
+                *slot = None;
+            }
+            Ok(Value::Void)
+        } else {
+            Err(RuntimeError::new(
+                "L0417",
+                format!("tcp_close expects a Socket but got `{socket}`"),
+            ))
+        }
+    }
+
+    /// `udp_bind(host string, port i64) -> result<Socket, string>`.
+    fn builtin_udp_bind(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [host, port]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("udp_bind", 2, args.len()))?;
+        let host = expect_string("udp_bind", host)?;
+        let port = expect_i64("udp_bind", port)?;
+        match UdpSocket::bind((host.as_str(), port as u16)) {
+            Ok(socket) => {
+                let handle = self.register_socket(SocketResource::Udp(socket));
+                Ok(result_value(Ok(handle)))
+            }
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `udp_send_to(sock Socket, data string, host string, port i64)
+    /// -> result<i64, string>`: send one datagram, returning the byte count.
+    fn builtin_udp_send_to(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [sock, data, host, port]: [Value; 4] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("udp_send_to", 4, args.len()))?;
+        let slot = self.socket_slot("udp_send_to", &sock)?;
+        let data = expect_string("udp_send_to", data)?;
+        let host = expect_string("udp_send_to", host)?;
+        let port = expect_i64("udp_send_to", port)?;
+        let sent = match &self.sockets[slot] {
+            Some(SocketResource::Udp(socket)) => {
+                socket.send_to(data.as_bytes(), (host.as_str(), port as u16))
+            }
+            _ => {
+                return Ok(result_value(Err(Value::String(
+                    "udp_send_to requires a UDP socket".to_string(),
+                ))));
+            }
+        };
+        match sent {
+            Ok(count) => Ok(result_value(Ok(Value::I64(count as i64)))),
+            Err(error) => Ok(net_err(&error)),
+        }
+    }
+
+    /// `udp_recv(sock Socket) -> result<string, string>`: receive one datagram,
+    /// dropping the sender address, and return it as a lossy UTF-8 string.
+    fn builtin_udp_recv(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [sock]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("udp_recv", 1, args.len()))?;
+        let slot = self.socket_slot("udp_recv", &sock)?;
+        let mut buffer = [0u8; 4096];
+        let received = match &self.sockets[slot] {
+            Some(SocketResource::Udp(socket)) => socket.recv_from(&mut buffer),
+            _ => {
+                return Ok(result_value(Err(Value::String(
+                    "udp_recv requires a UDP socket".to_string(),
+                ))));
+            }
+        };
+        match received {
+            Ok((count, _addr)) => Ok(result_value(Ok(Value::String(
+                String::from_utf8_lossy(&buffer[..count]).into_owned(),
+            )))),
+            Err(error) => Ok(net_err(&error)),
+        }
     }
 
     /// Execute a user function (or trait impl method) with the given argument
@@ -2801,5 +3076,19 @@ mod tests {
             "    choose(true, 10, 20) + choose(false, 3, 7)\n",
         );
         assert_eq!(run_source(source).expect("run"), Value::I64(17));
+    }
+
+    #[test]
+    fn tcp_connect_refused_yields_err_result() {
+        // Connecting to port 1 on loopback is a deterministic refusal, so the
+        // `result` takes the `err` arm and the program returns 1. No server.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let outcome result<Socket, string> = tcp_connect(\"127.0.0.1\", 1)\n",
+            "    match outcome\n",
+            "        ok(conn) -> 0\n",
+            "        err(message) -> 1\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(1));
     }
 }

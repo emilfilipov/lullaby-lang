@@ -114,6 +114,36 @@ operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`. Integer
 - `spawn`/`join`/channels are a deferred second increment; see
   [concurrency_design.md](concurrency_design.md).
 
+## Networking
+
+A `Socket` is an opaque handle to an OS network resource (TCP listener, TCP
+stream, or UDP socket), backed by a per-runtime handle table (like a heap
+pointer). Every fallible socket builtin returns a `result<T, string>`, so
+network errors are ordinary runtime values matched with `match` (`err(message)`
+on failure) rather than panics. Sockets run identically on the AST, IR, and
+bytecode backends.
+
+- TCP:
+  - `tcp_connect(host string, port i64) -> result<Socket, string>` — open a
+    client stream.
+  - `tcp_listen(host string, port i64) -> result<Socket, string>` — bind and
+    listen.
+  - `tcp_accept(listener Socket) -> result<Socket, string>` — block for a
+    connection and return a stream `Socket`.
+  - `tcp_read(conn Socket) -> result<string, string>` — read up to 4096 bytes as
+    a UTF-8 string (empty string on clean EOF).
+  - `tcp_write(conn Socket, data string) -> result<i64, string>` — write the
+    string's bytes; return the byte count.
+  - `tcp_close(conn Socket) -> void` — free the handle.
+- UDP:
+  - `udp_bind(host string, port i64) -> result<Socket, string>` — bind a datagram
+    socket.
+  - `udp_send_to(sock Socket, data string, host string, port i64) -> result<i64, string>`
+    — send one datagram; return the byte count.
+  - `udp_recv(sock Socket) -> result<string, string>` — receive one datagram as a
+    string (the sender address is dropped in this increment).
+- Wrong argument types or arities report `L0335`.
+
 ## Memory and references
 
 - Heap: `alloc(value)`, `load(ptr)`, `store(ptr, value)`, `dealloc(ptr)`.

@@ -1701,3 +1701,223 @@ fn run_directory_builtins_on_all_backends() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[test]
+fn runs_socket_fixture_on_all_backends() {
+    // The auto-run socket fixture is deterministic: `tcp_connect("127.0.0.1", 1)`
+    // is a guaranteed connection refusal (port 1 is virtually always closed), so
+    // the `match` takes the `err` arm and returns `1` on every backend without any
+    // external server or real I/O.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_socket.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(stdout(&output).trim(), "1", "{backend} result");
+    }
+}
+
+#[test]
+fn tcp_client_round_trip_on_all_backends() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A real TCP round-trip driven from the test as the SERVER. The Lullaby
+    // program is the client: it connects, writes a request, reads the reply, and
+    // returns the reply length. The Rust listener replies "pong!" (5 bytes) to
+    // every accepted connection, once per backend.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let port = listener.local_addr().expect("addr").port();
+
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _addr) = listener.accept().expect("accept");
+            let mut buffer = [0u8; 64];
+            let _read = stream.read(&mut buffer).expect("server read");
+            stream.write_all(b"pong!").expect("server write");
+            stream.flush().expect("server flush");
+        }
+    });
+
+    let program = format!(
+        "fn main -> i64\n    \
+         let outcome result<Socket, string> = tcp_connect(\"127.0.0.1\", {port})\n    \
+         match outcome\n        \
+         ok(conn) -> handle(conn)\n        \
+         err(message) -> 0 - 1\n\n\
+         fn handle conn Socket -> i64\n    \
+         let sent result<i64, string> = tcp_write(conn, \"ping\")\n    \
+         let reply result<string, string> = tcp_read(conn)\n    \
+         tcp_close(conn)\n    \
+         match reply\n        \
+         ok(text) -> len(text)\n        \
+         err(message) -> 0 - 2\n"
+    );
+    let prog = std::env::temp_dir().join("lullaby_tcp_client.lby");
+    std::fs::write(&prog, program).expect("write program");
+
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                prog.to_str().expect("program path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // The reply "pong!" is 5 bytes long.
+        assert_eq!(stdout(&output).trim(), "5", "{backend} reply length");
+    }
+
+    server.join().expect("server thread");
+    let _ = std::fs::remove_file(&prog);
+}
+
+#[test]
+fn tcp_server_round_trip() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    // A real TCP round-trip where the Lullaby program is the SERVER: it listens on
+    // a fixed loopback port, accepts one connection, reads the request, echoes it
+    // back with a prefix, and exits. The Rust test connects as the client.
+    //
+    // Pick an ephemeral port up front by binding and dropping, then reuse it. This
+    // is a small race window but adequate for a single-shot loopback test.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        probe.local_addr().expect("addr").port()
+    };
+
+    let program = format!(
+        "fn main -> i64\n    \
+         let bound result<Socket, string> = tcp_listen(\"127.0.0.1\", {port})\n    \
+         match bound\n        \
+         ok(listener) -> serve(listener)\n        \
+         err(message) -> 0 - 1\n\n\
+         fn serve listener Socket -> i64\n    \
+         let accepted result<Socket, string> = tcp_accept(listener)\n    \
+         match accepted\n        \
+         ok(conn) -> echo(conn)\n        \
+         err(message) -> 0 - 2\n\n\
+         fn echo conn Socket -> i64\n    \
+         let request result<string, string> = tcp_read(conn)\n    \
+         match request\n        \
+         ok(text) -> reply(conn, text)\n        \
+         err(message) -> 0 - 3\n\n\
+         fn reply conn Socket text string -> i64\n    \
+         let sent result<i64, string> = tcp_write(conn, \"echo:\" + text)\n    \
+         tcp_close(conn)\n    \
+         match sent\n        \
+         ok(count) -> count\n        \
+         err(message) -> 0 - 4\n"
+    );
+    let prog = std::env::temp_dir().join("lullaby_tcp_server.lby");
+    std::fs::write(&prog, program).expect("write program");
+
+    // Run the Lullaby server in a background thread so the test can connect to it.
+    let prog_path = prog.clone();
+    let server = std::thread::spawn(move || {
+        lullaby()
+            .args([
+                "run",
+                "--backend",
+                "ast",
+                prog_path.to_str().expect("program path"),
+            ])
+            .output()
+            .expect("run cli")
+    });
+
+    // Retry the connect briefly while the Lullaby server binds and starts listening.
+    let mut stream = None;
+    for _ in 0..50 {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(connected) => {
+                stream = Some(connected);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+    let mut stream = stream.expect("connect to lullaby server");
+    stream.write_all(b"hi").expect("client write");
+    stream.flush().expect("client flush");
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).expect("client read");
+    assert_eq!(reply, "echo:hi", "server echo reply");
+
+    let output = server.join().expect("server thread");
+    assert!(output.status.success(), "lullaby server: {output:?}");
+    // "echo:hi" is 7 bytes, the byte count returned by tcp_write.
+    assert_eq!(stdout(&output).trim(), "7", "server tcp_write byte count");
+    let _ = std::fs::remove_file(&prog);
+}
+
+#[test]
+fn udp_round_trip_on_all_backends() {
+    use std::net::UdpSocket;
+
+    // A real UDP round-trip: the Lullaby program binds a UDP socket, sends a
+    // datagram to a Rust-side UDP socket, then receives the Rust reply and returns
+    // its length. A fresh Rust responder socket is used per backend so datagrams
+    // never cross runs.
+    let program_template = |responder_port: u16| {
+        format!(
+            "fn main -> i64\n    \
+             let bound result<Socket, string> = udp_bind(\"127.0.0.1\", 0)\n    \
+             match bound\n        \
+             ok(sock) -> exchange(sock, {responder_port})\n        \
+             err(message) -> 0 - 1\n\n\
+             fn exchange sock Socket responder i64 -> i64\n    \
+             let sent result<i64, string> = udp_send_to(sock, \"ping\", \"127.0.0.1\", responder)\n    \
+             let reply result<string, string> = udp_recv(sock)\n    \
+             match reply\n        \
+             ok(text) -> len(text)\n        \
+             err(message) -> 0 - 2\n"
+        )
+    };
+
+    for backend in ["ast", "ir", "bytecode"] {
+        let responder = UdpSocket::bind("127.0.0.1:0").expect("responder bind");
+        let responder_port = responder.local_addr().expect("addr").port();
+
+        let handler = std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            let (_len, sender) = responder.recv_from(&mut buffer).expect("responder recv");
+            responder
+                .send_to(b"pong-udp", sender)
+                .expect("responder send");
+        });
+
+        let program = program_template(responder_port);
+        let prog = std::env::temp_dir().join(format!("lullaby_udp_{backend}.lby"));
+        std::fs::write(&prog, program).expect("write program");
+
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                prog.to_str().expect("program path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // The reply "pong-udp" is 8 bytes long.
+        assert_eq!(stdout(&output).trim(), "8", "{backend} udp reply length");
+
+        handler.join().expect("responder thread");
+        let _ = std::fs::remove_file(&prog);
+    }
+}

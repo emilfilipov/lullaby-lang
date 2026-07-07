@@ -362,6 +362,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Pass a `fn(i64) -> i64` function value and a `list<i64>` of arguments to `parallel_map`.",
     },
     DiagnosticEntry {
+        code: "L0335",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A TCP/UDP socket builtin has an argument type or arity mismatch.",
+        root_cause: "A `tcp_connect`/`tcp_listen`/`tcp_accept`/`tcp_read`/`tcp_write`/`tcp_close`/`udp_bind`/`udp_send_to`/`udp_recv` call had the wrong number of arguments or an argument of the wrong type (a non-`string` host/data, a non-`i64` port, or a non-`Socket` handle).",
+        suggested_fix: "Pass a `string` host/data, an `i64` port, and a `Socket` handle produced by a socket builtin, matching the builtin's arity.",
+    },
+    DiagnosticEntry {
         code: "L0340",
         phase: DiagnosticPhase::Semantic,
         explanation: "A region declaration has an invalid size, alignment, or kind.",

@@ -1,0 +1,5 @@
+fn main -> i64
+    let outcome result<Socket, string> = tcp_connect("127.0.0.1", 1)
+    match outcome
+        ok(sock) -> 0
+        err(message) -> 1

@@ -2956,6 +2956,66 @@ impl<'a> Checker<'a> {
                 }
                 Some(list_type(&TypeRef::new("i64")))
             }
+            "tcp_connect" | "tcp_listen" | "udp_bind" => {
+                // `(host string, port i64) -> result<Socket, string>`.
+                self.expect_socket_arg_count(name, args, 2, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_socket_arg_type(name, 2, &args[1], "i64", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("Socket"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "tcp_accept" => {
+                // `(listener Socket) -> result<Socket, string>`.
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "Socket", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("Socket"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "tcp_read" => {
+                // `(conn Socket) -> result<string, string>`.
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "Socket", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("string"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "tcp_write" => {
+                // `(conn Socket, data string) -> result<i64, string>`.
+                self.expect_socket_arg_count(name, args, 2, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "Socket", scope, function)?;
+                self.expect_socket_arg_type(name, 2, &args[1], "string", scope, function)?;
+                Some(result_type(&TypeRef::new("i64"), &TypeRef::new("string")))
+            }
+            "tcp_close" => {
+                // `(conn Socket) -> void`.
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "Socket", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "udp_send_to" => {
+                // `(sock Socket, data string, host string, port i64)
+                // -> result<i64, string>`.
+                self.expect_socket_arg_count(name, args, 4, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "Socket", scope, function)?;
+                self.expect_socket_arg_type(name, 2, &args[1], "string", scope, function)?;
+                self.expect_socket_arg_type(name, 3, &args[2], "string", scope, function)?;
+                self.expect_socket_arg_type(name, 4, &args[3], "i64", scope, function)?;
+                Some(result_type(&TypeRef::new("i64"), &TypeRef::new("string")))
+            }
+            "udp_recv" => {
+                // `(sock Socket) -> result<string, string>`.
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "Socket", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("string"),
+                    &TypeRef::new("string"),
+                ))
+            }
             _ => {
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     self.diagnostics.push(SemanticDiagnostic::at(
@@ -3886,6 +3946,64 @@ impl<'a> Checker<'a> {
         } else {
             self.diagnostics.push(SemanticDiagnostic::at(
                 "L0333",
+                format!(
+                    "argument {index} for `{name}` must be `{}` but got `{}`",
+                    expected.name,
+                    actual
+                        .as_ref()
+                        .map(|ty| ty.name.as_str())
+                        .unwrap_or("<unknown>")
+                ),
+                Some(function.name.clone()),
+                arg.span,
+            ));
+            None
+        }
+    }
+
+    /// Validate a socket/network builtin argument count, reporting `L0335` on a
+    /// mismatch.
+    fn expect_socket_arg_count(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: usize,
+        function: &Function,
+    ) -> Option<()> {
+        if args.len() == expected {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0335",
+                format!(
+                    "socket builtin `{name}` expects {expected} arguments but got {}",
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                args.first().map(|arg| arg.span).unwrap_or(function.span),
+            ));
+            None
+        }
+    }
+
+    /// Validate a socket/network builtin argument type, reporting `L0335` on a
+    /// mismatch.
+    fn expect_socket_arg_type(
+        &mut self,
+        name: &str,
+        index: usize,
+        arg: &Expr,
+        expected: &str,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<()> {
+        let expected = TypeRef::new(expected);
+        let actual = self.check_expr(arg, scope, function);
+        if actual.as_ref() == Some(&expected) {
+            Some(())
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0335",
                 format!(
                     "argument {index} for `{name}` must be `{}` but got `{}`",
                     expected.name,
@@ -5679,6 +5797,44 @@ mod tests {
         let diagnostics = validate_source(source).expect_err("unimplemented bound");
         assert!(
             diagnostics.iter().any(|d| d.code == "L0400"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_socket_builtins() {
+        // The socket builtins type-check with a `Socket` handle threaded through
+        // a `result` `match`; `tcp_connect` yields `result<Socket, string>`.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let outcome result<Socket, string> = tcp_connect(\"127.0.0.1\", 80)\n",
+            "    match outcome\n",
+            "        ok(conn) -> use_conn(conn)\n",
+            "        err(message) -> len(message)\n\n",
+            "fn use_conn conn Socket -> i64\n",
+            "    let sent result<i64, string> = tcp_write(conn, \"hi\")\n",
+            "    tcp_close(conn)\n",
+            "    match sent\n",
+            "        ok(count) -> count\n",
+            "        err(message) -> 0 - 1\n",
+        );
+        validate_source(source).expect("socket builtins type-check");
+    }
+
+    #[test]
+    fn rejects_wrong_type_socket_arg_with_l0335() {
+        // `tcp_connect` expects `(string, i64)`; passing an i64 host is a type
+        // error reported as L0335.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let outcome result<Socket, string> = tcp_connect(5, 80)\n",
+            "    match outcome\n",
+            "        ok(conn) -> 0\n",
+            "        err(message) -> 1\n",
+        );
+        let diagnostics = validate_source(source).expect_err("wrong socket arg type");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0335"),
             "{diagnostics:?}"
         );
     }
