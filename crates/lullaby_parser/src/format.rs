@@ -538,6 +538,33 @@ mod tests {
         format_program(&program)
     }
 
+    /// Read a named fixture from `tests/fixtures/valid/<name>.lby`.
+    fn read_fixture(name: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/valid")
+            .join(format!("{name}.lby"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
+    }
+
+    /// Assert the formatter is idempotent and stable on a fixture: parse the
+    /// source, format once (`f1`), re-parse `f1` and format again (`f2`), and
+    /// require `f1 == f2`. Also confirms `f1` re-lexes and re-parses cleanly
+    /// (a round-trip guard).
+    fn assert_fixture_idempotent(name: &str) {
+        let source = read_fixture(name);
+        let tokens = lex(&source).unwrap_or_else(|e| panic!("lex {name}: {e:?}"));
+        let program = parse(&tokens).unwrap_or_else(|e| panic!("parse {name}: {e:?}"));
+        let f1 = format_program(&program);
+
+        let tokens2 = lex(&f1).unwrap_or_else(|e| panic!("re-lex formatted {name}: {e:?}"));
+        let program2 =
+            parse(&tokens2).unwrap_or_else(|e| panic!("re-parse formatted {name}: {e:?}"));
+        let f2 = format_program(&program2);
+
+        assert_eq!(f1, f2, "formatter not idempotent on fixture {name}");
+    }
+
     #[test]
     fn formats_function_with_canonical_spacing() {
         let source = "fn add a i64 b i64 -> i64\n    a + b\n";
@@ -617,5 +644,124 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 10, "expected many fixtures, checked {checked}");
+    }
+
+    // Per-construct idempotency + round-trip guards over representative real
+    // fixtures. Each names the constructs it exercises so a regression points at
+    // the relevant language feature. All listed fixtures are single top-level
+    // files (no module loader required).
+
+    #[test]
+    fn idempotent_arithmetic() {
+        // arithmetic / operator precedence / parenthesization.
+        assert_fixture_idempotent("run_arithmetic");
+    }
+
+    #[test]
+    fn idempotent_logic() {
+        // boolean logic (and / or / not), comparisons.
+        assert_fixture_idempotent("run_logic");
+    }
+
+    #[test]
+    fn idempotent_if_elif_else() {
+        // if / elif / else branching.
+        assert_fixture_idempotent("branch");
+    }
+
+    #[test]
+    fn idempotent_while_loop() {
+        // while loops.
+        assert_fixture_idempotent("run_while");
+    }
+
+    #[test]
+    fn idempotent_loop() {
+        // infinite `loop` + break/continue.
+        assert_fixture_idempotent("run_loop");
+    }
+
+    #[test]
+    fn idempotent_for() {
+        // `for ... from ... to ... by ...` counted loops.
+        assert_fixture_idempotent("run_for_step");
+    }
+
+    #[test]
+    fn idempotent_arrays() {
+        // array literals + indexing + mutation.
+        assert_fixture_idempotent("run_array");
+    }
+
+    #[test]
+    fn idempotent_named_struct() {
+        // struct declarations, struct literals, field access.
+        assert_fixture_idempotent("run_named_struct");
+    }
+
+    #[test]
+    fn idempotent_enum_and_match() {
+        // enums + match arms (inline and block-bodied).
+        assert_fixture_idempotent("run_match");
+    }
+
+    #[test]
+    fn idempotent_enum() {
+        // enum declarations with payloads.
+        assert_fixture_idempotent("run_enum");
+    }
+
+    #[test]
+    fn idempotent_option_result() {
+        // option / result flavored control flow.
+        assert_fixture_idempotent("run_option_result");
+    }
+
+    #[test]
+    fn idempotent_list() {
+        // list-style collection usage.
+        assert_fixture_idempotent("run_list");
+    }
+
+    #[test]
+    fn idempotent_map() {
+        // map-style collection usage.
+        assert_fixture_idempotent("run_map");
+    }
+
+    #[test]
+    fn idempotent_generics() {
+        // generic functions `<T>` and generic type params.
+        assert_fixture_idempotent("run_generics");
+    }
+
+    #[test]
+    fn idempotent_traits() {
+        // traits (`trait` / `impl`), bounded params `<T: Bound>`.
+        assert_fixture_idempotent("run_traits");
+    }
+
+    #[test]
+    fn idempotent_first_class_fn() {
+        // first-class functions.
+        assert_fixture_idempotent("run_first_class_fn");
+    }
+
+    #[test]
+    fn idempotent_methods() {
+        // methods via impl blocks (self receiver).
+        assert_fixture_idempotent("run_methods");
+    }
+
+    #[test]
+    fn idempotent_compose() {
+        // composition of many constructs.
+        assert_fixture_idempotent("run_compose");
+    }
+
+    #[test]
+    fn idempotent_showcase() {
+        // broad showcase exercising many features together.
+        assert_fixture_idempotent("run_showcase");
     }
 }
