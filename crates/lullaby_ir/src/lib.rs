@@ -12,8 +12,9 @@ use lullaby_parser::{
 use lullaby_runtime::{
     Future, ResolvedPlace, RuntimeError, SharedMutex, SocketResource, Task, Value, apply_compound,
     await_future, char_find, expect_chan, expect_future, expect_i64, expect_list, expect_map,
-    expect_mutex, expect_string, expect_task, get_place, http_exchange, join_task, net_err,
-    new_chan, option_value, result_value, scalar_order_keys, set_place, value_type_name,
+    expect_mutex, expect_string, expect_task, extern_call_error, get_place, http_exchange,
+    join_task, net_err, new_chan, option_value, result_value, scalar_order_keys, set_place,
+    value_type_name,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,12 @@ pub struct IrModule {
     /// so existing artifacts and snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub async_functions: Vec<String>,
+    /// Names of `extern fn` (C-ABI) functions. These have no lowered body: a call
+    /// to one emits a `call` of the external symbol on the native backend, and is
+    /// rejected with `L0423` on the interpreters (which cannot execute C).
+    /// Serde-defaulted so existing artifacts and snapshots stay valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extern_functions: Vec<String>,
 }
 
 /// One trait impl method in the IR: the implementing type name, the method name,
@@ -799,6 +806,11 @@ pub struct BytecodeModule {
     /// `async fn` call spawns a thread. Serde-defaulted for compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub async_functions: Vec<String>,
+    /// Names of `extern fn` (C-ABI) functions, carried through so the native
+    /// backend emits an external-symbol call and the bytecode VM rejects a call
+    /// with `L0423`. Serde-defaulted for compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extern_functions: Vec<String>,
 }
 
 /// One trait impl method in the bytecode module: the implementing type name, the
@@ -1481,6 +1493,7 @@ pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
             .collect(),
         trait_methods: module.trait_methods.clone(),
         async_functions: module.async_functions.clone(),
+        extern_functions: module.extern_functions.clone(),
     }
 }
 
@@ -1514,6 +1527,7 @@ pub fn run_bytecode_main_with_args(
             .collect(),
         trait_methods: module.trait_methods.clone(),
         async_functions: module.async_functions.clone(),
+        extern_functions: module.extern_functions.clone(),
     };
     run_main_with_args(&ir, args)
 }
@@ -1886,6 +1900,7 @@ impl ConstantFolder {
             impls: module.impls.clone(),
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
+            extern_functions: module.extern_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2205,6 +2220,7 @@ impl CommonSubexpressionEliminator {
             impls: module.impls.clone(),
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
+            extern_functions: module.extern_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2579,6 +2595,7 @@ impl LoopInvariantMover {
             impls: module.impls.clone(),
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
+            extern_functions: module.extern_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2978,6 +2995,7 @@ impl CopyPropagator {
             impls: module.impls.clone(),
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
+            extern_functions: module.extern_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -3322,6 +3340,7 @@ impl DeadCodeEliminator {
             impls: module.impls.clone(),
             trait_methods: module.trait_methods.clone(),
             async_functions: module.async_functions.clone(),
+            extern_functions: module.extern_functions.clone(),
             functions: module
                 .functions
                 .iter()
@@ -3478,6 +3497,9 @@ struct IrRuntime<'a> {
     /// Names of `async fn` functions. Calling one spawns an OS thread running its
     /// body and yields a `Value::Future` that `await` resolves.
     async_functions: std::collections::HashSet<String>,
+    /// Names of `extern fn` (C-ABI) functions. The interpreter cannot execute C,
+    /// so a call to one raises `L0423` rather than dispatching a body.
+    extern_functions: std::collections::HashSet<String>,
 }
 
 impl<'a> IrRuntime<'a> {
@@ -3537,6 +3559,7 @@ impl<'a> IrRuntime<'a> {
         }
         let trait_method_names = module.trait_methods.iter().cloned().collect();
         let async_functions = module.async_functions.iter().cloned().collect();
+        let extern_functions = module.extern_functions.iter().cloned().collect();
 
         Ok(Self {
             module,
@@ -3552,6 +3575,7 @@ impl<'a> IrRuntime<'a> {
             impl_methods,
             trait_method_names,
             async_functions,
+            extern_functions,
         })
     }
 
@@ -4092,6 +4116,11 @@ impl<'a> IrRuntime<'a> {
                     Ok(Value::Func(target)) => target,
                     _ => name.clone(),
                 };
+                // An `extern fn` (C-ABI) cannot run on the interpreter; it only
+                // has meaning after native codegen + linking.
+                if self.extern_functions.contains(target.as_str()) {
+                    return Err(extern_call_error(&target));
+                }
                 // Calling an `async fn` spawns its body on a new OS thread and
                 // yields a `Future` handle; a synchronous call runs inline.
                 if self.async_functions.contains(target.as_str()) {
@@ -5730,10 +5759,13 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_program(&self) -> Result<IrModule, IrLoweringError> {
+        // Extern (C-ABI) declarations are body-less: they are recorded by name in
+        // `extern_functions` (below) and never lowered to an `IrFunction`.
         let functions = self
             .program
             .functions
             .iter()
+            .filter(|function| !function.is_extern)
             .map(|function| self.lower_function(function))
             .collect::<Result<Vec<_>, _>>()?;
         let structs = self
@@ -5792,6 +5824,15 @@ impl<'a> Lowerer<'a> {
             .filter(|function| function.is_async)
             .map(|function| function.name.clone())
             .collect();
+        // Record every `extern fn` so a call resolves to an external-symbol call
+        // on the native backend and to an `L0423` on the interpreters.
+        let extern_functions = self
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.is_extern)
+            .map(|function| function.name.clone())
+            .collect();
         Ok(IrModule {
             functions,
             structs,
@@ -5799,6 +5840,7 @@ impl<'a> Lowerer<'a> {
             impls,
             trait_methods,
             async_functions,
+            extern_functions,
         })
     }
 
@@ -7626,6 +7668,7 @@ mod tests {
             impls: Vec::new(),
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
+            extern_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: vec![IrParam {
@@ -7660,6 +7703,7 @@ mod tests {
             impls: Vec::new(),
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
+            extern_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),

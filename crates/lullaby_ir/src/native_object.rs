@@ -605,7 +605,16 @@ pub struct NativeProgram {
     pub compiled: Vec<String>,
     /// Functions skipped for the native subset, each with a reason.
     pub skipped: Vec<NativeSkippedFunction>,
+    /// C import libraries the linker must also resolve, beyond `kernel32.lib`.
+    /// Populated when the program calls `extern fn` C functions (e.g. `ucrt.lib`
+    /// for the C runtime). Empty for a program with no extern calls.
+    pub import_libs: Vec<String>,
 }
+
+/// The C runtime import library that provides the standard C library symbols
+/// (e.g. `llabs`) an `extern fn` may name. Discovered like `kernel32.lib` via
+/// the MSVC `LIB` environment variable.
+pub const C_RUNTIME_IMPORT_LIB: &str = "ucrt.lib";
 
 /// A function that was not eligible for the native i64-scalar subset.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -702,8 +711,14 @@ pub fn emit_alpha1_native_program(
     // function to skipped and drops it from the callable set, then re-runs (a
     // call to a demoted function must also fail). Converges quickly.
     loop {
-        let callable: std::collections::HashSet<&str> =
+        // Compiled functions plus every declared `extern fn` are callable. An
+        // extern name resolves to an undefined external symbol (bound by the
+        // linker) rather than a compiled `.text` function.
+        let mut callable: std::collections::HashSet<&str> =
             eligible_names.iter().map(String::as_str).collect();
+        for name in &module.extern_functions {
+            callable.insert(name.as_str());
+        }
         let mut lowered: Vec<LoweredNativeFunction> = Vec::new();
         let mut demoted: Option<NativeSkippedFunction> = None;
         // String constants are interned fresh each attempt so a demotion that
@@ -751,12 +766,20 @@ pub fn emit_alpha1_native_program(
 
         let compiled: Vec<String> = lowered.iter().map(|f| f.name.clone()).collect();
         let bytes = write_native_program_object(&lowered, &strings);
+        // When the program declares any `extern fn`, the C runtime import library
+        // must be linked so the external C symbols resolve.
+        let import_libs = if module.extern_functions.is_empty() {
+            Vec::new()
+        } else {
+            vec![C_RUNTIME_IMPORT_LIB.to_string()]
+        };
         return Ok(NativeProgram {
             target,
             bytes,
             entry_symbol: NATIVE_ENTRY_SYMBOL.to_string(),
             compiled,
             skipped,
+            import_libs,
         });
     }
 }
@@ -2286,6 +2309,18 @@ fn write_text_only_object(functions: &[LoweredNativeFunction]) -> Vec<u8> {
         section_number: 0,
         value: 0,
     });
+    // Any relocation target not defined above is an undefined external symbol —
+    // an `extern fn` C function bound by the linker (section 0), exactly like
+    // `ExitProcess`. Add each such symbol once.
+    for reloc in &relocations {
+        if !symbols.iter().any(|s| s.name == reloc.symbol_name) {
+            symbols.push(SymbolDef {
+                name: reloc.symbol_name.clone(),
+                section_number: 0,
+                value: 0,
+            });
+        }
+    }
 
     let symbol_index_of = |name: &str| -> u32 {
         symbols
@@ -2703,6 +2738,18 @@ fn write_object_with_data(functions: &[LoweredNativeFunction], strings: &StringP
         value: 8,
         is_function: false,
     });
+    // Undefined external symbols for any unresolved relocation target — the
+    // `extern fn` C functions bound by the linker (section 0), like `ExitProcess`.
+    for reloc in &relocations {
+        if !symbols.iter().any(|s| s.name == reloc.symbol_name) {
+            symbols.push(SymbolDef {
+                name: reloc.symbol_name.clone(),
+                section_number: 0,
+                value: 0,
+                is_function: true,
+            });
+        }
+    }
 
     let symbol_index_of = |name: &str| -> u32 {
         symbols
@@ -2878,6 +2925,7 @@ mod tests {
             impls: Vec::new(),
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
+            extern_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -2933,6 +2981,7 @@ mod tests {
             impls: Vec::new(),
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
+            extern_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -2993,6 +3042,7 @@ mod tests {
             impls: Vec::new(),
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
+            extern_functions: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -3133,6 +3183,35 @@ mod native_program_tests {
         );
         assert_eq!(program.skipped.len(), 1);
         assert_eq!(program.skipped[0].name, "greet");
+    }
+
+    #[test]
+    fn emits_extern_call_as_undefined_external_symbol() {
+        // An `extern fn` C function is called from `main`. The call lowers to a
+        // REL32 relocation against an undefined external symbol named after the C
+        // function, and the C runtime import library is requested for linking.
+        let program = emit_alpha1_native_program(&module_for(
+            "extern fn llabs x i64 -> i64\n\nfn main -> i64\n    llabs(-7)\n",
+        ))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert_eq!(
+            program.import_libs,
+            vec![C_RUNTIME_IMPORT_LIB.to_string()],
+            "extern calls require the C runtime import library"
+        );
+
+        // Three relocations: stub->main, stub->ExitProcess, main->llabs.
+        let sec = COFF_HEADER_SIZE as usize;
+        assert_eq!(read_u16(&program.bytes, sec + 32), 3, "three relocations");
+
+        // The undefined external symbol `llabs` (<= 8 bytes) is stored inline in a
+        // symbol record's name field; scan the object bytes for it.
+        let needle = b"llabs\0\0\0";
+        assert!(
+            program.bytes.windows(8).any(|w| w == needle),
+            "expected an `llabs` external symbol record"
+        );
     }
 
     #[test]

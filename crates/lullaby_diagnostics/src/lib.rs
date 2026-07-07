@@ -669,6 +669,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         root_cause: "An f64 operation received a non-float value.",
         suggested_fix: "Ensure the operand is an f64; the type checker normally prevents this.",
     },
+    DiagnosticEntry {
+        code: "L0423",
+        phase: DiagnosticPhase::Runtime,
+        explanation: "An `extern fn` (C-ABI) function was called on an interpreter, which cannot execute real C FFI.",
+        root_cause: "The AST, IR, and bytecode interpreters have no way to invoke a linked C function; an extern function only has meaning after native codegen and linking.",
+        suggested_fix: "Compile the program with `lullaby native` to emit an object, link it against the C runtime, and run the resulting `.exe`.",
+    },
 ];
 
 pub fn render_concise(report: &DiagnosticReport) -> String {

@@ -140,6 +140,14 @@ pub struct Function {
     /// single-file artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_async: bool,
+    /// True when the function is declared `extern fn` — a body-less declaration of
+    /// a C-ABI function imported at link time. An extern function has no `body`;
+    /// calls to it are type-checked like ordinary calls, lower to a `call` of the
+    /// external symbol on the native backend, and cannot run on the interpreters.
+    /// Serde-defaulted to `false` so existing artifacts and AST snapshots stay
+    /// valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_extern: bool,
 }
 
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.
@@ -703,15 +711,33 @@ impl<'a> Parser<'a> {
             // only applies to functions; `async fn` and `pub async fn` are both
             // valid, but `async` before anything other than `fn` is an error.
             let is_async = self.eat_keyword(Keyword::Async).is_some();
-            if self.eat_keyword(Keyword::Fn).is_some() {
-                if let Some(function) = self.parse_function(is_public, is_async) {
-                    functions.push(function);
-                }
-            } else if is_async {
+            // An optional `extern` modifier prefixes a body-less `fn` declaration
+            // of a C-ABI function imported at link time. `extern` only applies to
+            // functions and is mutually exclusive with `async`.
+            let is_extern = self.eat_keyword(Keyword::Extern).is_some();
+            if is_extern && is_async {
                 let token = self.peek();
                 self.error(
                     "L0201",
-                    "`async` must prefix a `fn` declaration",
+                    "`extern` and `async` cannot be combined on a `fn` declaration",
+                    token.span,
+                );
+            }
+            if self.eat_keyword(Keyword::Fn).is_some() {
+                let function = if is_extern {
+                    self.parse_extern_function(is_public)
+                } else {
+                    self.parse_function(is_public, is_async)
+                };
+                if let Some(function) = function {
+                    functions.push(function);
+                }
+            } else if is_async || is_extern {
+                let token = self.peek();
+                let modifier = if is_extern { "extern" } else { "async" };
+                self.error(
+                    "L0201",
+                    format!("`{modifier}` must prefix a `fn` declaration"),
                     token.span,
                 );
                 self.advance();
@@ -938,6 +964,7 @@ impl<'a> Parser<'a> {
             span: fn_span,
             is_public: false,
             is_async: false,
+            is_extern: false,
         })
     }
 
@@ -1059,6 +1086,50 @@ impl<'a> Parser<'a> {
             span: fn_span,
             is_public,
             is_async,
+            is_extern: false,
+        })
+    }
+
+    /// Parse an `extern fn NAME params -> Ret` declaration: a body-less signature
+    /// for a C-ABI function imported at link time. The `fn` keyword has already
+    /// been consumed. Generic type parameters, a `self` receiver, and an indented
+    /// body are not part of an extern declaration; the line ends after the return
+    /// type. The signature is registered so calls type-check like ordinary calls.
+    fn parse_extern_function(&mut self, is_public: bool) -> Option<Function> {
+        let fn_span = self.previous().span;
+        let name = self.expect_identifier("expected function name after `extern fn`")?;
+        let mut params = Vec::new();
+        while !self.at(TokenKindRef::Arrow)
+            && !self.at(TokenKindRef::Newline)
+            && !self.at(TokenKindRef::Eof)
+        {
+            let param_name = self.expect_identifier("expected parameter name")?;
+            let ty = self.expect_type("expected parameter type")?;
+            params.push(Param {
+                name: param_name,
+                ty,
+            });
+        }
+        if !self.eat(TokenKindRef::Arrow) {
+            self.error(
+                "L0202",
+                "expected `->` before extern function return type",
+                self.peek().span,
+            );
+            return None;
+        }
+        let return_type = self.expect_type("expected function return type after `->`")?;
+        self.expect_newline("expected newline after extern function signature");
+        Some(Function {
+            name,
+            type_params: Vec::new(),
+            params,
+            return_type,
+            body: Vec::new(),
+            span: fn_span,
+            is_public,
+            is_async: false,
+            is_extern: true,
         })
     }
 
@@ -2292,6 +2363,25 @@ mod tests {
         let tokens = lex("fn main -> void\n    return\n").expect("lex");
         let program = parse(&tokens).expect("parse");
         assert_eq!(program.functions[0].return_type.name, "void");
+    }
+
+    #[test]
+    fn parses_extern_function_without_body() {
+        let source = "extern fn llabs x i64 -> i64\n\nfn main -> i64\n    llabs(-7)\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let extern_fn = &program.functions[0];
+        assert_eq!(extern_fn.name, "llabs");
+        assert!(extern_fn.is_extern, "extern flag set");
+        assert!(extern_fn.body.is_empty(), "extern declaration has no body");
+        assert_eq!(extern_fn.params.len(), 1);
+        assert_eq!(extern_fn.return_type.name, "i64");
+        // The extern signature round-trips through the canonical formatter.
+        let formatted = format_program(&program);
+        assert!(
+            formatted.contains("extern fn llabs x i64 -> i64"),
+            "formatter renders extern signature: {formatted}"
+        );
     }
 
     #[test]

@@ -80,6 +80,7 @@ pub enum Keyword {
     Unsafe,
     Region,
     Alias,
+    Extern,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -449,6 +450,7 @@ fn keyword(text: &str) -> Option<Keyword> {
         "unsafe" => Keyword::Unsafe,
         "region" => Keyword::Region,
         "alias" => Keyword::Alias,
+        "extern" => Keyword::Extern,
         _ => return None,
     })
 }

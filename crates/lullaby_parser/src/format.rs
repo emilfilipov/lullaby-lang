@@ -158,6 +158,9 @@ fn render_function(function: &Function) -> String {
     if function.is_async {
         header.push_str("async ");
     }
+    if function.is_extern {
+        header.push_str("extern ");
+    }
     header.push_str(&format!("fn {}", function.name));
     header.push_str(&render_type_params(&function.type_params));
     for param in &function.params {
@@ -165,7 +168,10 @@ fn render_function(function: &Function) -> String {
     }
     header.push_str(&format!(" -> {}", function.return_type.name));
     let mut out = header;
-    render_block(&function.body, 1, &mut out);
+    // An extern declaration is body-less; render only the signature line.
+    if !function.is_extern {
+        render_block(&function.body, 1, &mut out);
+    }
     out
 }
 

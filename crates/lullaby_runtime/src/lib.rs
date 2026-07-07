@@ -271,6 +271,20 @@ impl RuntimeError {
     }
 }
 
+/// The error raised when an `extern fn` (C-ABI) function is called on any
+/// interpreter (AST, IR, or bytecode). The interpreters cannot execute real C
+/// FFI — an extern function only has meaning after native codegen + linking —
+/// so a call to one is `L0423` rather than a panic or a silent no-op. `check`
+/// still validates the extern declaration and its call sites.
+pub fn extern_call_error(name: &str) -> RuntimeError {
+    RuntimeError::new(
+        "L0423",
+        format!(
+            "cannot call extern (C-ABI) function `{name}` on an interpreter; compile with `lullaby native` to link and run it"
+        ),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
     Runtime,
@@ -680,6 +694,9 @@ struct Runtime<'a> {
     /// Names of `async fn` functions. Calling one spawns an OS thread running its
     /// body and yields a `Value::Future` that `await` resolves.
     async_functions: HashSet<&'a str>,
+    /// Names of `extern fn` (C-ABI) functions. The interpreter cannot execute C,
+    /// so a call to one raises `L0423` before any builtin/user dispatch.
+    extern_functions: HashSet<&'a str>,
 }
 
 impl<'a> Runtime<'a> {
@@ -744,6 +761,13 @@ impl<'a> Runtime<'a> {
             .map(|function| function.name.as_str())
             .collect::<HashSet<_>>();
 
+        let extern_functions = program
+            .functions
+            .iter()
+            .filter(|function| function.is_extern)
+            .map(|function| function.name.as_str())
+            .collect::<HashSet<_>>();
+
         Ok(Self {
             program,
             program_arc,
@@ -758,6 +782,7 @@ impl<'a> Runtime<'a> {
             impl_methods,
             trait_method_names,
             async_functions,
+            extern_functions,
         })
     }
 
@@ -1801,6 +1826,11 @@ impl<'a> Runtime<'a> {
                     Ok(Value::Func(target)) => target,
                     _ => name.clone(),
                 };
+                // An `extern fn` (C-ABI) cannot run on the interpreter; it only
+                // has meaning after native codegen + linking.
+                if self.extern_functions.contains(target.as_str()) {
+                    return Err(extern_call_error(&target));
+                }
                 // Calling an `async fn` spawns its body on a new OS thread and
                 // yields a `Future` handle; a synchronous call runs inline.
                 if self.async_functions.contains(target.as_str()) {

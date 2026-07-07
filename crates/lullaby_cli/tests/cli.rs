@@ -2786,6 +2786,87 @@ fn native_strings_execution_parity_when_linkable() {
     );
 }
 
+/// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
+/// reachable via the `LIB` environment variable, like `kernel32_available`.
+fn ucrt_available() -> bool {
+    std::env::var("LIB").ok().is_some_and(|lib| {
+        lib.split(';')
+            .any(|dir| !dir.is_empty() && PathBuf::from(dir.trim()).join("ucrt.lib").is_file())
+    })
+}
+
+/// C-ABI FFI: a program that declares `extern fn llabs x i64 -> i64` and returns
+/// `llabs(-7)`. On the interpreters the extern call is rejected with `L0423`
+/// (they cannot execute C). Native-compiled and linked against the C runtime
+/// (`ucrt.lib`), the `.exe` calls the real C `llabs` and exits with code 7.
+/// Gated on `rust-lld` + `kernel32.lib` + `ucrt.lib`; skips gracefully otherwise.
+#[test]
+fn ffi_calls_c_abs_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/native_only/ffi_llabs.lby");
+
+    // `check` validates the extern declaration and its call site.
+    let check = lullaby()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(check.status.success(), "{}", stderr(&check));
+
+    // Every interpreter backend rejects the extern call with L0423 rather than
+    // panicking or silently no-op-ing.
+    for backend in ["ast", "ir", "bytecode"] {
+        let run = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(
+            !run.status.success(),
+            "extern call must fail on the {backend} interpreter"
+        );
+        let rendered = format!("{}{}", stdout(&run), stderr(&run));
+        assert!(
+            rendered.contains("L0423"),
+            "expected L0423 on {backend}: {rendered}"
+        );
+    }
+
+    // Native codegen: emit + link + run.
+    let out = std::env::temp_dir().join("lullaby_ffi_llabs.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    assert!(
+        stdout(&emit).contains("compiled main"),
+        "expected `main` compiled: {}",
+        stdout(&emit)
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() || !ucrt_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib/ucrt.lib (via the LIB env var) not available; \
+             skipping C-ABI FFI link+run"
+        );
+        return;
+    }
+
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(exit, 7, "llabs(-7) via C FFI must exit 7");
+}
+
 #[test]
 fn test_runner_passes_on_demo_suite() {
     // The user-facing demo test suite has four `test_*` functions that all pass

@@ -138,6 +138,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
             span: function.span,
             is_public: function.is_public,
             is_async: function.is_async,
+            is_extern: function.is_extern,
         })
         .collect();
 
@@ -245,6 +246,7 @@ fn resolve_program_aliases(program: &Program) -> (Program, Vec<SemanticDiagnosti
                             span: function.span,
                             is_public: function.is_public,
                             is_async: function.is_async,
+                            is_extern: function.is_extern,
                         })
                         .collect(),
                     span: decl.span,
@@ -731,6 +733,12 @@ impl<'a> Checker<'a> {
         self.collect_signatures();
         self.collect_impls();
         for function in &self.program.functions {
+            // Extern (C-ABI) declarations are body-less: there is nothing to
+            // check beyond the signature, which `collect_signatures` already
+            // registered so call sites type-check.
+            if function.is_extern {
+                continue;
+            }
             self.validate_function(function);
         }
         self.validate_impls();
@@ -4540,6 +4548,31 @@ mod tests {
     #[test]
     fn non_void_function_may_return_last_expression() {
         assert!(validate_source("fn add x i64 y i64 -> i64\n    x + y\n").is_ok());
+    }
+
+    #[test]
+    fn validates_extern_declaration_and_call() {
+        // A body-less `extern fn` registers a signature so calls type-check like
+        // any other call (arity + i64 argument/return types), even though it has
+        // no body to validate.
+        let source = "extern fn llabs x i64 -> i64\n\nfn main -> i64\n    llabs(-7)\n";
+        let checked = validate_source(source).expect("extern decl + call type-checks");
+        let extern_fn = checked
+            .program
+            .functions
+            .iter()
+            .find(|f| f.name == "llabs")
+            .expect("extern function present");
+        assert!(extern_fn.is_extern, "llabs is marked extern");
+        assert!(extern_fn.body.is_empty(), "extern function has no body");
+    }
+
+    #[test]
+    fn extern_call_arity_mismatch_is_reported() {
+        // Extern call sites are checked like ordinary calls: wrong arity is L0312.
+        let source = "extern fn llabs x i64 -> i64\n\nfn main -> i64\n    llabs(1, 2)\n";
+        let diagnostics = validate_source(source).expect_err("arity mismatch");
+        assert!(diagnostics.iter().any(|d| d.code == "L0312"));
     }
 
     #[test]

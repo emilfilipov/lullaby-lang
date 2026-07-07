@@ -18,6 +18,7 @@ Implemented now:
 - An extended multi-function native program emitter (`emit_alpha1_native_program`) for the **i64-scalar subset** with control flow, calls, division, an entry stub, `ExitProcess` import, and COFF relocations, plus a best-effort `rust-lld` link-to-`.exe` behind the `lullaby native` command. See "Extended Native Program Emission And Link-To-Executable" below.
 - **Stack-allocated scalar aggregates** on top of the i64-scalar subset: all-i64 (optionally nested) structs and fixed-length `i64` arrays as function locals, laid out contiguously in the stack frame. See "Stack-Allocated Scalar Structs And Fixed Arrays" below.
 - **First heap step: string constants + a bump heap.** String literals used by `len("...")` are emitted into a read-only `.rdata` section, referenced by REL32 relocations, copied into a `.bss` bump-allocated heap region at runtime, and scanned for their byte length so `main` can derive an i64 from string data. See "First Heap Step: String Constants And Bump Allocator" below.
+- **C-ABI FFI (calling C).** A body-less `extern fn NAME params -> Ret` declares an imported C function; a call lowers to a `call` of an undefined external symbol (Win64 integer registers, result in `rax`) and links against the C runtime (`ucrt.lib`). Calling an extern on an interpreter is `L0423`. See "C-ABI FFI (calling C)" below.
 
 Not implemented yet:
 
@@ -149,6 +150,52 @@ Object layout and codegen (only when a program references string constants):
 - `__lullaby_strlen_copy(src in rcx) -> len in rax` measures the `.rdata` source length, calls `__lullaby_alloc` for `n + 1` bytes, `rep movsb`-copies the string (with terminator) into the heap, and scans the heap copy for its length. It saves/restores the non-volatile `rsi`/`rdi`/`rbx` and keeps `rsp` 16-aligned at the internal `call`.
 - A `len(string_literal)` call site lowers to `lea rcx, [rip + __str{i}]` (a REL32 relocation to the `.rdata` symbol) followed by `call __lullaby_strlen_copy` (a REL32 relocation to the helper). Cross-section references reuse the existing `IMAGE_REL_AMD64_REL32` machinery; the `.rdata`/`.bss` data symbols carry COFF type `0` (not the function type `0x20`).
 - The fixture `tests/fixtures/valid/native_strings.lby` (`main` returns `len("hello") + len("native") + len("") = 11`) runs on all backends for ground truth and is native-compiled, linked, and run by `native_strings_execution_parity_when_linkable` in `crates/lullaby_cli/tests/cli.rs`, which asserts the `.exe` exit code equals the interpreter's `run` result mod 256 (gated on `rust-lld` + `kernel32.lib`).
+
+## C-ABI FFI (calling C) (DELIVERED, first increment)
+
+The native backend can call C functions across the Win64 C ABI. This is the first FFI increment — calling *from* Lullaby *into* C.
+
+### The `extern` surface
+
+A body-less `extern fn` declares a C function imported at link time:
+
+```lullaby
+extern fn llabs x i64 -> i64
+
+fn main -> i64
+    llabs(-7)
+```
+
+Rules:
+
+- `extern` prefixes a `fn` declaration (an optional `pub` may precede it: `pub extern fn`); `extern` and `async` cannot be combined. The declaration has **no indented body** — it ends after the return type.
+- The Lullaby function name **is** the C symbol name. Calling it emits a call to that external symbol.
+- Calls are type-checked exactly like ordinary calls (arity, argument types, return type) using the registered signature. An extern name that is not a built-in resolves through the ordinary user-function call path, so the builtin catalog is unaffected (choose an extern name that is not a Lullaby builtin — e.g. `llabs`, not `abs`).
+- First increment: parameters and the return type must be `i64` for native codegen to compile the caller (the Win64 integer-register subset). Up to four integer arguments pass in `rcx`/`rdx`/`r8`/`r9`; the result is read from `rax`. An extern function with non-i64 parameters/return still type-checks, but a caller that uses it is demoted to the interpreters (which then reject it, see below).
+
+### Win64 mapping and codegen
+
+- A call to an `extern fn` evaluates its arguments left-to-right and moves the first four into `rcx`/`rdx`/`r8`/`r9` (the caller already reserves 32 bytes of shadow space and keeps `rsp` 16-byte aligned at the `call`, exactly like inter-function calls).
+- The call site emits `call rel32` with an `IMAGE_REL_AMD64_REL32` relocation against the C symbol. The COFF symbol table gains that name as an **undefined external symbol** (section number 0), reusing the exact mechanism that imports `ExitProcess` from kernel32. The result in `rax` is the call's `i64` value.
+- `extern_functions` on `IrModule`/`BytecodeModule` carries the extern names (serde-defaulted for artifact compatibility). The native emitter adds them to the callable set; the object writer materializes any unresolved relocation target as an undefined external.
+
+### Linking
+
+- When a program declares any `extern fn`, `emit_alpha1_native_program` reports the required C runtime import library (`ucrt.lib`) in `NativeProgram.import_libs`.
+- The `lullaby native` link step discovers `ucrt.lib` the same way it discovers `kernel32.lib` — via the MSVC `LIB` environment variable (a Developer Command Prompt) — and passes it to `rust-lld` alongside `kernel32.lib`. If `rust-lld` or any required import library cannot be located, linking degrades gracefully: the object is written and an explanation is printed, exactly like the existing native path.
+- The deterministic FFI fixture `tests/fixtures/native_only/ffi_llabs.lby` declares `extern fn llabs x i64 -> i64` and returns `llabs(-7)`; native-linked against `ucrt.lib`, the `.exe` calls the real C `llabs` and exits with code `7`. It lives under `tests/fixtures/native_only/` (not the auto-discovered parity directory) because it cannot run on the interpreters. `ffi_calls_c_abs_when_linkable` in `crates/lullaby_cli/tests/cli.rs` checks it, asserts `L0423` on every interpreter backend, and — when `rust-lld` + `kernel32.lib` + `ucrt.lib` are available — links and runs it asserting exit code 7.
+
+### Interpreter restriction and diagnostic
+
+The AST, IR, and bytecode interpreters cannot execute real C FFI. Calling an `extern fn` on any of them raises diagnostic **`L0423`** (runtime) rather than panicking or silently no-op-ing:
+
+> cannot call extern (C-ABI) function `NAME` on an interpreter; compile with `lullaby native` to link and run it
+
+`lullaby check` still validates extern declarations and their call sites, so type errors at extern call sites are caught statically.
+
+### Deferred FFI work
+
+Deferred beyond this increment: exposing Lullaby functions **to** C (callbacks / C calling Lullaby), non-scalar/pointer/struct C parameter and return types, `f64`/floating and 32-bit `int`/`long` C types, variadic C functions, callbacks and function-pointer arguments, string/buffer marshalling, and non-Windows C ABIs (System V on Linux/macOS).
 
 ## Deferred Native Work
 

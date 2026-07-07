@@ -166,3 +166,4 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `L0419` | resource | Standard stream write or flush failed. | stdout/stderr was closed or the pipe was broken. | Keep the output stream open or redirect it to a writable destination. |
 | `L0420` | runtime | Uncaught thrown error. | A `throw` propagated past every enclosing `try`/`catch`. | Wrap the throwing code in `try` / `catch NAME`, or avoid the throwing condition. |
 | `L0421` | runtime | Expected `f64`. | An f64 operation received a non-float value. | Ensure the operand is an `f64`; the type checker normally prevents this. |
+| `L0423` | runtime | Cannot call an `extern fn` (C-ABI) function on an interpreter. | The AST/IR/bytecode interpreters cannot execute real C FFI; an `extern fn` only has meaning after native codegen + linking. | Compile with `lullaby native`, link against the C runtime, and run the resulting `.exe`. |

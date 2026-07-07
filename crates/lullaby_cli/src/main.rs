@@ -385,8 +385,14 @@ fn native_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Resu
         ));
     }
 
-    // Best-effort link.
-    let link = link_native_object(&obj_output, &exe_output, &program.entry_symbol);
+    // Best-effort link. Extra C import libraries (e.g. `ucrt.lib`) are required
+    // when the program calls `extern fn` C functions.
+    let link = link_native_object(
+        &obj_output,
+        &exe_output,
+        &program.entry_symbol,
+        &program.import_libs,
+    );
 
     if mode == OutputMode::Json {
         println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
@@ -426,21 +432,35 @@ enum LinkOutcome {
 }
 
 /// Discover `rust-lld` and the library search paths, then invoke it in lld-link
-/// mode to produce a console `.exe`. Only `kernel32.lib` (for `ExitProcess`) is
-/// required; the entry stub bypasses the CRT via `/entry:`.
-fn link_native_object(obj: &Path, exe: &Path, entry_symbol: &str) -> LinkOutcome {
+/// mode to produce a console `.exe`. `kernel32.lib` (for `ExitProcess`) is always
+/// required; the entry stub bypasses the CRT via `/entry:`. `import_libs` adds
+/// any C import libraries an `extern fn` call needs (e.g. `ucrt.lib`), discovered
+/// the same way. When rust-lld or any required import library cannot be located,
+/// linking degrades gracefully (the object is kept, the reason is reported).
+fn link_native_object(
+    obj: &Path,
+    exe: &Path,
+    entry_symbol: &str,
+    import_libs: &[String],
+) -> LinkOutcome {
     let Some(lld) = find_rust_lld() else {
         return LinkOutcome::Unavailable("rust-lld not found in the rustc sysroot".to_string());
     };
     let lib_paths = discover_lib_paths();
-    if !lib_paths
-        .iter()
-        .any(|dir| dir.join("kernel32.lib").is_file())
-    {
-        return LinkOutcome::Unavailable(
-            "kernel32.lib not found (set the MSVC `LIB` environment variable, e.g. run from a Developer Command Prompt)"
-                .to_string(),
-        );
+    // Every library the object needs must be discoverable on the search path
+    // before we attempt the link; otherwise degrade gracefully.
+    let mut required_libs: Vec<String> = vec!["kernel32.lib".to_string()];
+    for lib in import_libs {
+        if !required_libs.iter().any(|existing| existing == lib) {
+            required_libs.push(lib.clone());
+        }
+    }
+    for lib in &required_libs {
+        if !lib_paths.iter().any(|dir| dir.join(lib).is_file()) {
+            return LinkOutcome::Unavailable(format!(
+                "{lib} not found (set the MSVC `LIB` environment variable, e.g. run from a Developer Command Prompt)"
+            ));
+        }
     }
 
     let mut command = std::process::Command::new(&lld);
@@ -451,7 +471,9 @@ fn link_native_object(obj: &Path, exe: &Path, entry_symbol: &str) -> LinkOutcome
         command.arg(format!("/libpath:{}", dir.display()));
     }
     command.arg(obj);
-    command.arg("kernel32.lib");
+    for lib in &required_libs {
+        command.arg(lib);
+    }
 
     match command.output() {
         Ok(out) if out.status.success() => LinkOutcome::Linked,
