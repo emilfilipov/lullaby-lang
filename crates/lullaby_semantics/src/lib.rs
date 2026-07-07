@@ -4,7 +4,7 @@ use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AssignOp, BinaryOp, EnumDecl, EnumVariant, Expr, ExprKind, Function, IfBranch, MatchArm,
     MatchPattern, Param, Place, Program, RegionDecl, Stmt, StructDecl, StructField, TypeRef,
-    UnaryOp,
+    UnaryOp, generic_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +207,22 @@ fn chain_is_cyclic(name: &str, map: &HashMap<String, TypeRef>) -> bool {
 }
 
 /// Render an assignment place path for diagnostics, e.g. `.items[0].x`.
+/// True for the four variant names reserved by the built-in `option`/`result`
+/// generic enums.
+fn is_builtin_variant(name: &str) -> bool {
+    matches!(name, "some" | "none" | "ok" | "err")
+}
+
+/// Canonical `option<T>` type spelling.
+fn option_type(payload: &TypeRef) -> TypeRef {
+    generic_type("option", std::slice::from_ref(payload))
+}
+
+/// Canonical `result<T, E>` type spelling.
+fn result_type(ok: &TypeRef, err: &TypeRef) -> TypeRef {
+    generic_type("result", &[ok.clone(), err.clone()])
+}
+
 fn render_place_path(path: &[Place]) -> String {
     let mut out = String::new();
     for place in path {
@@ -462,6 +478,20 @@ impl<'a> Checker<'a> {
     /// variant names across all enums (`L0382`).
     fn collect_enums(&mut self) {
         for declaration in &self.program.enums {
+            // `option` and `result` are built-in generic enum names; a user enum
+            // may not redeclare them.
+            if matches!(declaration.name.as_str(), "option" | "result") {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0380",
+                    format!(
+                        "`{}` is a built-in generic enum and cannot be redeclared",
+                        declaration.name
+                    ),
+                    None,
+                    declaration.span,
+                ));
+                continue;
+            }
             if self.enums.contains_key(&declaration.name) {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0380",
@@ -487,6 +517,21 @@ impl<'a> Checker<'a> {
                         format!(
                             "duplicate variant `{}` in enum `{}`",
                             variant.name, declaration.name
+                        ),
+                        None,
+                        declaration.span,
+                    ));
+                    continue;
+                }
+                // `some`/`none`/`ok`/`err` are reserved for the built-in
+                // `option`/`result` generic enums; a user variant may not shadow
+                // them (reuse the `L0382` global-collision diagnostic).
+                if is_builtin_variant(&variant.name) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0382",
+                        format!(
+                            "variant `{}` is reserved for the built-in `option`/`result` types",
+                            variant.name
                         ),
                         None,
                         declaration.span,
@@ -556,7 +601,7 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let block_type = self.check_block(&function.body, &mut scope, function);
+        let block_type = self.check_function_body(&function.body, &mut scope, function);
         self.check_lifetimes(function);
         if function.return_type.is_void() {
             return;
@@ -594,6 +639,37 @@ impl<'a> Checker<'a> {
         last_type
     }
 
+    /// Like `check_block`, but when a function's body ends in a bare expression
+    /// statement that expression is checked against the function's declared
+    /// return type, so `some/none/ok/err` in final-expression position get their
+    /// context-directed type (the generics-foundation return-type site).
+    fn check_function_body(
+        &mut self,
+        statements: &[Stmt],
+        scope: &mut Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let last_index = statements.len().checked_sub(1);
+        let mut last_type = None;
+        for (index, statement) in statements.iter().enumerate() {
+            last_type = match statement {
+                Stmt::Expr(expr)
+                    if Some(index) == last_index && !function.return_type.is_void() =>
+                {
+                    self.check_expr_expected(expr, Some(&function.return_type), scope, function)
+                }
+                _ => self.check_statement(statement, scope, function),
+            };
+            if matches!(
+                statement,
+                Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Throw { .. }
+            ) {
+                break;
+            }
+        }
+        last_type
+    }
+
     fn check_statement(
         &mut self,
         statement: &Stmt,
@@ -604,7 +680,7 @@ impl<'a> Checker<'a> {
             Stmt::Let {
                 name, ty, value, ..
             } => {
-                let value_type = self.check_expr(value, scope, function);
+                let value_type = self.check_expr_expected(value, ty.as_ref(), scope, function);
                 let binding_type = match ty {
                     Some(declared) => {
                         if value_type.as_ref() != Some(declared) {
@@ -697,7 +773,9 @@ impl<'a> Checker<'a> {
             Stmt::Return(expr) => {
                 let actual = expr
                     .as_ref()
-                    .map(|expr| self.check_expr(expr, scope, function))
+                    .map(|expr| {
+                        self.check_expr_expected(expr, Some(&function.return_type), scope, function)
+                    })
                     .unwrap_or_else(|| Some(TypeRef::new("void")));
                 if actual.as_ref() != Some(&function.return_type) {
                     let span = expr.as_ref().map(|expr| expr.span).unwrap_or(function.span);
@@ -1071,7 +1149,37 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Type-check an expression with no contextual expected type. This is the
+    /// common path; every construct behaves exactly as before.
     fn check_expr(&mut self, expr: &Expr, scope: &Scope, function: &Function) -> Option<TypeRef> {
+        self.check_expr_expected(expr, None, scope, function)
+    }
+
+    /// Type-check an expression, optionally against an expected type supplied by
+    /// context (a `let` annotation, a `return`, or a function's final
+    /// expression). Only the built-in `option`/`result` constructors consult
+    /// `expected`; all other expressions ignore it, so existing code is
+    /// unaffected.
+    fn check_expr_expected(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&TypeRef>,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        // Built-in `option`/`result` construction is context-directed. Handle it
+        // before the generic expression rules so `none`/`ok`/`err` can consult
+        // the expected type. `some(v)` synthesizes without an expected type.
+        if let Some(ty) = self.try_check_builtin_construction(expr, expected, scope, function) {
+            if let Some(ty) = &ty {
+                self.expression_types.push(ExpressionType {
+                    function: function.name.clone(),
+                    span: expr.span,
+                    ty: ty.clone(),
+                });
+            }
+            return ty;
+        }
         let inferred = match &expr.kind {
             ExprKind::Integer(_) => Some(TypeRef::new("i64")),
             ExprKind::Float(_) => Some(TypeRef::new("f64")),
@@ -1290,6 +1398,181 @@ impl<'a> Checker<'a> {
         }
 
         inferred
+    }
+
+    /// If `expr` constructs a built-in `option`/`result` value, type-check it
+    /// against the contextual `expected` type and return `Some(result)`.
+    /// Otherwise return `None` so the caller falls through to the generic rules.
+    ///
+    /// - `some(v)` → `option<typeof v>`; if `expected = option<U>`, require
+    ///   `typeof v == U`.
+    /// - `none` → requires `expected = option<U>` (else `L0386`).
+    /// - `ok(v)`/`err(v)` → require `expected = result<T, E>` and pin `v` to
+    ///   `T`/`E` respectively (else `L0386`).
+    ///
+    /// A payload whose type disagrees with the expected type is `L0303`.
+    fn try_check_builtin_construction(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&TypeRef>,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<Option<TypeRef>> {
+        match &expr.kind {
+            // `none` is a bare name. A local of the same name would shadow it,
+            // matching how user unit-variant construction defers to locals.
+            ExprKind::Variable(name) if name == "none" && !scope.locals.contains_key(name) => {
+                Some(self.check_option_none(expected, expr.span, function))
+            }
+            ExprKind::Call { name, args } if name == "some" => {
+                Some(self.check_option_some(args, expected, expr.span, scope, function))
+            }
+            ExprKind::Call { name, args } if name == "ok" || name == "err" => Some(
+                self.check_result_construction(name, args, expected, expr.span, scope, function),
+            ),
+            _ => None,
+        }
+    }
+
+    fn check_option_some(
+        &mut self,
+        args: &[Expr],
+        expected: Option<&TypeRef>,
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        if args.len() != 1 {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0381",
+                format!("`some` expects 1 payload value but got {}", args.len()),
+                Some(function.name.clone()),
+                span,
+            ));
+            for arg in args {
+                self.check_expr(arg, scope, function);
+            }
+            return None;
+        }
+        // The expected `option<U>` payload type, if any, guides nested inference.
+        let expected_payload = expected.and_then(|ty| ty.option_element());
+        let value_type =
+            self.check_expr_expected(&args[0], expected_payload.as_ref(), scope, function)?;
+        if let Some(expected_ty) = expected {
+            match expected_ty.option_element() {
+                Some(payload) => {
+                    if payload != value_type {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0303",
+                            format!(
+                                "`some` payload has `{}` but `{}` expects `{}`",
+                                value_type.name, expected_ty.name, payload.name
+                            ),
+                            Some(function.name.clone()),
+                            args[0].span,
+                        ));
+                    }
+                    return Some(expected_ty.clone());
+                }
+                None => {
+                    // Expected a non-option type; report the mismatch and still
+                    // synthesize the natural `option<typeof v>`.
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0303",
+                        format!(
+                            "`some(...)` has `option` type but `{}` was expected",
+                            expected_ty.name
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                }
+            }
+        }
+        Some(option_type(&value_type))
+    }
+
+    fn check_option_none(
+        &mut self,
+        expected: Option<&TypeRef>,
+        span: Span,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        match expected {
+            Some(ty) if ty.option_element().is_some() => Some(ty.clone()),
+            Some(ty) => {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0303",
+                    format!("`none` has `option` type but `{}` was expected", ty.name),
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+            None => {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0386",
+                    "cannot infer the type of `none`; add an `option<...>` annotation or return type",
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    fn check_result_construction(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        expected: Option<&TypeRef>,
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        if args.len() != 1 {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0381",
+                format!("`{name}` expects 1 payload value but got {}", args.len()),
+                Some(function.name.clone()),
+                span,
+            ));
+            for arg in args {
+                self.check_expr(arg, scope, function);
+            }
+            return None;
+        }
+        let Some((ok_ty, err_ty)) = expected.and_then(|ty| ty.result_args()) else {
+            // Without an expected `result<...>` we cannot pin the sibling type.
+            self.check_expr(&args[0], scope, function);
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0386",
+                format!(
+                    "cannot infer the type of `{name}`; add a `result<...>` annotation or return type"
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+            return None;
+        };
+        let pinned = if name == "ok" { &ok_ty } else { &err_ty };
+        let value_type = self.check_expr_expected(&args[0], Some(pinned), scope, function);
+        if value_type.as_ref() != Some(pinned) {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0303",
+                format!(
+                    "`{name}` payload expects `{}` but got `{}`",
+                    pinned.name,
+                    value_type
+                        .as_ref()
+                        .map(|ty| ty.name.as_str())
+                        .unwrap_or("<unknown>")
+                ),
+                Some(function.name.clone()),
+                args[0].span,
+            ));
+        }
+        Some(result_type(&ok_ty, &err_ty))
     }
 
     fn check_array_literal(
@@ -1873,6 +2156,47 @@ impl<'a> Checker<'a> {
     /// and the match must be exhaustive — every variant covered or a `_`
     /// wildcard present (`L0384`). The result type is the arms' common body type
     /// when they all agree, mirroring `if`/`try`; otherwise it is void.
+    /// The `(display name, ordered variants)` a `match` dispatches over for a
+    /// scrutinee type. Handles user enums plus the built-in `option<U>`
+    /// (`some(U)` + `none`) and `result<T, E>` (`ok(T)` + `err(E)`) generics,
+    /// whose variant payloads are instantiated from the scrutinee's type args.
+    fn match_variants(&self, ty: &TypeRef) -> Option<(String, Vec<EnumVariant>)> {
+        if let Some(variants) = self.enums.get(&ty.name) {
+            return Some((ty.name.clone(), variants.clone()));
+        }
+        if let Some(payload) = ty.option_element() {
+            return Some((
+                ty.name.clone(),
+                vec![
+                    EnumVariant {
+                        name: "some".to_string(),
+                        payload: vec![payload],
+                    },
+                    EnumVariant {
+                        name: "none".to_string(),
+                        payload: Vec::new(),
+                    },
+                ],
+            ));
+        }
+        if let Some((ok_ty, err_ty)) = ty.result_args() {
+            return Some((
+                ty.name.clone(),
+                vec![
+                    EnumVariant {
+                        name: "ok".to_string(),
+                        payload: vec![ok_ty],
+                    },
+                    EnumVariant {
+                        name: "err".to_string(),
+                        payload: vec![err_ty],
+                    },
+                ],
+            ));
+        }
+        None
+    }
+
     fn check_match(
         &mut self,
         scrutinee: &Expr,
@@ -1882,11 +2206,11 @@ impl<'a> Checker<'a> {
         function: &Function,
     ) -> Option<TypeRef> {
         let scrutinee_type = self.check_expr(scrutinee, scope, function);
-        let enum_name = match scrutinee_type
+        let (enum_name, declared_variants) = match scrutinee_type
             .as_ref()
-            .and_then(|ty| self.enums.get(&ty.name).map(|_| ty.name.clone()))
+            .and_then(|ty| self.match_variants(ty))
         {
-            Some(name) => name,
+            Some(pair) => pair,
             None => {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0383",
@@ -1908,8 +2232,6 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-
-        let declared_variants = self.enums.get(&enum_name).cloned().unwrap_or_default();
         let mut covered: HashSet<String> = HashSet::new();
         let mut has_wildcard = false;
         let mut arm_types: Vec<Option<TypeRef>> = Vec::new();
@@ -3149,6 +3471,138 @@ mod tests {
         let diagnostics = validate_source(source).expect_err("semantic");
         assert!(
             diagnostics.iter().any(|d| d.code == "L0385"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_annotated_option_and_result_construction() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a option<i64> = some(3)\n",
+            "    let b option<i64> = none\n",
+            "    let r result<i64, string> = ok(3)\n",
+            "    let e result<i64, string> = err(\"x\")\n",
+            "    0\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn accepts_option_in_return_and_final_expression() {
+        let source = concat!(
+            "fn pick flag bool -> option<i64>\n",
+            "    if flag\n",
+            "        return none\n",
+            "    some(1)\n\n",
+            "fn main -> i64\n",
+            "    match pick(true)\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn accepts_match_over_option_and_result() {
+        let source = concat!(
+            "fn unwrap_or o option<i64> fallback i64 -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> fallback\n\n",
+            "fn describe r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> len(m)\n\n",
+            "fn main -> i64\n",
+            "    let o option<i64> = some(2)\n",
+            "    let r result<i64, string> = ok(5)\n",
+            "    unwrap_or(o, 0) + describe(r)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_none_without_expected_type() {
+        let source = concat!("fn main -> i64\n", "    let x = none\n", "    0\n");
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0386"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_ok_without_expected_type() {
+        let source = concat!("fn main -> i64\n", "    let x = ok(3)\n", "    0\n");
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0386"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_option_payload_type_mismatch() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a option<i64> = some(true)\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0303"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_result_payload_type_mismatch() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let r result<i64, string> = ok(\"x\")\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0303"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_option_match() {
+        let source = concat!(
+            "fn get o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n\n",
+            "fn main -> i64\n",
+            "    get(some(1))\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0384"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_user_variant_named_none() {
+        let source = concat!(
+            "enum Maybe\n    just i64\n    none\n\n",
+            "fn main -> i64\n    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0382"),
             "{diagnostics:?}"
         );
     }

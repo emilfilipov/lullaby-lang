@@ -1,0 +1,16 @@
+fn unwrap_or o option<i64> fallback i64 -> i64
+    match o
+        some(v) -> v
+        none -> fallback
+
+fn divide n i64 d i64 -> result<i64, string>
+    if d == 0
+        return err("divide by zero")
+    ok(n / d)
+
+fn main -> i64
+    let value option<i64> = some(41)
+    let quotient result<i64, string> = divide(84, 2)
+    match quotient
+        ok(q) -> unwrap_or(value, 0) + q
+        err(m) -> len(m)

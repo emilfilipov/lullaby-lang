@@ -442,6 +442,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         suggested_fix: "Use each enum variant at most once and bind exactly one name per declared payload value.",
     },
     DiagnosticEntry {
+        code: "L0386",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "Building `none`, `ok`, or `err` needs a known `option`/`result` type.",
+        root_cause: "The type of a `none`/`ok`/`err` constructor could not be inferred from its payload and no expected `option`/`result` type was available from context.",
+        suggested_fix: "Add an `option<...>`/`result<...>` type annotation on the `let`, or use it where a function return type of that shape provides the expected type.",
+    },
+    DiagnosticEntry {
         code: "L0501",
         phase: DiagnosticPhase::Ir,
         explanation: "The checked source program could not be lowered into typed IR.",

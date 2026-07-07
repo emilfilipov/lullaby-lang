@@ -5,7 +5,7 @@ use std::process::Command;
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
     AssignOp, BinaryOp, Expr, ExprKind, Function, MatchArm, MatchPattern, Place, Program, Stmt,
-    TypeRef, UnaryOp,
+    TypeRef, UnaryOp, generic_type,
 };
 use lullaby_runtime::{
     ResolvedPlace, RuntimeError, Value, apply_compound, char_find, expect_i64, expect_string,
@@ -3285,6 +3285,12 @@ impl<'a> IrRuntime<'a> {
             .collect::<HashMap<_, _>>();
 
         let mut variants = HashMap::new();
+        // Built-in `option`/`result` generic-enum variants, registered like user
+        // variants so construction and `match` reuse the same `Value::Enum` path.
+        variants.insert("some", "option");
+        variants.insert("none", "option");
+        variants.insert("ok", "result");
+        variants.insert("err", "result");
         for declaration in &module.enums {
             for variant in &declaration.variants {
                 variants.insert(variant.name.as_str(), declaration.name.as_str());
@@ -4398,6 +4404,10 @@ impl Env {
 struct Lowerer<'a> {
     program: &'a Program,
     signatures: &'a HashMap<String, Signature>,
+    /// Declared return type of the function currently being lowered. Threaded so
+    /// `return EXPR` and a function's final expression can supply the expected
+    /// type that `none`/`ok`/`err` need. Set at the start of each function.
+    current_return_type: std::cell::RefCell<TypeRef>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -4405,6 +4415,7 @@ impl<'a> Lowerer<'a> {
         Self {
             program,
             signatures,
+            current_return_type: std::cell::RefCell::new(TypeRef::new("void")),
         }
     }
 
@@ -4482,6 +4493,9 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|param| (param.name.clone(), param.ty.clone()))
             .collect::<HashMap<_, _>>();
+        // Record the return type so `return` and the final expression can supply
+        // the expected type to `none`/`ok`/`err`.
+        *self.current_return_type.borrow_mut() = function.return_type.clone();
         Ok(IrFunction {
             name: function.name.clone(),
             params: function
@@ -4493,7 +4507,7 @@ impl<'a> Lowerer<'a> {
                 })
                 .collect(),
             return_type: function.return_type.clone(),
-            body: self.lower_block(&function.body, &mut scope)?,
+            body: self.lower_function_body(&function.body, &mut scope)?,
             span: function.span,
         })
     }
@@ -4517,6 +4531,36 @@ impl<'a> Lowerer<'a> {
         Ok(lowered)
     }
 
+    /// Lower a function body. A trailing bare expression statement is lowered
+    /// against the function's return type so a final `some/none/ok/err` gets its
+    /// context-directed type, mirroring the semantic final-expression rule.
+    fn lower_function_body(
+        &self,
+        statements: &[Stmt],
+        scope: &mut HashMap<String, TypeRef>,
+    ) -> Result<Vec<IrStmt>, IrLoweringError> {
+        let last_index = statements.len().checked_sub(1);
+        let return_type = self.current_return_type.borrow().clone();
+        let mut lowered = Vec::with_capacity(statements.len());
+        for (index, statement) in statements.iter().enumerate() {
+            match statement {
+                Stmt::Unsafe { body, .. } => {
+                    lowered.extend(self.lower_block(body, scope)?);
+                }
+                Stmt::Expr(expr)
+                    if Some(index) == last_index
+                        && !return_type.is_void()
+                        && !matches!(expr.kind, ExprKind::Match { .. }) =>
+                {
+                    let lowered_expr = self.lower_expr_expected(expr, Some(&return_type), scope)?;
+                    lowered.push(IrStmt::Expr(lowered_expr));
+                }
+                other => lowered.push(self.lower_statement(other, scope)?),
+            }
+        }
+        Ok(lowered)
+    }
+
     fn lower_statement(
         &self,
         statement: &Stmt,
@@ -4529,7 +4573,7 @@ impl<'a> Lowerer<'a> {
                 value,
                 span,
             } => {
-                let value = self.lower_expr(value, scope)?;
+                let value = self.lower_expr_expected(value, ty.as_ref(), scope)?;
                 let binding_type = ty.clone().unwrap_or_else(|| value.ty.clone());
                 scope.insert(name.clone(), binding_type.clone());
                 Ok(IrStmt::Let {
@@ -4558,11 +4602,14 @@ impl<'a> Lowerer<'a> {
                     span: *span,
                 })
             }
-            Stmt::Return(expr) => Ok(IrStmt::Return(
-                expr.as_ref()
-                    .map(|expr| self.lower_expr(expr, scope))
-                    .transpose()?,
-            )),
+            Stmt::Return(expr) => {
+                let return_type = self.current_return_type.borrow().clone();
+                Ok(IrStmt::Return(
+                    expr.as_ref()
+                        .map(|expr| self.lower_expr_expected(expr, Some(&return_type), scope))
+                        .transpose()?,
+                ))
+            }
             Stmt::Break(span) => Ok(IrStmt::Break(*span)),
             Stmt::Continue(span) => Ok(IrStmt::Continue(*span)),
             // A `match` reaches lowering wrapped in a `Stmt::Expr`; lower it to a
@@ -4723,14 +4770,14 @@ impl<'a> Lowerer<'a> {
         scope: &mut HashMap<String, TypeRef>,
     ) -> Result<IrStmt, IrLoweringError> {
         let scrutinee = self.lower_expr(scrutinee, scope)?;
-        let enum_name = scrutinee.ty.name.clone();
+        let scrutinee_ty = scrutinee.ty.clone();
         let mut lowered_arms = Vec::with_capacity(arms.len());
         for arm in arms {
             let mut arm_scope = scope.clone();
             let pattern = match &arm.pattern {
                 MatchPattern::Wildcard => IrMatchPattern::Wildcard,
                 MatchPattern::Variant { name, bindings } => {
-                    let payload = self.variant_payload(&enum_name, name);
+                    let payload = self.variant_binding_types(&scrutinee_ty, name);
                     for (binding, ty) in bindings.iter().zip(payload.iter()) {
                         arm_scope.insert(binding.clone(), ty.clone());
                     }
@@ -4750,13 +4797,28 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    /// The declared payload types of `variant` within enum `enum_name`, if the
-    /// enum and variant exist.
-    fn variant_payload(&self, enum_name: &str, variant: &str) -> Vec<TypeRef> {
+    /// The payload binding types of `variant` for a scrutinee of type
+    /// `scrutinee_ty`. Handles user enums (nominal name) plus the built-in
+    /// `option<U>` (`some(U)`) and `result<T, E>` (`ok(T)`/`err(E)`) generics,
+    /// whose payloads are read from the scrutinee's type arguments.
+    fn variant_binding_types(&self, scrutinee_ty: &TypeRef, variant: &str) -> Vec<TypeRef> {
+        if let Some(payload) = scrutinee_ty.option_element() {
+            return match variant {
+                "some" => vec![payload],
+                _ => Vec::new(),
+            };
+        }
+        if let Some((ok_ty, err_ty)) = scrutinee_ty.result_args() {
+            return match variant {
+                "ok" => vec![ok_ty],
+                "err" => vec![err_ty],
+                _ => Vec::new(),
+            };
+        }
         self.program
             .enums
             .iter()
-            .find(|declaration| declaration.name == enum_name)
+            .find(|declaration| declaration.name == scrutinee_ty.name)
             .and_then(|declaration| declaration.variants.iter().find(|v| v.name == variant))
             .map(|v| v.payload.clone())
             .unwrap_or_default()
@@ -4778,6 +4840,25 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
         scope: &HashMap<String, TypeRef>,
     ) -> Result<IrExpr, IrLoweringError> {
+        self.lower_expr_expected(expr, None, scope)
+    }
+
+    /// Lower an expression, optionally carrying a contextual expected type. The
+    /// expected type flows from `let` annotations and `return`/final-expression
+    /// sites so `none`/`ok`/`err` — which cannot be typed from their payload
+    /// alone — lower to the correct `option`/`result` type. Every other
+    /// expression ignores `expected` and lowers exactly as before.
+    fn lower_expr_expected(
+        &self,
+        expr: &Expr,
+        expected: Option<&TypeRef>,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Result<IrExpr, IrLoweringError> {
+        // Built-in `option`/`result` construction is context-directed; resolve it
+        // before the generic expression rules.
+        if let Some(result) = self.lower_builtin_construction(expr, expected, scope) {
+            return result;
+        }
         let (kind, ty) = match &expr.kind {
             ExprKind::Integer(value) => (IrExprKind::Integer(*value), TypeRef::new("i64")),
             ExprKind::Float(value) => (IrExprKind::Float(*value), TypeRef::new("f64")),
@@ -4972,6 +5053,81 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Lower a built-in `option`/`result` constructor to a variant `Call` IR
+    /// node whose type is resolved from the payload and/or the contextual
+    /// expected type. Returns `None` when `expr` is not such a constructor so the
+    /// caller falls through to the generic lowering rules. Semantics has already
+    /// validated these sites, so the expected type is trusted here.
+    fn lower_builtin_construction(
+        &self,
+        expr: &Expr,
+        expected: Option<&TypeRef>,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Option<Result<IrExpr, IrLoweringError>> {
+        let (name, payload_expr) = match &expr.kind {
+            // Bare `none` (not shadowed by a local) is unit-variant construction.
+            ExprKind::Variable(name) if name == "none" && !scope.contains_key(name) => {
+                (name.as_str(), None)
+            }
+            ExprKind::Call { name, args } if name == "some" || name == "ok" || name == "err" => {
+                (name.as_str(), args.first())
+            }
+            _ => return None,
+        };
+
+        // Lower the payload (if any), guided by the expected type so nested
+        // `option`/`result` payloads type correctly.
+        let payload_expected = match name {
+            "some" => expected.and_then(|ty| ty.option_element()),
+            "ok" => expected.and_then(|ty| ty.result_args()).map(|(ok, _)| ok),
+            "err" => expected.and_then(|ty| ty.result_args()).map(|(_, err)| err),
+            _ => None,
+        };
+        let lowered_payload = match payload_expr {
+            Some(payload) => Some(
+                match self.lower_expr_expected(payload, payload_expected.as_ref(), scope) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                },
+            ),
+            None => None,
+        };
+
+        // Resolve the constructed type. `some(v)` synthesizes `option<typeof v>`
+        // when no expected type pins it; `none`/`ok`/`err` require the expected
+        // type (guaranteed present by semantics).
+        let ty = match name {
+            "some" => expected.cloned().unwrap_or_else(|| {
+                option_type(
+                    lowered_payload
+                        .as_ref()
+                        .map(|value| &value.ty)
+                        .unwrap_or(&TypeRef::new("void")),
+                )
+            }),
+            "none" | "ok" | "err" => match expected.cloned() {
+                Some(ty) => ty,
+                None => {
+                    return Some(Err(IrLoweringError::new(
+                        format!("cannot infer the type of `{name}` without an expected type"),
+                        Some(expr.span),
+                    )));
+                }
+            },
+            _ => unreachable!(),
+        };
+
+        let args = lowered_payload.into_iter().collect();
+        Some(Ok(IrExpr {
+            kind: IrExprKind::Call {
+                name: name.to_string(),
+                args,
+            },
+            ty,
+            span: expr.span,
+        }))
+    }
+
     fn call_return_type(
         &self,
         name: &str,
@@ -5054,6 +5210,11 @@ impl<'a> Lowerer<'a> {
                 })?,
         })
     }
+}
+
+/// Canonical `option<T>` type spelling.
+fn option_type(payload: &TypeRef) -> TypeRef {
+    generic_type("option", std::slice::from_ref(payload))
 }
 
 /// Extract the inner type `T` of the first argument's `<ctor><T>` reference type.
@@ -5975,6 +6136,7 @@ mod tests {
         assert!(covered.contains(&"run_file_io.lby".to_string()));
         assert!(covered.contains(&"run_store.lby".to_string()));
         assert!(covered.contains(&"run_for_step.lby".to_string()));
+        assert!(covered.contains(&"run_option_result.lby".to_string()));
     }
 
     #[test]

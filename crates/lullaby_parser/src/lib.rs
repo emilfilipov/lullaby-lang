@@ -88,12 +88,44 @@ impl TypeRef {
     }
 
     /// The inner type of a `<ctor><T>` spelling, e.g. `generic_arg("rc")` on
-    /// `rc<i64>` yields `i64`.
+    /// `rc<i64>` yields `i64`. For a multi-argument spelling this returns the
+    /// full comma-separated argument text as one `TypeRef`; use `generic_args`
+    /// to split it into nesting-aware top-level arguments.
     pub fn generic_arg(&self, ctor: &str) -> Option<TypeRef> {
         self.name
             .strip_prefix(&format!("{ctor}<"))
             .and_then(|name| name.strip_suffix('>'))
             .map(TypeRef::new)
+    }
+
+    /// All top-level, nesting-aware comma-separated arguments of a `ctor<...>`
+    /// spelling. `result<array<i64>, string>.generic_args("result")` yields
+    /// `[array<i64>, string]`; a single-argument `option<i64>` yields `[i64]`.
+    /// Returns `None` when the spelling is not a `ctor<...>` form.
+    pub fn generic_args(&self, ctor: &str) -> Option<Vec<TypeRef>> {
+        let inner = self
+            .name
+            .strip_prefix(&format!("{ctor}<"))
+            .and_then(|name| name.strip_suffix('>'))?;
+        Some(split_generic_args(inner))
+    }
+
+    /// The payload type `T` of an `option<T>` spelling, if any.
+    pub fn option_element(&self) -> Option<TypeRef> {
+        self.generic_args("option")
+            .filter(|args| args.len() == 1)
+            .map(|mut args| args.remove(0))
+    }
+
+    /// The `(T, E)` type pair of a `result<T, E>` spelling, if any.
+    pub fn result_args(&self) -> Option<(TypeRef, TypeRef)> {
+        self.generic_args("result")
+            .filter(|args| args.len() == 2)
+            .map(|mut args| {
+                let error = args.remove(1);
+                let ok = args.remove(0);
+                (ok, error)
+            })
     }
 
     /// The pointee of a raw pointer, accepting the modern `ptr<T>` spelling and
@@ -122,6 +154,44 @@ impl TypeRef {
     pub fn is_safe_reference(&self) -> bool {
         self.reference_target().is_some() || self.rc_target().is_some()
     }
+}
+
+/// Build the canonical spelling of a generic type `ctor<a, b, ...>`. This is the
+/// single source of truth for generic-type text so string-based `TypeRef`
+/// equality holds across the parser, semantics, and IR lowerer. Arguments are
+/// joined with `", "` (comma-space), matching the parser's `expect_type`.
+pub fn generic_type(ctor: &str, args: &[TypeRef]) -> TypeRef {
+    let joined = args
+        .iter()
+        .map(|arg| arg.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    TypeRef::new(format!("{ctor}<{joined}>"))
+}
+
+/// Split the inner text of a `ctor<...>` spelling into its top-level,
+/// nesting-aware comma-separated arguments. Commas inside nested `<...>` are not
+/// splits, so `array<i64>, string` yields `["array<i64>", "string"]`.
+fn split_generic_args(inner: &str) -> Vec<TypeRef> {
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                args.push(TypeRef::new(inner[start..index].trim()));
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        args.push(TypeRef::new(tail));
+    }
+    args
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1010,8 +1080,18 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                if matches!(name.as_str(), "array" | "ptr" | "ref" | "rc") && self.eat_symbol("<") {
-                    let inner = self.expect_type("expected generic type argument")?;
+                // Single-argument generics reuse one shape; `result` accepts a
+                // comma-separated argument list. All emit the shared canonical
+                // spelling so string-based `TypeRef` equality holds everywhere.
+                let is_single = matches!(name.as_str(), "array" | "ptr" | "ref" | "rc" | "option");
+                let is_multi = name.as_str() == "result";
+                if (is_single || is_multi) && self.eat_symbol("<") {
+                    let mut args = vec![self.expect_type("expected generic type argument")?];
+                    if is_multi {
+                        while self.eat_symbol(",") {
+                            args.push(self.expect_type("expected generic type argument")?);
+                        }
+                    }
                     if !self.eat_symbol(">") {
                         self.error(
                             "L0203",
@@ -1020,7 +1100,7 @@ impl<'a> Parser<'a> {
                         );
                         return None;
                     }
-                    Some(TypeRef::new(format!("{name}<{}>", inner.name)))
+                    Some(generic_type(&name, &args))
                 } else {
                     Some(TypeRef::new(name))
                 }
@@ -1619,6 +1699,45 @@ mod tests {
         let tokens = lex("fn main -> void\n    return\n").expect("lex");
         let program = parse(&tokens).expect("parse");
         assert_eq!(program.functions[0].return_type.name, "void");
+    }
+
+    #[test]
+    fn parses_option_and_result_generic_types() {
+        let source = concat!(
+            "fn f a option<i64> b result<i64, string> c option<array<i64>> -> void\n",
+            "    return\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let params = &program.functions[0].params;
+        assert_eq!(params[0].ty.name, "option<i64>");
+        assert_eq!(params[1].ty.name, "result<i64, string>");
+        assert_eq!(params[2].ty.name, "option<array<i64>>");
+    }
+
+    #[test]
+    fn generic_args_splits_nesting_aware() {
+        assert_eq!(
+            TypeRef::new("option<i64>").option_element(),
+            Some(TypeRef::new("i64"))
+        );
+        assert_eq!(
+            TypeRef::new("result<i64, string>").result_args(),
+            Some((TypeRef::new("i64"), TypeRef::new("string")))
+        );
+        assert_eq!(
+            TypeRef::new("result<array<i64>, string>").generic_args("result"),
+            Some(vec![TypeRef::new("array<i64>"), TypeRef::new("string")])
+        );
+        assert_eq!(
+            TypeRef::new("option<array<i64>>").option_element(),
+            Some(TypeRef::new("array<i64>"))
+        );
+        // Canonical spelling round-trips through the shared formatter.
+        assert_eq!(
+            generic_type("result", &[TypeRef::new("i64"), TypeRef::new("string")]).name,
+            "result<i64, string>"
+        );
     }
 
     #[test]

@@ -254,6 +254,7 @@
       <a href="#arrays">Arrays</a>
       <a href="#enums">Enums</a>
       <a href="#match">Pattern Matching</a>
+      <a href="#option-result">option and result</a>
       <a href="#control-flow">Control Flow</a>
       <a href="#boolean-logic">Boolean Logic</a>
       <a href="#math-builtins">Math Builtins</a>
@@ -435,6 +436,34 @@ fn main -> i64
           <li>Matching must be exhaustive: every variant covered, or a <code>_</code> wildcard arm present. A non-exhaustive match reports <code>L0384</code>.</li>
           <li>The scrutinee must be an enum type (<code>L0383</code>); an unknown or duplicate variant arm, or a wrong payload binding count, reports <code>L0385</code>.</li>
           <li><code>match</code> runs identically across the AST, IR, and bytecode backends, including under optimization.</li>
+        </ul>
+      </section>
+
+      <section id="option-result">
+        <h2>option and result</h2>
+        <p><code>option&lt;T&gt;</code> and <code>result&lt;T, E&gt;</code> are two built-in generic enums for absence and fallible results. <code>option&lt;T&gt;</code> has variants <code>some(value)</code> and <code>none</code>; <code>result&lt;T, E&gt;</code> has variants <code>ok(value)</code> and <code>err(error)</code>. The variant names <code>some</code>/<code>none</code>/<code>ok</code>/<code>err</code> are reserved, and <code>option</code>/<code>result</code> cannot be redeclared as user enums. Construction is context-directed: <code>some(v)</code> synthesizes <code>option&lt;typeof v&gt;</code>, while <code>none</code>, <code>ok(v)</code>, and <code>err(v)</code> take their type from a <code>let</code> annotation or a function return type.</p>
+        <pre data-fixture="tests/fixtures/valid/docs_option_result.lby" data-mode="run"><code>fn unwrap_or o option&lt;i64&gt; fallback i64 -&gt; i64
+    match o
+        some(v) -&gt; v
+        none -&gt; fallback
+
+fn divide n i64 d i64 -&gt; result&lt;i64, string&gt;
+    if d == 0
+        return err("divide by zero")
+    ok(n / d)
+
+fn main -&gt; i64
+    let value option&lt;i64&gt; = some(41)
+    let quotient result&lt;i64, string&gt; = divide(84, 2)
+    match quotient
+        ok(q) -&gt; unwrap_or(value, 0) + q
+        err(m) -&gt; len(m)</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_option_result.lby</code>.</p>
+        <ul>
+          <li>Type spelling reuses the generic form with a comma-separated argument list: <code>option&lt;i64&gt;</code>, <code>result&lt;i64, string&gt;</code>, <code>option&lt;array&lt;i64&gt;&gt;</code>.</li>
+          <li>Building <code>none</code>/<code>ok</code>/<code>err</code> without a known <code>option</code>/<code>result</code> type from context reports <code>L0386</code>; a payload whose type disagrees with the annotation reports <code>L0303</code>.</li>
+          <li><code>match</code> over an <code>option&lt;U&gt;</code> covers <code>some</code> + <code>none</code> (or <code>_</code>); over a <code>result&lt;T, E&gt;</code> it covers <code>ok</code> + <code>err</code> (or <code>_</code>), reusing <code>L0384</code>/<code>L0385</code>.</li>
+          <li><code>option</code>/<code>result</code> construct and match identically across the AST, IR, and bytecode backends, including under optimization.</li>
         </ul>
       </section>
 
@@ -690,6 +719,7 @@ Suggested fix:
             <tr><td><code>L0383</code></td><td>Match scrutinee is not an enum type.</td></tr>
             <tr><td><code>L0384</code></td><td>Non-exhaustive match: a variant is uncovered and no <code>_</code> wildcard is present.</td></tr>
             <tr><td><code>L0385</code></td><td>Invalid match arm: unknown or duplicate variant, or wrong payload binding count.</td></tr>
+            <tr><td><code>L0386</code></td><td>Cannot infer the type of <code>none</code>/<code>ok</code>/<code>err</code>; add an <code>option</code>/<code>result</code> annotation or return type.</td></tr>
             <tr><td><code>L0501 [ir]</code></td><td>Typed IR lowering failed after semantic validation.</td></tr>
             <tr><td><code>L0502 [optimizer]</code></td><td><code>--optimize</code> was requested without an IR or bytecode backend.</td></tr>
             <tr><td><code>L0601 [bytecode]</code></td><td>Compiled <code>.lbc</code> artifact is malformed, unsupported, fails metadata/function table/memory operation compatibility checks, or violates the instruction contract.</td></tr>

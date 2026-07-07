@@ -222,6 +222,12 @@ impl<'a> Runtime<'a> {
             .collect::<HashMap<_, _>>();
 
         let mut variants = HashMap::new();
+        // Built-in `option`/`result` generic-enum variants. Registered like user
+        // variants so construction and `match` reuse the same `Value::Enum` path.
+        variants.insert("some", "option");
+        variants.insert("none", "option");
+        variants.insert("ok", "result");
+        variants.insert("err", "result");
         for declaration in &program.enums {
             for variant in &declaration.variants {
                 variants.insert(variant.name.as_str(), declaration.name.as_str());
@@ -1940,6 +1946,31 @@ mod tests {
             "fn main -> i64\n    rank(Green) + rank(Red) + rank(Blue)\n",
         );
         assert_eq!(run_source(source).expect("run"), Value::I64(12));
+    }
+
+    #[test]
+    fn runs_option_and_result_via_match() {
+        let source = concat!(
+            "fn unwrap_or o option<i64> fallback i64 -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> fallback\n\n",
+            "fn describe r result<i64, string> -> string\n",
+            "    match r\n",
+            "        ok(v) -> \"ok \" + to_string(v)\n",
+            "        err(m) -> \"err \" + m\n\n",
+            "fn main -> string\n",
+            "    let a option<i64> = some(3)\n",
+            "    let b option<i64> = none\n",
+            "    let sum i64 = unwrap_or(a, 0) + unwrap_or(b, 100)\n",
+            "    let good result<i64, string> = ok(sum)\n",
+            "    let bad result<i64, string> = err(\"boom\")\n",
+            "    describe(good) + \" / \" + describe(bad)\n",
+        );
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::String("ok 103 / err boom".to_string())
+        );
     }
 
     #[test]
