@@ -13,11 +13,19 @@ This repository defines and will implement Lullaby, a compiled systems programmi
 ## Project Direction
 
 - Implementation language: Rust, unless the owner explicitly changes this decision.
-- Initial compiler target: a clear, testable frontend and semantic pipeline before native code generation.
+- The language's canonical name is **Lullaby**. The `nous_lang` repository directory and any legacy "Nous"/"Nous Lang" naming are historical only and must never appear as the language's name in code, documents, diagnostics, ClickUp tickets, or user-facing material. "Nous" was an evaluated rename candidate that was rejected in favor of keeping Lullaby — see `documents/name_research.md`.
 - Canonical source extension: `.lby` until the language specification is intentionally changed.
 - Keep the syntax indentation-only. Curly braces are not block delimiters, and semicolons are not statement terminators.
-- Keep the implementation conservative: prefer a correct parser/type checker/runtime prototype over speculative backend complexity.
+- The frontend and semantic pipeline came first; native code generation, the WASM backend, and the full 1.0 primitive set are now in active development. Target 1.0 as defined in `documents/roadmap_1_0.md` and the ClickUp `Lullaby` folder: technically capable of expressing any program (a spanning set of primitives) plus an easy-to-install, branded toolchain, with specialized modules layered on after 1.0.
 - Maintain offline browser-based documentation from the start. The project must eventually ship a self-contained HTML documentation bundle that users can open locally without a server or internet access, and that bundle should be suitable for inclusion in the language toolchain installer.
+
+## Production Quality Standard
+
+- Everything is written to production quality. No aspect of the language — lexer, parser, semantics, runtime, IR, optimizer, backends (AST/IR/bytecode/native/WASM), CLI, installers, packaging, or documentation — may be committed in a "good enough for now", placeholder, stubbed, mocked, or temporary form.
+- No `todo!()`/`unimplemented!()`, no `unreachable!()` used to dodge a real case, no silent partial handling, no hardcoded/fake results standing in for real logic, no "TODO: handle later" left in committed code. If a case can occur, it is handled correctly or rejected with a clear `L####` diagnostic.
+- Every feature ships complete: correct edge-case and error handling, full parity across every backend it touches, deterministic tests (including negative/failure cases), and updated Markdown + offline documentation. A feature that is 90% done is not done.
+- Placeholder scaffolding is acceptable only transiently inside unmerged work-in-progress and must be replaced with the real implementation before the change is committed. Prefer correctness and completeness over speed of landing.
+- When a task is genuinely large, split it into smaller production-complete increments — never land a shallow version of the whole.
 
 ## Core Documentation Map
 

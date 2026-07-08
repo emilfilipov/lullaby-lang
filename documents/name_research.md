@@ -2,7 +2,7 @@
 
 Date researched: 2026-06-28.
 
-This document records the rename research for the project formerly named Nous Lang and the current decision to use Lullaby. It is not a legal clearance report. Before a final public rename, run a proper trademark/domain/package-name clearance pass.
+The language's canonical name is **Lullaby**. This document records the research into renaming it (with "Nous"/"Nous Lang" as the leading candidate) and the final decision to **keep Lullaby** — "Nous" was evaluated and rejected. It is not a legal clearance report. Before any future public rename, run a proper trademark/domain/package-name clearance pass.
 
 ## Naming Constraints
 
