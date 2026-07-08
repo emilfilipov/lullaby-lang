@@ -2843,6 +2843,30 @@ impl<'a> Checker<'a> {
                 self.expect_arg_type(name, 2, &args[1], "i64", scope, function)?;
                 Some(element)
             }
+            "list_index_of" | "list_contains" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                let value_type =
+                    self.check_expr_expected(&args[1], Some(&element), scope, function)?;
+                if value_type != element {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`{name}` search value must be `{}` but got `{}`",
+                            element.name, value_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new(if name == "list_index_of" {
+                    "i64"
+                } else {
+                    "bool"
+                }))
+            }
             "set" => {
                 self.expect_arg_count(name, args, 3, function)?;
                 let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
@@ -5814,6 +5838,29 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0374")
+        );
+    }
+
+    #[test]
+    fn accepts_list_search_and_rejects_element_mismatch() {
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 3)\n",
+            "    list_index_of(l, 3)\n",
+        );
+        assert!(validate_source(ok).is_ok(), "{:?}", validate_source(ok));
+
+        let bad = concat!(
+            "fn main -> bool\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 3)\n",
+            "    list_contains(l, true)\n",
+        );
+        let diagnostics = validate_source(bad).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
         );
     }
 

@@ -3775,6 +3775,8 @@ impl<'a> IrRuntime<'a> {
             "get" => Self::builtin_get(args),
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
+            "list_index_of" => Self::builtin_list_index_of(args),
+            "list_contains" => Self::builtin_list_contains(args),
             "reverse" => Self::builtin_reverse(args),
             "sort" => Self::builtin_sort(args),
             "concat" => Self::builtin_concat(args),
@@ -5629,6 +5631,29 @@ impl<'a> IrRuntime<'a> {
             return Err(RuntimeError::new("L0413", "cannot pop from an empty list"));
         }
         Ok(Value::Array(values))
+    }
+
+    /// `list_index_of(l, x) -> i64`: index of the first element equal to `x`, or -1.
+    fn builtin_list_index_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, target]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_index_of", 2, args.len()))?;
+        let values = expect_list("list_index_of", list)?;
+        let index = values
+            .iter()
+            .position(|value| *value == target)
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        Ok(Value::I64(index))
+    }
+
+    /// `list_contains(l, x) -> bool`: whether any element equals `x`.
+    fn builtin_list_contains(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, target]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_contains", 2, args.len()))?;
+        let values = expect_list("list_contains", list)?;
+        Ok(Value::Bool(values.contains(&target)))
     }
 
     /// `reverse(l) -> list<T>`: a new list with the elements reversed.
@@ -7666,9 +7691,9 @@ impl<'a> Lowerer<'a> {
             }
             "file_exists" | "is_file" | "is_dir" | "contains" | "starts_with" | "ends_with"
             | "map_has" | "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper"
-            | "is_lower" => TypeRef::new("bool"),
+            | "is_lower" | "list_contains" => TypeRef::new("bool"),
             "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
-            | "byte_len" | "mono_now" | "wall_now" => TypeRef::new("i64"),
+            | "byte_len" | "mono_now" | "wall_now" | "list_index_of" => TypeRef::new("i64"),
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`

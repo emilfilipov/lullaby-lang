@@ -1,0 +1,15 @@
+fn main -> i64
+    let l list<i64> = list_new()
+    l = push(l, 10)
+    l = push(l, 20)
+    l = push(l, 30)
+    let idx i64 = list_index_of(l, 20)
+    let missing i64 = list_index_of(l, 99)
+    let has i64 = 0
+    if list_contains(l, 30)
+        has = 1
+    let no i64 = 0
+    if list_contains(l, 5)
+        no = 1
+    # 1 + (-1) + 1 + 0 + 100 => 101
+    idx + missing + has + no + 100
