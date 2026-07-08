@@ -3330,6 +3330,66 @@ fn native_aggregates_execution_parity_when_linkable() {
     );
 }
 
+/// Best-effort execution parity for the native control-flow subset: native-compile
+/// a program whose functions use a `while` loop, `for` sum/product loops, and
+/// inter-function calls, then assert the linked `.exe`'s exit code equals the
+/// interpreter's `main` result (mod 256). This proves the loop bounds/step
+/// semantics, checked-integer arithmetic, and the Win64 call ABI all agree with
+/// the interpreters. Gated on `rust-lld` + `kernel32.lib` like the other native
+/// parity tests.
+#[test]
+fn native_control_flow_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/native_control_flow.lby");
+    let out = std::env::temp_dir().join("lullaby_native_control_flow_parity.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    // Every function (the two `for` loops, the `while` loop, and the caller that
+    // invokes all three plus `main`) is i64-scalar, so all compile natively.
+    for name in ["while_sum", "for_sum", "for_product", "combine", "main"] {
+        assert!(
+            stdout(&emit).contains(&format!("compiled {name}")),
+            "expected `{name}` compiled: {}",
+            stdout(&emit)
+        );
+    }
+
+    // Interpreter ground truth for `main`.
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 31, "control-flow fixture main computes 31");
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib (via the LIB env var) not available; \
+             skipping native control-flow link+run parity"
+        );
+        return;
+    }
+
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(
+        exit,
+        (interp.rem_euclid(256)) as i32,
+        "native exit code must equal the interpreter result (mod 256)"
+    );
+}
+
 /// Best-effort execution parity for the first native heap step: native-compile a
 /// program whose `main` derives an i64 from string constants (the summed byte
 /// lengths of string literals), then assert the linked `.exe`'s exit code equals

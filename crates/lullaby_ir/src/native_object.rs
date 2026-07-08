@@ -4299,6 +4299,122 @@ mod native_program_tests {
         // loop is self-contained, so exactly two relocations exist.
         let sec = COFF_HEADER_SIZE as usize;
         assert_eq!(read_u16(&program.bytes, sec + 32), 2);
+
+        // A `while` loop closes with a backward `jmp` (E9) whose rel32 is negative
+        // (it jumps back to the loop top). Confirm at least one such backward jump
+        // appears in the compiled `.text`.
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        assert!(
+            has_backward_jmp(text),
+            "expected a backward `jmp` closing the while loop"
+        );
+    }
+
+    /// Whether `code` contains a near `jmp rel32` (opcode `0xE9`) whose signed
+    /// 32-bit displacement is negative — i.e. a backward branch, as a loop's
+    /// closing jump must be. Scans every `0xE9` and decodes the following four
+    /// bytes as a little-endian `i32`.
+    fn has_backward_jmp(code: &[u8]) -> bool {
+        code.windows(5)
+            .any(|w| w[0] == 0xE9 && i32::from_le_bytes([w[1], w[2], w[3], w[4]]) < 0)
+    }
+
+    #[test]
+    fn emits_for_loops_and_inter_function_calls() {
+        // A `for`-sum, a `for`-product, and a `combine` that calls all three
+        // helpers plus itself feeds `main`. Every function is i64-scalar, so all
+        // compile — none is skipped — and the emitter must produce real `call`
+        // relocations (inter-function calls) and backward `jmp`s (the loops).
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn for_sum n i64 -> i64\n",
+            "    let total i64 = 0\n",
+            "    for i from 1 to n\n",
+            "        total += i\n",
+            "    return total\n\n",
+            "fn for_product n i64 -> i64\n",
+            "    let product i64 = 1\n",
+            "    for i from 1 to n\n",
+            "        product *= i\n",
+            "    return product\n\n",
+            "fn combine a i64 b i64 -> i64\n",
+            "    return for_sum(a) + for_product(b)\n\n",
+            "fn main -> i64\n",
+            "    return combine(4, 3)\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(
+            program.compiled,
+            vec![
+                "for_sum".to_string(),
+                "for_product".to_string(),
+                "combine".to_string(),
+                "main".to_string(),
+            ],
+            "every i64-scalar function compiles"
+        );
+        assert!(
+            program.skipped.is_empty(),
+            "no function should be skipped: {:?}",
+            program.skipped
+        );
+
+        // The `.text` holds the entry stub plus every function. The two intra-body
+        // `call` relocations (combine->for_sum, combine->for_product) join the
+        // stub's two (stub->main, stub->ExitProcess) and main->combine, so at least
+        // three `call` relocations to compiled functions are present.
+        let sec = COFF_HEADER_SIZE as usize;
+        let num_relocs = read_u16(&program.bytes, sec + 32) as usize;
+        assert!(
+            num_relocs >= 5,
+            "expected the inter-function call relocations, got {num_relocs}"
+        );
+
+        // The compiled `.text` must contain a backward `jmp` (each `for` loop
+        // closes with one) — direct evidence the loops were lowered natively.
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        assert!(
+            has_backward_jmp(text),
+            "expected a backward `jmp` closing a for loop"
+        );
+        // And an `imul rax, rcx` (48 0F AF C1), the `for`-product multiply.
+        assert!(
+            text.windows(4).any(|w| w == [0x48, 0x0F, 0xAF, 0xC1]),
+            "expected an `imul rax, rcx` for the product loop"
+        );
+    }
+
+    #[test]
+    fn skips_match_over_enum_scrutinee_gracefully() {
+        // Lullaby `match` is exclusively variant-based (option/result/enum), whose
+        // scrutinees are heap values — there is no scalar (integer/bool) match in
+        // the grammar. Such a function stays outside the native i64-scalar subset:
+        // it is skipped (and runs on the interpreters), never miscompiled.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn classify o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n\n",
+            "fn double x i64 -> i64\n",
+            "    x + x\n\n",
+            "fn main -> i64\n",
+            "    return double(21)\n",
+        )))
+        .expect("emit native program");
+        // `double` and `main` are i64-scalar and compile; `classify` (option param,
+        // match body) is skipped.
+        assert_eq!(
+            program.compiled,
+            vec!["double".to_string(), "main".to_string()]
+        );
+        assert!(
+            program.skipped.iter().any(|s| s.name == "classify"),
+            "match-over-enum function must be skipped: {:?}",
+            program.skipped
+        );
     }
 
     #[test]

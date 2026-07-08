@@ -1,0 +1,25 @@
+fn while_sum n i64 -> i64
+    let total i64 = 0
+    let i i64 = 1
+    while i <= n
+        total += i
+        i += 1
+    return total
+
+fn for_sum n i64 -> i64
+    let total i64 = 0
+    for i from 1 to n
+        total += i
+    return total
+
+fn for_product n i64 -> i64
+    let product i64 = 1
+    for i from 1 to n
+        product *= i
+    return product
+
+fn combine a i64 b i64 -> i64
+    return while_sum(a) + for_sum(b) + for_product(3)
+
+fn main -> i64
+    return combine(5, 4)
