@@ -35,7 +35,8 @@ REQUIRED_IDS = [
 
 REQUIRED_PHRASES = [
     ".lby",
-    "Alpha 1 language surface",
+    "active development toward 1.0",
+    "currently implemented language surface",
     "Indentation defines scope",
     "Last-expression return",
     "zero-argument main",
@@ -191,7 +192,8 @@ GENERATED_REQUIRED_PHRASES = REQUIRED_PHRASES + [
     "--diagnostic-format json",
     "Current Limitations",
     "L0211",
-    "No native code generation yet",
+    "active development toward 1.0",
+    "native x86-64 backend",
 ]
 
 FORBIDDEN_REMOTE_PATTERNS = [

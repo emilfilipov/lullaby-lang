@@ -239,7 +239,7 @@
   <header>
     <div class="top">
       <h1>Lullaby</h1>
-      <p class="tagline">Offline documentation for the current Lullaby alpha: a compiled systems language prototype with concise indentation-only syntax, strong typing, and an executable Rust-based frontend/runtime.</p>
+      <p class="tagline">Offline documentation for the current state of Lullaby: a compiled systems language in active development toward 1.0, with concise indentation-only syntax, strong typing, and an executable Rust-based frontend, runtime, and backends.</p>
     </div>
   </header>
 
@@ -277,8 +277,8 @@
     <main>
       <section id="overview">
         <h2>Overview</h2>
-        <p>Lullaby is implemented in Rust. The current alpha focuses on a clear, testable compiler frontend plus AST, IR, and initial bytecode execution paths before native code generation.</p>
-        <p>The Alpha 1 language surface is frozen in <code>documents/alpha1_language_surface.md</code>. Broader Markdown design docs are planned material unless the feature appears in that file or on this page.</p>
+        <p>Lullaby is implemented in Rust and in active development toward 1.0. It runs today through a clear, testable compiler frontend plus AST, typed IR, and instruction-bytecode execution paths, a scalar-subset WebAssembly backend, and an i64-scalar native x86-64 backend.</p>
+        <p>The currently implemented language surface is recorded in <code>documents/alpha1_language_surface.md</code>. Anything documented on this page is accepted by the compiler; features only in the broader Markdown design docs are planned material unless they appear here.</p>
         <div class="status-grid">
           <div class="status-item"><strong>Extension</strong><code>.lby</code> is the canonical source file extension.</div>
           <div class="status-item"><strong>Blocks</strong>Indentation defines scope. Curly braces are rejected.</div>
@@ -308,7 +308,7 @@
 cargo run -p lullaby_cli -- build --optimize alpha -o hello-build.lbc hello.lby
 cargo run -p lullaby_cli -- inspect hello.lbc
 cargo run -p lullaby_cli -- run hello.lbc</code></pre>
-        <p>During development, the CLI is available through Cargo. The Alpha 1 portable package builds a direct <code>bin\lullaby.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, ships user-facing examples such as <code>examples\valid\calculator.lby</code>, emits <code>lullaby-alpha1-windows-x64.zip.sha256</code>, and supports <code>lullaby docs</code> and <code>lullaby examples</code> to locate local resources. The cross-platform package driver also prepares <code>install.sh</code> and <code>uninstall.sh</code> for Linux/macOS portable archives after those targets are validated.</p>
+        <p>During development, the CLI is available through Cargo. The Windows portable package builds a direct <code>bin\lullaby.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, ships user-facing examples such as <code>examples\valid\calculator.lby</code>, emits <code>lullaby-alpha1-windows-x64.zip.sha256</code>, and supports <code>lullaby docs</code> and <code>lullaby examples</code> to locate local resources. The cross-platform package driver also prepares <code>install.sh</code> and <code>uninstall.sh</code> for Linux/macOS portable archives after those targets are validated.</p>
       </section>
 
       <section id="source-files">
@@ -432,14 +432,14 @@ fn main -> i64
 
       <section id="arrays">
         <h2>Arrays</h2>
-        <p>The alpha supports homogeneous arrays with <code>array&lt;T&gt;</code> type spelling, non-empty array literals, and bounds-checked indexing.</p>
+        <p>Lullaby supports homogeneous arrays with <code>array&lt;T&gt;</code> type spelling, non-empty array literals, and bounds-checked indexing.</p>
         <pre data-fixture="tests/fixtures/valid/run_array.lby" data-mode="run"><code>fn main -> i64
     let values array&lt;i64&gt; = [2, 4, 6]
     values[2]</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_array.lby</code>.</p>
         <ul>
           <li>Array literal values must all have the same static type.</li>
-          <li>Empty array literals are not accepted yet because empty-array inference is not implemented.</li>
+          <li>Empty array literals are not accepted yet because empty-array inference is not implemented (use <code>list&lt;T&gt;</code> for growable, initially empty collections).</li>
           <li>Index expressions require an <code>i64</code> index.</li>
           <li>Out-of-bounds indexes are runtime errors.</li>
         </ul>
@@ -454,11 +454,11 @@ fn main -> i64
 
       <section id="char-byte">
         <h2>Char And Byte</h2>
-        <p>The alpha adds two scalar types beyond the numeric ones. A <code>char</code> is a single Unicode scalar written with single quotes (<code>'a'</code>); a char literal must hold exactly one character (an empty, multi-character, or unterminated literal is lexer error <code>L0105</code>). A <code>byte</code> is an 8-bit unsigned integer (0&ndash;255) with no literal form. Both compare with <code>==</code>/<code>!=</code> and order with <code>&lt;</code>/<code>&lt;=</code>/<code>&gt;</code>/<code>&gt;=</code> &mdash; chars by code point, bytes numerically.</p>
+        <p>Lullaby adds two scalar types beyond the numeric ones. A <code>char</code> is a single Unicode scalar written with single quotes (<code>'a'</code>); a char literal must hold exactly one character (an empty, multi-character, or unterminated literal is lexer error <code>L0105</code>). A <code>byte</code> is an 8-bit unsigned integer (0&ndash;255) with no literal form. Both compare with <code>==</code>/<code>!=</code> and order with <code>&lt;</code>/<code>&lt;=</code>/<code>&gt;</code>/<code>&gt;=</code> &mdash; chars by code point, bytes numerically.</p>
         <ul>
           <li><code>char_code(c char)</code> returns the Unicode scalar value as <code>i64</code>; <code>char_from(i i64)</code> returns the <code>char</code> for a scalar value (runtime error on an invalid scalar).</li>
           <li><code>byte(i i64)</code> returns a <code>byte</code> (runtime error outside 0&ndash;255); <code>byte_val(b byte)</code> returns its <code>i64</code> value.</li>
-          <li><code>to_string(x)</code> also accepts a <code>char</code> or a <code>byte</code>. Wrong argument types or arities to these builtins report <code>L0389</code>. No byte arithmetic is implemented for Alpha 1, and other sized integer types (<code>i32</code>, <code>u32</code>, &hellip;) remain planned.</li>
+          <li><code>to_string(x)</code> also accepts a <code>char</code> or a <code>byte</code>. Wrong argument types or arities to these builtins report <code>L0389</code>. Byte arithmetic is not implemented yet, and other sized integer types (<code>i32</code>, <code>u32</code>, &hellip;) remain planned.</li>
         </ul>
         <pre data-fixture="tests/fixtures/valid/run_char_byte.lby" data-mode="run"><code>fn main -> i64
     let a char = 'A'
@@ -798,7 +798,7 @@ fn main -> i64
 
       <section id="boolean-logic">
         <h2>Boolean Logic</h2>
-        <p>The alpha supports boolean logic with <code>and</code>, <code>or</code>, and unary <code>not</code>. Logical operands must be <code>bool</code>, and <code>and</code>/<code>or</code> short-circuit during runtime execution.</p>
+        <p>Lullaby supports boolean logic with <code>and</code>, <code>or</code>, and unary <code>not</code>. Logical operands must be <code>bool</code>, and <code>and</code>/<code>or</code> short-circuit during runtime execution.</p>
         <pre data-fixture="tests/fixtures/valid/run_logic.lby" data-mode="run"><code>fn main -> bool
     not false and true or false</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_logic.lby</code>.</p>
@@ -817,7 +817,7 @@ fn main -> i64
 
       <section id="math-builtins">
         <h2>Math Builtins</h2>
-        <p>The alpha includes a small, type-directed math library over <code>i64</code> and <code>f64</code>. <code>abs(x)</code> returns the magnitude (<code>i64-&gt;i64</code> or <code>f64-&gt;f64</code>). <code>min(a, b)</code> and <code>max(a, b)</code> take two matching numeric operands and return the smaller or larger. <code>pow(base, exp)</code> raises to a power; the integer form requires <code>exp &gt;= 0</code> (a negative integer exponent is runtime <code>L0417</code>). <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, and <code>round</code> take one <code>f64</code> and return <code>f64</code>. The transcendental builtins also take and return <code>f64</code>: <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>atan</code>, <code>exp</code>, <code>ln</code>, and <code>log10</code> are unary, and <code>atan2(y, x)</code> takes two <code>f64</code>s and returns the angle in radians. A wrong or mismatched operand type reports <code>L0374</code>.</p>
+        <p>Lullaby includes a small, type-directed math library over <code>i64</code> and <code>f64</code>. <code>abs(x)</code> returns the magnitude (<code>i64-&gt;i64</code> or <code>f64-&gt;f64</code>). <code>min(a, b)</code> and <code>max(a, b)</code> take two matching numeric operands and return the smaller or larger. <code>pow(base, exp)</code> raises to a power; the integer form requires <code>exp &gt;= 0</code> (a negative integer exponent is runtime <code>L0417</code>). <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, and <code>round</code> take one <code>f64</code> and return <code>f64</code>. The transcendental builtins also take and return <code>f64</code>: <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>atan</code>, <code>exp</code>, <code>ln</code>, and <code>log10</code> are unary, and <code>atan2(y, x)</code> takes two <code>f64</code>s and returns the angle in radians. A wrong or mismatched operand type reports <code>L0374</code>.</p>
         <p><strong>Bitwise intrinsics</strong> operate on <code>i64</code>: <code>rotate_left(x, n)</code> / <code>rotate_right(x, n)</code> rotate the 64 bits by <code>n &amp; 63</code> positions; <code>count_ones(x)</code> is the population count; <code>leading_zeros(x)</code> / <code>trailing_zeros(x)</code> count high/low zero bits (0&ndash;64); and <code>reverse_bytes(x)</code> swaps byte order. All are total and deterministic.</p>
         <pre data-fixture="tests/fixtures/valid/docs_math.lby" data-mode="run"><code>fn main -> i64
     let magnitude i64 = abs(0 - 7)
@@ -833,7 +833,7 @@ fn main -> i64
 
       <section id="memory-builtins">
         <h2>Memory Builtins</h2>
-        <p>The alpha runtime includes heap-slot builtins. These are an interim executable model while the full region/ARC memory design is still being implemented.</p>
+        <p>Lullaby's runtime includes heap-slot builtins. These are an interim executable model while the full region/ARC memory design is still being implemented.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -856,7 +856,7 @@ fn main -> i64
 
       <section id="io-system">
         <h2>I/O And System Builtins</h2>
-        <p>The alpha runtime includes flat text and binary file I/O builtins, directory operations, and a conservative system command abstraction. All file-system builtins are one-shot: dotted <code>io.*</code> APIs, stateful file handles, seeking, buffered streams, memory mapping, async, and IPC are planned rather than current syntax. TCP/UDP sockets are covered separately under <a href="#networking">Networking</a>.</p>
+        <p>Lullaby's runtime includes flat text and binary file I/O builtins, directory operations, and a conservative system command abstraction. All file-system builtins are one-shot: dotted <code>io.*</code> APIs, stateful file handles, seeking, buffered streams, memory mapping, async, and IPC are planned rather than current syntax. TCP/UDP sockets are covered separately under <a href="#networking">Networking</a>.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -906,7 +906,7 @@ fn main -> i64
 
       <section id="string-builtins">
         <h2>String Builtins</h2>
-        <p>The alpha runtime includes a small character-indexed string library. All indices are character indices (like <code>len</code> on a <code>string</code>), not byte offsets. Wrong argument types report <code>L0375</code>.</p>
+        <p>Lullaby's runtime includes a small character-indexed string library. All indices are character indices (like <code>len</code> on a <code>string</code>), not byte offsets. Wrong argument types report <code>L0375</code>.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -986,7 +986,7 @@ fn main -> i64
             <tr><td><code>cargo run -p lullaby_cli -- examples</code></td><td>Print the local valid example directory. In the portable package, use <code>bin\lullaby.exe examples</code> or <code>lullaby examples</code> after adding <code>bin</code> to <code>PATH</code>.</td></tr>
             <tr><td><code>cargo run -p lullaby_cli -- check --verbose path/to/file.lby</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
             <tr><td><code>cargo run -p lullaby_cli -- check --format json path/to/file.lby</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\lullaby.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid and invalid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, a zip archive, and a SHA-256 checksum file.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Windows portable package with <code>bin\lullaby.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid and invalid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, a zip archive, and a SHA-256 checksum file.</td></tr>
             <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain, including <code>lullaby inspect</code>, <code>lullaby examples</code>, invalid example diagnostics, checksum verification, and dry-run PATH helper scripts.</td></tr>
             <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1</code></td><td>Verify the package, tag the current commit, and create a GitHub prerelease with the zip and checksum assets.</td></tr>
           </tbody>
@@ -1052,7 +1052,7 @@ Suggested fix:
             <tr><td><code>L0102</code></td><td>Curly braces are forbidden as block delimiters.</td></tr>
             <tr><td><code>L0103</code></td><td>Semicolons are forbidden as statement terminators.</td></tr>
             <tr><td><code>L0105</code></td><td>Invalid char literal: a <code>'...'</code> literal was empty, held more than one character, or was never closed.</td></tr>
-            <tr><td><code>L0211</code></td><td>Planned syntax such as imports, modules, pattern matching (<code>match</code>), or unions is not supported in Alpha 1.</td></tr>
+            <tr><td><code>L0211</code></td><td>A still-reserved keyword is not yet supported. <code>import</code>, modules via <code>pub</code>, <code>struct</code>, <code>enum</code>, <code>match</code>, and <code>try</code>/<code>catch</code> are now implemented; this rejects only genuinely not-yet-implemented keywords such as <code>module</code>, <code>package</code>, <code>union</code>, <code>interface</code>, <code>class</code>, <code>switch</code>, and <code>coroutine</code>.</td></tr>
             <tr><td><code>L0208</code></td><td>Parser expected an assignment operator.</td></tr>
             <tr><td><code>L0301+</code></td><td>Semantic errors such as unknown names, type mismatch, invalid returns, or invalid loop control.</td></tr>
             <tr><td><code>L0324</code></td><td>Array literal values do not all have the same type.</td></tr>
@@ -1106,15 +1106,16 @@ Suggested fix:
       <section id="limitations">
         <h2>Current Limitations</h2>
         <div class="note">
-          <p>This page documents the current executable alpha. Planned syntax and systems features in the broader Markdown specs may not be accepted by the compiler yet.</p>
+          <p>This page documents the currently implemented language. Lullaby is in active development toward 1.0, so some systems features described in the broader Markdown specs are still planned and may not be accepted by the compiler yet.</p>
         </div>
         <ul>
-          <li>No native code generation yet. Execution currently supports AST, typed IR, an instruction-bytecode backend, and versioned <code>.lbc</code> bytecode artifacts. The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
-          <li>Typed IR now reports Alpha 1 memory operations and bounds-checked indexing with sequence and safety metadata for backend work, and version 5 <code>.lbc</code> artifacts preserve that metadata in <code>memory_operations</code>. The full region memory model, ARC/reference counting, cleanup insertion, and lifetime analysis are pending.</li>
-          <li>The type system currently covers the alpha scalar, array, call, local binding, assignment, control-flow, and interim pointer subset.</li>
-          <li>The current I/O surface is limited to text/binary file builtins, direct program-plus-argv command calls, and basic TCP/UDP sockets; buffered streams, memory mapping, async, and IPC are future work.</li>
-          <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive with optional user PATH helper scripts; the cross-platform package driver also prepares Unix PATH helpers for future Linux/macOS archives.</li>
-          <li>Planned syntax keywords such as <code>import</code>, <code>module</code>, <code>struct</code>, <code>match</code>, and <code>try</code> are rejected with <code>L0211 [parser]</code> until their feature areas are implemented.</li>
+          <li>Execution runs on AST, typed IR, and instruction-bytecode interpreters plus versioned <code>.lbc</code> bytecode artifacts; a scalar-subset WebAssembly backend (<code>lullaby wasm</code>) and an i64-scalar native x86-64 backend (<code>lullaby native</code>) exist. The native and WASM backends cover only a subset (scalar / i64-scalar functions); non-eligible functions still run on the interpreters. Full native lowering of the whole language is still in progress.</li>
+          <li>The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
+          <li>Typed IR reports memory operations and bounds-checked indexing with sequence and safety metadata, and version 5 <code>.lbc</code> artifacts preserve that metadata in <code>memory_operations</code>. The full region memory model, ARC/reference counting, cleanup insertion, and lifetime analysis are still pending.</li>
+          <li>The current I/O surface is text/binary file builtins, directory operations, direct program-plus-argv command calls, TCP/UDP sockets, and a minimal HTTP/1.1 client; buffered streams, memory mapping, async, IPC, and TLS/HTTPS are future work.</li>
+          <li>Structs, enums, pattern matching (<code>match</code>), traits with bounded generics, generic functions, <code>option</code>/<code>result</code>/<code>list</code>/<code>map</code>, modules and visibility (<code>import</code>/<code>pub</code>), multi-directory projects (<code>lullaby.json</code>), structured error handling (<code>throw</code>/<code>try</code>/<code>catch</code>), and threads/channels/mutex concurrency are all implemented today. Still planned: default trait methods, trait objects (<code>dyn</code>), associated types and supertraits, capturing closures (lambda literals), enum methods and generics over enums, wider integer types (<code>i32</code>, <code>u32</code>, &hellip;), and byte arithmetic.</li>
+          <li>The current distribution path is a Windows portable archive with optional user PATH helper scripts; the cross-platform package driver also prepares Unix PATH helpers for Linux/macOS archives, which still need non-Windows host validation and active CI runs. A full graphical installer is future work.</li>
+          <li>Genuinely reserved keywords that are not yet implemented &mdash; <code>module</code>, <code>package</code>, <code>union</code>, <code>interface</code>, <code>class</code>, <code>switch</code>, <code>catch</code> (as a standalone statement), and <code>coroutine</code> &mdash; are rejected with <code>L0211 [parser]</code> until their feature areas are implemented.</li>
           <li>Inline assembly (<code>asm b0, b1, ...</code>, a list of raw <code>0..=255</code> machine-code bytes inside an <code>unsafe</code> block) is emitted verbatim into the current function's <code>.text</code> by the native backend only. It is inherently unsafe: the bytes are trusted and not decoded, relocated, or register-modeled, and a trailing <code>asm</code> that leaves a value in <code>rax</code> becomes the function's return value. The AST, IR, and bytecode interpreters cannot execute raw machine code, so any <code>asm</code> statement is rejected with <code>L0425</code>; compile with <code>lullaby native</code> to emit and link it. Out-of-range bytes or use outside <code>unsafe</code> are caught at check time (<code>L0425</code> / <code>L0330</code>).</li>
           <li>The native backend (<code>lullaby native</code>) compiles the i64-scalar subset to an x86-64 Windows COFF object and, best-effort, links it into a runnable <code>.exe</code>. Adding <code>--freestanding</code> (alias <code>--no-std</code>) builds a no-C-runtime executable: it links <code>kernel32.lib</code> only (zero <code>ucrt</code>/<code>vcruntime</code>/<code>msvcrt</code>) and terminates through the minimal OS import <code>kernel32!ExitProcess</code>, bypassing the C runtime startup. It is still a Windows PE, not a bare-metal binary; true bare-metal (raw-syscall exit with no OS imports, other object formats, a custom entry and linker script) is deferred. A freestanding build that declares an <code>extern fn</code> (which needs the C runtime) is rejected with <code>L0426</code>. Adding <code>--debug</code> (alias <code>-g</code>) emits native source-line debug info: a CodeView <code>.debug$S</code> section maps each compiled function's entry offset to its <code>.lby</code> declaration line (per-function granularity) so a debugger can break at a function and show its source line; <code>--debug</code> is opt-in and without it the object bytes are unchanged. Per-statement line mapping, variable/type info, and a full compiler-emitted PDB are deferred.</li>
           <li>The checked-in documentation bundle is currently hand-authored HTML. The standard-library generator from canonical docs is available at <code>offline_docs/generate_offline_docs.py</code>, emits package-ready quick start, CLI reference, package layout, diagnostics, limitations, shipped-doc parity sections, and fixture-backed examples, and is now used by the Windows portable package path.</li>
@@ -1139,7 +1140,7 @@ Suggested fix:
   </div>
 
   <footer>
-    Lullaby offline documentation alpha. Last maintained with the repository source and tests.
+    Lullaby offline documentation, in active development toward 1.0. Last maintained with the repository source and tests.
   </footer>
 </body>
 </html>

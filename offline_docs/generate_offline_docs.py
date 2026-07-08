@@ -184,8 +184,8 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "Overview",
             "overview",
             """
-            <p>Lullaby is implemented in Rust. The current alpha focuses on a clear, testable compiler frontend plus AST, IR, and instruction-bytecode execution paths before native code generation.</p>
-            <p>The Alpha 1 language surface is frozen in <code>documents/alpha1_language_surface.md</code>. Broader Markdown design docs are planned material unless the feature appears in that file or on this page.</p>
+            <p>Lullaby is implemented in Rust and in active development toward 1.0. It runs today through a clear, testable compiler frontend plus AST, typed IR, and instruction-bytecode execution paths, a scalar-subset WebAssembly backend, and an i64-scalar native x86-64 backend.</p>
+            <p>The currently implemented language surface is recorded in <code>documents/alpha1_language_surface.md</code>. Anything documented here is accepted by the compiler; features only in the broader Markdown design docs are planned material unless they appear on this page.</p>
             <ul>
               <li><code>.lby</code> is the canonical source file extension.</li>
               <li>Indentation defines scope. Curly braces are rejected as block delimiters.</li>
@@ -244,10 +244,10 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "Arrays",
             "arrays",
             """
-            <p>The alpha supports homogeneous arrays with <code>array&lt;T&gt;</code> type spelling, non-empty array literals, and bounds-checked indexing.</p>
+            <p>Lullaby supports homogeneous arrays with <code>array&lt;T&gt;</code> type spelling, non-empty array literals, and bounds-checked indexing.</p>
             <ul>
               <li>Array literal values must all have the same type.</li>
-              <li>Empty array literals are not part of the Alpha 1 surface.</li>
+              <li>Empty array literals are not accepted yet; use <code>list&lt;T&gt;</code> for growable collections.</li>
               <li>Index expressions require an <code>i64</code> index.</li>
               <li>Out-of-bounds indexes are runtime errors.</li>
             </ul>
@@ -257,7 +257,7 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "Control Flow",
             "control-flow",
             """
-            <p>The alpha supports <code>if</code>, <code>elif</code>, and <code>else</code> branches with boolean conditions.</p>
+            <p>Lullaby supports <code>if</code>, <code>elif</code>, and <code>else</code> branches with boolean conditions.</p>
             <p><code>while</code> loops repeat while a boolean condition is true.</p>
             <p><code>for</code> loops iterate over inclusive <code>i64</code> ranges using <code>from</code>, <code>to</code>, and optional <code>by</code>. The default step is <code>1</code>, and runtime execution rejects step <code>0</code>.</p>
             <p><code>loop</code>, <code>break</code>, and <code>continue</code> support unconditional loops and loop control.</p>
@@ -267,14 +267,14 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "Boolean Logic",
             "boolean-logic",
             """
-            <p>The alpha supports boolean logic with <code>and</code>, <code>or</code>, and unary <code>not</code>. Logical operands must be <code>bool</code>, and <code>and</code>/<code>or</code> short-circuit during runtime execution.</p>
+            <p>Lullaby supports boolean logic with <code>and</code>, <code>or</code>, and unary <code>not</code>. Logical operands must be <code>bool</code>, and <code>and</code>/<code>or</code> short-circuit during runtime execution.</p>
             """,
         ),
         (
             "Memory Builtins",
             "memory-builtins",
             """
-            <p>The alpha runtime includes heap-slot builtins. These are an interim executable model while the full region/ARC memory design is still being implemented.</p>
+            <p>Lullaby's runtime includes heap-slot builtins. These are an interim executable model while the full region/ARC memory design is still being implemented.</p>
             <table>
               <tr><td><code>alloc(value)</code></td><td>Stores a value in a runtime heap slot and returns an interim pointer such as <code>ptr_i64</code>.</td></tr>
               <tr><td><code>load(ptr)</code></td><td>Loads the value from a valid pointer.</td></tr>
@@ -287,7 +287,7 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "I/O And System Builtins",
             "io-system",
             """
-            <p>The alpha runtime includes flat text file I/O builtins and a conservative system command abstraction. Dotted <code>io.*</code> APIs, streams, binary I/O, memory mapping, async, sockets, and IPC are planned rather than current syntax.</p>
+            <p>Lullaby's runtime includes flat text file I/O builtins and a conservative system command abstraction. Dotted <code>io.*</code> APIs, buffered streams, stateful file handles, memory mapping, async, and IPC are planned rather than current syntax. Binary/directory file builtins and TCP/UDP sockets are also implemented (see the shipped page for the full surface).</p>
             <table>
               <tr><td><code>read_file(path)</code></td><td>Reads a UTF-8 text file into a <code>string</code>.</td></tr>
               <tr><td><code>write_file(path, content)</code></td><td>Writes text to a file, replacing existing contents.</td></tr>
@@ -316,7 +316,7 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
               <tr><td><code>cargo run -p lullaby_cli -- examples</code><br><code>lullaby examples</code></td><td>Print the packaged valid examples directory.</td></tr>
               <tr><td><code>cargo run -p lullaby_cli -- check --verbose path/to/file.lby</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
               <tr><td><code>cargo run -p lullaby_cli -- check --format json path/to/file.lby</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
-              <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with generated docs.</td></tr>
+              <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\\package_windows_portable.ps1</code></td><td>Build the Windows portable package with generated docs.</td></tr>
               <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain.</td></tr>
               <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\\publish_github_release.ps1</code></td><td>Verify the package, tag the current commit, and create a GitHub prerelease.</td></tr>
             </table>
@@ -366,11 +366,11 @@ def alpha_user_sections() -> list[tuple[str, str, str]]:
             "limitations",
             """
             <ul>
-              <li>No native code generation yet. Execution currently supports AST, typed IR, an instruction-bytecode backend, and versioned <code>.lbc</code> bytecode artifacts. The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
-              <li>Version 5 <code>.lbc</code> artifacts preserve Alpha 1 memory operation metadata and sequence numbers in <code>memory_operations</code>; the full region memory model, ARC/reference counting, compiler-inserted cleanup, and lifetime analysis remain planned.</li>
-              <li>Modules, imports, structs, try/catch, packages, and advanced generics are planned syntax and are rejected with <code>L0211</code> until implemented.</li>
+              <li>Execution runs on AST, typed IR, and instruction-bytecode interpreters plus versioned <code>.lbc</code> bytecode artifacts; a scalar-subset WebAssembly backend (<code>lullaby wasm</code>) and an i64-scalar native x86-64 backend (<code>lullaby native</code>) exist and cover only a subset, with non-eligible functions still running on the interpreters. Full native lowering of the whole language is still in progress. The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
+              <li>Version 5 <code>.lbc</code> artifacts preserve memory operation metadata and sequence numbers in <code>memory_operations</code>; the full region memory model, ARC/reference counting, compiler-inserted cleanup, and lifetime analysis remain planned.</li>
+              <li>Modules and visibility (<code>import</code>/<code>pub</code>), structs, enums, pattern matching, traits with bounded generics, generic functions, structured error handling (<code>throw</code>/<code>try</code>/<code>catch</code>), multi-directory projects, and threads/channels/mutex concurrency are implemented. Still planned: capturing closures, trait objects and default methods, wider integer types (<code>i32</code>/<code>u32</code>), and byte arithmetic. Genuinely reserved keywords (<code>module</code>, <code>package</code>, <code>union</code>, <code>interface</code>, <code>class</code>, <code>switch</code>, standalone <code>catch</code>, <code>coroutine</code>) are rejected with <code>L0211</code> until implemented.</li>
               <li>Cross-platform portable package generation exists with platform PATH helpers, but release assets still need non-Windows host validation and active CI workflow runs.</li>
-              <li>The Windows Alpha 1 package now generates offline docs during packaging; the checked-in hand-authored page remains as a maintained source-era reference until it is retired.</li>
+              <li>The Windows package now generates offline docs during packaging; the checked-in hand-authored page remains as a maintained reference until it is retired.</li>
             </ul>
             """,
         ),
