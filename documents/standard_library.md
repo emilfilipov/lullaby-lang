@@ -72,6 +72,23 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 `repeat(s, count i64) -> string` (`count <= 0` yields `""`).
 Concatenate with `+` on two `string`s.
 
+### Bytes and UTF-8
+
+- `to_bytes(s string) -> list<byte>` — the UTF-8 encoding of `s` as a list of
+  `byte`s (the same `list<byte>` representation `read_bytes`/`write_bytes` use).
+- `from_bytes(b list<byte>) -> result<string, string>` — decode the bytes as
+  UTF-8, returning `ok(s)` on success and `err(message)` on invalid UTF-8. It
+  never panics and never lossily replaces bad bytes — invalid input yields `err`,
+  matched with `match` like any other `result`.
+- `byte_len(s string) -> i64` — the number of UTF-8 bytes in `s`. This is
+  distinct from `len`, which counts *characters* for a string, so `byte_len`
+  exceeds `len` whenever `s` contains non-ASCII text (e.g. `byte_len("café")` is
+  `5` while `len("café")` is `4`).
+
+These three primitives are pure and deterministic, and produce identical results
+(including the invalid-UTF-8 `err`) on the AST, IR, and bytecode backends. A
+wrong argument type or arity reports the string-builtin family code `L0375`.
+
 ## Math
 
 `abs`, `min`, `max`, `pow` are type-directed over `i64` and `f64` (matching

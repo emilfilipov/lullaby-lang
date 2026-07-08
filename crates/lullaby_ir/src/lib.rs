@@ -3785,6 +3785,9 @@ impl<'a> IrRuntime<'a> {
             "replace" => Self::builtin_replace(args),
             "upper" => Self::builtin_upper(args),
             "lower" => Self::builtin_lower(args),
+            "to_bytes" => Self::builtin_to_bytes(args),
+            "from_bytes" => Self::builtin_from_bytes(args),
+            "byte_len" => Self::builtin_byte_len(args),
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
@@ -5628,6 +5631,42 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::String(text.to_lowercase()))
     }
 
+    /// `to_bytes(s string) -> list<byte>`: the UTF-8 encoding of `s` as a
+    /// `list<byte>` (a `Value::Array` of `Value::Byte`, matching `read_bytes`).
+    fn builtin_to_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_bytes", 1, args.len()))?;
+        let text = expect_string("to_bytes", text)?;
+        Ok(Value::Array(
+            text.into_bytes().into_iter().map(Value::Byte).collect(),
+        ))
+    }
+
+    /// `from_bytes(b list<byte>) -> result<string, string>`: decode `b` as UTF-8,
+    /// returning `ok(s)` on success and `err(message)` (never a panic, never a
+    /// lossy replacement) on invalid UTF-8.
+    fn builtin_from_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [data]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("from_bytes", 1, args.len()))?;
+        let bytes = Self::value_to_bytes("from_bytes", data)?;
+        Ok(result_value(match String::from_utf8(bytes) {
+            Ok(text) => Ok(Value::String(text)),
+            Err(error) => Err(Value::String(format!("invalid utf-8: {error}"))),
+        }))
+    }
+
+    /// `byte_len(s string) -> i64`: the number of UTF-8 bytes in `s` (distinct
+    /// from `len`, which counts characters for a string).
+    fn builtin_byte_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("byte_len", 1, args.len()))?;
+        let text = expect_string("byte_len", text)?;
+        Ok(Value::I64(text.len() as i64))
+    }
+
     fn builtin_abs(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -6965,7 +7004,7 @@ impl<'a> Lowerer<'a> {
             "tcp_connect" | "tcp_listen" | "tcp_accept" | "udp_bind" => {
                 generic_type("result", &[TypeRef::new("Socket"), TypeRef::new("string")])
             }
-            "tcp_read" | "udp_recv" | "http_get" | "http_post" => {
+            "tcp_read" | "udp_recv" | "http_get" | "http_post" | "from_bytes" => {
                 generic_type("result", &[TypeRef::new("string"), TypeRef::new("string")])
             }
             "tcp_write" | "udp_send_to" => {
@@ -6976,12 +7015,13 @@ impl<'a> Lowerer<'a> {
             "read_lines" | "list_dir" => {
                 generic_type("list", std::slice::from_ref(&TypeRef::new("string")))
             }
-            "read_bytes" => generic_type("list", std::slice::from_ref(&TypeRef::new("byte"))),
+            "read_bytes" | "to_bytes" => {
+                generic_type("list", std::slice::from_ref(&TypeRef::new("byte")))
+            }
             "file_exists" | "is_file" | "is_dir" | "contains" | "starts_with" | "ends_with"
             | "map_has" => TypeRef::new("bool"),
-            "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val" => {
-                TypeRef::new("i64")
-            }
+            "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
+            | "byte_len" => TypeRef::new("i64"),
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
@@ -8056,6 +8096,49 @@ mod tests {
         assert_eq!(ir, ast);
         assert_eq!(bytecode, ast);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn to_bytes_from_bytes_byte_len_match_across_backend_variants() {
+        // Round-trips "Hi" through `to_bytes`/`from_bytes`, checks byte values,
+        // and contrasts `byte_len` (UTF-8 bytes) with `len` (characters) on a
+        // multi-byte string. 72 + 105 + len("Hi")=2 + (byte_len=5 - len=4)=1.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bytes list<byte> = to_bytes(\"Hi\")\n",
+            "    let first i64 = byte_val(get(bytes, 0))\n",
+            "    let second i64 = byte_val(get(bytes, 1))\n",
+            "    match from_bytes(bytes)\n",
+            "        ok(s) -> first + second + len(s) + (byte_len(\"café\") - len(\"café\"))\n",
+            "        err(m) -> 0 - len(m)\n",
+        );
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(180));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
+    fn from_bytes_invalid_utf8_err_matches_across_backend_variants() {
+        // A lone `0xFF` byte is invalid UTF-8: every backend takes the `err`
+        // branch identically (no panic, no lossy replacement).
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bad list<byte> = push(list_new(), byte(255))\n",
+            "    match from_bytes(bad)\n",
+            "        ok(s) -> len(s)\n",
+            "        err(m) -> 1\n",
+        );
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(1));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
     }
 
     #[test]

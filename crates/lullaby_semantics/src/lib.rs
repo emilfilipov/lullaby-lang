@@ -2980,6 +2980,29 @@ impl<'a> Checker<'a> {
                 self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
                 Some(TypeRef::new("string"))
             }
+            "to_bytes" => {
+                // `to_bytes(s string) -> list<byte>`: the UTF-8 encoding of `s`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(list_type(&TypeRef::new("byte")))
+            }
+            "from_bytes" => {
+                // `from_bytes(b list<byte>) -> result<string, string>`: decode the
+                // bytes as UTF-8, yielding `err(message)` on invalid input.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "list<byte>", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("string"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "byte_len" => {
+                // `byte_len(s string) -> i64`: the UTF-8 byte length of `s`
+                // (distinct from `len`, which counts characters for a string).
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
             "abs" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let arg_type = self.check_expr(&args[0], scope, function)?;
@@ -5850,6 +5873,52 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0333")
+        );
+    }
+
+    #[test]
+    fn string_bytes_builtins_type_check() {
+        // `to_bytes` -> `list<byte>`, `from_bytes` -> `result<string, string>`
+        // (unwrapped with `match`), and `byte_len` -> `i64`.
+        validate_source(concat!(
+            "fn f -> i64\n",
+            "    let b list<byte> = to_bytes(\"hi\")\n",
+            "    let n i64 = byte_len(\"café\")\n",
+            "    match from_bytes(b)\n",
+            "        ok(s) -> len(s) + n + byte_val(get(b, 0))\n",
+            "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect("string↔bytes builtins type-check");
+    }
+
+    #[test]
+    fn catches_to_bytes_argument_type_mismatch() {
+        // `to_bytes` requires a `string` argument; a wrong type reports the
+        // string-builtin family code `L0375`.
+        let diagnostics =
+            validate_source("fn bad -> i64\n    len(to_bytes(7))\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn catches_from_bytes_argument_type_mismatch() {
+        // `from_bytes` requires a `list<byte>` argument; a `string` is rejected
+        // with the string-builtin family code `L0375`.
+        let diagnostics = validate_source(concat!(
+            "fn bad -> i64\n",
+            "    match from_bytes(\"not bytes\")\n",
+            "        ok(s) -> len(s)\n",
+            "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
         );
     }
 

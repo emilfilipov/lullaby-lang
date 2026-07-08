@@ -924,6 +924,9 @@ impl<'a> Runtime<'a> {
             "replace" => Self::builtin_replace(args),
             "upper" => Self::builtin_upper(args),
             "lower" => Self::builtin_lower(args),
+            "to_bytes" => Self::builtin_to_bytes(args),
+            "from_bytes" => Self::builtin_from_bytes(args),
+            "byte_len" => Self::builtin_byte_len(args),
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
@@ -2831,6 +2834,42 @@ impl<'a> Runtime<'a> {
         Ok(Value::String(text.to_lowercase()))
     }
 
+    /// `to_bytes(s string) -> list<byte>`: the UTF-8 encoding of `s` as a
+    /// `list<byte>` (a `Value::Array` of `Value::Byte`, matching `read_bytes`).
+    fn builtin_to_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_bytes", 1, args.len()))?;
+        let text = expect_string("to_bytes", text)?;
+        Ok(Value::Array(
+            text.into_bytes().into_iter().map(Value::Byte).collect(),
+        ))
+    }
+
+    /// `from_bytes(b list<byte>) -> result<string, string>`: decode `b` as UTF-8,
+    /// returning `ok(s)` on success and `err(message)` (never a panic, never a
+    /// lossy replacement) on invalid UTF-8.
+    fn builtin_from_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [data]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("from_bytes", 1, args.len()))?;
+        let bytes = Self::value_to_bytes("from_bytes", data)?;
+        Ok(result_value(match String::from_utf8(bytes) {
+            Ok(text) => Ok(Value::String(text)),
+            Err(error) => Err(Value::String(format!("invalid utf-8: {error}"))),
+        }))
+    }
+
+    /// `byte_len(s string) -> i64`: the number of UTF-8 bytes in `s` (distinct
+    /// from `len`, which counts characters for a string).
+    fn builtin_byte_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("byte_len", 1, args.len()))?;
+        let text = expect_string("byte_len", text)?;
+        Ok(Value::I64(text.len() as i64))
+    }
+
     fn builtin_abs(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -4063,6 +4102,38 @@ mod tests {
             "    match outcome\n",
             "        ok(body) -> 0\n",
             "        err(message) -> 1\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(1));
+    }
+
+    #[test]
+    fn to_bytes_from_bytes_round_trip_and_byte_len() {
+        // `to_bytes("Hi")` = [72, 105]; `from_bytes` decodes back to "Hi";
+        // `byte_len("café")` = 5 while `len` counts 4 characters.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bytes list<byte> = to_bytes(\"Hi\")\n",
+            "    let first i64 = byte_val(get(bytes, 0))\n",
+            "    let second i64 = byte_val(get(bytes, 1))\n",
+            "    let decoded i64 = 0\n",
+            "    match from_bytes(bytes)\n",
+            // 72 + 105 + len("Hi")=2 + (byte_len=5 - len=4)=1 => 180
+            "        ok(s) -> first + second + len(s) + (byte_len(\"café\") - len(\"café\"))\n",
+            "        err(m) -> 0 - len(m)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(180));
+    }
+
+    #[test]
+    fn from_bytes_rejects_invalid_utf8_with_err() {
+        // A lone `0xFF` byte is not valid UTF-8: `from_bytes` returns `err`
+        // (never a panic, never a lossy replacement).
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bad list<byte> = push(list_new(), byte(255))\n",
+            "    match from_bytes(bad)\n",
+            "        ok(s) -> len(s)\n",
+            "        err(m) -> 1\n",
         );
         assert_eq!(run_source(source).expect("run"), Value::I64(1));
     }
