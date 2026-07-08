@@ -2597,6 +2597,160 @@ fn wasm_heap_types_execution_parity_with_node() {
 }
 
 #[test]
+fn wasm_aggregate_args_execution_parity_with_node() {
+    // Aggregates across call boundaries: a `main -> i64` that passes a struct to a
+    // function reading its fields, receives a struct another function returns, and
+    // takes+returns a fixed array — plus a value-semantics probe where a callee
+    // mutates its struct/array PARAMETER and the caller's copy stays unchanged.
+    // Every aggregate argument is deep-copied at the call site, so the WASM result
+    // must equal the interpreter's ground truth bit-for-bit.
+    let fixture = workspace_root().join("tests/fixtures/valid/wasm_aggregate_args.lby");
+    let out = std::env::temp_dir().join("lullaby_wasm_aggregate_args.wasm");
+    let emit = lullaby()
+        .args([
+            "wasm",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    // Every function — the struct/array takers and returners, the value-semantics
+    // mutator, and `main` — compiles to WASM (none skipped).
+    let listing = stdout(&emit);
+    for name in [
+        "sum_point",
+        "make_point",
+        "first_of",
+        "bump",
+        "mutate_point",
+        "main",
+    ] {
+        assert!(
+            listing.contains(&format!("compiled {name}")),
+            "expected `{name}` compiled: {listing}"
+        );
+    }
+
+    // Interpreter ground truth for `main` (which drives every case).
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp_main = stdout(&run).trim().to_string();
+    assert_eq!(interp_main, "150");
+
+    if !node_available() {
+        eprintln!("node not found on PATH; skipping WASM aggregate-args execution parity");
+        return;
+    }
+
+    // Instantiate and compare `main()` to the interpreter. The value-semantics of
+    // the deep copies are baked into `main`: `arr_untouched` (1, not 101) proves
+    // `bump` did not mutate the caller's array, and `caller_unchanged` (11, not
+    // 1998) proves `mutate_point` did not mutate the caller's struct.
+    let runner = std::env::temp_dir().join("lullaby_wasm_aggregate_args_runner.js");
+    let js = format!(
+        "const fs=require('fs');\
+         const bytes=fs.readFileSync({wasm:?});\
+         const imports={{env:{{log_i64:()=>{{}},console_log:()=>{{}},dom_set_text:()=>{{}}}}}};\
+         WebAssembly.instantiate(bytes,imports).then(r=>{{\
+           process.stdout.write('main='+r.instance.exports.main().toString());\
+         }}).catch(err=>{{console.error('FAIL:'+err.message);process.exit(1)}});",
+        wasm = out.to_str().expect("out path")
+    );
+    std::fs::write(&runner, js).expect("write runner");
+
+    let node = Command::new("node")
+        .arg(runner.to_str().expect("runner path"))
+        .output()
+        .expect("run node");
+    assert!(
+        node.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let out_text = String::from_utf8_lossy(&node.stdout);
+    assert!(
+        out_text.contains(&format!("main={interp_main}")),
+        "WASM aggregate-args `main` must equal the interpreter (value semantics): {out_text}"
+    );
+}
+
+#[test]
+fn wasm_nested_aggregate_args_execution_parity_with_node() {
+    // The recursive deep-copy path: aggregates nested inside aggregates crossing
+    // call boundaries — a struct holding a struct, and an array of arrays. When a
+    // callee mutates a nested field/element of its parameter, the caller's copy
+    // must be untouched, which requires the copy-on-pass to recurse into nested
+    // mutable aggregates. `main` returns the interpreter-checked total.
+    let fixture = workspace_root().join("tests/fixtures/valid/wasm_aggregate_nested.lby");
+    let out = std::env::temp_dir().join("lullaby_wasm_aggregate_nested.wasm");
+    let emit = lullaby()
+        .args([
+            "wasm",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    let listing = stdout(&emit);
+    for name in ["outer_total", "wreck", "rows_sum", "wreck_rows", "main"] {
+        assert!(
+            listing.contains(&format!("compiled {name}")),
+            "expected `{name}` compiled: {listing}"
+        );
+    }
+
+    // Interpreter ground truth.
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp_main = stdout(&run).trim().to_string();
+    assert_eq!(interp_main, "32");
+
+    if !node_available() {
+        eprintln!("node not found on PATH; skipping WASM nested-aggregate execution parity");
+        return;
+    }
+
+    let runner = std::env::temp_dir().join("lullaby_wasm_aggregate_nested_runner.js");
+    let js = format!(
+        "const fs=require('fs');\
+         const bytes=fs.readFileSync({wasm:?});\
+         const imports={{env:{{log_i64:()=>{{}},console_log:()=>{{}},dom_set_text:()=>{{}}}}}};\
+         WebAssembly.instantiate(bytes,imports).then(r=>{{\
+           process.stdout.write('main='+r.instance.exports.main().toString());\
+         }}).catch(err=>{{console.error('FAIL:'+err.message);process.exit(1)}});",
+        wasm = out.to_str().expect("out path")
+    );
+    std::fs::write(&runner, js).expect("write runner");
+
+    let node = Command::new("node")
+        .arg(runner.to_str().expect("runner path"))
+        .output()
+        .expect("run node");
+    assert!(
+        node.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let out_text = String::from_utf8_lossy(&node.stdout);
+    assert!(
+        out_text.contains(&format!("main={interp_main}")),
+        "WASM nested-aggregate `main` must equal the interpreter (recursive value semantics): {out_text}"
+    );
+}
+
+#[test]
 fn wasm_fixed_width_integers_execution_parity_with_node() {
     // The fixed-width integer step: three fixtures whose `main` returns `i64` but
     // whose bodies exercise the width-normalized operations (wrapping arithmetic,

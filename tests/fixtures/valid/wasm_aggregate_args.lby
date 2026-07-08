@@ -1,0 +1,35 @@
+struct Point
+    x i64
+    y i64
+
+fn sum_point p Point -> i64
+    p.x + p.y
+
+fn make_point a i64 b i64 -> Point
+    Point(a, b)
+
+fn first_of xs array<i64> -> i64
+    xs[0]
+
+fn bump xs array<i64> -> array<i64>
+    xs[0] += 100
+    xs[1] += 100
+    xs
+
+fn mutate_point p Point -> i64
+    p.x = 999
+    p.y = 999
+    p.x + p.y
+
+fn main -> i64
+    let taken i64 = sum_point(make_point(3, 4))
+    let made Point = make_point(10, 20)
+    let via_field i64 = made.x + made.y
+    let arr array<i64> = [1, 2, 3]
+    let bumped array<i64> = bump(arr)
+    let arr_untouched i64 = first_of(arr)
+    let bumped_first i64 = bumped[0]
+    let p Point = Point(5, 6)
+    let ignored i64 = mutate_point(p)
+    let caller_unchanged i64 = p.x + p.y
+    taken + via_field + arr_untouched + bumped_first + caller_unchanged

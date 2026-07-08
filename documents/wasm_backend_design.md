@@ -124,11 +124,41 @@ a pointer (nested strings/structs/arrays).
   before its body. This covers the built-in `option<T>`/`result<T, E>` when
   `T`/`E` are scalar and user enums whose every variant payload is scalar.
 
-**Deferred:** enums with a **heap** payload (`string`/`list`/`array`/`map` —
-notably `result<i64, string>`); the growable `list`/`map` collections; runtime
-string construction; and a free-list allocator (`__alloc` never frees this
-increment). Functions using any of these are skipped with a reason and still run
-on the interpreters.
+### Aggregates across call boundaries (landed)
+
+A `struct`, fixed `array`, or supported `enum` may be a function **parameter, a
+return value, or a call argument** — not just a local. At the WASM level the `i32`
+pointer is passed and returned directly, so the ABI is the pointer itself.
+
+To preserve Lullaby **value semantics** (an aggregate passed by value is an
+independent snapshot; a callee mutating its parameter must not change the caller's
+copy), each **mutable** aggregate argument is **deep-copied at the call site**
+before the `call`: a fresh record is `__alloc`'d and every word copied, recursing
+into nested mutable aggregate fields/elements. This mirrors the interpreters'
+recursive `Value::clone` bit-for-bit. Specifics:
+
+- **struct:** copy each field slot; a scalar/string slot is copied word-for-word,
+  a nested mutable aggregate slot is itself deep-copied.
+- **array:** read the `[len]` header, `__alloc` a fresh `[len][slots]` block, store
+  the header, and copy each element in a runtime loop (recursing for nested
+  aggregate elements).
+- **enum:** copy the `[tag][payload slots]` record word-for-word — enum payloads
+  are always scalar, so a flat copy is an exact deep copy.
+- **string:** NOT copied. Strings are immutable, so sharing the pointer is already
+  value-equivalent to the interpreters' clone.
+
+A **returned** aggregate is the callee's own fresh record, so no extra copy is
+needed on return. Fixtures `wasm_aggregate_args.lby` and
+`wasm_aggregate_nested.lby` exercise struct/array take+return plus value-semantics
+probes (a callee mutates its parameter; the caller's copy is verified unchanged),
+node-gated against the interpreter.
+
+**Deferred:** aggregates containing heap values the backend does not lay out
+(`list`/`map`, or an enum with a heap payload); enums with a **heap** payload
+(`string`/`list`/`array`/`map` — notably `result<i64, string>`); the growable
+`list`/`map` collections; runtime string construction; and a free-list allocator
+(`__alloc` never frees this increment). Functions using any of these are skipped
+with a reason and still run on the interpreters.
 
 ## First increment — the scalar subset
 
