@@ -92,6 +92,25 @@ These three primitives are pure and deterministic, and produce identical results
 (including the invalid-UTF-8 `err`) on the AST, IR, and bytecode backends. A
 wrong argument type or arity reports the string-builtin family code `L0375`.
 
+### Number parsing
+
+- `parse_i64(s string) -> result<i64, string>` — parse `s` as a base-10 signed
+  64-bit integer, returning `ok(n)` on success and `err(message)` on any failure
+  (empty string, non-numeric text, or a value outside the `i64` range). It never
+  panics. Leading/trailing whitespace is **not** trimmed — a padded string such
+  as `" 42"` is an `err`; call `trim` first if you want to accept surrounding
+  whitespace. An optional leading `+`/`-` sign is accepted.
+- `parse_f64(s string) -> result<f64, string>` — parse `s` as an `f64`,
+  returning `ok(x)` on success and `err(message)` on failure. It accepts the same
+  forms Rust's float parser does, including `1.5`, `-2`, `1e3`, `inf`/`-inf`, and
+  `nan`; whitespace is likewise not trimmed.
+
+Both return a `result` unwrapped with `match` like any other, and the `err`
+message is a fixed, backend-independent string (`` cannot parse `<s>` as i64 ``
+or `` ... as f64 ``), so the `ok`/`err` outcome and the message text are
+byte-for-byte identical on the AST, IR, and bytecode backends. A wrong argument
+type or arity reports the string-builtin family code `L0375`.
+
 ## Math
 
 `abs`, `min`, `max`, `pow` are type-directed over `i64` and `f64` (matching

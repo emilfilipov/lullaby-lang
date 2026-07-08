@@ -3796,6 +3796,8 @@ impl<'a> IrRuntime<'a> {
             "to_bytes" => Self::builtin_to_bytes(args),
             "from_bytes" => Self::builtin_from_bytes(args),
             "byte_len" => Self::builtin_byte_len(args),
+            "parse_i64" => Self::builtin_parse_i64(args),
+            "parse_f64" => Self::builtin_parse_f64(args),
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
@@ -5896,6 +5898,37 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::I64(text.len() as i64))
     }
 
+    /// `parse_i64(s string) -> result<i64, string>`: parse `s` as a base-10
+    /// signed 64-bit integer via Rust `str::parse::<i64>()`, returning `ok(n)`
+    /// on success and `err(message)` on any failure (empty, non-numeric, or out
+    /// of range). Whitespace is not trimmed, so a padded string is an `err`. The
+    /// error message is a fixed string so every backend matches byte-for-byte.
+    fn builtin_parse_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parse_i64", 1, args.len()))?;
+        let text = expect_string("parse_i64", text)?;
+        Ok(result_value(match text.parse::<i64>() {
+            Ok(value) => Ok(Value::I64(value)),
+            Err(_) => Err(Value::String(format!("cannot parse `{text}` as i64"))),
+        }))
+    }
+
+    /// `parse_f64(s string) -> result<f64, string>`: parse `s` as an `f64` via
+    /// Rust `str::parse::<f64>()`, returning `ok(x)` on success and
+    /// `err(message)` on failure. The error message is a fixed string so every
+    /// backend matches byte-for-byte.
+    fn builtin_parse_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parse_f64", 1, args.len()))?;
+        let text = expect_string("parse_f64", text)?;
+        Ok(result_value(match text.parse::<f64>() {
+            Ok(value) => Ok(Value::F64(value)),
+            Err(_) => Err(Value::String(format!("cannot parse `{text}` as f64"))),
+        }))
+    }
+
     fn builtin_abs(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -7531,9 +7564,10 @@ impl<'a> Lowerer<'a> {
             "tcp_read" | "udp_recv" | "http_get" | "http_post" | "from_bytes" => {
                 generic_type("result", &[TypeRef::new("string"), TypeRef::new("string")])
             }
-            "tcp_write" | "udp_send_to" => {
+            "tcp_write" | "udp_send_to" | "parse_i64" => {
                 generic_type("result", &[TypeRef::new("i64"), TypeRef::new("string")])
             }
+            "parse_f64" => generic_type("result", &[TypeRef::new("f64"), TypeRef::new("string")]),
             "read_file" | "sys_output" | "to_string" | "substring" | "join" | "trim"
             | "replace" | "upper" | "lower" | "repeat" => TypeRef::new("string"),
             "read_lines" | "list_dir" => {

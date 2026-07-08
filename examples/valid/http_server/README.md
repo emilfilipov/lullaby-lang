@@ -8,8 +8,9 @@ thin entry program wires them to the socket loop.
 ## Files
 
 - `http.lby` — the reusable framework module (`pub` functions):
-  - `parse_i64` / `digit_value` — read numeric program arguments (there is no
-    numeric-parse builtin yet, so this is done char by char).
+  - `parse_uint` / `digit_value` — read non-negative numeric program arguments
+    char by char (a hand-rolled parser that returns a plain `i64`, distinct from
+    the built-in `parse_i64`, which returns a `result<i64, string>`).
   - `request_line` / `request_path` — parse the request line
     (`METHOD PATH VERSION`) using `split` on CRLF/LF and then on spaces.
   - `route_body` / `route_status` — the router seed: map a path to a body and a

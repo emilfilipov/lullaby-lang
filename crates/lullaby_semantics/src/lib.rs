@@ -3131,6 +3131,22 @@ impl<'a> Checker<'a> {
                 self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
                 Some(TypeRef::new("i64"))
             }
+            "parse_i64" => {
+                // `parse_i64(s string) -> result<i64, string>`: parse `s` as a
+                // base-10 signed 64-bit integer, yielding `err(message)` on any
+                // failure (empty, non-numeric, or out of range). Whitespace is
+                // not trimmed, so a padded string is an `err`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(result_type(&TypeRef::new("i64"), &TypeRef::new("string")))
+            }
+            "parse_f64" => {
+                // `parse_f64(s string) -> result<f64, string>`: parse `s` as an
+                // `f64`, yielding `err(message)` on failure.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(result_type(&TypeRef::new("f64"), &TypeRef::new("string")))
+            }
             "abs" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let arg_type = self.check_expr(&args[0], scope, function)?;
@@ -6270,6 +6286,63 @@ mod tests {
             "    match from_bytes(\"not bytes\")\n",
             "        ok(s) -> len(s)\n",
             "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn parse_number_builtins_type_check() {
+        // `parse_i64` -> `result<i64, string>` and `parse_f64` ->
+        // `result<f64, string>`, unwrapped with `match` in a helper's tail.
+        validate_source(concat!(
+            "fn to_int s string -> i64\n",
+            "    match parse_i64(s)\n",
+            "        ok(n) -> n\n",
+            "        err(m) -> 0 - len(m)\n",
+            "fn to_float s string -> f64\n",
+            "    match parse_f64(s)\n",
+            "        ok(x) -> x\n",
+            "        err(m) -> 0.0\n",
+            "fn f -> f64\n",
+            "    to_float(\"3.5\") + sqrt(to_float(\"4.0\"))\n",
+            "fn g -> i64\n",
+            "    to_int(\"42\")\n",
+        ))
+        .expect("parse_i64/parse_f64 builtins type-check");
+    }
+
+    #[test]
+    fn catches_parse_i64_argument_type_mismatch() {
+        // `parse_i64` requires a `string` argument; an `i64` is rejected with
+        // the string-builtin family code `L0375`.
+        let diagnostics = validate_source(concat!(
+            "fn bad -> i64\n",
+            "    match parse_i64(7)\n",
+            "        ok(n) -> n\n",
+            "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn catches_parse_f64_argument_type_mismatch() {
+        // `parse_f64` requires a `string` argument; an `i64` is rejected with
+        // the string-builtin family code `L0375`.
+        let diagnostics = validate_source(concat!(
+            "fn bad -> f64\n",
+            "    match parse_f64(7)\n",
+            "        ok(x) -> x\n",
+            "        err(m) -> 0.0\n",
         ))
         .expect_err("semantic");
         assert!(
