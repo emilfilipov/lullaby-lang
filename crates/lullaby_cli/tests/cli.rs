@@ -3706,6 +3706,95 @@ fn native_aggregates_execution_parity_when_linkable() {
     );
 }
 
+/// Best-effort execution parity for the native **aggregate-boundary** ABI:
+/// native-compile programs that pass, return, and mutate scalar-field aggregates
+/// (structs, fixed arrays, scalar-payload enums) across function boundaries, then
+/// assert each linked `.exe`'s exit code equals the interpreter's `main` result
+/// (mod 256). This exercises the hidden-return-pointer / by-pointer-argument /
+/// copy-in ABI end to end, including value semantics (a callee that mutates its
+/// aggregate parameter must not change the caller's copy). Gated on `rust-lld` +
+/// `kernel32.lib` like the other native parity tests; the compile-not-skip and
+/// interpreter-truth assertions always run.
+#[test]
+fn native_aggregate_boundary_execution_parity_when_linkable() {
+    for (name, funcs) in [
+        (
+            "native_aggregate_params",
+            &["taxicab", "make_point", "shift", "mutate_local"][..],
+        ),
+        (
+            "native_aggregate_array",
+            &["sum_array", "doubled", "mutate_array"][..],
+        ),
+        (
+            "native_aggregate_enum",
+            &["classify", "unwrap_or", "direct"][..],
+        ),
+        (
+            "native_aggregate_value_semantics",
+            &["clobber_struct", "clobber_array"][..],
+        ),
+    ] {
+        let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
+        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "--verbose",
+                "-o",
+                out.to_str().expect("out path"),
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(emit.status.success(), "{}: {}", name, stderr(&emit));
+        // Every aggregate-boundary function compiles natively (not skipped): the
+        // by-pointer parameter/return ABI is in the native subset.
+        for func in funcs {
+            assert!(
+                stdout(&emit).contains(&format!("compiled {func}")),
+                "{name}: expected `{func}` compiled natively: {}",
+                stdout(&emit)
+            );
+        }
+        assert!(
+            stdout(&emit).contains("compiled main"),
+            "{name}: expected `main` compiled: {}",
+            stdout(&emit)
+        );
+        assert!(
+            !stdout(&emit).contains("skipped"),
+            "{name}: no aggregate-boundary function should be skipped: {}",
+            stdout(&emit)
+        );
+
+        // Interpreter ground truth for `main`.
+        let run = lullaby()
+            .args(["run", fixture.to_str().expect("fixture path")])
+            .output()
+            .expect("run cli");
+        assert!(run.status.success(), "{}: {}", name, stderr(&run));
+        let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+
+        if rust_lld_path().is_none() || !kernel32_available() {
+            eprintln!(
+                "rust-lld and/or kernel32.lib not available; skipping {name} link+run parity"
+            );
+            continue;
+        }
+
+        assert!(out.is_file(), "expected linked exe at {}", out.display());
+        let exe = Command::new(&out).output().expect("run native exe");
+        let exit = exe.status.code().expect("native exit code");
+        assert_eq!(
+            exit,
+            (interp.rem_euclid(256)) as i32,
+            "{name}: native exit code must equal the interpreter result (mod 256)"
+        );
+    }
+}
+
 /// Best-effort execution parity for the native enum + `match` subset:
 /// native-compile a program that builds `option`/`result`/user enum locals and
 /// matches over them (tag dispatch + scalar payload binding), then assert the

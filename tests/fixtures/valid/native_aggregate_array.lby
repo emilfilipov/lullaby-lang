@@ -1,0 +1,35 @@
+fn sum_array xs array<i64> -> i64
+    let total i64 = 0
+    for i from 0 to len(xs) - 1
+        total += xs[i]
+    total
+
+fn doubled xs array<i64> -> array<i64>
+    let out array<i64> = [0, 0, 0, 0]
+    for i from 0 to len(xs) - 1
+        out[i] = xs[i] * 2
+    out
+
+fn mutate_array xs array<i64> -> i64
+    xs[0] = xs[0] + 1000
+    xs[0]
+
+fn main -> i64
+    let data array<i64> = [1, 2, 3, 4]
+    let s i64 = sum_array(data)
+    let d array<i64> = doubled(data)
+    let ds i64 = d[0] + d[1] + d[2] + d[3]
+    let touched i64 = mutate_array(data)
+    let after i64 = sum_array(data)
+    # s=10, ds=20 (returned array read back), touched=1001 (callee copy),
+    # after=10 (value semantics: caller's array unchanged). Encode as < 256.
+    let ok i64 = 0
+    if s == 10
+        ok += 1
+    if ds == 20
+        ok += 2
+    if touched == 1001
+        ok += 4
+    if after == 10
+        ok += 8
+    ok

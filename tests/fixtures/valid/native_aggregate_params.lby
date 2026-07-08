@@ -1,0 +1,37 @@
+struct Point
+    x i64
+    y i64
+
+fn taxicab p Point -> i64
+    p.x + p.y
+
+fn make_point a i64 b i64 -> Point
+    Point(a, b)
+
+fn shift p Point d i64 -> Point
+    Point(p.x + d, p.y + d)
+
+fn mutate_local p Point -> i64
+    p.x = p.x + 100
+    p.x + p.y
+
+fn main -> i64
+    let base Point = make_point(3, 4)
+    let moved Point = shift(base, 10)
+    let a i64 = taxicab(base)
+    let b i64 = taxicab(moved)
+    let unchanged i64 = mutate_local(base)
+    let still i64 = taxicab(base)
+    # a=7, b=27, unchanged=107 (callee's own copy), still=7 (value semantics).
+    # Encode the four results into a single value < 256 so the native process
+    # exit code compares directly to the interpreter result.
+    let ok i64 = 0
+    if a == 7
+        ok += 1
+    if b == 27
+        ok += 2
+    if unchanged == 107
+        ok += 4
+    if still == 7
+        ok += 8
+    ok

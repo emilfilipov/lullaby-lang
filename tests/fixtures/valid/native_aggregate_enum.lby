@@ -1,0 +1,21 @@
+fn classify n i64 -> option<i64>
+    if n > 0
+        return some(n * 10)
+    none
+
+fn unwrap_or o option<i64> d i64 -> i64
+    match o
+        some(v) -> v
+        none -> d
+
+fn direct n i64 -> i64
+    match classify(n)
+        some(v) -> v + 1
+        none -> 0
+
+fn main -> i64
+    let a option<i64> = classify(5)
+    let b option<i64> = classify(0)
+    let x i64 = unwrap_or(a, 100)
+    let y i64 = unwrap_or(b, 100)
+    x + y + direct(3) + direct(0)
