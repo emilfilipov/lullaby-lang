@@ -37,6 +37,9 @@ From the portable package root:
   `& ~flag` to clear, and `^` to toggle, rendered as an `rwx` string.
 - `valid/bits.lby`: bit tricks with the bitwise operators — population count,
   power-of-two test (`n & (n - 1)`), and byte extraction (`(x >> 8) & 255`).
+- `valid/utf8_bytes.lby`: encodes strings to UTF-8 bytes with `to_bytes`,
+  round-trips them back with `from_bytes` (matching on the `result`), and shows
+  the char-count vs `byte_len` distinction for non-ASCII text.
 - `invalid/int_float_mismatch.lby`: mixes `i64` and `f64` in one expression
   (`let x i64 = 1 + 2.0`); `lullaby check` reports diagnostic `L0307` (operands
   of `+` must share a type) and exits non-zero.
