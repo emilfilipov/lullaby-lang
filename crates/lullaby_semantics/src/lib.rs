@@ -3433,6 +3433,18 @@ impl<'a> Checker<'a> {
                 }
                 Some(TypeRef::new("i64"))
             }
+            // Float conversions: `to_f32` rounds an `f64` to `f32`; `to_f64`
+            // widens an `f32` back to `f64`. No implicit float coercion exists.
+            "to_f32" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "f64", scope, function)?;
+                Some(TypeRef::new("f32"))
+            }
+            "to_f64" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "f32", scope, function)?;
+                Some(TypeRef::new("f64"))
+            }
             "env" => {
                 self.expect_process_arg_count(name, args, 1, call_span, function)?;
                 self.expect_process_arg(name, 1, &args[0], "string", scope, function)?;
@@ -5070,7 +5082,7 @@ fn same_numeric_type(left: &Option<TypeRef>, right: &Option<TypeRef>) -> Option<
 fn is_numeric_type_name(name: &str) -> bool {
     matches!(
         name,
-        "i64" | "f64" | "i8" | "i16" | "i32" | "u16" | "u32" | "u64" | "isize" | "usize"
+        "i64" | "f64" | "f32" | "i8" | "i16" | "i32" | "u16" | "u32" | "u64" | "isize" | "usize"
     )
 }
 
@@ -7556,6 +7568,38 @@ mod tests {
             "    to_i64(a + b)\n",
         );
         validate_source(source).expect("i32/u32 arithmetic and conversions type-check");
+    }
+
+    #[test]
+    fn f32_arithmetic_and_conversions_type_check() {
+        // f32 values arithmetic and compare among themselves and convert to and
+        // from f64 through `to_f32`/`to_f64`; f32 never mixes with f64 directly.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a f32 = to_f32(1.5)\n",
+            "    let b f32 = to_f32(2.5)\n",
+            "    let sum f32 = a + b\n",
+            "    if to_f64(sum) > 3.0\n",
+            "        return 1\n",
+            "    0\n",
+        );
+        validate_source(source).expect("f32 arithmetic and conversions type-check");
+    }
+
+    #[test]
+    fn rejects_f32_f64_mixed_operands_with_l0307() {
+        // No implicit float coercion: `f32 + f64` has no common numeric type.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a f32 = to_f32(1.0)\n",
+            "    let bad f32 = a + 2.0\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("f32 + f64 must be rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

@@ -3783,6 +3783,8 @@ impl<'a> IrRuntime<'a> {
             "to_isize" => Self::builtin_to_int("to_isize", args, IntKind::Isize),
             "to_usize" => Self::builtin_to_int("to_usize", args, IntKind::Usize),
             "to_i64" => Self::builtin_to_i64(args),
+            "to_f32" => Self::builtin_to_f32(args),
+            "to_f64" => Self::builtin_to_f64(args),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
@@ -4321,6 +4323,33 @@ impl<'a> IrRuntime<'a> {
                 BinaryOp::Subtract => Value::F64(l - r),
                 BinaryOp::Multiply => Value::F64(l * r),
                 BinaryOp::Divide => Value::F64(l / r),
+                BinaryOp::Equal => Value::Bool(l == r),
+                BinaryOp::NotEqual => Value::Bool(l != r),
+                BinaryOp::Less => Value::Bool(l < r),
+                BinaryOp::LessEqual => Value::Bool(l <= r),
+                BinaryOp::Greater => Value::Bool(l > r),
+                BinaryOp::GreaterEqual => Value::Bool(l >= r),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("logical ops short-circuit in eval_expr")
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops require i64 operands (rejected by semantics)")
+                }
+            });
+        }
+        // 32-bit float arithmetic/comparison, identical to the AST runtime; the
+        // native f32 storage rounds each result to f32 precision.
+        if let (Value::F32(l), Value::F32(r)) = (&left, &right) {
+            let (l, r) = (*l, *r);
+            return Ok(match op {
+                BinaryOp::Add => Value::F32(l + r),
+                BinaryOp::Subtract => Value::F32(l - r),
+                BinaryOp::Multiply => Value::F32(l * r),
+                BinaryOp::Divide => Value::F32(l / r),
                 BinaryOp::Equal => Value::Bool(l == r),
                 BinaryOp::NotEqual => Value::Bool(l != r),
                 BinaryOp::Less => Value::Bool(l < r),
@@ -5016,6 +5045,28 @@ impl<'a> IrRuntime<'a> {
             other => Err(RuntimeError::new(
                 "L0407",
                 format!("to_i64 expects a fixed-width integer but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `to_f32(x f64) -> f32`: round an `f64` to the nearest `f32`.
+    fn builtin_to_f32(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f32", 1, args.len()))?;
+        Ok(Value::F32(value.as_f64()? as f32))
+    }
+
+    /// `to_f64(x f32) -> f64`: widen an `f32` to `f64` (exact).
+    fn builtin_to_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f64", 1, args.len()))?;
+        match value {
+            Value::F32(value) => Ok(Value::F64(f64::from(value))),
+            other => Err(RuntimeError::new(
+                "L0421",
+                format!("to_f64 expects an f32 but got `{other}`"),
             )),
         }
     }
@@ -7925,6 +7976,7 @@ impl<'a> Lowerer<'a> {
             "to_u64" => TypeRef::new("u64"),
             "to_isize" => TypeRef::new("isize"),
             "to_usize" => TypeRef::new("usize"),
+            "to_f32" => TypeRef::new("f32"),
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
@@ -8021,7 +8073,7 @@ impl<'a> Lowerer<'a> {
             "atomic_load" | "atomic_swap" | "atomic_cas" | "atomic_add" | "atomic_sub"
             | "atomic_and" | "atomic_or" | "atomic_xor" => TypeRef::new("i64"),
             "sqrt" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan" | "atan" | "exp" | "ln"
-            | "log10" | "atan2" => TypeRef::new("f64"),
+            | "log10" | "atan2" | "to_f64" => TypeRef::new("f64"),
             // Bit intrinsics on i64: rotations, popcount, leading/trailing zero
             // counts, and byte swap all return i64.
             "rotate_left" | "rotate_right" | "count_ones" | "leading_zeros" | "trailing_zeros"

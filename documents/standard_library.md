@@ -20,6 +20,7 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `u16` / `u32` / `u64` | unsigned fixed-width integers (wrapping; from `to_u16`/`to_u32`/`to_u64`) |
 | `isize` / `usize` | pointer-sized integers (64-bit on current targets; from `to_isize`/`to_usize`) |
 | `f64` | 64-bit IEEE-754 float (literals contain a `.`) |
+| `f32` | 32-bit IEEE-754 float (rounds each op to single precision; from `to_f32`) |
 | `bool` | `true` / `false` |
 | `string` | UTF-8 text |
 | `char` | a single Unicode scalar (literal `'a'`) |
@@ -48,6 +49,8 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `to_u16` / `to_u32` / `to_u64` | `to_u<N>(x i64) -> u<N>` | wrapping reinterpret into unsigned width |
 | `to_isize` / `to_usize` | `to_isize/to_usize(x i64) -> isize/usize` | pointer-sized (64-bit) reinterpret |
 | `to_i64` | `to_i64(x) -> i64` | widen any fixed-width integer back to `i64` |
+| `to_f32` | `to_f32(x f64) -> f32` | round an `f64` to single precision |
+| `to_f64` | `to_f64(x f32) -> f64` | widen an `f32` to `f64` (exact) |
 
 ### Fixed-width integers
 
@@ -67,6 +70,15 @@ but a negative value for a signed one — `to_u32(0 - 1)` is `4294967295` while
 `to_i32(0 - 1)` is `-1`, and `to_u64(0 - 1) / to_u64(2)` divides on the unsigned
 magnitude. Every backend normalizes at identical points, so results agree
 bit-for-bit.
+
+### 32-bit floats
+
+`f32` is a single-precision float alongside the default `f64`. Like the integer
+widths, it never mixes with `f64` in one expression without an explicit
+conversion (`L0307`): `to_f32(x f64)` rounds to single precision and
+`to_f64(x f32)` widens back exactly. Every `f32` operation is rounded to `f32`
+precision, so it loses resolution an `f64` keeps — e.g. `2^24 + 1` rounds back
+to `2^24` in `f32` but is exact in `f64`.
 
 ## Character classification
 

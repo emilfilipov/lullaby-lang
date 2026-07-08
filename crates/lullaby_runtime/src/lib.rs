@@ -21,6 +21,7 @@ pub fn value_type_name(value: &Value) -> String {
         Value::I64(_) => "i64".to_string(),
         Value::Int { ty, .. } => ty.type_name().to_string(),
         Value::F64(_) => "f64".to_string(),
+        Value::F32(_) => "f32".to_string(),
         Value::Bool(_) => "bool".to_string(),
         Value::String(_) => "string".to_string(),
         Value::Char(_) => "char".to_string(),
@@ -239,6 +240,10 @@ pub enum Value {
         ty: IntKind,
     },
     F64(f64),
+    /// A 32-bit IEEE-754 float. Stored as a native `f32`, so every operation is
+    /// inherently rounded to `f32` precision (the required normalization); a
+    /// distinct `f32` never mixes with an `f64` without an explicit conversion.
+    F32(f32),
     Bool(bool),
     String(String),
     /// A Unicode scalar value.
@@ -302,6 +307,7 @@ impl fmt::Display for Value {
                 }
             }
             Self::F64(value) => write!(formatter, "{value}"),
+            Self::F32(value) => write!(formatter, "{value}"),
             Self::Bool(value) => write!(formatter, "{value}"),
             Self::String(value) => write!(formatter, "{value}"),
             Self::Char(value) => write!(formatter, "{value}"),
@@ -1184,6 +1190,8 @@ impl<'a> Runtime<'a> {
             "to_isize" => Self::builtin_to_int("to_isize", args, IntKind::Isize),
             "to_usize" => Self::builtin_to_int("to_usize", args, IntKind::Usize),
             "to_i64" => Self::builtin_to_i64(args),
+            "to_f32" => Self::builtin_to_f32(args),
+            "to_f64" => Self::builtin_to_f64(args),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
@@ -2617,6 +2625,33 @@ impl<'a> Runtime<'a> {
                 }
             });
         }
+        // 32-bit float arithmetic/comparison, IEEE 754 like f64. Storing a native
+        // f32 rounds each result to f32 precision automatically.
+        if let (Value::F32(l), Value::F32(r)) = (&left, &right) {
+            let (l, r) = (*l, *r);
+            return Ok(match op {
+                BinaryOp::Add => Value::F32(l + r),
+                BinaryOp::Subtract => Value::F32(l - r),
+                BinaryOp::Multiply => Value::F32(l * r),
+                BinaryOp::Divide => Value::F32(l / r),
+                BinaryOp::Equal => Value::Bool(l == r),
+                BinaryOp::NotEqual => Value::Bool(l != r),
+                BinaryOp::Less => Value::Bool(l < r),
+                BinaryOp::LessEqual => Value::Bool(l <= r),
+                BinaryOp::Greater => Value::Bool(l > r),
+                BinaryOp::GreaterEqual => Value::Bool(l >= r),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("logical ops short-circuit in eval_expr")
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops require i64 operands (rejected by semantics)")
+                }
+            });
+        }
         // Fixed-width integer arithmetic/comparison. Both operands carry the same
         // width/signedness tag (the type checker forbids mixing widths); the
         // arithmetic result is wrap-normalized back into that width, and ordering
@@ -3288,6 +3323,28 @@ impl<'a> Runtime<'a> {
             other => Err(RuntimeError::new(
                 "L0407",
                 format!("to_i64 expects a fixed-width integer but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `to_f32(x f64) -> f32`: round an `f64` to the nearest `f32`.
+    fn builtin_to_f32(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f32", 1, args.len()))?;
+        Ok(Value::F32(value.as_f64()? as f32))
+    }
+
+    /// `to_f64(x f32) -> f64`: widen an `f32` to `f64` (exact).
+    fn builtin_to_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f64", 1, args.len()))?;
+        match value {
+            Value::F32(value) => Ok(Value::F64(f64::from(value))),
+            other => Err(RuntimeError::new(
+                "L0421",
+                format!("to_f64 expects an f32 but got `{other}`"),
             )),
         }
     }

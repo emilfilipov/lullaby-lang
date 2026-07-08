@@ -1,0 +1,24 @@
+# 32-bit floats: f32 arithmetic rounds to single precision, so it loses
+# resolution an f64 keeps. 2^24 is the largest integer with a unique f32; adding
+# 1 rounds back to 2^24 in f32 but is exact in f64. Deterministic i64 (3) on the
+# AST, IR, and bytecode backends.
+fn main -> i64
+    let total i64 = 0
+
+    # f32 cannot represent 2^24 + 1, so the increment rounds away.
+    let big f32 = to_f32(16777216.0)
+    let bumped f32 = big + to_f32(1.0)
+    if bumped == big
+        total = total + 1
+
+    # f64 keeps the extra bit of precision.
+    let big64 f64 = 16777216.0
+    if big64 + 1.0 > big64
+        total = total + 1
+
+    # Basic f32 arithmetic and comparison, plus a round-trip widening to f64.
+    let half f32 = to_f32(1.0) / to_f32(2.0)
+    if to_f64(half) < 1.0
+        total = total + 1
+
+    total

@@ -468,6 +468,32 @@ fn main -> i64
           <li><code>to_i64(x)</code> widens any fixed-width integer back to <code>i64</code>; the bit pattern is reinterpreted, so a <code>u64</code> above <code>i64::MAX</code> reads as a negative <code>i64</code>.</li>
         </ul>
         <p>Arithmetic (<code>+ - * /</code>) on a fixed-width integer <strong>wraps</strong> modulo the type width — total and deterministic, never a trap — and division and comparison respect signedness. The same bit pattern reads as a large magnitude for an unsigned type but a negative value for a signed one: <code>to_u32(0 - 1)</code> is <code>4294967295</code>, while <code>to_i32(0 - 1)</code> is <code>-1</code>, and <code>to_u64(0 - 1) / to_u64(2)</code> divides on the unsigned magnitude. Every backend normalizes at the same points, so results agree bit-for-bit.</p>
+        <h3>32-bit floats</h3>
+        <p>Alongside the default <code>f64</code>, Lullaby has the single-precision float <code>f32</code>. As with the integer widths, an <code>f32</code> never mixes with an <code>f64</code> in one arithmetic or comparison expression (mixing is an <code>L0307</code> type error): <code>to_f32(x f64)</code> rounds an <code>f64</code> to single precision and <code>to_f64(x f32)</code> widens back exactly. Every <code>f32</code> operation is rounded to <code>f32</code> precision, so it loses resolution an <code>f64</code> keeps — <code>2^24 + 1</code> rounds back to <code>2^24</code> in <code>f32</code> but is exact in <code>f64</code>.</p>
+        <pre data-fixture="tests/fixtures/valid/run_f32.lby" data-mode="run"><code># 32-bit floats: f32 arithmetic rounds to single precision, so it loses
+# resolution an f64 keeps. 2^24 is the largest integer with a unique f32; adding
+# 1 rounds back to 2^24 in f32 but is exact in f64. Deterministic i64 (3) on the
+# AST, IR, and bytecode backends.
+fn main -> i64
+    let total i64 = 0
+
+    # f32 cannot represent 2^24 + 1, so the increment rounds away.
+    let big f32 = to_f32(16777216.0)
+    let bumped f32 = big + to_f32(1.0)
+    if bumped == big
+        total = total + 1
+
+    # f64 keeps the extra bit of precision.
+    let big64 f64 = 16777216.0
+    if big64 + 1.0 &gt; big64
+        total = total + 1
+
+    # Basic f32 arithmetic and comparison, plus a round-trip widening to f64.
+    let half f32 = to_f32(1.0) / to_f32(2.0)
+    if to_f64(half) &lt; 1.0
+        total = total + 1
+
+    total</code></pre>
         <pre data-fixture="tests/fixtures/valid/run_int_widths.lby" data-mode="run"><code># Fixed-width integer lattice (i32/u32): wrapping arithmetic, signed vs
 # unsigned comparison, and conversions to/from i64. Every operation is
 # width-normalized identically on the AST, IR, and bytecode backends, so this
