@@ -846,7 +846,7 @@ pub fn emit_alpha1_native_program_with_debug(
     let mut skipped: Vec<NativeSkippedFunction> = Vec::new();
     let mut eligible_names: Vec<String> = Vec::new();
     for function in &module.functions {
-        match native_signature_eligibility(function) {
+        match native_signature_eligibility(function, &module.structs, &module.enums) {
             Ok(()) => eligible_names.push(function.name.clone()),
             Err(reason) => skipped.push(NativeSkippedFunction {
                 name: function.name.clone(),
@@ -880,12 +880,56 @@ pub fn emit_alpha1_native_program_with_debug(
         // drops a function also drops any strings only it referenced.
         let mut strings = StringPool::default();
 
+        // Infer array lengths for every eligible function's array-typed signature
+        // slots (fixed arrays carry no length in their `array<T>` type), then
+        // compute the native signatures (parameter + return layouts). A function
+        // whose array slot cannot be sized consistently — or that would call a
+        // function whose signature failed — is demoted and the loop retries.
+        let mut array_lengths_by_fn: HashMap<String, ArrayLengths> = HashMap::new();
+        let mut signatures: HashMap<String, NativeSignature> = HashMap::new();
         for name in &eligible_names {
             let function = module
                 .functions
                 .iter()
                 .find(|f| &f.name == name)
                 .expect("eligible name exists");
+            let inference =
+                infer_array_lengths(function, module, &eligible_names).and_then(|lengths| {
+                    let sig = compute_native_signature(
+                        function,
+                        &module.structs,
+                        &module.enums,
+                        &lengths,
+                    )?;
+                    Ok((lengths, sig))
+                });
+            match inference {
+                Ok((lengths, sig)) => {
+                    array_lengths_by_fn.insert(name.clone(), lengths);
+                    signatures.insert(name.clone(), sig);
+                }
+                Err(reason) => {
+                    demoted = Some(NativeSkippedFunction {
+                        name: name.clone(),
+                        reason,
+                    });
+                    break;
+                }
+            }
+        }
+        if let Some(demoted) = demoted {
+            eligible_names.retain(|n| n != &demoted.name);
+            merge_native_skip(&mut skipped, demoted);
+            continue;
+        }
+
+        for name in &eligible_names {
+            let function = module
+                .functions
+                .iter()
+                .find(|f| &f.name == name)
+                .expect("eligible name exists");
+            let array_lengths = &array_lengths_by_fn[name];
             match lower_native_function(
                 function,
                 &callable,
@@ -893,6 +937,8 @@ pub fn emit_alpha1_native_program_with_debug(
                 &module.structs,
                 &module.enums,
                 &mut strings,
+                &signatures,
+                array_lengths,
             ) {
                 Ok(l) => lowered.push(l),
                 Err(reason) => {
@@ -970,31 +1016,429 @@ fn merge_native_skip(skips: &mut Vec<NativeSkippedFunction>, skip: NativeSkipped
     }
 }
 
-/// Whether a function's signature is entirely `i64` with at most four params
-/// (Win64 register arguments; stack args are deferred).
-fn native_signature_eligibility(function: &BytecodeFunction) -> Result<(), String> {
-    if function.params.len() > 4 {
+/// Whether a signature type (a parameter type or the return type) is native and
+/// whether it is an aggregate. A native **integer** scalar (`i64`/fixed-width/
+/// `bool`/`char`/`byte`) passes/returns in an integer register; an aggregate (a
+/// scalar-field struct, a fixed array of scalars, or a scalar-payload enum)
+/// passes/returns by pointer per the aggregate ABI.
+///
+/// A top-level **float** (`f64`/`f32`) scalar parameter or return is deferred: the
+/// call path routes every argument and the return through the integer registers,
+/// so a float scalar boundary would need XMM argument routing (`xmm0..3`), which
+/// is not implemented. Such a function skips gracefully. (Float payloads *inside*
+/// a by-pointer aggregate are fine — they are copied as raw bit-preserving words.)
+/// A heap-containing aggregate (`string`/`list`/`map`, or an aggregate whose
+/// element/field is heap) is also not native and skips gracefully.
+///
+/// Returns `Ok(true)` for an aggregate, `Ok(false)` for an integer scalar, and
+/// `Err` for a non-native / deferred type.
+fn native_signature_type_is_aggregate(
+    ty: &TypeRef,
+    structs: &[IrStructDef],
+    enums: &[IrEnumDef],
+) -> Result<bool, String> {
+    // A plain integer scalar is a register value, not an aggregate. It is
+    // resolvable by `resolve_native_type` but we classify it here directly so an
+    // `array<T>` (whose length is unknown from the type) is treated as an
+    // aggregate rather than the length error `resolve_native_type` raises.
+    if ty.name == "i64"
+        || fixed_int_kind(&ty.name).is_some()
+        || matches!(ty.name.as_str(), "bool" | "char" | "byte")
+    {
+        return Ok(false);
+    }
+    // A top-level float scalar boundary needs XMM argument routing (deferred).
+    if matches!(ty.name.as_str(), "f64" | "f32") {
         return Err(format!(
-            "native subset supports at most four i64 parameters; `{}` has {}",
-            function.name,
-            function.params.len()
+            "float scalar `{}` as a parameter/return needs XMM argument routing (deferred)",
+            ty.name
         ));
     }
-    for param in &function.params {
-        if param.ty.name != "i64" {
-            return Err(format!(
-                "parameter `{}` has non-i64 type `{}`",
-                param.name, param.ty.name
-            ));
-        }
+    // A fixed array parameter/return is an aggregate. Its element layout must be a
+    // native (non-heap) type; the length is not needed for the signature check
+    // (the callee copies whole words by count derived from the caller's value at
+    // the call site — see the call/return ABI), so we only validate the element.
+    if let Some(rest) = ty.name.strip_prefix("array<") {
+        let elem_name = rest.strip_suffix('>').unwrap_or(rest);
+        let elem_ty = TypeRef::new(elem_name);
+        // Recurse: the element must itself be a native scalar or native aggregate.
+        native_signature_type_is_aggregate(&elem_ty, structs, enums)?;
+        return Ok(true);
     }
-    if function.return_type.name != "i64" {
+    // A struct or scalar-payload enum resolves to an aggregate layout; a heap type
+    // (`string`/`list`/`map`) or a heap-containing aggregate fails to resolve and
+    // is rejected here so the function skips gracefully.
+    let native = resolve_native_type(ty, structs, enums)?;
+    match native {
+        NativeType::I64 | NativeType::F64 | NativeType::F32 => Ok(false),
+        NativeType::Struct { .. } | NativeType::Array { .. } | NativeType::Enum { .. } => Ok(true),
+    }
+}
+
+/// Whether a function's signature is native-eligible. Scalars (`i64`, the fixed-
+/// width integers, `bool`/`char`/`byte`, `f64`/`f32`) pass/return in a register;
+/// scalar-field aggregates (structs, fixed arrays of scalars, scalar-payload
+/// enums) pass/return **by pointer** (see the aggregate ABI). An aggregate return
+/// consumes one integer register for the hidden result pointer, so the number of
+/// *effective* register arguments (params + a hidden return pointer, if any) must
+/// be at most four; otherwise, and for any non-native (heap-containing) type, the
+/// function skips gracefully and runs on the interpreters.
+fn native_signature_eligibility(
+    function: &BytecodeFunction,
+    structs: &[IrStructDef],
+    enums: &[IrEnumDef],
+) -> Result<(), String> {
+    // Does the return type consume a hidden first integer-register argument?
+    let returns_aggregate =
+        native_signature_type_is_aggregate(&function.return_type, structs, enums).map_err(
+            |reason| {
+                format!(
+                    "return type `{}` is not in the native subset: {reason}",
+                    function.return_type.name
+                )
+            },
+        )?;
+
+    for param in &function.params {
+        native_signature_type_is_aggregate(&param.ty, structs, enums).map_err(|reason| {
+            format!(
+                "parameter `{}` type `{}` is not in the native subset: {reason}",
+                param.name, param.ty.name
+            )
+        })?;
+    }
+
+    // The hidden return pointer (if any) plus each parameter must fit in the four
+    // Win64 integer argument registers. `main`'s scalar `i64` return path is
+    // unaffected (no hidden pointer).
+    let effective_args = function.params.len() + usize::from(returns_aggregate);
+    if effective_args > 4 {
         return Err(format!(
-            "return type `{}` is not i64",
-            function.return_type.name
+            "native subset supports at most four register arguments; `{}` needs {} \
+             (including {} hidden return pointer)",
+            function.name,
+            effective_args,
+            usize::from(returns_aggregate)
         ));
     }
     Ok(())
+}
+
+// -- Array-length inference for signatures -----------------------------------
+//
+// A fixed array's length is absent from its `array<T>` type, so a function that
+// takes or returns one has its length inferred: a returned array's length comes
+// from the function's returned array value; a parameter array's length comes
+// from every call site's argument in that position, which must all agree. A
+// length that cannot be determined (or that disagrees across callers) demotes
+// the function so it runs on the interpreters rather than miscompiling.
+
+/// Compute a function's array-length environment: for each array-typed parameter
+/// and (if array-typed) the return slot, the concrete element count. A function
+/// with no array signature slots yields an empty map. An unsizable array slot is
+/// an error the caller turns into a skip.
+fn infer_array_lengths(
+    function: &BytecodeFunction,
+    module: &BytecodeModule,
+    eligible_names: &[String],
+) -> Result<ArrayLengths, String> {
+    let mut lengths = ArrayLengths::new();
+
+    // Return array: length taken from the function's returned array value(s).
+    if function.return_type.name.starts_with("array<") {
+        let len = infer_return_array_len(function).ok_or_else(|| {
+            format!(
+                "return array length of `{}` could not be inferred (return an array literal \
+                 or a fixed array local)",
+                function.name
+            )
+        })?;
+        lengths.insert(RETURN_ARRAY_KEY.to_string(), len);
+    }
+
+    // Parameter arrays: every call site's argument in that position must resolve
+    // to the same length. A function that is never called (e.g. an unreferenced
+    // helper) has no callers to size its array params, so it is demoted.
+    for (index, param) in function.params.iter().enumerate() {
+        if !param.ty.name.starts_with("array<") {
+            continue;
+        }
+        let mut found: Option<usize> = None;
+        let mut saw_call = false;
+        for caller in &module.functions {
+            if !eligible_names.contains(&caller.name) {
+                continue;
+            }
+            collect_call_arg_lengths(
+                &caller.instructions,
+                caller,
+                &function.name,
+                index,
+                &mut found,
+                &mut saw_call,
+            )?;
+        }
+        if !saw_call {
+            return Err(format!(
+                "parameter array `{}` of `{}` has no call site to infer its length from",
+                param.name, function.name
+            ));
+        }
+        let len = found.ok_or_else(|| {
+            format!(
+                "parameter array `{}` of `{}` could not be sized from its call sites",
+                param.name, function.name
+            )
+        })?;
+        lengths.insert(param.name.clone(), len);
+    }
+
+    Ok(lengths)
+}
+
+/// Infer the element count of a function's returned array from its returned
+/// array values (an explicit `return <arr>`, or a tail array expression). All
+/// returned arrays must agree; a disagreement or an unsizable value yields `None`.
+fn infer_return_array_len(function: &BytecodeFunction) -> Option<usize> {
+    let mut result: Option<usize> = None;
+    fn visit(
+        body: &[BytecodeInstruction],
+        function: &BytecodeFunction,
+        result: &mut Option<usize>,
+        ok: &mut bool,
+    ) {
+        for stmt in body {
+            match stmt {
+                BytecodeInstruction::Return(Some(expr)) | BytecodeInstruction::Expr(expr) => {
+                    if let Some(len) = array_len_of_expr(expr, function) {
+                        match result {
+                            Some(existing) if *existing != len => *ok = false,
+                            _ => *result = Some(len),
+                        }
+                    } else if matches!(
+                        &expr.kind,
+                        BytecodeExprKind::Array(_) | BytecodeExprKind::Variable(_)
+                    ) {
+                        // An array-valued return whose length we cannot read.
+                        *ok = false;
+                    }
+                }
+                BytecodeInstruction::If {
+                    branches,
+                    else_body,
+                    ..
+                } => {
+                    for branch in branches {
+                        visit(&branch.body, function, result, ok);
+                    }
+                    visit(else_body, function, result, ok);
+                }
+                BytecodeInstruction::While { body, .. }
+                | BytecodeInstruction::Loop { body, .. }
+                | BytecodeInstruction::For { body, .. } => visit(body, function, result, ok),
+                BytecodeInstruction::Match { arms, .. } => {
+                    for arm in arms {
+                        visit(&arm.body, function, result, ok);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut ok = true;
+    visit(&function.instructions, function, &mut result, &mut ok);
+    if ok { result } else { None }
+}
+
+/// The element count of an array-valued expression within `function`'s context:
+/// a direct array literal, or a variable bound to a fixed array local (its `let`
+/// initializer array literal). Returns `None` for anything else.
+fn array_len_of_expr(expr: &BytecodeExpr, function: &BytecodeFunction) -> Option<usize> {
+    match &expr.kind {
+        BytecodeExprKind::Array(elements) => Some(elements.len()),
+        BytecodeExprKind::Variable(name) => local_array_len(&function.instructions, name),
+        _ => None,
+    }
+}
+
+/// Find the array length of a local `name` bound by a `let name array<...> = [..]`
+/// anywhere in a body (including nested blocks). Returns `None` if not an array
+/// local with a literal initializer.
+fn local_array_len(body: &[BytecodeInstruction], name: &str) -> Option<usize> {
+    for stmt in body {
+        match stmt {
+            BytecodeInstruction::Let {
+                name: n, ty, value, ..
+            } if n == name && ty.name.starts_with("array<") => {
+                if let BytecodeExprKind::Array(elements) = &value.kind {
+                    return Some(elements.len());
+                }
+            }
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    if let Some(len) = local_array_len(&branch.body, name) {
+                        return Some(len);
+                    }
+                }
+                if let Some(len) = local_array_len(else_body, name) {
+                    return Some(len);
+                }
+            }
+            BytecodeInstruction::While { body, .. }
+            | BytecodeInstruction::Loop { body, .. }
+            | BytecodeInstruction::For { body, .. } => {
+                if let Some(len) = local_array_len(body, name) {
+                    return Some(len);
+                }
+            }
+            BytecodeInstruction::Match { arms, .. } => {
+                for arm in arms {
+                    if let Some(len) = local_array_len(&arm.body, name) {
+                        return Some(len);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Scan a caller body for calls to `callee`, reading the array length of the
+/// argument at `arg_index`. Every such call must agree on the length; a
+/// disagreement or an unsizable argument is an error the caller turns into a skip.
+fn collect_call_arg_lengths(
+    body: &[BytecodeInstruction],
+    caller: &BytecodeFunction,
+    callee: &str,
+    arg_index: usize,
+    found: &mut Option<usize>,
+    saw_call: &mut bool,
+) -> Result<(), String> {
+    fn visit_expr(
+        expr: &BytecodeExpr,
+        caller: &BytecodeFunction,
+        callee: &str,
+        arg_index: usize,
+        found: &mut Option<usize>,
+        saw_call: &mut bool,
+    ) -> Result<(), String> {
+        if let BytecodeExprKind::Call { name, args } = &expr.kind
+            && name == callee
+        {
+            *saw_call = true;
+            let arg = args
+                .get(arg_index)
+                .ok_or_else(|| format!("call to `{callee}` is missing argument {arg_index}"))?;
+            let len = array_len_of_expr(arg, caller).ok_or_else(|| {
+                format!(
+                    "call to `{callee}` passes an array argument whose length is not \
+                     statically known"
+                )
+            })?;
+            match found {
+                Some(existing) if *existing != len => {
+                    return Err(format!(
+                        "call sites of `{callee}` disagree on array argument {arg_index} length \
+                         ({existing} vs {len})"
+                    ));
+                }
+                _ => *found = Some(len),
+            }
+        }
+        for child in expr_children(expr) {
+            visit_expr(child, caller, callee, arg_index, found, saw_call)?;
+        }
+        Ok(())
+    }
+    for stmt in body {
+        match stmt {
+            BytecodeInstruction::Let { value, .. }
+            | BytecodeInstruction::Assign { value, .. }
+            | BytecodeInstruction::Return(Some(value))
+            | BytecodeInstruction::Expr(value) => {
+                visit_expr(value, caller, callee, arg_index, found, saw_call)?;
+            }
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    visit_expr(
+                        &branch.condition,
+                        caller,
+                        callee,
+                        arg_index,
+                        found,
+                        saw_call,
+                    )?;
+                    collect_call_arg_lengths(
+                        &branch.body,
+                        caller,
+                        callee,
+                        arg_index,
+                        found,
+                        saw_call,
+                    )?;
+                }
+                collect_call_arg_lengths(else_body, caller, callee, arg_index, found, saw_call)?;
+            }
+            BytecodeInstruction::While {
+                condition, body, ..
+            } => {
+                visit_expr(condition, caller, callee, arg_index, found, saw_call)?;
+                collect_call_arg_lengths(body, caller, callee, arg_index, found, saw_call)?;
+            }
+            BytecodeInstruction::Loop { body, .. } | BytecodeInstruction::For { body, .. } => {
+                collect_call_arg_lengths(body, caller, callee, arg_index, found, saw_call)?;
+            }
+            BytecodeInstruction::Match {
+                scrutinee, arms, ..
+            } => {
+                visit_expr(scrutinee, caller, callee, arg_index, found, saw_call)?;
+                for arm in arms {
+                    collect_call_arg_lengths(
+                        &arm.body, caller, callee, arg_index, found, saw_call,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Compute a function's native signature (parameter + return layouts) using the
+/// inferred array lengths for its array-typed signature slots.
+fn compute_native_signature(
+    function: &BytecodeFunction,
+    structs: &[IrStructDef],
+    enums: &[IrEnumDef],
+    array_lengths: &ArrayLengths,
+) -> Result<NativeSignature, String> {
+    let mut params = Vec::with_capacity(function.params.len());
+    for param in &function.params {
+        params.push(resolve_signature_native_type(
+            &param.ty,
+            structs,
+            enums,
+            array_lengths,
+            &param.name,
+        )?);
+    }
+    let ret = resolve_signature_native_type(
+        &function.return_type,
+        structs,
+        enums,
+        array_lengths,
+        RETURN_ARRAY_KEY,
+    )?;
+    Ok(NativeSignature { params, ret })
 }
 
 // -- Stack aggregate layout (all-i64 structs and fixed i64 arrays) -----------
@@ -1052,6 +1496,17 @@ struct NativeEnumVariant {
 }
 
 impl NativeType {
+    /// Whether this is an aggregate (struct / fixed array / enum) — a value that
+    /// crosses a native function boundary **by pointer** — rather than a scalar
+    /// (`i64`/fixed-width/`bool`/`char`/`byte`/`f64`/`f32`) that passes in a
+    /// register.
+    fn is_aggregate(&self) -> bool {
+        matches!(
+            self,
+            NativeType::Struct { .. } | NativeType::Array { .. } | NativeType::Enum { .. }
+        )
+    }
+
     /// The number of 8-byte words this value occupies on the stack.
     fn words(&self) -> usize {
         match self {
@@ -1256,14 +1711,15 @@ fn native_type_of_init(
     expr: &BytecodeExpr,
     structs: &[IrStructDef],
     enums: &[IrEnumDef],
+    signatures: &HashMap<String, NativeSignature>,
 ) -> Result<NativeType, String> {
     if let BytecodeExprKind::Array(elements) = &expr.kind {
         let first = elements
             .first()
             .ok_or("empty array literals are not in the native stack subset")?;
-        let elem = native_type_of_init(first, structs, enums)?;
+        let elem = native_type_of_init(first, structs, enums, signatures)?;
         for other in &elements[1..] {
-            let other_ty = native_type_of_init(other, structs, enums)?;
+            let other_ty = native_type_of_init(other, structs, enums, signatures)?;
             if other_ty != elem {
                 return Err("array literal elements have differing native layouts".to_string());
             }
@@ -1273,7 +1729,58 @@ fn native_type_of_init(
             len: elements.len(),
         });
     }
+    // An array local bound from a call takes its length from the callee's inferred
+    // return layout (the `array<T>` type alone carries no length).
+    if expr.ty.name.starts_with("array<")
+        && let BytecodeExprKind::Call { name, .. } = &expr.kind
+        && let Some(sig) = signatures.get(name)
+        && matches!(sig.ret, NativeType::Array { .. })
+    {
+        return Ok(sig.ret.clone());
+    }
     resolve_native_type(&expr.ty, structs, enums)
+}
+
+/// The concrete word length of an array-typed signature slot, keyed by parameter
+/// name; the return array (if any) uses the reserved key `RETURN_ARRAY_KEY`.
+/// Fixed arrays carry no length in their `array<T>` type, so a function that
+/// passes or returns one has its length inferred (see [`infer_array_lengths`])
+/// and pinned here so the callee's copy-in / hidden-return-write knows the count.
+type ArrayLengths = HashMap<String, usize>;
+
+/// Reserved [`ArrayLengths`] key for a function's return-array length.
+const RETURN_ARRAY_KEY: &str = "\0return";
+
+/// Resolve a **signature** type (a parameter or return type) into its
+/// `NativeType`. Identical to [`resolve_native_type`] except a fixed-array type
+/// (`array<T>`), whose length is absent from the type, takes its length from
+/// `array_lengths[key]` (populated by [`infer_array_lengths`]). A bare array with
+/// no inferred length is rejected so the function skips gracefully.
+fn resolve_signature_native_type(
+    ty: &TypeRef,
+    structs: &[IrStructDef],
+    enums: &[IrEnumDef],
+    array_lengths: &ArrayLengths,
+    key: &str,
+) -> Result<NativeType, String> {
+    if let Some(rest) = ty.name.strip_prefix("array<") {
+        let elem_name = rest.strip_suffix('>').unwrap_or(rest);
+        let elem = resolve_signature_native_type(
+            &TypeRef::new(elem_name),
+            structs,
+            enums,
+            array_lengths,
+            key,
+        )?;
+        let len = *array_lengths.get(key).ok_or_else(|| {
+            format!("array length for signature slot `{key}` could not be inferred")
+        })?;
+        return Ok(NativeType::Array {
+            elem: Box::new(elem),
+            len,
+        });
+    }
+    resolve_native_type(ty, structs, enums)
 }
 
 /// A function lowered to x86-64: its symbol name, machine-code bytes, and the
@@ -1362,6 +1869,35 @@ struct NativeCtx<'a> {
     /// call result or constructed enum spills the value here). Assigned lazily
     /// past the planned locals; `scratch_base` marks the first free word.
     scratch_next: i32,
+    /// When the function returns an aggregate by pointer, the frame slot holding
+    /// the hidden result pointer (the caller-allocated destination passed in the
+    /// first integer-argument register). `None` for a scalar (register) return,
+    /// including `main`'s `i64`.
+    sret_slot: Option<i32>,
+    /// The `NativeType` of the function's return value, so an aggregate `return`
+    /// knows how many words to write into the hidden result pointer.
+    return_ty: NativeType,
+    /// Native signatures (parameter + return layouts) of every compiled function,
+    /// keyed by name. A `Call` to an aggregate-parameter / aggregate-returning
+    /// function uses these to materialize by-pointer arguments and allocate the
+    /// hidden return destination.
+    signatures: &'a HashMap<String, NativeSignature>,
+}
+
+/// The native signature of a compiled function: the layout of each parameter and
+/// of its return value. Aggregate parameters/returns cross the boundary by
+/// pointer (see the aggregate ABI); scalars pass in registers.
+#[derive(Debug, Clone)]
+struct NativeSignature {
+    params: Vec<NativeType>,
+    ret: NativeType,
+}
+
+impl NativeSignature {
+    /// Whether the return value is an aggregate (returned by hidden pointer).
+    fn returns_aggregate(&self) -> bool {
+        self.ret.is_aggregate()
+    }
 }
 
 impl<'a> NativeCtx<'a> {
@@ -1369,6 +1905,7 @@ impl<'a> NativeCtx<'a> {
     /// parameter and `let`/`for` local (aggregates reserve one word per
     /// flattened scalar), plus 32 bytes of Win64 shadow space when the function
     /// makes calls. All slots are `[rbp - displacement]`.
+    #[allow(clippy::too_many_arguments)]
     fn plan(
         function: &'a BytecodeFunction,
         callable: &'a std::collections::HashSet<&'a str>,
@@ -1376,19 +1913,49 @@ impl<'a> NativeCtx<'a> {
         structs: &'a [IrStructDef],
         enums: &'a [IrEnumDef],
         strings: &'a mut StringPool,
+        signatures: &'a HashMap<String, NativeSignature>,
+        array_lengths: &ArrayLengths,
     ) -> Result<Self, String> {
         let mut locals: HashMap<String, NativeLocal> = HashMap::new();
         let mut next_slot: i32 = 0;
 
-        // Parameters first (they will be spilled from registers in the prologue).
-        // Aggregate parameters are deferred, so every param is a single i64 word.
-        for param in &function.params {
+        // Return classification: an aggregate return is written through a hidden
+        // pointer passed in the first integer-argument register (Win64 `rcx`),
+        // shifting the visible parameters to the following registers.
+        let return_ty = resolve_signature_native_type(
+            &function.return_type,
+            structs,
+            enums,
+            array_lengths,
+            RETURN_ARRAY_KEY,
+        )?;
+        let return_is_aggregate = return_ty.is_aggregate();
+        let sret_slot = if return_is_aggregate {
             next_slot += 8;
+            Some(next_slot)
+        } else {
+            None
+        };
+
+        // Parameters (spilled from / copied out of registers in the prologue). A
+        // scalar parameter is one word; an aggregate parameter reserves the full
+        // aggregate layout (the register holds a pointer to the caller's copy,
+        // whose words the prologue copies into these slots — value semantics).
+        for param in &function.params {
+            let native = resolve_signature_native_type(
+                &param.ty,
+                structs,
+                enums,
+                array_lengths,
+                &param.name,
+            )?;
+            let words = native.words() as i32;
+            next_slot += words * 8;
             locals.insert(
                 param.name.clone(),
                 NativeLocal {
-                    slot: next_slot,
-                    ty: NativeType::I64,
+                    slot: next_slot - (words - 1) * 8,
+                    ty: native,
                 },
             );
         }
@@ -1398,19 +1965,41 @@ impl<'a> NativeCtx<'a> {
             &function.instructions,
             structs,
             enums,
+            signatures,
             &mut locals,
             &mut next_slot,
         )?;
 
         // Reserve scratch words for `match` scrutinees that are not plain locals
         // (a call result or freshly-constructed enum is spilled to scratch before
-        // the tag dispatch). One shared region sized to the widest such enum
-        // scrutinee across the function suffices, since a match fully consumes its
-        // scratch before the next one runs. The scratch base is the first word
-        // past the planned locals.
-        let scratch_words = max_match_scratch_words(&function.instructions, structs, enums)?;
+        // the tag dispatch), and for aggregate call arguments / aggregate returns,
+        // which are materialized into scratch and then copied by pointer. One
+        // shared region sized to the widest such temporary across the function
+        // suffices, since each is fully consumed before the next runs. The scratch
+        // base is the first word past the planned locals.
+        let match_scratch = max_match_scratch_words(&function.instructions, structs, enums)?;
+        // The return value, when an aggregate, is materialized in scratch before
+        // being copied through the hidden return pointer.
+        let return_scratch = if return_is_aggregate {
+            return_ty.words()
+        } else {
+            0
+        };
+        // Aggregate call arguments are each materialized in scratch before their
+        // address is passed; a single call may pass several, so size the region to
+        // the widest single call's total aggregate-argument words.
+        let arg_scratch = max_call_arg_scratch_words(
+            &function.instructions,
+            structs,
+            enums,
+            signatures,
+            array_lengths,
+        )?;
+        // The scratch cursor starts one word past `scratch_base` (word 0 of the
+        // region is a reserved guard), so reserve one extra word of headroom.
+        let scratch_words = match_scratch.max(return_scratch).max(arg_scratch);
         let scratch_base = next_slot;
-        next_slot += scratch_words as i32 * 8;
+        next_slot += (scratch_words as i32 + 1) * 8;
 
         let has_call = body_has_call(&function.instructions);
         // Reserve local slots plus (if calling) 32 bytes of shadow space.
@@ -1431,6 +2020,9 @@ impl<'a> NativeCtx<'a> {
             enums,
             // First scratch word sits one word past the scratch base.
             scratch_next: scratch_base + 8,
+            sret_slot,
+            return_ty,
+            signatures,
         })
     }
 
@@ -1486,6 +2078,7 @@ fn collect_native_locals(
     body: &[BytecodeInstruction],
     structs: &[IrStructDef],
     enums: &[IrEnumDef],
+    signatures: &HashMap<String, NativeSignature>,
     locals: &mut HashMap<String, NativeLocal>,
     next_slot: &mut i32,
 ) -> Result<(), String> {
@@ -1496,7 +2089,7 @@ fn collect_native_locals(
             } => {
                 if !locals.contains_key(name) {
                     let native = if ty.name.starts_with("array<") {
-                        native_type_of_init(value, structs, enums)?
+                        native_type_of_init(value, structs, enums, signatures)?
                     } else {
                         resolve_native_type(ty, structs, enums)?
                     };
@@ -1531,7 +2124,7 @@ fn collect_native_locals(
                         }
                     });
                 }
-                collect_native_locals(body, structs, enums, locals, next_slot)?;
+                collect_native_locals(body, structs, enums, signatures, locals, next_slot)?;
             }
             BytecodeInstruction::If {
                 branches,
@@ -1539,12 +2132,19 @@ fn collect_native_locals(
                 ..
             } => {
                 for branch in branches {
-                    collect_native_locals(&branch.body, structs, enums, locals, next_slot)?;
+                    collect_native_locals(
+                        &branch.body,
+                        structs,
+                        enums,
+                        signatures,
+                        locals,
+                        next_slot,
+                    )?;
                 }
-                collect_native_locals(else_body, structs, enums, locals, next_slot)?;
+                collect_native_locals(else_body, structs, enums, signatures, locals, next_slot)?;
             }
             BytecodeInstruction::While { body, .. } | BytecodeInstruction::Loop { body, .. } => {
-                collect_native_locals(body, structs, enums, locals, next_slot)?;
+                collect_native_locals(body, structs, enums, signatures, locals, next_slot)?;
             }
             BytecodeInstruction::Match {
                 scrutinee, arms, ..
@@ -1585,7 +2185,9 @@ fn collect_native_locals(
                             }
                         }
                     }
-                    collect_native_locals(&arm.body, structs, enums, locals, next_slot)?;
+                    collect_native_locals(
+                        &arm.body, structs, enums, signatures, locals, next_slot,
+                    )?;
                 }
             }
             _ => {}
@@ -1642,6 +2244,125 @@ fn max_match_scratch_words(
         max = max.max(nested);
     }
     Ok(max)
+}
+
+/// The maximum scratch words any single call in this body needs for its
+/// by-pointer aggregate arguments. Each aggregate argument of a call is
+/// materialized into scratch before its address is passed, so a call's scratch
+/// need is the sum of its aggregate arguments' words; the shared scratch region
+/// is sized to the widest single call across the function (and nested calls in
+/// argument position, handled recursively). Non-aggregate arguments need none.
+fn max_call_arg_scratch_words(
+    body: &[BytecodeInstruction],
+    structs: &[IrStructDef],
+    enums: &[IrEnumDef],
+    signatures: &HashMap<String, NativeSignature>,
+    array_lengths: &ArrayLengths,
+) -> Result<usize, String> {
+    fn expr_scratch(expr: &BytecodeExpr, signatures: &HashMap<String, NativeSignature>) -> usize {
+        let mut here = 0usize;
+        if let BytecodeExprKind::Call { name, args } = &expr.kind {
+            if let Some(sig) = signatures.get(name) {
+                let mut sum = 0usize;
+                for param_ty in &sig.params {
+                    if param_ty.is_aggregate() {
+                        sum += param_ty.words();
+                    }
+                }
+                here = sum;
+            }
+            // A nested call in argument position materializes independently.
+            for arg in args {
+                here = here.max(expr_scratch(arg, signatures));
+            }
+        } else {
+            for child in expr_children(expr) {
+                here = here.max(expr_scratch(child, signatures));
+            }
+        }
+        here
+    }
+    // `structs`/`enums`/`array_lengths` are accepted for symmetry with the other
+    // scratch sizers and to keep the call site uniform; layout comes from the
+    // precomputed signatures.
+    let _ = (structs, enums, array_lengths);
+    let mut max = 0usize;
+    for instruction in body {
+        let here = match instruction {
+            BytecodeInstruction::Let { value, .. }
+            | BytecodeInstruction::Assign { value, .. }
+            | BytecodeInstruction::Return(Some(value))
+            | BytecodeInstruction::Expr(value) => expr_scratch(value, signatures),
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                let mut h = max_call_arg_scratch_words(
+                    else_body,
+                    structs,
+                    enums,
+                    signatures,
+                    array_lengths,
+                )?;
+                for branch in branches {
+                    h = h.max(expr_scratch(&branch.condition, signatures)).max(
+                        max_call_arg_scratch_words(
+                            &branch.body,
+                            structs,
+                            enums,
+                            signatures,
+                            array_lengths,
+                        )?,
+                    );
+                }
+                h
+            }
+            BytecodeInstruction::While {
+                condition, body, ..
+            } => expr_scratch(condition, signatures).max(max_call_arg_scratch_words(
+                body,
+                structs,
+                enums,
+                signatures,
+                array_lengths,
+            )?),
+            BytecodeInstruction::Loop { body, .. } | BytecodeInstruction::For { body, .. } => {
+                max_call_arg_scratch_words(body, structs, enums, signatures, array_lengths)?
+            }
+            BytecodeInstruction::Match {
+                scrutinee, arms, ..
+            } => {
+                let mut h = expr_scratch(scrutinee, signatures);
+                for arm in arms {
+                    h = h.max(max_call_arg_scratch_words(
+                        &arm.body,
+                        structs,
+                        enums,
+                        signatures,
+                        array_lengths,
+                    )?);
+                }
+                h
+            }
+            _ => 0,
+        };
+        max = max.max(here);
+    }
+    Ok(max)
+}
+
+/// The immediate sub-expressions of an expression (for recursive scans).
+fn expr_children(expr: &BytecodeExpr) -> Vec<&BytecodeExpr> {
+    match &expr.kind {
+        BytecodeExprKind::Binary { left, right, .. } => vec![left, right],
+        BytecodeExprKind::Unary { expr, .. } => vec![expr],
+        BytecodeExprKind::Call { args, .. } => args.iter().collect(),
+        BytecodeExprKind::Array(elements) => elements.iter().collect(),
+        BytecodeExprKind::Field { target, .. } => vec![target],
+        BytecodeExprKind::Index { target, index } => vec![target, index],
+        _ => Vec::new(),
+    }
 }
 
 /// Whether any instruction in a body issues a call (so the frame needs shadow
@@ -1722,6 +2443,7 @@ struct NativeLoop {
     break_sites: Vec<usize>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_native_function(
     function: &BytecodeFunction,
     callable: &std::collections::HashSet<&str>,
@@ -1729,26 +2451,72 @@ fn lower_native_function(
     structs: &[IrStructDef],
     enums: &[IrEnumDef],
     strings: &mut StringPool,
+    signatures: &HashMap<String, NativeSignature>,
+    array_lengths: &ArrayLengths,
 ) -> Result<LoweredNativeFunction, String> {
-    let mut ctx = NativeCtx::plan(function, callable, extern_sigs, structs, enums, strings)?;
+    let mut ctx = NativeCtx::plan(
+        function,
+        callable,
+        extern_sigs,
+        structs,
+        enums,
+        strings,
+        signatures,
+        array_lengths,
+    )?;
     let mut code = Vec::new();
 
     // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size.
     code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5]);
     emit_sub_rsp(&mut code, ctx.frame_size);
 
-    // Spill register parameters (rcx, rdx, r8, r9) into their slots.
-    // mov [rbp - slot], reg
+    // Register argument order: `mov [rbp - slot], reg`. When the function returns
+    // an aggregate, the hidden result pointer consumes the first register (rcx),
+    // shifting the visible parameters down by one.
     const PARAM_STORE: [&[u8]; 4] = [
         &[0x48, 0x89, 0x8D], // mov [rbp+disp32], rcx
         &[0x48, 0x89, 0x95], // mov [rbp+disp32], rdx
         &[0x4C, 0x89, 0x85], // mov [rbp+disp32], r8
         &[0x4C, 0x89, 0x8D], // mov [rbp+disp32], r9
     ];
-    for (index, param) in function.params.iter().enumerate() {
-        let slot = ctx.local_slot(&param.name)?;
-        code.extend_from_slice(PARAM_STORE[index]);
-        code.extend_from_slice(&(-slot).to_le_bytes());
+    // Load an integer argument register (by index) into rax: `mov rax, reg`.
+    const ARG_TO_RAX: [&[u8]; 4] = [
+        &[0x48, 0x89, 0xC8], // mov rax, rcx
+        &[0x48, 0x89, 0xD0], // mov rax, rdx
+        &[0x4C, 0x89, 0xC0], // mov rax, r8
+        &[0x4C, 0x89, 0xC8], // mov rax, r9
+    ];
+
+    // The hidden return pointer (if any) is register 0; parameters follow.
+    let mut reg = 0usize;
+    if let Some(sret_slot) = ctx.sret_slot {
+        // Spill the caller-provided result pointer into its frame slot.
+        code.extend_from_slice(PARAM_STORE[reg]);
+        code.extend_from_slice(&(-sret_slot).to_le_bytes());
+        reg += 1;
+    }
+    for param in &function.params {
+        let local = ctx.local(&param.name)?.clone();
+        if local.ty.is_aggregate() {
+            // The register holds a pointer to the caller's copy. Copy the aggregate
+            // words into the parameter's frame slots (value semantics: the callee
+            // owns an independent snapshot and never mutates the caller's copy).
+            // rax = source pointer (addresses word 0, the aggregate's highest
+            // stack address). Words descend in memory, so word k is at
+            // `[rax - 8*k]`, matching the caller's `[rbp - (base + 8*k)]` layout.
+            code.extend_from_slice(ARG_TO_RAX[reg]);
+            for word in 0..local.ty.words() as i32 {
+                // mov rcx, [rax - 8*word]
+                emit_mov_rcx_from_rax_disp(&mut code, -word * 8);
+                // mov [rbp - (slot + 8*word)], rcx
+                emit_mov_slot_from_rcx(&mut code, local.slot + word * 8);
+            }
+        } else {
+            // A scalar parameter spills its register directly into its slot.
+            code.extend_from_slice(PARAM_STORE[reg]);
+            code.extend_from_slice(&(-local.slot).to_le_bytes());
+        }
+        reg += 1;
     }
 
     let mut loops: Vec<NativeLoop> = Vec::new();
@@ -1786,7 +2554,14 @@ fn lower_native_function(
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
         if let BytecodeInstruction::Expr(expr) = &tail[0] {
-            lower_native_expr(&mut ctx, expr, &mut code)?;
+            // An aggregate-valued tail expression is the function's by-pointer
+            // result: materialize it through the hidden return pointer. A scalar
+            // tail expression leaves its value in rax.
+            if ctx.sret_slot.is_some() {
+                lower_aggregate_return(&mut ctx, expr, &mut code)?;
+            } else {
+                lower_native_expr(&mut ctx, expr, &mut code)?;
+            }
         }
         emit_native_epilogue(&mut code, ctx.frame_size);
     } else if tail_is_value_match {
@@ -2003,7 +2778,11 @@ fn lower_native_stmt(
             Ok(())
         }
         BytecodeInstruction::Return(Some(expr)) => {
-            lower_native_expr(ctx, expr, code)?;
+            if ctx.sret_slot.is_some() {
+                lower_aggregate_return(ctx, expr, code)?;
+            } else {
+                lower_native_expr(ctx, expr, code)?;
+            }
             emit_native_epilogue(code, ctx.frame_size);
             Ok(())
         }
@@ -2078,11 +2857,14 @@ fn lower_native_stmt(
 // -- Stack aggregate lowering (init, place resolution, addressing) -----------
 
 /// Materialize an aggregate value into the contiguous stack words beginning at
-/// `base_slot`. Three initializer shapes are supported, mirroring how the IR
-/// lowerer represents construction:
+/// `base_slot`. The supported initializer shapes mirror how the IR lowerer
+/// represents construction:
 ///   * an array literal `[e0, e1, ...]` -> each element materialized in turn;
 ///   * a struct constructor `Call { name: StructName, args }` -> each field in
 ///     declared order (the IR already reorders named fields);
+///   * an enum constructor `Call { name: variant, args }`;
+///   * a call to an aggregate-returning function -> the callee writes the result
+///     through a hidden pointer; the returned pointer is copied word-by-word;
 ///   * an aggregate variable `x` -> a word-by-word copy of another local.
 fn lower_aggregate_init(
     ctx: &mut NativeCtx,
@@ -2091,6 +2873,16 @@ fn lower_aggregate_init(
     value: &BytecodeExpr,
     code: &mut Vec<u8>,
 ) -> Result<(), String> {
+    // A call to a compiled function that returns this aggregate: the callee writes
+    // its result through a hidden pointer we supply. We could pass `base_slot`'s
+    // address as that pointer directly, but the address must be computed relative
+    // to `rbp`; do so and let the call fill it, avoiding a second copy.
+    if let BytecodeExprKind::Call { name, .. } = &value.kind
+        && ctx.signatures.contains_key(name.as_str())
+    {
+        // Materialize the call, directing its aggregate result into `base_slot`.
+        return lower_aggregate_returning_call(ctx, base_slot, ty, value, code);
+    }
     match (&value.kind, ty) {
         (BytecodeExprKind::Array(elements), NativeType::Array { elem, len }) => {
             if elements.len() != *len {
@@ -2459,14 +3251,49 @@ fn lower_native_match(
             lower_enum_construction(ctx, base, &variants, payload_words, name, args, code)?;
             base
         }
+        BytecodeExprKind::Call { name, .. }
+            if ctx
+                .signatures
+                .get(name.as_str())
+                .is_some_and(NativeSignature::returns_aggregate) =>
+        {
+            // Matching the result of a call that *returns* an enum: materialize the
+            // by-pointer aggregate return into scratch, then dispatch on it. The
+            // aggregate-return ABI writes the tag + payload words directly into the
+            // scratch destination.
+            //
+            // The scrutinee occupies scratch while the match runs; if the call also
+            // needed scratch for by-pointer *aggregate arguments*, the shared region
+            // (sized to the max, not the sum, of scrutinee vs. args) could overlap.
+            // A call with only scalar arguments needs no arg scratch, so restrict to
+            // that case and skip otherwise rather than risk a miscompile.
+            let sig = ctx
+                .signatures
+                .get(name.as_str())
+                .expect("guarded aggregate-returning signature");
+            if sig.params.iter().any(NativeType::is_aggregate) {
+                return Err(
+                    "match on an enum-returning call whose arguments are aggregates is \
+                     deferred on the native backend"
+                        .to_string(),
+                );
+            }
+            let enum_ty = NativeType::Enum {
+                name: String::new(),
+                variants: variants.clone(),
+                payload_words,
+            };
+            let base = ctx.alloc_scratch(enum_ty.words());
+            lower_aggregate_returning_call(ctx, base, &enum_ty, scrutinee, code)?;
+            base
+        }
         _ => {
-            // Matching the result of a call that *returns* an enum (or any other
-            // temporary enum expression) requires an aggregate return ABI that is
-            // not yet implemented; such a function skips gracefully to the
-            // interpreters rather than miscompiling.
+            // Any other temporary enum scrutinee (e.g. an enum read out of an
+            // aggregate field) is outside the supported set; such a function skips
+            // gracefully to the interpreters rather than miscompiling.
             return Err(
-                "match scrutinee must be an enum local or a freshly-constructed enum \
-                 (enum-returning calls are deferred on the native backend)"
+                "match scrutinee must be an enum local, a freshly-constructed enum, \
+                 or an enum-returning call"
                     .to_string(),
             );
         }
@@ -2909,6 +3736,23 @@ fn lower_native_expr(
                     "call to non-i64-scalar or unknown function `{name}`"
                 ));
             }
+            // A call to a compiled function that *returns* an aggregate cannot
+            // leave its result in `rax` as a value: it writes through a hidden
+            // pointer. Such a call reaching here (in scalar expression position)
+            // would be a use of its aggregate result that we do not handle, so it
+            // is routed through `lower_aggregate_init` instead. Guard against it.
+            if let Some(sig) = ctx.signatures.get(name.as_str())
+                && sig.returns_aggregate()
+            {
+                return Err(format!(
+                    "aggregate-returning call `{name}` is only supported in a binding or \
+                     return position on the native backend"
+                ));
+            }
+            // Effective register arguments: an aggregate argument is passed by
+            // pointer (one register), a scalar by value (one register). No hidden
+            // return pointer here (this path is scalar-returning). Enforce the
+            // four-register Win64 limit.
             if args.len() > 4 {
                 return Err(format!(
                     "native calls support at most four arguments; `{name}` got {}",
@@ -2942,25 +3786,17 @@ fn lower_native_expr(
             } else {
                 None
             };
-            // Evaluate args left-to-right, pushing each result. Then pop into the
-            // Win64 argument registers in order. An integer scalar already sits in
-            // the low bits of `rax` normalized to its width (the interpreter's
-            // cell model), which is exactly what Win64 passes in the low bits of
-            // the argument register, so no per-argument marshalling is needed for
-            // the integer subset.
-            for arg in args {
-                lower_native_expr(ctx, arg, code)?;
-                code.push(0x50); // push rax
-            }
+            // Evaluate/stage args left-to-right onto the stack, then pop into the
+            // Win64 argument registers. A scalar argument stages its value; an
+            // aggregate argument stages a *pointer* to a freshly materialized,
+            // caller-owned copy (by-pointer aggregate ABI, value semantics). An
+            // integer scalar already sits in the low bits of `rax` normalized to
+            // its width, exactly what Win64 passes in the low bits of the argument
+            // register.
+            emit_staged_call_args(ctx, name, args, code)?;
             // Pop in reverse so the first argument lands in rcx.
-            const ARG_POP: [&[u8]; 4] = [
-                &[0x59],       // pop rcx
-                &[0x5A],       // pop rdx
-                &[0x41, 0x58], // pop r8
-                &[0x41, 0x59], // pop r9
-            ];
             for index in (0..args.len()).rev() {
-                code.extend_from_slice(ARG_POP[index]);
+                code.extend_from_slice(CALL_ARG_POP[index]);
             }
             // call rel32 -> relocation against the target symbol.
             code.push(0xE8);
@@ -2999,6 +3835,180 @@ fn lower_native_expr(
             Err("expression is not in the native i64-scalar subset".to_string())
         }
     }
+}
+
+// -- Aggregate call/return ABI (by hidden pointer) ---------------------------
+//
+// Aggregates cross a native function boundary by pointer. A scalar-returning
+// call stages each argument on the stack (a scalar value or, for an aggregate
+// argument, the address of a caller-owned copy) and pops them into the Win64
+// integer registers. An aggregate return uses a hidden first pointer: the caller
+// allocates the destination and passes its address in the first register; the
+// callee writes the result words there and returns that pointer in rax.
+
+/// Pop sequence for the first four Win64 integer argument registers, in order.
+const CALL_ARG_POP: [&[u8]; 4] = [
+    &[0x59],       // pop rcx
+    &[0x5A],       // pop rdx
+    &[0x41, 0x58], // pop r8
+    &[0x41, 0x59], // pop r9
+];
+
+/// Stage a call's arguments on the stack (left-to-right) so they can be popped
+/// into the Win64 registers. A scalar argument pushes its value; an aggregate
+/// argument materializes a fresh caller-owned copy in scratch and pushes that
+/// copy's address (`lea rax, [rbp - base]`), preserving value semantics — the
+/// callee copies-in from this snapshot and cannot mutate the caller's original.
+fn emit_staged_call_args(
+    ctx: &mut NativeCtx,
+    callee: &str,
+    args: &[BytecodeExpr],
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    // The callee's parameter layouts (when it is a compiled function) tell us
+    // which arguments are aggregates. An `extern`/builtin call has no aggregate
+    // parameters (guarded elsewhere), so treat missing signatures as all-scalar.
+    let param_tys: Vec<Option<NativeType>> = match ctx.signatures.get(callee) {
+        Some(sig) => sig.params.iter().map(|t| Some(t.clone())).collect(),
+        None => args.iter().map(|_| None).collect(),
+    };
+    // Reset the scratch cursor so each call reuses the shared scratch region.
+    let saved_scratch = ctx.scratch_next;
+    for (arg, param_ty) in args.iter().zip(param_tys.iter()) {
+        match param_ty {
+            Some(ty) if ty.is_aggregate() => {
+                // Materialize the argument aggregate into scratch, then push its
+                // address.
+                let base = ctx.alloc_scratch(ty.words());
+                lower_aggregate_init(ctx, base, ty, arg, code)?;
+                emit_lea_rax_slot(code, base); // rax = &scratch copy
+                code.push(0x50); // push rax
+            }
+            _ => {
+                // A scalar argument: evaluate its value and push it.
+                lower_native_expr(ctx, arg, code)?;
+                code.push(0x50); // push rax
+            }
+        }
+    }
+    ctx.scratch_next = saved_scratch;
+    Ok(())
+}
+
+/// Lower a call to a compiled function that returns an aggregate, writing the
+/// result into the words at `dest_slot`. The caller-allocated destination address
+/// is passed as the hidden first integer argument (`rcx`); the visible arguments
+/// (scalar values / aggregate-copy pointers) follow in `rdx`/`r8`/`r9`. The callee
+/// writes the result through the hidden pointer, so after the call `dest_slot`
+/// holds the returned aggregate.
+fn lower_aggregate_returning_call(
+    ctx: &mut NativeCtx,
+    dest_slot: i32,
+    ty: &NativeType,
+    value: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let BytecodeExprKind::Call { name, args } = &value.kind else {
+        return Err("expected a call expression".to_string());
+    };
+    let sig = ctx
+        .signatures
+        .get(name.as_str())
+        .ok_or_else(|| format!("call target `{name}` has no native signature"))?;
+    if !sig.returns_aggregate() {
+        return Err(format!("call `{name}` does not return an aggregate"));
+    }
+    // The callee writes `sig.ret.words()` words into the destination; the caller's
+    // destination must reserve at least that many. (An enum `match` scrutinee
+    // constructs an equivalent layout with a synthetic name, so compare by word
+    // count rather than exact type equality.)
+    if sig.ret.words() != ty.words() {
+        return Err(format!(
+            "call `{name}` return layout ({} words) does not match the destination ({} words)",
+            sig.ret.words(),
+            ty.words()
+        ));
+    }
+    // Effective register args: the hidden return pointer plus each argument.
+    if args.len() + 1 > 4 {
+        return Err(format!(
+            "aggregate-returning call `{name}` needs {} register arguments (limit 4)",
+            args.len() + 1
+        ));
+    }
+    // Stage the visible arguments on the stack (scalar values / aggregate-copy
+    // pointers), then pop them into the registers *after* the hidden pointer.
+    emit_staged_call_args(ctx, name, args, code)?;
+    // Pop the visible args into rdx/r8/r9 (registers 1..=args.len()), in reverse.
+    for index in (0..args.len()).rev() {
+        code.extend_from_slice(CALL_ARG_POP[index + 1]);
+    }
+    // Hidden return pointer -> rcx = &dest_slot.
+    emit_lea_rcx_slot(code, dest_slot);
+    // call rel32 -> relocation against the callee.
+    code.push(0xE8);
+    let site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    ctx.relocations.push(CodeRelocation {
+        offset: site as u32,
+        symbol: name.clone(),
+    });
+    // The callee wrote the result words into `[rcx]` == `dest_slot`; nothing more
+    // to copy.
+    Ok(())
+}
+
+/// Lower a `return <aggregate>` (or an aggregate tail expression): materialize the
+/// value into scratch, then copy its words through the hidden return pointer and
+/// leave that pointer in `rax` (the by-pointer return convention). A direct
+/// aggregate-returning call is special-cased to write straight into the hidden
+/// pointer's destination (no scratch round-trip).
+fn lower_aggregate_return(
+    ctx: &mut NativeCtx,
+    expr: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let sret_slot = ctx
+        .sret_slot
+        .ok_or("aggregate return without a hidden result pointer")?;
+    let ty = ctx.return_ty.clone();
+    // Materialize into a scratch region, then copy the words to `[sret]`. Using
+    // scratch (rather than writing straight through the pointer) keeps the
+    // materialization code — which addresses `[rbp - slot]` frame slots — reusable
+    // for every initializer shape (constructor, literal, local copy, call).
+    let saved_scratch = ctx.scratch_next;
+    let base = ctx.alloc_scratch(ty.words());
+    lower_aggregate_init(ctx, base, &ty, expr, code)?;
+    // rax = hidden result pointer (the caller-allocated destination, addressing
+    // word 0). Aggregate words descend in memory, so word k is written at
+    // `[rax - 8*k]`, matching the destination's `[rbp - (slot + 8*k)]` layout.
+    emit_mov_rax_from_slot(code, sret_slot);
+    // Copy each word: rcx = [rbp - (base + 8k)]; [rax - 8k] = rcx.
+    for word in 0..ty.words() as i32 {
+        emit_mov_rcx_from_slot(code, base + word * 8);
+        emit_mov_rax_disp_from_rcx(code, -word * 8);
+    }
+    ctx.scratch_next = saved_scratch;
+    // Per the ABI, an aggregate return leaves the result pointer in rax.
+    emit_mov_rax_from_slot(code, sret_slot);
+    Ok(())
+}
+
+/// `lea rax, [rbp - slot]` — the effective address of a frame slot.
+fn emit_lea_rax_slot(code: &mut Vec<u8>, slot: i32) {
+    code.extend_from_slice(&[0x48, 0x8D, 0x85]); // lea rax, [rbp + disp32]
+    code.extend_from_slice(&(-slot).to_le_bytes());
+}
+
+/// `lea rcx, [rbp - slot]` — the effective address of a frame slot.
+fn emit_lea_rcx_slot(code: &mut Vec<u8>, slot: i32) {
+    code.extend_from_slice(&[0x48, 0x8D, 0x8D]); // lea rcx, [rbp + disp32]
+    code.extend_from_slice(&(-slot).to_le_bytes());
+}
+
+/// `mov rax, [rbp - slot]`.
+fn emit_mov_rax_from_slot(code: &mut Vec<u8>, slot: i32) {
+    load_local(code, slot);
 }
 
 /// Lower a binary expression. `and`/`or` short-circuit; other operators evaluate
@@ -3628,6 +4638,33 @@ fn load_local(code: &mut Vec<u8>, slot: i32) {
 /// `mov [rbp - slot], rax`.
 fn store_local(code: &mut Vec<u8>, slot: i32) {
     code.extend_from_slice(&[0x48, 0x89, 0x85]);
+    code.extend_from_slice(&(-slot).to_le_bytes());
+}
+
+/// `mov rcx, [rax + disp]` — read a word at an offset from a pointer in rax.
+/// Used to copy aggregate words out of a by-pointer argument or into a by-pointer
+/// result. `disp` is a small non-negative byte offset (disp32 form).
+fn emit_mov_rcx_from_rax_disp(code: &mut Vec<u8>, disp: i32) {
+    code.extend_from_slice(&[0x48, 0x8B, 0x88]); // mov rcx, [rax + disp32]
+    code.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// `mov [rbp - slot], rcx` — store rcx into a frame slot.
+fn emit_mov_slot_from_rcx(code: &mut Vec<u8>, slot: i32) {
+    code.extend_from_slice(&[0x48, 0x89, 0x8D]); // mov [rbp + disp32], rcx
+    code.extend_from_slice(&(-slot).to_le_bytes());
+}
+
+/// `mov [rax + disp], rcx` — store rcx to an offset from a pointer in rax.
+/// Used to write aggregate result words through the hidden return pointer.
+fn emit_mov_rax_disp_from_rcx(code: &mut Vec<u8>, disp: i32) {
+    code.extend_from_slice(&[0x48, 0x89, 0x88]); // mov [rax + disp32], rcx
+    code.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// `mov rcx, [rbp - slot]` — load a frame slot into rcx.
+fn emit_mov_rcx_from_slot(code: &mut Vec<u8>, slot: i32) {
+    code.extend_from_slice(&[0x48, 0x8B, 0x8D]); // mov rcx, [rbp + disp32]
     code.extend_from_slice(&(-slot).to_le_bytes());
 }
 
@@ -5062,12 +6099,11 @@ mod native_program_tests {
     }
 
     #[test]
-    fn skips_match_over_enum_scrutinee_gracefully() {
-        // `match` over a *local* enum now compiles natively, but an enum passed as
-        // a *parameter* is still deferred: aggregate/enum parameters are not in the
-        // native register ABI, so `classify` (whose `o` is an `option<i64>` param)
-        // is skipped at the signature stage and runs on the interpreters — never
-        // miscompiled — while the i64-scalar `double`/`main` still compile.
+    fn compiles_match_over_enum_parameter() {
+        // `match` over an enum passed as a *parameter* now compiles: a scalar-
+        // payload enum crosses the boundary by pointer (copied into the callee's
+        // frame), and the callee matches the local copy. `double`/`main` still
+        // compile too.
         let program = emit_alpha1_native_program(&module_for(concat!(
             "fn classify o option<i64> -> i64\n",
             "    match o\n",
@@ -5076,20 +6112,18 @@ mod native_program_tests {
             "fn double x i64 -> i64\n",
             "    x + x\n\n",
             "fn main -> i64\n",
-            "    return double(21)\n",
+            "    return double(21) + classify(some(1))\n",
         )))
         .expect("emit native program");
-        // `double` and `main` are i64-scalar and compile; `classify` (option param)
-        // is skipped for its non-i64 parameter.
-        assert_eq!(
-            program.compiled,
-            vec!["double".to_string(), "main".to_string()]
-        );
         assert!(
-            program.skipped.iter().any(|s| s.name == "classify"),
-            "match-over-enum function must be skipped: {:?}",
+            program.compiled.contains(&"classify".to_string())
+                && program.compiled.contains(&"double".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "enum-parameter match must compile: {:?} / {:?}",
+            program.compiled,
             program.skipped
         );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
     }
 
     #[test]
@@ -6043,12 +7077,10 @@ mod native_program_tests {
     }
 
     #[test]
-    fn defers_enum_returning_call_gracefully() {
-        // A function that returns an enum and a caller that matches that call
-        // result are both deferred (aggregate return ABI is not implemented), and
-        // the deferral never crashes — the whole program falls to the interpreters
-        // with a clear skip reason.
-        let err = emit_alpha1_native_program(&module_for(concat!(
+    fn compiles_enum_returning_call_and_match_on_it() {
+        // A function that returns an enum (by the hidden-pointer aggregate return
+        // ABI) and a caller that matches that call result now both compile.
+        let program = emit_alpha1_native_program(&module_for(concat!(
             "fn lookup key i64 -> option<i64>\n",
             "    if key == 1\n",
             "        return some(11)\n",
@@ -6060,14 +7092,16 @@ mod native_program_tests {
             "fn main -> i64\n",
             "    use_lookup(1)\n",
         )))
-        .expect_err("no function is native-eligible");
-        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        .expect("emit native program");
         assert!(
-            err.skipped.iter().any(|s| s.name == "use_lookup"
-                && s.reason.contains("enum-returning calls are deferred")),
-            "expected a clear deferral reason for the enum-returning match: {:?}",
-            err.skipped
+            program.compiled.contains(&"lookup".to_string())
+                && program.compiled.contains(&"use_lookup".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "enum-returning call + match must compile: {:?} / {:?}",
+            program.compiled,
+            program.skipped
         );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
     }
 
     #[test]
@@ -6103,5 +7137,193 @@ mod native_program_tests {
                 );
             }
         }
+    }
+
+    // -- Aggregate parameter / return / call-argument ABI --------------------
+
+    #[test]
+    fn compiles_struct_parameter_and_return_with_by_pointer_abi() {
+        // A function that TAKES a struct and returns an i64, a function that
+        // RETURNS a struct, and a `main` that passes/receives both compile (not
+        // skip). The by-pointer argument (`lea rax/rcx, [rbp+disp]` staged into an
+        // argument register) and the hidden-return-pointer copy (`mov [rax-disp],
+        // rcx` writing result words) must appear in the emitted code.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "struct Point\n    x i64\n    y i64\n\n",
+            "fn taxicab p Point -> i64\n    p.x + p.y\n\n",
+            "fn shift p Point d i64 -> Point\n    Point(p.x + d, p.y + d)\n\n",
+            "fn main -> i64\n",
+            "    let base Point = Point(3, 4)\n",
+            "    let moved Point = shift(base, 10)\n",
+            "    taxicab(base) + taxicab(moved)\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"taxicab".to_string())
+                && program.compiled.contains(&"shift".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "struct param/return functions must compile: compiled={:?} skipped={:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+
+        let text = text_bytes(&program);
+        // Hidden-return-pointer write: `mov [rax - 8], rcx` (48 89 88 F8 FF FF FF)
+        // — `shift` writes result word 1 through the caller-supplied pointer.
+        assert!(
+            text.windows(7)
+                .any(|w| w == [0x48, 0x89, 0x88, 0xF8, 0xFF, 0xFF, 0xFF]),
+            "expected a hidden-return-pointer word write (`mov [rax-8], rcx`)"
+        );
+        // By-pointer argument: `lea rax, [rbp+disp]` (48 8D 85 ..) stages the
+        // address of a materialized aggregate argument copy before it is pushed.
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0x8D, 0x85]),
+            "expected a `lea rax, [rbp+disp]` staging an aggregate argument address"
+        );
+        // Hidden return pointer passed in rcx: `lea rcx, [rbp+disp]` (48 8D 8D ..).
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0x8D, 0x8D]),
+            "expected a `lea rcx, [rbp+disp]` for the hidden return pointer"
+        );
+    }
+
+    #[test]
+    fn compiles_fixed_array_parameter_and_return() {
+        // A function taking a fixed array and one returning a fixed array compile;
+        // the array lengths are inferred from the call sites / returned literal.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn sum_array xs array<i64> -> i64\n",
+            "    let total i64 = 0\n",
+            "    for i from 0 to len(xs) - 1\n",
+            "        total += xs[i]\n",
+            "    total\n\n",
+            "fn doubled xs array<i64> -> array<i64>\n",
+            "    let out array<i64> = [0, 0, 0]\n",
+            "    for i from 0 to len(xs) - 1\n",
+            "        out[i] = xs[i] * 2\n",
+            "    out\n\n",
+            "fn main -> i64\n",
+            "    let data array<i64> = [1, 2, 3]\n",
+            "    let d array<i64> = doubled(data)\n",
+            "    sum_array(data) + d[0] + d[1] + d[2]\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"sum_array".to_string())
+                && program.compiled.contains(&"doubled".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "array param/return functions must compile: compiled={:?} skipped={:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+    }
+
+    #[test]
+    fn aggregate_parameter_copies_in_for_value_semantics() {
+        // A struct parameter is copied into the callee's frame in the prologue
+        // (`mov rcx, [rax - disp]` then `mov [rbp - slot], rcx`), so mutating the
+        // parameter cannot affect the caller's copy. The prologue copy-in loads
+        // from the argument pointer via `mov rcx, [rax + disp]` (48 8B 88 ..).
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "struct Box\n    a i64\n    b i64\n\n",
+            "fn clobber s Box -> i64\n",
+            "    s.a = s.a + 1\n",
+            "    s.a + s.b\n\n",
+            "fn main -> i64\n",
+            "    let box Box = Box(10, 20)\n",
+            "    let inside i64 = clobber(box)\n",
+            "    inside + box.a + box.b\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"clobber".to_string()),
+            "clobber must compile: {:?} / {:?}",
+            program.compiled,
+            program.skipped
+        );
+        let text = text_bytes(&program);
+        // Copy-in read from the argument pointer: `mov rcx, [rax + disp32]`
+        // (48 8B 88 ..) — the callee reads the caller's snapshot word-by-word.
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0x8B, 0x88]),
+            "expected an aggregate-parameter copy-in read (`mov rcx, [rax+disp]`)"
+        );
+    }
+
+    #[test]
+    fn compiles_enum_parameter_and_return_and_match_on_call() {
+        // An `option<i64>` (a scalar-payload enum) as a parameter and a return
+        // type compiles, including a `match` on an enum-returning call.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn classify n i64 -> option<i64>\n",
+            "    if n > 0\n",
+            "        return some(n)\n",
+            "    none\n\n",
+            "fn unwrap_or o option<i64> d i64 -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> d\n\n",
+            "fn direct n i64 -> i64\n",
+            "    match classify(n)\n",
+            "        some(v) -> v + 1\n",
+            "        none -> 0\n\n",
+            "fn main -> i64\n",
+            "    unwrap_or(classify(2), 9) + direct(0)\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"classify".to_string())
+                && program.compiled.contains(&"unwrap_or".to_string())
+                && program.compiled.contains(&"direct".to_string()),
+            "enum param/return/match-on-call must compile: {:?} / {:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+    }
+
+    #[test]
+    fn defers_heap_containing_aggregate_parameter() {
+        // A struct field of a heap type (`string`) is not a native scalar-field
+        // aggregate, so a function taking it by value skips gracefully.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "struct Named\n    id i64\n    label string\n\n",
+            "fn id_of n Named -> i64\n    n.id\n\n",
+            "fn main -> i64\n    7\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(
+            program.skipped.iter().any(|s| s.name == "id_of"),
+            "heap-field aggregate parameter must skip: {:?}",
+            program.skipped
+        );
+    }
+
+    #[test]
+    fn defers_aggregate_return_that_overflows_register_arity() {
+        // Four scalar parameters plus a hidden return pointer would need five
+        // integer registers, exceeding the Win64 four-register limit, so the
+        // function skips gracefully rather than miscompiling.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "struct Quad\n    a i64\n    b i64\n\n",
+            "fn build w i64 x i64 y i64 z i64 -> Quad\n    Quad(w + x, y + z)\n\n",
+            "fn main -> i64\n    7\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        let build_skip = program
+            .skipped
+            .iter()
+            .find(|s| s.name == "build")
+            .expect("build must be skipped");
+        assert!(
+            build_skip.reason.contains("register arguments"),
+            "skip reason should cite the register-arity limit: {}",
+            build_skip.reason
+        );
     }
 }

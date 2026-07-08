@@ -1,0 +1,34 @@
+struct Box
+    a i64
+    b i64
+
+fn clobber_struct s Box -> i64
+    s.a = s.a + 500
+    s.b = s.b + 500
+    s.a + s.b
+
+fn clobber_array xs array<i64> -> i64
+    xs[0] = 999
+    xs[1] = 999
+    xs[0] + xs[1]
+
+fn main -> i64
+    let box Box = Box(1, 2)
+    let arr array<i64> = [3, 4]
+    let inside_s i64 = clobber_struct(box)
+    let inside_a i64 = clobber_array(arr)
+    let outside_s i64 = box.a + box.b
+    let outside_a i64 = arr[0] + arr[1]
+    # inside_s=1003 / inside_a=1998 (each callee mutates its OWN copy);
+    # outside_s=3 / outside_a=7 prove the caller's aggregates are unchanged
+    # (value semantics). Encode the four checks into a value < 256.
+    let ok i64 = 0
+    if inside_s == 1003
+        ok += 1
+    if inside_a == 1998
+        ok += 2
+    if outside_s == 3
+        ok += 4
+    if outside_a == 7
+        ok += 8
+    ok
