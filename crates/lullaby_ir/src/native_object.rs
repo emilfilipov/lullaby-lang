@@ -751,8 +751,90 @@ const HEAP_NEXT_SYMBOL: &str = "__lullaby_heap_next";
 /// The heap region base symbol in `.bss` — a fixed reserved bump region.
 const HEAP_BASE_SYMBOL: &str = "__lullaby_heap_base";
 
-/// Size in bytes of the fixed reserved native heap region.
-const HEAP_REGION_SIZE: u32 = 64 * 1024;
+/// Size in bytes of the fixed reserved native heap region. Growable lists
+/// capacity-double and orphan their old backing blocks in this no-reclaim bump
+/// heap, so the region is sized generously (1 MiB) to give list-building
+/// programs headroom. It lives in zero-initialized `.bss`, so it costs no object
+/// file bytes.
+const HEAP_REGION_SIZE: u32 = 1024 * 1024;
+
+// -- Growable list layout (native) -------------------------------------------
+//
+// A growable `list<T>` (scalar `T`) is a heap pointer (one 8-byte word / register
+// value) to a header `[len: i64][cap: i64][elem slots...]`: the current element
+// count, the allocated capacity, then `cap` 8-byte element slots. Every field is
+// an 8-byte word so the whole block is naturally `i64`-aligned and element `i`
+// lives at `LIST_DATA_OFF + i * 8`, letting a scalar element (i64/fixed-width/
+// bool/char/byte, or an f64/f32 stored bit-for-bit in its low bytes) be moved as
+// a flat 8-byte word.
+//
+// Value semantics: Lullaby lists are value-semantic (`l = push(l, x)` returns a
+// NEW list). Every mutating op (`push`/`set`/`pop`) deep-copies the source list
+// first and mutates the fresh copy, so mutating one binding is never observable
+// through another (`let b = a` then `set(b, ...)` leaves `a` untouched because
+// `set` copies `b`). Read ops (`get`/`len`) never mutate, so sharing a list
+// pointer across a binding or a call boundary is safe without an extra copy —
+// exactly matching the interpreters bit-for-bit. The bump allocator never
+// reclaims, so a grown or copied list orphans its old block, like the existing
+// string-constant heap growth.
+
+/// Byte offset of a list's `len` header (element count), an `i64` word.
+const LIST_LEN_OFF: i32 = 0;
+
+/// Byte offset of a list's `cap` header (allocated capacity in elements), an
+/// `i64` word.
+const LIST_CAP_OFF: i32 = 8;
+
+/// Byte offset of a list's first element slot, past the two `i64` headers.
+const LIST_DATA_OFF: i32 = 16;
+
+/// Bytes per list element slot — one 8-byte word, like struct/array/enum slots.
+const LIST_SLOT_SIZE: i32 = 8;
+
+/// Initial capacity a `list_new()` header (and the first growth of an empty list)
+/// allocates, so a handful of pushes do not each trigger a realloc. Mirrors the
+/// WASM backend's `LIST_INITIAL_CAP`.
+const LIST_INITIAL_CAP: i64 = 4;
+
+/// The list-runtime helper emitted in `.text`. Signature: no arguments; returns a
+/// fresh `[len=0][cap=LIST_INITIAL_CAP][slots]` heap block pointer in `rax`.
+const LIST_NEW_SYMBOL: &str = "__lullaby_list_new";
+
+/// The list deep-copy helper emitted in `.text`. Signature: the source list
+/// pointer in `rcx`; returns a fresh independent copy's pointer in `rax`.
+const LIST_COPY_SYMBOL: &str = "__lullaby_list_copy";
+
+/// The list-grow helper emitted in `.text`. Signature: the list pointer in `rcx`;
+/// returns a (possibly reallocated) list pointer in `rax` guaranteed to have
+/// `cap > len` (room for one more push). Doubles capacity (or seeds
+/// `LIST_INITIAL_CAP` from an empty list) and copies the live elements.
+const LIST_GROW_SYMBOL: &str = "__lullaby_list_grow";
+
+/// Builtins that construct or read growable lists, matched by name in call
+/// lowering (arity / element type are validated there against the IR types).
+const LIST_NEW_BUILTIN: &str = "list_new";
+const LIST_PUSH_BUILTIN: &str = "push";
+const LIST_GET_BUILTIN: &str = "get";
+const LIST_SET_BUILTIN: &str = "set";
+const LIST_POP_BUILTIN: &str = "pop";
+
+/// The element type of a supported growable `list<T>`, or `None` if `ty` is not a
+/// list or its element is not a native scalar. Lists of heap elements
+/// (`list<string>`/`list<struct>`/`list<list<…>>`/`list<map<…>>`) are DEFERRED —
+/// the native backend lays out scalar-element lists only this increment — so such
+/// a list is unsupported and its enclosing function skips (still runs on the
+/// interpreters).
+fn supported_list_element(ty: &TypeRef) -> Option<TypeRef> {
+    let elem = ty.list_element()?;
+    if elem.name == "i64"
+        || fixed_int_kind(&elem.name).is_some()
+        || matches!(elem.name.as_str(), "bool" | "char" | "byte" | "f64" | "f32")
+    {
+        Some(elem)
+    } else {
+        None
+    }
+}
 
 /// `.rdata` section characteristics: initialized, read-only data.
 /// `IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ`.
@@ -1065,12 +1147,20 @@ fn native_signature_type_is_aggregate(
         native_signature_type_is_aggregate(&elem_ty, structs, enums)?;
         return Ok(true);
     }
+    // A scalar-element growable `list<T>` crosses a boundary as a single pointer
+    // word in an integer register (by value, value-semantic — its mutators copy),
+    // so it is a scalar for the signature classification, not a by-pointer
+    // aggregate. A heap-element list is rejected by `resolve_native_type` below.
+    if ty.name.starts_with("list<") {
+        resolve_native_type(ty, structs, enums)?;
+        return Ok(false);
+    }
     // A struct or scalar-payload enum resolves to an aggregate layout; a heap type
-    // (`string`/`list`/`map`) or a heap-containing aggregate fails to resolve and
-    // is rejected here so the function skips gracefully.
+    // (`string`/`map`) or a heap-containing aggregate fails to resolve and is
+    // rejected here so the function skips gracefully.
     let native = resolve_native_type(ty, structs, enums)?;
     match native {
-        NativeType::I64 | NativeType::F64 | NativeType::F32 => Ok(false),
+        NativeType::I64 | NativeType::F64 | NativeType::F32 | NativeType::List { .. } => Ok(false),
         NativeType::Struct { .. } | NativeType::Array { .. } | NativeType::Enum { .. } => Ok(true),
     }
 }
@@ -1470,6 +1560,14 @@ enum NativeType {
     },
     /// A fixed-length array of a supported element type.
     Array { elem: Box<NativeType>, len: usize },
+    /// A growable `list<T>` with a scalar element type. Represented as a single
+    /// 8-byte word holding a heap pointer to a `[len i64][cap i64][slots]` block;
+    /// it passes/returns in an integer register (by value, like a pointer) and is
+    /// value-semantic because its mutators deep-copy their source (see the
+    /// "Growable list layout (native)" comment). `elem` is the (scalar) element
+    /// layout, used to keep the element word count exact and mirror the WASM
+    /// backend.
+    List { elem: Box<NativeType> },
     /// A tagged enum whose variants all carry scalar payloads. Laid out as one
     /// tag word (the variant's discriminant index) followed by
     /// `payload_words` payload words (the maximum payload width across the
@@ -1510,7 +1608,8 @@ impl NativeType {
     /// The number of 8-byte words this value occupies on the stack.
     fn words(&self) -> usize {
         match self {
-            NativeType::I64 | NativeType::F64 | NativeType::F32 => 1,
+            // A list is a single pointer word, like a scalar.
+            NativeType::I64 | NativeType::F64 | NativeType::F32 | NativeType::List { .. } => 1,
             NativeType::Struct { fields, .. } => fields.iter().map(|(_, t)| t.words()).sum(),
             NativeType::Array { elem, len } => elem.words() * len,
             // One tag word plus the shared payload region.
@@ -1567,6 +1666,21 @@ fn resolve_native_type(
         name if name.starts_with("array<") => Err(format!(
             "array length for `{name}` is unknown from its type"
         )),
+        // A growable `list<T>` (scalar `T`): a single pointer word. The element
+        // must be a native scalar; a heap element (`list<string>` etc.) is
+        // deferred and rejected so the enclosing function skips gracefully.
+        name if name.starts_with("list<") => {
+            let elem = supported_list_element(ty).ok_or_else(|| {
+                format!(
+                    "list element of `{name}` is not a native scalar \
+                     (heap-element lists are deferred)"
+                )
+            })?;
+            let elem_native = resolve_native_type(&elem, structs, enums)?;
+            Ok(NativeType::List {
+                elem: Box::new(elem_native),
+            })
+        }
         // The built-in generic enums and user enums with scalar payloads.
         name if is_enum_type_name(name, enums) => resolve_enum_type(ty, structs, enums),
         name => {
@@ -2526,9 +2640,12 @@ fn lower_native_function(
                     emit_mov_slot_from_rcx(&mut code, local.slot + word * 8);
                 }
             }
-            NativeType::I64 => {
-                // An integer/pointer scalar parameter spills its register directly
-                // into its slot.
+            NativeType::I64 | NativeType::List { .. } => {
+                // An integer/pointer scalar parameter — or a list (a heap pointer
+                // word) — spills its register directly into its slot. A list
+                // parameter shares the caller's block by pointer, which is safe:
+                // list mutators (`push`/`set`/`pop`) deep-copy their source, so the
+                // callee cannot alter the caller's list through the shared pointer.
                 code.extend_from_slice(PARAM_STORE[reg]);
                 code.extend_from_slice(&(-local.slot).to_le_bytes());
             }
@@ -2662,7 +2779,9 @@ fn lower_native_stmt(
             // xmm0 and stores the whole word; an aggregate `let` materializes each
             // flattened scalar word directly into its slots.
             match ctx.local(name)?.ty {
-                NativeType::I64 => {
+                // An `i64` scalar or a list (a pointer word) uses the register
+                // path: evaluate into `rax` and store the whole word.
+                NativeType::I64 | NativeType::List { .. } => {
                     lower_native_expr(ctx, value, code)?;
                     let slot = ctx.local_slot(name)?;
                     store_local(code, slot); // mov [rbp - slot], rax
@@ -2746,6 +2865,19 @@ fn lower_native_stmt(
                 let base = ctx.local(name)?.slot;
                 let ty = ctx.local(name)?.ty.clone();
                 return lower_aggregate_init(ctx, base, &ty, value, code);
+            }
+            // A path-less whole-value assignment to a list local (`l = push(l, x)`,
+            // `l = list_new()`, `l = set(l, i, x)`, `l = pop(l)`) re-stores the
+            // pointer word through the register path. Only `Replace` is meaningful
+            // for a list (there is no `+=` on a list); a compound op is a skip.
+            if path.is_empty() && matches!(ctx.local(name)?.ty, NativeType::List { .. }) {
+                if !matches!(op, AssignOp::Replace) {
+                    return Err("compound assignment on a list is not supported".to_string());
+                }
+                lower_native_expr(ctx, value, code)?;
+                let slot = ctx.local_slot(name)?;
+                store_local(code, slot);
+                return Ok(());
             }
             let place = resolve_scalar_place(ctx, name, path)?;
             match op {
@@ -3710,6 +3842,57 @@ fn lower_native_expr(
                 lower_native_expr(ctx, &args[0], code)?;
                 return Ok(());
             }
+            // Growable `list<T>` (scalar `T`) builtins. `list_new()` allocates a
+            // fresh `[len=0][cap=LIST_INITIAL_CAP][slots]` heap block; `push`/`set`/
+            // `pop` are value-semantic (they deep-copy their source and mutate the
+            // copy); `get` loads element `i`; `len(l)` loads the list's `len`
+            // header. Each leaves a pointer (or, for `get`/`len`, an `i64`) in
+            // `rax`. Dispatched by the (scalar-element) list type of the operand.
+            if name == LIST_NEW_BUILTIN {
+                if !args.is_empty() {
+                    return Err("list_new expects 0 arguments".to_string());
+                }
+                lower_list_new(ctx, code);
+                return Ok(());
+            }
+            if name == LIST_PUSH_BUILTIN
+                && args.len() == 2
+                && supported_list_element(&args[0].ty).is_some()
+            {
+                lower_list_push(ctx, &args[0], &args[1], code)?;
+                return Ok(());
+            }
+            if name == LIST_SET_BUILTIN
+                && args.len() == 3
+                && supported_list_element(&args[0].ty).is_some()
+            {
+                lower_list_set(ctx, &args[0], &args[1], &args[2], code)?;
+                return Ok(());
+            }
+            if name == LIST_POP_BUILTIN
+                && args.len() == 1
+                && supported_list_element(&args[0].ty).is_some()
+            {
+                lower_list_pop(ctx, &args[0], code)?;
+                return Ok(());
+            }
+            if name == LIST_GET_BUILTIN
+                && args.len() == 2
+                && supported_list_element(&args[0].ty).is_some()
+            {
+                lower_list_get(ctx, &args[0], &args[1], code)?;
+                return Ok(());
+            }
+            // `len(l)` on a growable list loads its `len` header word.
+            if name == "len"
+                && args.len() == 1
+                && supported_list_element(&args[0].ty).is_some()
+            {
+                lower_native_expr(ctx, &args[0], code)?; // list pointer -> rax
+                // mov rax, [rax + LIST_LEN_OFF]
+                emit_mov_rax_from_rax_disp(code, LIST_LEN_OFF);
+                return Ok(());
+            }
             // `len(arr)` over a fixed native array folds to a compile-time
             // constant (arrays never grow in the native subset).
             if name == "len"
@@ -4314,6 +4497,18 @@ fn lower_native_float_expr(
                 code.extend_from_slice(&[0xF3, 0x0F, 0x5A, 0xC0]);
                 return Ok(FloatWidth::F64);
             }
+            // `get(l, i)` on a float-element list: load the raw 8-byte element
+            // word into `rax`, then move its bits into `xmm0` at the element's
+            // width (the low four bytes of the word for f32).
+            if name == LIST_GET_BUILTIN
+                && args.len() == 2
+                && let Some(elem) = supported_list_element(&args[0].ty)
+                && let Some(width) = FloatWidth::from_type_name(&elem.name)
+            {
+                lower_list_get(ctx, &args[0], &args[1], code)?; // element word -> rax
+                emit_movq_xmm0_from_rax(code, width);
+                return Ok(width);
+            }
             // A float-returning `extern fn` C call: marshal the arguments across
             // the Win64 C ABI (integer/pointer → GPRs, float → `xmm0..3`, §4.1)
             // and read the `f64`/`f32` return from `xmm0`.
@@ -4857,6 +5052,243 @@ fn emit_signed_idiv_r8(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0x49, 0xF7, 0xF8]);
 }
 
+// -- Growable list op lowering (native) --------------------------------------
+//
+// A `list<T>` value is a heap pointer to `[len i64][cap i64][slots]`. The heavy
+// lifting (allocate, deep-copy, grow) lives in three `.text` helpers
+// (`__lullaby_list_new`/`__lullaby_list_copy`/`__lullaby_list_grow`) so each call
+// site stays small; the inline codegen below stages operands and calls them. The
+// helper calls (and any list op) are `Call` IR nodes, so the frame reserves
+// shadow space and stays 16-byte aligned at each `call` exactly like other calls.
+
+/// `list_new()` -> a fresh `[len=0][cap=LIST_INITIAL_CAP][slots]` heap block
+/// pointer in `rax`. Just calls the runtime helper.
+fn lower_list_new(ctx: &mut NativeCtx, code: &mut Vec<u8>) {
+    emit_call_symbol(ctx, LIST_NEW_SYMBOL, code);
+}
+
+/// Emit a relocated `call rel32` against a `.text` symbol, leaving the callee's
+/// `rax` result in place. Used for the list runtime helpers.
+fn emit_call_symbol(ctx: &mut NativeCtx, symbol: &str, code: &mut Vec<u8>) {
+    code.push(0xE8);
+    let site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    ctx.relocations.push(CodeRelocation {
+        offset: site as u32,
+        symbol: symbol.to_string(),
+    });
+}
+
+/// Lower `push(l, x) -> list<T>` (value-semantic append): deep-copy `l`, grow the
+/// copy if it is full, store `x` into slot `len`, bump `len`, and leave the fresh
+/// list pointer in `rax`. Because `push` always returns a NEW list,
+/// `l = push(l, x)` matches the interpreters' `Value::clone`-then-append.
+fn lower_list_push(
+    ctx: &mut NativeCtx,
+    list: &BytecodeExpr,
+    value: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem = supported_list_element(&list.ty).ok_or_else(|| {
+        format!(
+            "push expects a scalar-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    // rax = deep copy of the source list.
+    lower_native_expr(ctx, list, code)?;
+    code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (copy source)
+    emit_call_symbol(ctx, LIST_COPY_SYMBOL, code); // rax = fresh copy
+    // Ensure room for one more element: rax = grow(copy) (a no-op when cap > len).
+    code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+    emit_call_symbol(ctx, LIST_GROW_SYMBOL, code); // rax = grown copy
+    code.push(0x50); // push rax (save the list pointer across value evaluation)
+    // Evaluate the value to append into rax (a scalar or a float bit pattern).
+    // A float element is stored bit-for-bit through the GPR: move xmm0 into rax
+    // so the 8-byte word write preserves the exact bits (f32 keeps its low four).
+    if let Some(width) = FloatWidth::from_type_name(&elem.name) {
+        lower_native_float_expr(ctx, value, code)?;
+        emit_movq_rax_from_xmm0(code, width);
+    } else {
+        lower_native_expr(ctx, value, code)?;
+    }
+    // rcx = list pointer (restored); the element value stays in rax.
+    code.push(0x59); // pop rcx
+    // r8 = len = [rcx + LIST_LEN_OFF]
+    emit_mov_r8_from_rcx_disp(code, LIST_LEN_OFF);
+    // Element slot address: rdx = rcx + LIST_DATA_OFF + r8*8.
+    // lea rdx, [rcx + r8*8 + LIST_DATA_OFF]
+    code.extend_from_slice(&[0x4A, 0x8D, 0x94, 0xC1]);
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    // mov [rdx], rax  (store the element word)
+    code.extend_from_slice(&[0x48, 0x89, 0x02]);
+    // len += 1: r8 += 1; mov [rcx + LIST_LEN_OFF], r8
+    code.extend_from_slice(&[0x49, 0xFF, 0xC0]); // inc r8
+    emit_mov_rcx_disp_from_r8(code, LIST_LEN_OFF);
+    // Result: the list pointer.
+    code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+    Ok(())
+}
+
+/// Lower `set(l, i, x) -> list<T>` (value-semantic replace): deep-copy `l`, store
+/// `x` into element slot `i` of the copy, leave the fresh list pointer in `rax`.
+/// In-bounds writes match the interpreters; an out-of-range index writes past the
+/// live elements into the (still-allocated) capacity or beyond, consistent with
+/// the native no-bounds-check discipline for arrays.
+fn lower_list_set(
+    ctx: &mut NativeCtx,
+    list: &BytecodeExpr,
+    index: &BytecodeExpr,
+    value: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem = supported_list_element(&list.ty).ok_or_else(|| {
+        format!(
+            "set expects a scalar-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    // rax = deep copy of the source list.
+    lower_native_expr(ctx, list, code)?;
+    code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+    emit_call_symbol(ctx, LIST_COPY_SYMBOL, code); // rax = fresh copy
+    code.push(0x50); // push rax (the copy pointer)
+    // rax = index (i64).
+    lower_native_expr(ctx, index, code)?;
+    code.push(0x50); // push rax (index)
+    // Evaluate the replacement value into rax (float via xmm0 -> rax).
+    if let Some(width) = FloatWidth::from_type_name(&elem.name) {
+        lower_native_float_expr(ctx, value, code)?;
+        emit_movq_rax_from_xmm0(code, width);
+    } else {
+        lower_native_expr(ctx, value, code)?;
+    }
+    code.push(0x59); // pop rcx (index)
+    code.push(0x5A); // pop rdx (list pointer)
+    // Element slot address: rdx = rdx + LIST_DATA_OFF + rcx*8.
+    // lea rdx, [rdx + rcx*8 + LIST_DATA_OFF]
+    code.extend_from_slice(&[0x48, 0x8D, 0x94, 0xCA]);
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    // mov [rdx], rax  (store the element)
+    code.extend_from_slice(&[0x48, 0x89, 0x02]);
+    // Result: the (copied) list pointer. Recompute it: rax = rdx - (index*8 + DATA).
+    // Simpler: the copy pointer was pushed first; recover by reloading is complex,
+    // so instead keep it: we overwrote rdx with the slot address. Recompute the
+    // base by subtracting the same offset.
+    // rax = rdx ; rax -= rcx*8 ; rax -= LIST_DATA_OFF
+    code.extend_from_slice(&[0x48, 0x89, 0xD0]); // mov rax, rdx
+    code.extend_from_slice(&[0x48, 0xC1, 0xE1, 0x03]); // shl rcx, 3
+    code.extend_from_slice(&[0x48, 0x29, 0xC8]); // sub rax, rcx
+    emit_sub_rax_imm32(code, LIST_DATA_OFF);
+    Ok(())
+}
+
+/// Lower `pop(l) -> list<T>` (value-semantic remove-last): deep-copy `l`,
+/// decrement the copy's `len` (the slot stays allocated, like `Vec::pop`), leave
+/// the fresh list pointer in `rax`. Popping an empty list is `L0413` on the
+/// interpreters; the native path decrements `len` toward `-1`, so the program is
+/// expected to keep the same non-empty precondition the interpreters require.
+fn lower_list_pop(
+    ctx: &mut NativeCtx,
+    list: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    supported_list_element(&list.ty).ok_or_else(|| {
+        format!(
+            "pop expects a scalar-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    lower_native_expr(ctx, list, code)?;
+    code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+    emit_call_symbol(ctx, LIST_COPY_SYMBOL, code); // rax = fresh copy
+    // len -= 1: r8 = [rax + LIST_LEN_OFF]; r8 -= 1; [rax + LIST_LEN_OFF] = r8.
+    // mov r8, [rax + LIST_LEN_OFF]
+    code.extend_from_slice(&[0x4C, 0x8B, 0x80]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    code.extend_from_slice(&[0x49, 0xFF, 0xC8]); // dec r8
+    // mov [rax + LIST_LEN_OFF], r8
+    code.extend_from_slice(&[0x4C, 0x89, 0x80]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    // Result: the (copied) list pointer already in rax.
+    Ok(())
+}
+
+/// Lower `get(l, i) -> T`: load element `i` from `l + LIST_DATA_OFF + i*8`. A
+/// float element is loaded back into `xmm0` by the float-expr path; this integer
+/// path loads the raw word into `rax` (a float `get` result is handled by
+/// `lower_native_float_expr`'s list-get case).
+fn lower_list_get(
+    ctx: &mut NativeCtx,
+    list: &BytecodeExpr,
+    index: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    supported_list_element(&list.ty).ok_or_else(|| {
+        format!(
+            "get expects a scalar-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    // rax = index; push it; rax = list pointer; pop rcx = index.
+    lower_native_expr(ctx, index, code)?;
+    code.push(0x50); // push rax (index)
+    lower_native_expr(ctx, list, code)?; // rax = list pointer
+    code.push(0x59); // pop rcx (index)
+    // rax = [rax + rcx*8 + LIST_DATA_OFF]
+    code.extend_from_slice(&[0x48, 0x8B, 0x84, 0xC8]); // mov rax, [rax + rcx*8 + disp32]
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    Ok(())
+}
+
+/// `movq rax, xmm0` (f64) or `movd eax, xmm0` (f32, zero-extending the low four
+/// bytes into rax) — move a float's bit pattern into `rax` so it can be stored as
+/// a flat 8-byte list element word bit-for-bit.
+fn emit_movq_rax_from_xmm0(code: &mut Vec<u8>, width: FloatWidth) {
+    match width {
+        // movq rax, xmm0 : 66 48 0F 7E C0
+        FloatWidth::F64 => code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]),
+        // movd eax, xmm0 : 66 0F 7E C0  (writing eax zero-extends into rax)
+        FloatWidth::F32 => code.extend_from_slice(&[0x66, 0x0F, 0x7E, 0xC0]),
+    }
+}
+
+/// `movq xmm0, rax` (f64) or `movd xmm0, eax` (f32) — move a raw list element
+/// word's bit pattern from `rax` into `xmm0` at the element's float width, for a
+/// float-element `get`.
+fn emit_movq_xmm0_from_rax(code: &mut Vec<u8>, width: FloatWidth) {
+    match width {
+        // movq xmm0, rax : 66 48 0F 6E C0
+        FloatWidth::F64 => code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0]),
+        // movd xmm0, eax : 66 0F 6E C0
+        FloatWidth::F32 => code.extend_from_slice(&[0x66, 0x0F, 0x6E, 0xC0]),
+    }
+}
+
+/// `mov rax, [rax + disp32]` — dereference a pointer in `rax` at a byte offset.
+fn emit_mov_rax_from_rax_disp(code: &mut Vec<u8>, disp: i32) {
+    code.extend_from_slice(&[0x48, 0x8B, 0x80]); // mov rax, [rax + disp32]
+    code.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// `mov r8, [rcx + disp32]`.
+fn emit_mov_r8_from_rcx_disp(code: &mut Vec<u8>, disp: i32) {
+    code.extend_from_slice(&[0x4C, 0x8B, 0x81]); // mov r8, [rcx + disp32]
+    code.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// `mov [rcx + disp32], r8`.
+fn emit_mov_rcx_disp_from_r8(code: &mut Vec<u8>, disp: i32) {
+    code.extend_from_slice(&[0x4C, 0x89, 0x81]); // mov [rcx + disp32], r8
+    code.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// `sub rax, imm32`.
+fn emit_sub_rax_imm32(code: &mut Vec<u8>, imm: i32) {
+    code.extend_from_slice(&[0x48, 0x2D]); // sub rax, imm32
+    code.extend_from_slice(&imm.to_le_bytes());
+}
+
 // -- Small instruction helpers -----------------------------------------------
 
 /// `mov rax, imm64` (always the 10-byte form for simplicity/correctness).
@@ -4946,11 +5378,29 @@ fn write_native_program_object(
     emit_stub: bool,
     debug: Option<&DebugOptions>,
 ) -> Vec<u8> {
-    if strings.is_empty() {
+    // The heap path (bump allocator + `.bss` region + helpers) is needed when the
+    // program interns string constants OR references any growable-list runtime
+    // helper. A program using neither keeps the exact prior text-only layout.
+    if strings.is_empty() && !program_uses_list_helpers(functions) {
         write_text_only_object(functions, emit_stub, debug)
     } else {
         write_object_with_data(functions, strings, emit_stub, debug)
     }
+}
+
+/// Whether any lowered function references a growable-list runtime helper (via a
+/// relocation against `__lullaby_list_new`/`__lullaby_list_copy`/
+/// `__lullaby_list_grow`). Used to decide whether the object needs the heap
+/// sections + helpers even when it interns no string constants.
+fn program_uses_list_helpers(functions: &[LoweredNativeFunction]) -> bool {
+    functions.iter().any(|f| {
+        f.relocations.iter().any(|r| {
+            matches!(
+                r.symbol.as_str(),
+                LIST_NEW_SYMBOL | LIST_COPY_SYMBOL | LIST_GROW_SYMBOL
+            )
+        })
+    })
 }
 
 /// Assemble the whole `.text` blob (entry stub + functions) and the section
@@ -5392,6 +5842,241 @@ fn emit_short_jmp_back(code: &mut Vec<u8>, target: usize) {
     code.push(rel as i8 as u8);
 }
 
+// -- Growable-list runtime helpers (native) ----------------------------------
+//
+// Three `.text` helpers back the inline list op codegen. Each list value is a
+// pointer to `[len i64][cap i64][cap * 8-byte slots]`. The helpers bump-allocate
+// through `__lullaby_alloc` (no reclamation — grown/copied blocks orphan the old
+// one) and copy whole 8-byte element words (elements are always scalar, so a flat
+// word copy is an exact deep copy, mirroring the WASM backend's `list<T>`).
+
+/// Emit a runtime loop that copies `count` 8-byte words from `[src_reg]` to
+/// `[dst_reg]` (both pointing at each block's first element slot). Uses `rax` as
+/// the loop counter and `r10`/`r11` as scratch, none of which the callers rely on
+/// across the loop. `count_reg` holds the element count. Registers by encoding:
+/// `src_reg`/`dst_reg`/`count_reg` are the 3-bit register numbers (rsi=6, rdi=7,
+/// rbx=3, etc.). This helper assumes src=rsi, dst=rdi, count=rbx for compact
+/// encodings, matching how the copy/grow helpers set them up.
+fn emit_list_word_copy_loop_rsi_rdi_rbx(code: &mut Vec<u8>) {
+    // xor rax, rax   (i = 0)
+    code.extend_from_slice(&[0x48, 0x31, 0xC0]);
+    let loop_top = code.len();
+    // cmp rax, rbx
+    code.extend_from_slice(&[0x48, 0x39, 0xD8]);
+    // jge done (rel32, patched)
+    code.extend_from_slice(&[0x0F, 0x8D]);
+    let done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // r10 = [rsi + rax*8 + LIST_DATA_OFF]   (mov r10, [rsi + rax*8 + disp32])
+    code.extend_from_slice(&[0x4C, 0x8B, 0x94, 0xC6]);
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    // [rdi + rax*8 + LIST_DATA_OFF] = r10   (mov [rdi + rax*8 + disp32], r10)
+    code.extend_from_slice(&[0x4C, 0x89, 0x94, 0xC7]);
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    // inc rax
+    code.extend_from_slice(&[0x48, 0xFF, 0xC0]);
+    // jmp loop_top (rel32)
+    emit_jmp_to(code, loop_top);
+    // done:
+    patch_rel32(code, done_site);
+}
+
+/// Emit `sub rsp, 40` / `add rsp, 40` framing that keeps `rsp` 16-byte aligned at
+/// an internal `call` (the return address makes 8, `sub rsp, 40` restores %16==0,
+/// and reserves the 32-byte Win64 shadow space).
+fn emit_helper_shadow_prologue(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 40
+}
+fn emit_helper_shadow_epilogue(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]); // add rsp, 40
+}
+
+/// `__lullaby_list_new() -> ptr in rax`: allocate a fresh empty list block with
+/// `len = 0`, `cap = LIST_INITIAL_CAP`.
+fn emit_list_new_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+    emit_helper_shadow_prologue(&mut code);
+    // rcx = LIST_DATA_OFF + LIST_INITIAL_CAP * 8  (block byte size)
+    let size = LIST_DATA_OFF as i64 + LIST_INITIAL_CAP * LIST_SLOT_SIZE as i64;
+    // mov rcx, imm32 (size is small)  -> use mov ecx, imm32 (B9) zero-extends.
+    code.push(0xB9);
+    code.extend_from_slice(&(size as i32).to_le_bytes());
+    // call __lullaby_alloc
+    code.push(0xE8);
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: HEAP_ALLOC_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // mov qword [rax + LIST_LEN_OFF], 0
+    code.extend_from_slice(&[0x48, 0xC7, 0x80]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    code.extend_from_slice(&0i32.to_le_bytes());
+    // mov qword [rax + LIST_CAP_OFF], LIST_INITIAL_CAP
+    code.extend_from_slice(&[0x48, 0xC7, 0x80]);
+    code.extend_from_slice(&LIST_CAP_OFF.to_le_bytes());
+    code.extend_from_slice(&(LIST_INITIAL_CAP as i32).to_le_bytes());
+    emit_helper_shadow_epilogue(&mut code);
+    code.push(0xC3); // ret (rax = new block)
+    HelperFunction {
+        name: LIST_NEW_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
+/// `__lullaby_list_copy(rcx = src) -> rax = fresh copy`: allocate a block with the
+/// source's `cap`, copy the `len`/`cap` headers and the `len` live element words.
+fn emit_list_copy_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+    // Preserve non-volatiles used: rsi (src), rdi (dst), rbx (len/cap scratch).
+    code.push(0x56); // push rsi
+    code.push(0x57); // push rdi
+    code.push(0x53); // push rbx
+    emit_helper_shadow_prologue(&mut code); // sub rsp, 40 (keeps %16 at the call)
+    // rsi = src
+    code.extend_from_slice(&[0x48, 0x89, 0xCE]); // mov rsi, rcx
+    // Allocation size = LIST_DATA_OFF + cap * 8. cap = [rsi + LIST_CAP_OFF].
+    // rcx = [rsi + LIST_CAP_OFF]
+    code.extend_from_slice(&[0x48, 0x8B, 0x8E]);
+    code.extend_from_slice(&LIST_CAP_OFF.to_le_bytes());
+    // rcx = rcx * 8 : shl rcx, 3
+    code.extend_from_slice(&[0x48, 0xC1, 0xE1, 0x03]);
+    // rcx = rcx + LIST_DATA_OFF : add rcx, imm32
+    code.extend_from_slice(&[0x48, 0x81, 0xC1]);
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    // call __lullaby_alloc -> rax = dst
+    code.push(0xE8);
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: HEAP_ALLOC_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // rdi = dst
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax
+    // Copy len + cap headers: two 8-byte words at offsets 0 and 8.
+    // r10 = [rsi + 0]; [rdi + 0] = r10  (len)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x96]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0x97]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    // r10 = [rsi + 8]; [rdi + 8] = r10  (cap)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x96]);
+    code.extend_from_slice(&LIST_CAP_OFF.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0x97]);
+    code.extend_from_slice(&LIST_CAP_OFF.to_le_bytes());
+    // rbx = len (element count to copy)
+    code.extend_from_slice(&[0x48, 0x8B, 0x9E]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    // Copy `rbx` element words from rsi to rdi.
+    emit_list_word_copy_loop_rsi_rdi_rbx(&mut code);
+    // rax = dst (return value)
+    code.extend_from_slice(&[0x48, 0x89, 0xF8]); // mov rax, rdi
+    emit_helper_shadow_epilogue(&mut code);
+    code.push(0x5B); // pop rbx
+    code.push(0x5F); // pop rdi
+    code.push(0x5E); // pop rsi
+    code.push(0xC3); // ret
+    HelperFunction {
+        name: LIST_COPY_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
+/// `__lullaby_list_grow(rcx = list) -> rax = list with room for one more element`:
+/// when `len < cap` the list is returned unchanged; otherwise a block with
+/// `new_cap = (cap == 0 ? LIST_INITIAL_CAP : cap * 2)` is allocated, the `len`
+/// header and the `len` live elements are copied, the new `cap` is written, and
+/// the fresh block is returned (the old block is orphaned).
+fn emit_list_grow_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+    code.push(0x56); // push rsi
+    code.push(0x57); // push rdi
+    code.push(0x53); // push rbx
+    emit_helper_shadow_prologue(&mut code); // sub rsp, 40
+    // rsi = list
+    code.extend_from_slice(&[0x48, 0x89, 0xCE]); // mov rsi, rcx
+    // rax = len = [rsi + LEN]; rdx = cap = [rsi + CAP].
+    code.extend_from_slice(&[0x48, 0x8B, 0x86]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x8B, 0x96]);
+    code.extend_from_slice(&LIST_CAP_OFF.to_le_bytes());
+    // if len < cap: return the list unchanged.
+    // cmp rax, rdx ; jl return_same (rel32)
+    code.extend_from_slice(&[0x48, 0x39, 0xD0]); // cmp rax, rdx
+    code.extend_from_slice(&[0x0F, 0x8C]); // jl rel32
+    let return_same_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // rbx = new_cap = (cap == 0 ? LIST_INITIAL_CAP : cap * 2).
+    // rbx = cap ; test rbx, rbx ; jnz double ; rbx = LIST_INITIAL_CAP ; jmp sized
+    code.extend_from_slice(&[0x48, 0x89, 0xD3]); // mov rbx, rdx (cap)
+    code.extend_from_slice(&[0x48, 0x85, 0xDB]); // test rbx, rbx
+    code.extend_from_slice(&[0x0F, 0x85]); // jnz double (rel32)
+    let double_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // rbx = LIST_INITIAL_CAP : mov ebx, imm32
+    code.push(0xBB);
+    code.extend_from_slice(&(LIST_INITIAL_CAP as i32).to_le_bytes());
+    code.extend_from_slice(&[0xE9]); // jmp sized (rel32)
+    let sized_jmp_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // double: rbx = cap * 2  (shl rbx, 1)
+    patch_rel32(&mut code, double_site);
+    code.extend_from_slice(&[0x48, 0xD1, 0xE3]); // shl rbx, 1
+    // sized: allocate LIST_DATA_OFF + new_cap * 8.
+    patch_rel32(&mut code, sized_jmp_site);
+    // rcx = rbx * 8 + LIST_DATA_OFF
+    code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx
+    code.extend_from_slice(&[0x48, 0xC1, 0xE1, 0x03]); // shl rcx, 3
+    code.extend_from_slice(&[0x48, 0x81, 0xC1]); // add rcx, imm32
+    code.extend_from_slice(&LIST_DATA_OFF.to_le_bytes());
+    // call __lullaby_alloc -> rax = dst
+    code.push(0xE8);
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: HEAP_ALLOC_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // rdi = dst
+    code.extend_from_slice(&[0x48, 0x89, 0xC7]); // mov rdi, rax
+    // dst.len = src.len : r10 = [rsi + LEN]; [rdi + LEN] = r10.
+    code.extend_from_slice(&[0x4C, 0x8B, 0x96]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0x97]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    // dst.cap = new_cap (rbx) : mov [rdi + CAP], rbx.
+    code.extend_from_slice(&[0x48, 0x89, 0x9F]);
+    code.extend_from_slice(&LIST_CAP_OFF.to_le_bytes());
+    // Copy `len` element words. rbx = len (reuse rbx as the count now).
+    code.extend_from_slice(&[0x48, 0x8B, 0x9E]);
+    code.extend_from_slice(&LIST_LEN_OFF.to_le_bytes());
+    emit_list_word_copy_loop_rsi_rdi_rbx(&mut code);
+    // rax = dst (the grown block).
+    code.extend_from_slice(&[0x48, 0x89, 0xF8]); // mov rax, rdi
+    code.extend_from_slice(&[0xE9]); // jmp epilogue (rel32)
+    let epi_jmp_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // return_same: rax = the original list (rsi).
+    patch_rel32(&mut code, return_same_site);
+    code.extend_from_slice(&[0x48, 0x89, 0xF0]); // mov rax, rsi
+    // epilogue:
+    patch_rel32(&mut code, epi_jmp_site);
+    emit_helper_shadow_epilogue(&mut code);
+    code.push(0x5B); // pop rbx
+    code.push(0x5F); // pop rdi
+    code.push(0x5E); // pop rsi
+    code.push(0xC3); // ret
+    HelperFunction {
+        name: LIST_GROW_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
 /// Write the extended COFF object with `.text`, `.rdata`, and `.bss` sections.
 /// Used only when the program references string constants.
 fn write_object_with_data(
@@ -5478,6 +6163,24 @@ fn write_object_with_data(
         &strlen.code,
         &strlen.relocations,
     );
+    // Growable-list runtime helpers (list_new / list_copy / list_grow). Emitted
+    // unconditionally alongside the string helpers whenever the heap path runs; a
+    // program that never references them simply carries three unused `.text`
+    // functions (the linker's dead-strip removes them from the final image).
+    for list_helper in [
+        emit_list_new_helper(),
+        emit_list_copy_helper(),
+        emit_list_grow_helper(),
+    ] {
+        append_code(
+            &mut text,
+            &mut relocations,
+            &mut func_offsets,
+            &list_helper.name,
+            &list_helper.code,
+            &list_helper.relocations,
+        );
+    }
 
     // -- Build .rdata: NUL-terminated string constants -----------------------
     let mut rdata: Vec<u8> = Vec::new();
@@ -5514,7 +6217,13 @@ fn write_object_with_data(
             is_function: true,
         });
     }
-    for helper in [HEAP_ALLOC_SYMBOL, HEAP_STRLEN_SYMBOL] {
+    for helper in [
+        HEAP_ALLOC_SYMBOL,
+        HEAP_STRLEN_SYMBOL,
+        LIST_NEW_SYMBOL,
+        LIST_COPY_SYMBOL,
+        LIST_GROW_SYMBOL,
+    ] {
         symbols.push(SymbolDef {
             name: helper.to_string(),
             section_number: 1,
@@ -7660,5 +8369,146 @@ mod native_program_tests {
             "skip reason should cite the register-arity limit: {}",
             build_skip.reason
         );
+    }
+
+    // -- Growable list<T> (scalar element) native codegen --------------------
+
+    #[test]
+    fn compiles_growable_list_function_natively() {
+        // A function that builds a scalar-element `list<i64>` via `list_new`/
+        // `push`/`set`/`pop`/`get`/`len` — including a signature returning
+        // `list<i64>` and one taking it — now compiles natively (not skipped).
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn build -> list<i64>\n",
+            "    let xs list<i64> = list_new()\n",
+            "    xs = push(xs, 10)\n",
+            "    xs = push(xs, 20)\n",
+            "    xs\n\n",
+            "fn total xs list<i64> -> i64\n",
+            "    let ys list<i64> = set(xs, 0, 5)\n",
+            "    let zs list<i64> = pop(ys)\n",
+            "    get(ys, 0) + len(zs)\n\n",
+            "fn main -> i64\n",
+            "    let xs list<i64> = build()\n",
+            "    total(xs)\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"build".to_string())
+                && program.compiled.contains(&"total".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "growable list functions must compile: {:?} / {:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+    }
+
+    #[test]
+    fn list_object_emits_grow_and_copy_helpers() {
+        // A list-using program (no string constants) still emits the heap path:
+        // the object must contain the `__lullaby_list_new`/`_copy`/`_grow`
+        // runtime-helper symbols and the bump allocator, proving grow/copy codegen
+        // is present.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let xs list<i64> = list_new()\n",
+            "    xs = push(xs, 1)\n",
+            "    xs = push(xs, 2)\n",
+            "    len(xs)\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        // The three list helpers + the bump allocator are external-defined symbols.
+        for symbol in [
+            LIST_NEW_SYMBOL,
+            LIST_COPY_SYMBOL,
+            LIST_GROW_SYMBOL,
+            HEAP_ALLOC_SYMBOL,
+        ] {
+            let (section, _storage) =
+                coff_symbol(&program.bytes, symbol).unwrap_or_else(|| panic!("missing {symbol}"));
+            assert_eq!(section, 1, "{symbol} must be defined in .text");
+        }
+        // The bump-heap `.bss` cell/region symbols must be present too.
+        assert!(
+            coff_symbol(&program.bytes, HEAP_BASE_SYMBOL).is_some(),
+            "the .bss heap region must be present for a list-using object"
+        );
+    }
+
+    #[test]
+    fn push_call_site_calls_copy_then_grow() {
+        // A `push` call site deep-copies the source list (value semantics) and then
+        // grows it, so `main`'s text carries relocations against BOTH the copy and
+        // grow helpers.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let xs list<i64> = list_new()\n",
+            "    xs = push(xs, 7)\n",
+            "    get(xs, 0)\n",
+        )))
+        .expect("emit native program");
+        let main = program
+            .compiled
+            .iter()
+            .position(|n| n == "main")
+            .expect("main compiled");
+        assert_eq!(main, 0);
+        // The object references the copy + grow helpers (proving push emits both).
+        assert!(
+            coff_symbol(&program.bytes, LIST_COPY_SYMBOL).is_some(),
+            "push must reference the list-copy helper"
+        );
+        assert!(
+            coff_symbol(&program.bytes, LIST_GROW_SYMBOL).is_some(),
+            "push must reference the list-grow helper"
+        );
+    }
+
+    #[test]
+    fn defers_heap_element_list_gracefully() {
+        // A `list<string>` (heap element) is DEFERRED: the enclosing function skips
+        // with a clear reason and still runs on the interpreters — never
+        // miscompiled.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn names -> list<string>\n",
+            "    push(list_new(), \"a\")\n\n",
+            "fn main -> i64\n",
+            "    len(names())\n",
+        )));
+        // `main` calls `names` (which is skipped), so `main` demotes too; the whole
+        // program has no eligible function -> the L0339 "nothing eligible" error.
+        let err = program.expect_err("heap-element list must not compile");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(
+            err.skipped
+                .iter()
+                .any(|s| s.name == "names" && s.reason.contains("heap-element")),
+            "the skip reason must cite the deferred heap-element list: {:?}",
+            err.skipped
+        );
+    }
+
+    #[test]
+    fn compiles_float_element_list_natively() {
+        // A `list<f64>` (float scalar element) compiles: elements are stored as
+        // bit-preserving 8-byte words, and a float `get` moves the word back into
+        // an XMM register.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let xs list<f64> = list_new()\n",
+            "    xs = push(xs, 1.5)\n",
+            "    xs = push(xs, 2.5)\n",
+            "    let a f64 = get(xs, 0)\n",
+            "    let b f64 = get(xs, 1)\n",
+            "    let flag i64 = 0\n",
+            "    if a + b > 3.9\n",
+            "        flag = 1\n",
+            "    flag + len(xs)\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
     }
 }
