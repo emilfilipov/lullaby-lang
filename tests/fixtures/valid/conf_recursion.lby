@@ -1,0 +1,30 @@
+# Integration: recursive numeric functions (factorial, fibonacci) combined with
+# higher-order use of a first-class function applied over a range.
+
+fn fact n i64 -> i64
+    if n <= 1
+        return 1
+    n * fact(n - 1)
+
+fn fib n i64 -> i64
+    if n < 2
+        return n
+    fib(n - 1) + fib(n - 2)
+
+fn accumulate lo i64 hi i64 f fn(i64) -> i64 -> i64
+    let total i64 = 0
+    for i from lo to hi
+        total += f(i)
+    total
+
+fn main -> i64
+    # fact(5) = 120
+    let a i64 = fact(5)
+    # fib(10) = 55
+    let b i64 = fib(10)
+    # sum of fact over 1..4 = 1 + 2 + 6 + 24 = 33
+    let c i64 = accumulate(1, 4, fact)
+    # sum of fib over 0..6 = 0+1+1+2+3+5+8 = 20
+    let d i64 = accumulate(0, 6, fib)
+    # 120 + 55 + 33 + 20 = 228
+    a + b + c + d

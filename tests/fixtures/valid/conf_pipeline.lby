@@ -1,0 +1,36 @@
+# Integration: list<struct> where the struct holds an enum field; iterate the
+# list with an index-based for loop, match on the enum inside a helper, and
+# accumulate an i64.
+
+enum Op
+    Add i64
+    Mul i64
+    Reset
+
+struct Step
+    weight i64
+    op Op
+
+fn apply acc i64 s Step -> i64
+    match s.op
+        Add(n) -> acc + n * s.weight
+        Mul(n) -> acc * n
+        Reset -> 0
+
+fn build -> list<Step>
+    let steps list<Step> = list_new()
+    steps = push(steps, Step(2, Add(3)))
+    steps = push(steps, Step(1, Mul(4)))
+    steps = push(steps, Step(5, Add(1)))
+    steps = push(steps, Step(1, Reset))
+    steps = push(steps, Step(3, Add(2)))
+    steps
+
+fn main -> i64
+    let steps list<Step> = build()
+    let acc i64 = 10
+    let n i64 = len(steps)
+    for i from 0 to n - 1
+        acc = apply(acc, get(steps, i))
+    # trace: 10 -> +3*2=16 -> *4=64 -> +1*5=69 -> Reset=0 -> +2*3=6
+    acc + n
