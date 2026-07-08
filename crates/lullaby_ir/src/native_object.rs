@@ -8,8 +8,72 @@ use lullaby_parser::{AssignOp, BinaryOp, TypeRef};
 use crate::native_contract::{NativeObjectFormat, NativeTarget, alpha1_native_backend_contract};
 use crate::{
     BytecodeExpr, BytecodeExprKind, BytecodeFunction, BytecodeIfBranch, BytecodeInstruction,
-    BytecodeModule, BytecodePlace, IrStructDef,
+    BytecodeModule, BytecodePlace, IntKind, IrStructDef,
 };
+
+/// The fixed-width integer kind named by a Lullaby type name (`i8`/`u32`/…), or
+/// `None` for `i64` and every non-fixed-width type. The native backend keeps a
+/// fixed-width value in a 64-bit register as the same normalized `i64` cell the
+/// interpreters use (see [`IntKind`] and [`IntKind::normalize`]): signed kinds
+/// sign-extended, unsigned zero-extended, the 64-bit kinds filling the cell.
+fn fixed_int_kind(type_name: &str) -> Option<IntKind> {
+    match type_name {
+        "i8" => Some(IntKind::I8),
+        "i16" => Some(IntKind::I16),
+        "i32" => Some(IntKind::I32),
+        "u8" => Some(IntKind::U8),
+        "u16" => Some(IntKind::U16),
+        "u32" => Some(IntKind::U32),
+        "u64" => Some(IntKind::U64),
+        "isize" => Some(IntKind::Isize),
+        "usize" => Some(IntKind::Usize),
+        _ => None,
+    }
+}
+
+/// The target [`IntKind`] of a `to_<T>` conversion builtin (`to_i8`/`to_u32`/…),
+/// or `None` for `to_i64` (identity on the cell) and every non-conversion call.
+/// These appear in the IR/bytecode as builtin calls; the native backend emits
+/// them inline (a width-normalize of the argument's cell) rather than a real
+/// call — see [`lower_native_expr`].
+fn to_int_conversion_kind(name: &str) -> Option<IntKind> {
+    match name {
+        "to_i8" => Some(IntKind::I8),
+        "to_i16" => Some(IntKind::I16),
+        "to_i32" => Some(IntKind::I32),
+        "to_u8" => Some(IntKind::U8),
+        "to_u16" => Some(IntKind::U16),
+        "to_u32" => Some(IntKind::U32),
+        "to_u64" => Some(IntKind::U64),
+        "to_isize" => Some(IntKind::Isize),
+        "to_usize" => Some(IntKind::Usize),
+        _ => None,
+    }
+}
+
+/// Emit the re-normalization of the value in `rax` into `kind`'s canonical cell,
+/// matching [`IntKind::normalize`] exactly: truncate to the kind's width, then
+/// sign-extend (signed kinds) or zero-extend (unsigned kinds) back into the
+/// 64-bit register. The 64-bit kinds (`u64`/`usize`/`isize`) already fill the
+/// cell, so normalization is a no-op for them.
+fn emit_normalize_rax(code: &mut Vec<u8>, kind: IntKind) {
+    match kind {
+        // movsx rax, al  (48 0F BE C0)
+        IntKind::I8 => code.extend_from_slice(&[0x48, 0x0F, 0xBE, 0xC0]),
+        // movsx rax, ax  (48 0F BF C0)
+        IntKind::I16 => code.extend_from_slice(&[0x48, 0x0F, 0xBF, 0xC0]),
+        // movsxd rax, eax  (48 63 C0)
+        IntKind::I32 => code.extend_from_slice(&[0x48, 0x63, 0xC0]),
+        // movzx rax, al  (48 0F B6 C0)
+        IntKind::U8 => code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]),
+        // movzx rax, ax  (48 0F B7 C0)
+        IntKind::U16 => code.extend_from_slice(&[0x48, 0x0F, 0xB7, 0xC0]),
+        // mov eax, eax  (89 C0) — a 32-bit write zero-extends into rax.
+        IntKind::U32 => code.extend_from_slice(&[0x89, 0xC0]),
+        // 64-bit kinds fill the whole cell: normalization is the identity.
+        IntKind::U64 | IntKind::Isize | IntKind::Usize => {}
+    }
+}
 
 const AMD64_MACHINE: u16 = 0x8664;
 const COFF_HEADER_SIZE: u32 = 20;
@@ -941,6 +1005,9 @@ impl NativeType {
 fn resolve_native_type(ty: &TypeRef, structs: &[IrStructDef]) -> Result<NativeType, String> {
     match ty.name.as_str() {
         "i64" => Ok(NativeType::I64),
+        // A fixed-width integer (`i8`…`usize`) is stored as its normalized `i64`
+        // cell, so it occupies exactly one 8-byte word like `i64`.
+        name if fixed_int_kind(name).is_some() => Ok(NativeType::I64),
         name if name.starts_with("array<") => Err(format!(
             "array length for `{name}` is unknown from its type"
         )),
@@ -2052,16 +2119,44 @@ fn lower_native_expr(
                 code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
                 Ok(())
             }
-            // Integer bitwise NOT is deferred on the native backend; a function
-            // using it is skipped and still runs on the interpreters.
+            // Integer bitwise NOT (`~`). On a fixed-width kind it is one's
+            // complement re-normalized to the width, matching the interpreter's
+            // `Value::int(!v, ty)`. On plain `i64` it is a full-width `not`.
             lullaby_parser::UnaryOp::BitNot => {
-                Err("bitwise `~` is not supported on the native backend".to_string())
+                lower_native_expr(ctx, inner, code)?;
+                code.extend_from_slice(&[0x48, 0xF7, 0xD0]); // not rax
+                if let Some(kind) = fixed_int_kind(inner.ty.name.as_str()) {
+                    emit_normalize_rax(code, kind);
+                }
+                Ok(())
             }
         },
         BytecodeExprKind::Binary { left, op, right } => {
             lower_native_binary(ctx, left, *op, right, code)
         }
         BytecodeExprKind::Call { name, args } => {
+            // Fixed-width integer conversions are emitted inline, not as calls.
+            // `to_<T>(x)` normalizes the argument's `i64` cell into `T`'s width
+            // (truncate + sign/zero-extend), matching the interpreter's
+            // `Value::int(x, T)`. `to_i64(x)` widens a fixed-width cell to `i64`,
+            // which is the identity on the already-normalized cell.
+            if let Some(kind) = to_int_conversion_kind(name) {
+                if args.len() != 1 {
+                    return Err(format!("`{name}` takes exactly one argument"));
+                }
+                lower_native_expr(ctx, &args[0], code)?;
+                emit_normalize_rax(code, kind);
+                return Ok(());
+            }
+            if name == "to_i64" {
+                if args.len() != 1 {
+                    return Err("`to_i64` takes exactly one argument".to_string());
+                }
+                // The source cell is already normalized; widening to `i64` keeps
+                // the bits unchanged.
+                lower_native_expr(ctx, &args[0], code)?;
+                return Ok(());
+            }
             // `len(arr)` over a fixed native array folds to a compile-time
             // constant (arrays never grow in the native subset).
             if name == "len"
@@ -2212,9 +2307,139 @@ fn lower_native_binary(
             lower_native_expr(ctx, left, code)?;
             code.push(0x50); // push rax (left)
             lower_native_expr(ctx, right, code)?; // right in rax
-            emit_i64_binop_from_stack(code, op)
+            // A fixed-width operand kind (both operands share it; the type checker
+            // forbids mixing widths) selects width- and signedness-correct codegen
+            // that re-normalizes the result. Plain `i64` uses the full-width path.
+            match fixed_int_kind(left.ty.name.as_str()) {
+                Some(kind) => emit_fixed_binop_from_stack(code, op, kind),
+                None => emit_i64_binop_from_stack(code, op),
+            }
         }
     }
+}
+
+/// Combine a fixed-width binary op whose left operand is on the stack and whose
+/// right operand is in `rax`, leaving the result (a normalized cell for
+/// arithmetic/bitwise/shift, a canonical `0`/`1` for comparisons) in `rax`. This
+/// mirrors the interpreter free functions exactly: arithmetic wraps then
+/// re-normalizes (`Value::int`), division and comparison are signedness-aware
+/// (`int_div`/`int_cmp`), and shifts mask the count to the width and honor
+/// signedness (`int_shl`/`int_shr`).
+fn emit_fixed_binop_from_stack(
+    code: &mut Vec<u8>,
+    op: BinaryOp,
+    kind: IntKind,
+) -> Result<(), String> {
+    match op {
+        BinaryOp::Add => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::Subtract => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+            code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::Multiply => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC1]); // imul rax, rcx
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::Divide => {
+            // left / right, where left is the dividend. Divide on the full 64-bit
+            // cell (signedness-correct because signed cells are sign-extended and
+            // unsigned cells zero-extended), then re-normalize the quotient.
+            code.push(0x59); // pop rcx (left = dividend)
+            code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax (divisor)
+            code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx (dividend)
+            if kind.is_unsigned() {
+                code.extend_from_slice(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
+                code.extend_from_slice(&[0x49, 0xF7, 0xF0]); // div r8
+            } else {
+                code.extend_from_slice(&[0x48, 0x99]); // cqo (sign-extend into rdx)
+                code.extend_from_slice(&[0x49, 0xF7, 0xF8]); // idiv r8
+            }
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::Equal | BinaryOp::NotEqual => {
+            // Equality is width-agnostic on the normalized cells.
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x39, 0xC1]); // cmp rcx, rax
+            let set_opcode = if matches!(op, BinaryOp::Equal) {
+                0x94 // sete
+            } else {
+                0x95 // setne
+            };
+            code.extend_from_slice(&[0x0F, set_opcode, 0xC0]); // set<cc> al
+            code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+        }
+        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+            // Ordering uses unsigned condition codes for unsigned kinds and
+            // signed condition codes for signed kinds, on the normalized cells.
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x39, 0xC1]); // cmp rcx, rax
+            let set_opcode = if kind.is_unsigned() {
+                match op {
+                    BinaryOp::Less => 0x92,         // setb
+                    BinaryOp::LessEqual => 0x96,    // setbe
+                    BinaryOp::Greater => 0x97,      // seta
+                    BinaryOp::GreaterEqual => 0x93, // setae
+                    _ => unreachable!(),
+                }
+            } else {
+                match op {
+                    BinaryOp::Less => 0x9C,         // setl
+                    BinaryOp::LessEqual => 0x9E,    // setle
+                    BinaryOp::Greater => 0x9F,      // setg
+                    BinaryOp::GreaterEqual => 0x9D, // setge
+                    _ => unreachable!(),
+                }
+            };
+            code.extend_from_slice(&[0x0F, set_opcode, 0xC0]); // set<cc> al
+            code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+        }
+        BinaryOp::BitAnd => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x21, 0xC8]); // and rax, rcx
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::BitOr => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x09, 0xC8]); // or rax, rcx
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::BitXor => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x31, 0xC8]); // xor rax, rcx
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::Shl | BinaryOp::Shr => {
+            // Mask the shift count to `width-1` (matching `int_shl`/`int_shr`),
+            // move it into cl, then shift the left operand and re-normalize. `<<`
+            // is `shl`; `>>` is `sar` (arithmetic) for signed kinds and `shr`
+            // (logical) for unsigned kinds.
+            //
+            // Stack holds the left operand; rax holds the right (count).
+            let mask = (kind.width_bits() - 1) as u8; // 7/15/31/63, fits imm8
+            code.extend_from_slice(&[0x48, 0x83, 0xE0, mask]); // and rax, mask
+            code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (count in cl)
+            code.push(0x58); // pop rax (left = value to shift)
+            let shift_op: &[u8] = match (op, kind.is_unsigned()) {
+                (BinaryOp::Shl, _) => &[0x48, 0xD3, 0xE0], // shl rax, cl
+                (BinaryOp::Shr, true) => &[0x48, 0xD3, 0xE8], // shr rax, cl (logical)
+                (BinaryOp::Shr, false) => &[0x48, 0xD3, 0xF8], // sar rax, cl (arithmetic)
+                _ => unreachable!(),
+            };
+            code.extend_from_slice(shift_op);
+            emit_normalize_rax(code, kind);
+        }
+        BinaryOp::And | BinaryOp::Or => {
+            return Err("logical and/or must be short-circuited".to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Normalize rax to a canonical boolean (1 if non-zero, else 0).
@@ -3658,6 +3883,119 @@ mod native_program_tests {
         );
         assert_eq!(program.skipped.len(), 1);
         assert_eq!(program.skipped[0].name, "greet");
+    }
+
+    #[test]
+    fn compiles_fixed_width_integer_function_natively() {
+        // A `main` whose signature is `-> i64` but which uses the fixed-width
+        // integer types internally (u32 wrapping subtraction, an unsigned
+        // comparison, and the `to_u32`/`to_i64` conversions) now compiles
+        // natively instead of being skipped.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let a u32 = to_u32(0)\n",
+            "    let b u32 = to_u32(1)\n",
+            "    let wrapped i64 = to_i64(a - b)\n",
+            "    let flag i64 = 0\n",
+            "    if a > b\n",
+            "        flag = 1\n",
+            "    wrapped + flag\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(
+            program.skipped.is_empty(),
+            "no function should be skipped: {:?}",
+            program.skipped
+        );
+
+        // The compiled body must contain a `mov eax, eax` (89 C0) — the u32
+        // zero-extend that re-normalizes each width-producing op — and a `setb
+        // al` (0F 92 C0), the unsigned `>` (a > b) condition code.
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        assert!(
+            text.windows(2).any(|w| w == [0x89, 0xC0]),
+            "expected a `mov eax, eax` u32 normalization"
+        );
+        assert!(
+            text.windows(3).any(|w| w == [0x0F, 0x97, 0xC0]),
+            "expected a `seta al` for the unsigned `>`"
+        );
+    }
+
+    #[test]
+    fn compiles_fixed_width_bitwise_and_shifts_natively() {
+        // Bitwise and shift operators on fixed-width kinds compile natively: a u8
+        // AND, a signed i32 arithmetic right shift, and one's-complement `~`.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let a u8 = to_u8(200)\n",
+            "    let b u8 = to_u8(15)\n",
+            "    let band u8 = a & b\n",
+            "    let notv u8 = ~a\n",
+            "    let s i32 = to_i32(0 - 8)\n",
+            "    let sar i32 = s >> to_i32(1)\n",
+            "    to_i64(band) + to_i64(notv) + to_i64(sar)\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        // `sar rax, cl` (48 D3 F8) for the signed right shift, and `not rax`
+        // (48 F7 D0) for `~`.
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0xD3, 0xF8]),
+            "expected a `sar rax, cl` for the signed i32 `>>`"
+        );
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0xF7, 0xD0]),
+            "expected a `not rax` for `~`"
+        );
+    }
+
+    #[test]
+    fn skips_float_using_function_gracefully() {
+        // A `-> i64` function that touches an `f32` value is not in the native
+        // subset (float codegen is deferred); it must skip gracefully and report
+        // why, leaving nothing eligible.
+        let err = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let e f32 = to_f32(2.0)\n",
+            "    let flag i64 = 0\n",
+            "    if e > to_f32(1.0)\n",
+            "        flag = 1\n",
+            "    flag\n",
+        )))
+        .expect_err("float function is not native-eligible");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(err.skipped.iter().any(|s| s.name == "main"));
+    }
+
+    #[test]
+    fn skips_saturating_builtin_gracefully() {
+        // `saturating_add` returns a plain integer but is deferred on the native
+        // backend (it is not emitted inline); a `main` using it skips gracefully.
+        let err = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let s u8 = saturating_add(to_u8(200), to_u8(100))\n",
+            "    to_i64(s)\n",
+        )))
+        .expect_err("saturating builtin is deferred");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(
+            err.skipped
+                .iter()
+                .any(|s| s.name == "main" && s.reason.contains("saturating_add")),
+            "skip reason should name the deferred builtin: {:?}",
+            err.skipped
+        );
     }
 
     #[test]
