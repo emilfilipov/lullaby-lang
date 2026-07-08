@@ -1,105 +1,141 @@
 # Lullaby
 
-Lullaby is an experimental compiled systems programming language focused on concise, indentation-only syntax, strong typing, memory-safety foundations, and source that is easy for LLMs to generate.
+Lullaby is a compiled, statically typed systems programming language with an
+indentation-only syntax. It is designed for concise, readable source that is
+strongly typed, memory-safety aware, and easy for both humans and LLMs to
+generate. Lullaby is in active development toward a 1.0 release; the toolchain
+already runs real programs end to end across five backends.
 
-The toolchain runs Lullaby on three parity-checked backends — an AST interpreter, a typed-IR interpreter, and an instruction-bytecode VM (with an optimizer) — plus a versioned `.lbc` artifact path and offline docs, shipped as a Windows-first portable package. Native code generation, linking, and a full systems runtime are still future work.
+The compiler runs Lullaby on five parity-checked backends — an AST interpreter,
+a typed-IR interpreter, an instruction-bytecode VM (with an optimizer), a
+WebAssembly emitter, and a native x86-64 code generator (with linking,
+freestanding / no-std builds, and inline assembly) — plus a versioned `.lbc`
+bytecode artifact path, an editor language server, a test runner, and a
+self-contained offline documentation bundle.
 
 ## Language At A Glance
 
-The implemented surface (all running identically on every backend) includes:
+The implemented surface runs identically on the interpreter backends (with the
+WebAssembly and native backends supporting growing subsets):
 
-- **Types**: `i64`, `f64`, `bool`, `string`, `char`, `byte`, `void`; `array<T>`, growable `list<T>`, `map<K, V>`; nominal `struct` and `enum` (tagged unions); `option<T>` / `result<T, E>`; function values `fn(T) -> R`; and `rc<T>`/`ref<T>`/`ptr<T>` references.
-- **Data**: struct construction (positional and named `Point(x: 3, y: 4)`), field access and mutation, UFCS method calls (`p.dist()`), enum variants with payloads.
-- **Control flow**: `if`/`elif`/`else`, `while`, range `for`, `loop`, `break`/`continue`, exhaustive `match` with payload binding, and `throw`/`try`/`catch`.
-- **Abstraction**: user-defined generic functions (`fn f<T> ...`) with call-site inference, traits with `impl` and bounded generics (`<T: Show>`), and first-class functions passed and returned by value.
-- **Programs**: multi-file `import` with `pub` visibility; a string and math standard library, collections, and text/stream/system I/O — all documented in the [standard library catalog](documents/standard_library.md).
-- **Tooling**: strong diagnostics (concise / verbose / JSON), a canonical formatter (`lullaby fmt`), an editor language server (`lullaby lsp`), and a bytecode artifact + inspector.
+- **Types**: `i64`, `f64`, `bool`, `string`, `char`, `byte`, `void`; fixed
+  `array<T>`, growable `list<T>`, and `map<K, V>`; nominal `struct` and `enum`
+  (tagged unions); the built-in generic enums `option<T>` and `result<T, E>`;
+  function values `fn(T) -> R`; and `rc<T>` / `ref<T>` / `ptr<T>` references.
+- **Data & collections**: struct construction (positional and named
+  `Point(x: 3, y: 4)`), field access and mutation, UFCS method calls
+  (`p.dist()`), enum variants with payloads, `list<T>` / `map<K, V>` with
+  iteration and `sort`.
+- **Control flow**: `if` / `elif` / `else`, `while`, range `for`, `loop`,
+  `break` / `continue`, exhaustive `match` with payload binding, `throw` /
+  `try` / `catch`, and the `?` operator for `option` / `result` propagation.
+- **Abstraction**: user-defined generic functions (`fn f<T> ...`) with call-site
+  inference, traits with `impl` and bounded generics (`<T: Show>`), and
+  first-class functions passed and returned by value.
+- **Programs**: multi-file `import` with `pub` visibility and a `lullaby.json`
+  project manifest with local-path dependencies, so programs can span multiple
+  files and packages.
+- **Standard library** (the always-in-scope prelude): a rich math library,
+  string / bytes / UTF-8 utilities plus number parsing and char helpers,
+  time / clock and OS randomness, memory builtins, and text / directory /
+  binary file I/O — all cataloged in the
+  [standard library reference](documents/standard_library.md).
+- **Systems & I/O**: bitwise operators and intrinsics; TCP/UDP socket I/O with a
+  working HTTP client and HTTP/1.1 server written in pure Lullaby; and
+  concurrency via threads, channels, a shared mutex, atomics, and data
+  parallelism (`parallel_map`).
+- **Tooling**: strong diagnostics (concise / verbose / JSON), a canonical
+  formatter (`lullaby fmt`), an editor language server (`lullaby lsp`), a
+  language-level test runner (`lullaby test`), and a `.lbc` bytecode artifact
+  with an inspector.
 
-See the [Alpha 1 language surface](documents/alpha1_language_surface.md) for the exact, authoritative feature list.
+For the authoritative, always-current list of what is implemented, see the
+[repository map](documents/repository_map.md) and the
+[language specification](documents/language_specification.md).
 
-## Install The Portable Package
+## Roadmap
 
-1. Download `lullaby-alpha1-windows-x64.zip` and `lullaby-alpha1-windows-x64.zip.sha256` from the latest GitHub prerelease.
-2. Verify the archive checksum:
-
-```powershell
-$expected = (Get-Content .\lullaby-alpha1-windows-x64.zip.sha256 -Raw).Split(" ")[0]
-$actual = (Get-FileHash .\lullaby-alpha1-windows-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "checksum mismatch" }
-```
-
-3. Unzip the archive.
-4. From the package directory, run:
-
-```powershell
-.\bin\lullaby.exe --version
-.\bin\lullaby.exe docs
-.\bin\lullaby.exe examples
-.\bin\lullaby.exe run .\examples\valid\calculator.lby
-```
-
-Optional user PATH setup:
-
-```powershell
-.\install.cmd
-lullaby --version
-.\uninstall.cmd
-```
-
-Open a new PowerShell or cmd window after running `install.cmd`.
+Lullaby is not yet at 1.0. Genuinely planned work includes wider integer types,
+`f32`, environment-capturing (capturing) closures, the WebAssembly heap phase
+and a broader browser/DOM interop surface, wider FFI breadth, and the
+branding / packaging / installer work (a named toolchain and native install
+channels). See [documents/post_alpha_roadmap.md](documents/post_alpha_roadmap.md)
+for the current sequencing.
 
 ## Build From Source
 
+Lullaby currently builds from source with Cargo. Prebuilt install channels
+(winget, MSI, and similar) are planned but not yet available.
+
 Prerequisites:
 
-- Rust toolchain with Cargo.
-- PowerShell on Windows for release packaging scripts.
+- A Rust toolchain with Cargo.
+- On Windows, the native backend's link step best-effort uses `rust-lld` and the
+  MSVC `LIB` environment; without them `lullaby native` still emits the object
+  file and reports why it could not link.
 
-Common commands:
+Common commands (run from the repository root):
 
 ```powershell
 cargo run -p lullaby_cli -- check examples\valid\calculator.lby
 cargo run -p lullaby_cli -- run examples\valid\calculator.lby
+cargo run -p lullaby_cli -- run --backend bytecode examples\valid\calculator.lby
 cargo run -p lullaby_cli -- compile --optimize alpha -o target\calculator.lbc examples\valid\calculator.lby
-cargo run -p lullaby_cli -- build --optimize alpha -o target\calculator-build.lbc examples\valid\calculator.lby
 cargo run -p lullaby_cli -- inspect target\calculator.lbc
 cargo run -p lullaby_cli -- run target\calculator.lbc
 ```
 
-Release package verification:
+Run the test suite and lints with the standard workspace commands:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
 ```
 
-## Current CLI
+## CLI
 
-- `lullaby check [--verbose|--format json] <file.lby>`
-- `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>`
-- `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>`
-- `lullaby inspect [--verbose|--format json] <file.lbc>`
-- `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>`
-- `lullaby run [--verbose|--format json] <file.lbc>`
-- `lullaby native [--verbose] [--freestanding|--no-std] [--debug|-g] [-o out.exe] <file.lby>`
-- `lullaby fmt [--write|--check] <file.lby>`
-- `lullaby lsp`
-- `lullaby docs`
-- `lullaby examples`
-- `lullaby help`
-- `lullaby --version`
+Invoke the CLI during development with `cargo run -p lullaby_cli -- <command>`
+(shown below as `lullaby` for brevity):
 
-`lullaby check` can validate helper/library-style `.lby` files without `main`. `lullaby compile`, `lullaby build`, and source `lullaby run` require executable source with zero-argument `main`; invalid entry points report `L0329`. `lullaby build` is an artifact-generation alias for `lullaby compile`.
+- `lullaby check [--verbose|--format json] <file.lby>` — type-check source,
+  including helper/library files without `main`.
+- `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby>` — run source on any interpreter backend.
+- `lullaby run [--verbose|--format json] <file.lbc>` — run a compiled bytecode artifact.
+- `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>` — emit a versioned `.lbc` artifact.
+- `lullaby build [--optimize ...] [-o output.lbc] [--verbose|--format json] <file.lby>` — artifact-generation alias for `compile`.
+- `lullaby inspect [--verbose|--format json] <file.lbc>` — summarize a `.lbc` artifact.
+- `lullaby fmt [--write|--check] <file.lby>` — canonical source formatter.
+- `lullaby wasm [--verbose] [-o out.wasm] <file.lby>` — emit a `.wasm` module for the eligible subset.
+- `lullaby native [--verbose] [--freestanding|--no-std] [--debug|-g] [-o out.exe] <file.lby>` — emit an x86-64 COFF object and best-effort link a native `.exe`.
+- `lullaby test [--verbose] <file.lby>` — run `test_*` functions and report pass/fail.
+- `lullaby lsp` — run the editor language server over stdio.
+- `lullaby docs` — open / locate the offline documentation.
+- `lullaby examples` — list bundled examples.
+- `lullaby help`, `lullaby --version`.
 
-`lullaby native` compiles the i64-scalar subset to an x86-64 Windows COFF object and, best-effort, links it into a runnable `.exe`. Adding `--freestanding` (alias `--no-std`) builds a **no-C-runtime** executable: it links `kernel32.lib` only (zero `ucrt`/`vcruntime`/`msvcrt`) and terminates through the minimal OS import `kernel32!ExitProcess`. It is still a Windows PE, not a bare-metal binary. A freestanding build that declares an `extern fn` (which needs the C runtime) is rejected with `L0426`. Adding `--debug` (alias `-g`) emits **source-line debug info**: a CodeView `.debug$S` section maps each compiled function's entry offset to its `.lby` declaration line (per-function granularity) so a debugger can break at a function and show its source line. `--debug` is opt-in; without it the object bytes are unchanged.
+`lullaby compile`, `lullaby build`, source `lullaby run`, `lullaby wasm`, and
+`lullaby native` require executable source with a zero-argument `main`; invalid
+entry points report `L0329`.
+
+`lullaby native` compiles the i64-scalar subset (plus stack-allocated scalar
+aggregates and a first string-heap step) to an x86-64 Windows COFF object and,
+best-effort, links it into a runnable `.exe`. `--freestanding` (alias
+`--no-std`) builds a no-C-runtime executable that links `kernel32.lib` only and
+exits through `kernel32!ExitProcess`; it is still a Windows PE, not a bare-metal
+binary. `--debug` (alias `-g`) emits CodeView source-line debug info, opt-in so
+the default object bytes are unchanged.
 
 ## Documentation
 
-- [Alpha 1 language surface](documents/alpha1_language_surface.md)
-- [Standard library catalog (the prelude)](documents/standard_library.md)
+- [Standard library reference (the prelude)](documents/standard_library.md)
 - [Language specification](documents/language_specification.md)
+- [Post-alpha roadmap](documents/post_alpha_roadmap.md)
 - [Implementation plan](documents/implementation_plan.md)
 - [Diagnostic registry](documents/diagnostic_registry.md)
 - [Contributor guide for language features](documents/contributor_guide.md)
 - [Repository map](documents/repository_map.md)
 
-The offline browser documentation is bundled in the package as `docs\index.html` and can be opened directly from disk.
+Runnable example programs live under [`examples/`](examples/); the offline
+browser documentation is a self-contained HTML bundle that can be generated and
+opened directly from disk (no server or internet access required).
