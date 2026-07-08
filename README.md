@@ -59,7 +59,7 @@ Lullaby is not yet at 1.0. Genuinely planned work includes wider integer types,
 `f32`, environment-capturing (capturing) closures, the WebAssembly heap phase
 and a broader browser/DOM interop surface, wider FFI breadth, and the
 branding / packaging / installer work (a named toolchain and native install
-channels). See [documents/post_alpha_roadmap.md](documents/post_alpha_roadmap.md)
+channels). See [documents/roadmap_1_0.md](documents/roadmap_1_0.md)
 for the current sequencing.
 
 ## Build From Source
@@ -130,7 +130,7 @@ the default object bytes are unchanged.
 
 - [Standard library reference (the prelude)](documents/standard_library.md)
 - [Language specification](documents/language_specification.md)
-- [Post-alpha roadmap](documents/post_alpha_roadmap.md)
+- [Road to 1.0](documents/roadmap_1_0.md)
 - [Implementation plan](documents/implementation_plan.md)
 - [Diagnostic registry](documents/diagnostic_registry.md)
 - [Contributor guide for language features](documents/contributor_guide.md)
