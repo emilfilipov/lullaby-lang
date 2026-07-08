@@ -1,0 +1,12 @@
+fn main -> i64
+    let m map<string, i64> = map_new()
+    m = map_set(m, "a", 10)
+    m = map_set(m, "b", 20)
+    m = map_set(m, "c", 30)
+    let keys list<string> = map_keys(m)
+    let vals list<i64> = map_values(m)
+    let sum i64 = 0
+    for i from 0 to len(vals) - 1
+        sum = sum + get(vals, i)
+    # len(keys)=3 + get(vals,0)=10 + get(vals,2)=30 + sum=60 => 103
+    len(keys) + get(vals, 0) + get(vals, 2) + sum

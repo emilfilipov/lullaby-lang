@@ -1,0 +1,30 @@
+# Integration: a map<string, i64> with inserts and updates, keys read back via
+# match on map_get's option, folded into a sum with a for loop over a key list.
+
+fn build -> map<string, i64>
+    let m map<string, i64> = map_new()
+    m = map_set(m, "a", 1)
+    m = map_set(m, "b", 2)
+    m = map_set(m, "c", 3)
+    m = map_set(m, "a", 10)
+    m = map_set(m, "b", 20)
+    m
+
+fn get_or m map<string, i64> k string fallback i64 -> i64
+    match map_get(m, k)
+        some(v) -> v
+        none -> fallback
+
+fn main -> i64
+    let m map<string, i64> = build()
+    let keys list<string> = list_new()
+    keys = push(keys, "a")
+    keys = push(keys, "b")
+    keys = push(keys, "c")
+    keys = push(keys, "z")
+    let sum i64 = 0
+    let n i64 = len(keys)
+    for i from 0 to n - 1
+        sum += get_or(m, get(keys, i), 0)
+    # a=10, b=20, c=3, z missing->0 => 33; plus map_len = 3 => 36
+    sum + map_len(m)

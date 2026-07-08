@@ -46,7 +46,13 @@ IDENT =
     alpha_or_underscore { alpha_or_digit_or_underscore } ;
 
 NUMBER =
-    digit { digit_or_separator } [ "." digit { digit_or_separator } ] ;
+      base_prefixed_integer
+    | digit { digit_or_separator } [ "." digit { digit_or_separator } ] ;
+
+base_prefixed_integer =
+      ( "0x" | "0X" ) hex_digit { hex_digit | "_" }
+    | ( "0b" | "0B" ) bin_digit { bin_digit | "_" }
+    | ( "0o" | "0O" ) oct_digit { oct_digit | "_" } ;
 
 digit_or_separator =
     digit | "_" ;
@@ -55,7 +61,7 @@ STRING =
     '"' { string_character } '"' ;
 ```
 
-The lexer emits integer and floating-point number text (a `.` marks an `f64` literal). A `_` may appear between digits as a cosmetic separator (`1_000_000`, `3.141_592`); the parser validates its placement and strips it, rejecting a leading, trailing, doubled, or `.`-adjacent underscore as a malformed literal. Negative numbers are parsed as unary minus over an expression and represented in the AST as `0 - expression`.
+The lexer emits the entire number token as raw text (its scan includes ASCII alphanumerics, `.`, and `_`), so a base-prefixed literal such as `0xFF` arrives as one token. The parser decides the shape: a `0x`/`0X`, `0b`/`0B`, or `0o`/`0O` prefix (matched case-insensitively) yields a base-prefixed **integer** literal parsed via `i64::from_str_radix`; anything else is a decimal integer (no `.`) or an `f64` literal (a `.` marks the float). A `_` may appear between digits as a cosmetic separator — decimal `1_000_000`/`3.141_592`, or between two valid radix digits in a base-prefixed literal (`0xFF_FF`, `0b1010_0101`); the parser validates placement and strips it, rejecting a leading, trailing, doubled, prefix-adjacent, or (decimal) `.`-adjacent underscore. A base-prefixed literal is integer-only, so a `.`, empty digits after the prefix (`0x`), an out-of-radix digit (`0xG`, `0b2`, `0o8`), or an `i64` overflow is a malformed-literal error. Negative numbers are parsed as unary minus over an expression and represented in the AST as `0 - expression`, so `-0xFF` desugars to `0 - 0xFF`.
 
 ## Indentation Tokens
 

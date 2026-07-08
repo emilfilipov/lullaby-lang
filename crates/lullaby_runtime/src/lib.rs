@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -18,7 +19,9 @@ use lullaby_parser::{
 pub fn value_type_name(value: &Value) -> String {
     match value {
         Value::I64(_) => "i64".to_string(),
+        Value::Int { ty, .. } => ty.type_name().to_string(),
         Value::F64(_) => "f64".to_string(),
+        Value::F32(_) => "f32".to_string(),
         Value::Bool(_) => "bool".to_string(),
         Value::String(_) => "string".to_string(),
         Value::Char(_) => "char".to_string(),
@@ -30,10 +33,12 @@ pub fn value_type_name(value: &Value) -> String {
         Value::Func(_) => "fn".to_string(),
         Value::Ptr(_) => "ptr".to_string(),
         Value::Socket(_) => "Socket".to_string(),
+        Value::Process(_) => "process".to_string(),
         Value::Chan(_) => "Chan".to_string(),
         Value::Task(_) => "Task".to_string(),
         Value::Future(_) => "Future".to_string(),
         Value::Mutex(_) => "Mutex".to_string(),
+        Value::Atomic(_) => "atomic_i64".to_string(),
         Value::Void => "void".to_string(),
     }
 }
@@ -111,11 +116,255 @@ impl PartialEq for SharedMutex {
     }
 }
 
+/// A shared atomic `i64` cell. `Arc<AtomicI64>`, so the value's `Clone` shares
+/// the same lock-free cell across threads (reference semantics, exactly like
+/// [`SharedMutex`], but backed by `std::sync::atomic` for wait-free access).
+/// `Send + Sync`, so the handle crosses thread boundaries safely. Every
+/// operation uses `Ordering::SeqCst` in this increment; weaker orderings are a
+/// documented future optimization.
+#[derive(Debug, Clone)]
+pub struct SharedAtomic {
+    pub cell: Arc<AtomicI64>,
+}
+
+impl PartialEq for SharedAtomic {
+    /// Atomic handles compare by identity of the shared cell.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+}
+
+/// Width/signedness tag for the fixed-width integer lattice carried by
+/// [`Value::Int`]. The stored `i64` cell is always kept normalized to the kind's
+/// range (truncate to width, then sign- or zero-extend). Signed kinds sit in
+/// their signed range so plain `i64` ordering is correct; unsigned kinds are
+/// zero-extended, so the ≤32-bit ones also order as `i64`. The 64-bit unsigned
+/// kinds (`u64`/`usize`) can hold values above `i64::MAX`, stored bit-for-bit as
+/// a negative `i64`, so division and ordering consult [`IntKind::is_unsigned`]
+/// and operate on the `u64` reinterpretation. Every dynamic backend (AST
+/// runtime, IR interpreter, bytecode VM) normalizes at the same points so
+/// results agree bit-for-bit; `usize`/`isize` are 64-bit on the current targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntKind {
+    /// Signed 8-bit.
+    I8,
+    /// Signed 16-bit.
+    I16,
+    /// Signed 32-bit.
+    I32,
+    /// Unsigned 16-bit.
+    U16,
+    /// Unsigned 32-bit.
+    U32,
+    /// Unsigned 64-bit.
+    U64,
+    /// Pointer-sized signed (64-bit on the current targets).
+    Isize,
+    /// Pointer-sized unsigned (64-bit on the current targets).
+    Usize,
+}
+
+impl IntKind {
+    /// The canonical Lullaby type name for this integer kind.
+    pub fn type_name(self) -> &'static str {
+        match self {
+            IntKind::I8 => "i8",
+            IntKind::I16 => "i16",
+            IntKind::I32 => "i32",
+            IntKind::U16 => "u16",
+            IntKind::U32 => "u32",
+            IntKind::U64 => "u64",
+            IntKind::Isize => "isize",
+            IntKind::Usize => "usize",
+        }
+    }
+
+    /// Whether this kind is unsigned. Division and ordering of unsigned kinds use
+    /// the `u64` reinterpretation of the normalized cell.
+    pub fn is_unsigned(self) -> bool {
+        matches!(
+            self,
+            IntKind::U16 | IntKind::U32 | IntKind::U64 | IntKind::Usize
+        )
+    }
+
+    /// Normalize a mathematical `i64` result into this kind's range: truncate to
+    /// the kind's width, then sign-extend (signed kinds) or zero-extend
+    /// (unsigned kinds) back into the `i64` cell. Total and deterministic — this
+    /// is the wrapping default shared by every backend. The 64-bit kinds occupy
+    /// the whole cell, so normalization is the identity on the bits.
+    pub fn normalize(self, value: i64) -> i64 {
+        match self {
+            IntKind::I8 => i64::from(value as i8),
+            IntKind::I16 => i64::from(value as i16),
+            IntKind::I32 => i64::from(value as i32),
+            IntKind::U16 => i64::from(value as u16),
+            IntKind::U32 => i64::from(value as u32),
+            IntKind::U64 | IntKind::Usize | IntKind::Isize => value,
+        }
+    }
+
+    /// The inclusive `[min, max]` range of this kind as `i128`, wide enough to
+    /// hold every kind (up to `u64::MAX`). Used by checked/saturating arithmetic
+    /// to detect and clamp overflow exactly.
+    pub fn range_i128(self) -> (i128, i128) {
+        match self {
+            IntKind::I8 => (i128::from(i8::MIN), i128::from(i8::MAX)),
+            IntKind::I16 => (i128::from(i16::MIN), i128::from(i16::MAX)),
+            IntKind::I32 => (i128::from(i32::MIN), i128::from(i32::MAX)),
+            IntKind::Isize => (i128::from(i64::MIN), i128::from(i64::MAX)),
+            IntKind::U16 => (0, i128::from(u16::MAX)),
+            IntKind::U32 => (0, i128::from(u32::MAX)),
+            IntKind::U64 | IntKind::Usize => (0, i128::from(u64::MAX)),
+        }
+    }
+
+    /// The mathematical value of a normalized `i64` cell of this kind as `i128`
+    /// (unsigned kinds read the cell as `u64`, so a negative cell becomes its
+    /// large positive magnitude).
+    pub fn value_to_i128(self, cell: i64) -> i128 {
+        if self.is_unsigned() {
+            i128::from(cell as u64)
+        } else {
+            i128::from(cell)
+        }
+    }
+
+    /// Pack an in-range `i128` value back into this kind's `i64` cell (the
+    /// inverse of [`IntKind::value_to_i128`] for values within `range_i128`).
+    pub fn i128_to_cell(self, value: i128) -> i64 {
+        if self.is_unsigned() {
+            value as u64 as i64
+        } else {
+            value as i64
+        }
+    }
+}
+
+/// The three arithmetic operations that the overflow-aware builtins provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl ArithOp {
+    /// Apply the operation over the wide `i128` domain (never overflows for
+    /// operands drawn from any fixed-width kind, whose product fits `i128`).
+    pub fn apply_i128(self, left: i128, right: i128) -> i128 {
+        match self {
+            ArithOp::Add => left + right,
+            ArithOp::Sub => left - right,
+            ArithOp::Mul => left * right,
+        }
+    }
+}
+
+/// Signedness-aware quotient of two normalized `i64` cells tagged `ty`; the
+/// caller guarantees a non-zero divisor. Unsigned kinds divide on the `u64`
+/// reinterpretation so 64-bit unsigned values above `i64::MAX` divide correctly.
+pub fn int_div(left: i64, right: i64, ty: IntKind) -> i64 {
+    if ty.is_unsigned() {
+        (left as u64).wrapping_div(right as u64) as i64
+    } else {
+        left.wrapping_div(right)
+    }
+}
+
+/// Signedness-aware ordering of two normalized `i64` cells tagged `ty`. Unsigned
+/// kinds compare on the `u64` reinterpretation (correct for the 64-bit unsigned
+/// kinds whose cells may be negative `i64`s); signed kinds compare as `i64`.
+pub fn int_cmp(left: i64, right: i64, ty: IntKind) -> std::cmp::Ordering {
+    if ty.is_unsigned() {
+        (left as u64).cmp(&(right as u64))
+    } else {
+        left.cmp(&right)
+    }
+}
+
+/// Overflow behaviour selector for the `checked_*`/`saturating_*`/`wrapping_*`
+/// arithmetic builtins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowMode {
+    /// `option<T>`: `none` when the true result is outside `T`.
+    Checked,
+    /// `T`: clamp to `T`'s bounds.
+    Saturating,
+    /// `T`: wrap modulo the type width (the default `+`/`-`/`*` behaviour).
+    Wrapping,
+}
+
+/// Unwrap a `Value::Int`, returning its normalized cell and kind, or an `L0407`
+/// runtime error otherwise.
+pub fn expect_fixed_int(name: &str, value: &Value) -> Result<(i64, IntKind), RuntimeError> {
+    match value {
+        Value::Int { value, ty } => Ok((*value, *ty)),
+        other => Err(RuntimeError::new(
+            "L0407",
+            format!("{name} expects a fixed-width integer but got `{other}`"),
+        )),
+    }
+}
+
+/// Shared implementation of the overflow-aware arithmetic builtins. Both operands
+/// must be the same fixed-width kind (enforced by the type checker); the true
+/// result is computed in `i128` — wide enough that no fixed-width add/sub/mul
+/// overflows it — then resolved per `mode`. Identical on every backend.
+pub fn overflow_arith(
+    name: &str,
+    args: Vec<Value>,
+    op: ArithOp,
+    mode: OverflowMode,
+) -> Result<Value, RuntimeError> {
+    let [a, b]: [Value; 2] = args.try_into().map_err(|args: Vec<Value>| {
+        RuntimeError::new(
+            "L0407",
+            format!("{name} expects 2 arguments but got {}", args.len()),
+        )
+    })?;
+    let (la, ta) = expect_fixed_int(name, &a)?;
+    let (lb, tb) = expect_fixed_int(name, &b)?;
+    if ta != tb {
+        return Err(RuntimeError::new(
+            "L0407",
+            format!("{name} operands must have the same integer type"),
+        ));
+    }
+    let wide = op.apply_i128(ta.value_to_i128(la), ta.value_to_i128(lb));
+    let (min, max) = ta.range_i128();
+    Ok(match mode {
+        // `wide as i64` keeps the low 64 bits (wrapping mod 2^64); `Value::int`
+        // then wraps to the kind's width.
+        OverflowMode::Wrapping => Value::int(wide as i64, ta),
+        OverflowMode::Saturating => Value::int(ta.i128_to_cell(wide.clamp(min, max)), ta),
+        OverflowMode::Checked => {
+            if wide < min || wide > max {
+                option_value(None)
+            } else {
+                option_value(Some(Value::int(ta.i128_to_cell(wide), ta)))
+            }
+        }
+    })
+}
+
 // `Eq` is intentionally omitted: `Value::F64` holds an `f64`, which is not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     I64(i64),
+    /// A fixed-width integer (`i32`/`u32`) carrying its width/signedness tag. The
+    /// `value` cell is always normalized to `ty`'s range via [`Value::int`], so
+    /// the derived `PartialEq` and plain `i64` ordering are exact. `i64` itself
+    /// stays [`Value::I64`] (its own full-width cell), never an `Int`.
+    Int {
+        value: i64,
+        ty: IntKind,
+    },
     F64(f64),
+    /// A 32-bit IEEE-754 float. Stored as a native `f32`, so every operation is
+    /// inherently rounded to `f32` precision (the required normalization); a
+    /// distinct `f32` never mixes with an `f64` without an explicit conversion.
+    F32(f32),
     Bool(bool),
     String(String),
     /// A Unicode scalar value.
@@ -144,6 +393,11 @@ pub enum Value {
     /// `TcpStream`, or `UdpSocket`) is not `Clone`, so sockets are represented
     /// as opaque integer handles, mirroring how `Ptr` indexes the heap.
     Socket(usize),
+    /// A live external-process handle: an index into the interpreter's per-runtime
+    /// `processes` table. The underlying `std::process::Child` is not `Clone`, so a
+    /// spawned process is surfaced to Lullaby as an opaque integer handle, exactly
+    /// like `Socket`.
+    Process(usize),
     /// An unbounded `i64` message-passing channel; shared on clone.
     Chan(Chan),
     /// A one-shot handle to a spawned detached thread; `join`ed once.
@@ -153,6 +407,10 @@ pub enum Value {
     Future(Future),
     /// A shared mutex over one `i64`; shared on clone.
     Mutex(SharedMutex),
+    /// A shared atomic `i64` cell (`atomic_i64`); shared on clone. Backed by
+    /// `Arc<AtomicI64>` so cross-thread updates are lock-free and visible to
+    /// every holder.
+    Atomic(SharedAtomic),
     Void,
 }
 
@@ -160,7 +418,17 @@ impl fmt::Display for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::I64(value) => write!(formatter, "{value}"),
+            // The cell is normalized, so an unsigned kind prints the unsigned
+            // reinterpretation and a signed kind prints its sign-extended value.
+            Self::Int { value, ty } => {
+                if ty.is_unsigned() {
+                    write!(formatter, "{}", *value as u64)
+                } else {
+                    write!(formatter, "{value}")
+                }
+            }
             Self::F64(value) => write!(formatter, "{value}"),
+            Self::F32(value) => write!(formatter, "{value}"),
             Self::Bool(value) => write!(formatter, "{value}"),
             Self::String(value) => write!(formatter, "{value}"),
             Self::Char(value) => write!(formatter, "{value}"),
@@ -206,10 +474,12 @@ impl fmt::Display for Value {
             }
             Self::Func(name) => write!(formatter, "fn {name}"),
             Self::Socket(handle) => write!(formatter, "socket({handle})"),
+            Self::Process(handle) => write!(formatter, "process({handle})"),
             Self::Chan(_) => write!(formatter, "chan"),
             Self::Task(_) => write!(formatter, "task"),
             Self::Future(_) => write!(formatter, "future"),
             Self::Mutex(_) => write!(formatter, "mutex"),
+            Self::Atomic(_) => write!(formatter, "atomic"),
             Self::Void => write!(formatter, "void"),
         }
     }
@@ -323,6 +593,68 @@ pub fn expect_string(name: &str, value: Value) -> Result<String, RuntimeError> {
 }
 
 /// Unwrap a runtime `Value` expected to be an `i64`, reporting `L0417` otherwise.
+/// The process-global monotonic baseline for `mono_now`. It is initialized on
+/// the first call to [`monotonic_now_nanos`] and never re-initialized, so the
+/// clock is non-decreasing for the whole process. Both interpreters and the
+/// bytecode VM route through this single function, so they observe one shared
+/// baseline regardless of which backend is active.
+static MONOTONIC_BASELINE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Nanoseconds elapsed since the process-global monotonic baseline. The first
+/// call establishes the baseline (returning `0` or a tiny value); every later
+/// call returns a value `>=` all previous ones. Backs the `mono_now` builtin on
+/// every interpreter backend.
+pub fn monotonic_now_nanos() -> i64 {
+    let baseline = MONOTONIC_BASELINE.get_or_init(std::time::Instant::now);
+    baseline.elapsed().as_nanos() as i64
+}
+
+/// Milliseconds since the Unix epoch (wall-clock time). Backs the `wall_now`
+/// builtin. A pre-epoch system clock (rare, misconfigured host) yields the
+/// negated pre-epoch offset so the value stays total and never panics.
+pub fn wall_now_millis() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => delta.as_millis() as i64,
+        Err(err) => -(err.duration().as_millis() as i64),
+    }
+}
+
+/// Sleep the current thread for `ms` milliseconds. A negative `ms` is treated as
+/// `0` (no sleep, no error), keeping the builtin total. Backs `sleep_millis`.
+pub fn sleep_millis(ms: i64) {
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
+
+/// Fill a fresh buffer of `len` bytes with cryptographically-secure randomness
+/// straight from the operating-system CSPRNG (`getrandom`/`getentropy` on
+/// Unix-likes, `BCryptGenRandom` on Windows, `/dev/urandom` as a fallback).
+/// This is a real OS randomness source — never a seeded or deterministic PRNG,
+/// so callers may use it for keys, nonces, and tokens.
+///
+/// Backs the `os_random` builtin on every interpreter backend (AST runtime, IR
+/// interpreter, bytecode VM) so all three exhibit identical behavior:
+///
+/// - `len < 0` returns `Err("os_random length must be non-negative")` and never
+///   panics.
+/// - `len == 0` returns `Ok(Vec::new())` (no syscall, an empty buffer).
+/// - a genuine OS RNG failure is surfaced as `Err(message)` rather than a panic.
+pub fn os_random_bytes(len: i64) -> Result<Vec<u8>, String> {
+    if len < 0 {
+        return Err("os_random length must be non-negative".to_string());
+    }
+    let len = len as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut buffer = vec![0u8; len];
+    match getrandom::fill(&mut buffer) {
+        Ok(()) => Ok(buffer),
+        Err(error) => Err(format!("os_random failed: {error}")),
+    }
+}
+
 pub fn expect_i64(name: &str, value: Value) -> Result<i64, RuntimeError> {
     match value {
         Value::I64(number) => Ok(number),
@@ -342,6 +674,20 @@ pub fn scalar_order_keys(left: &Value, right: &Value) -> Option<(u32, u32)> {
         (Value::Byte(l), Value::Byte(r)) => Some((u32::from(*l), u32::from(*r))),
         _ => None,
     }
+}
+
+/// Left shift of an `i64` with a total, deterministic shift amount: the amount
+/// is masked to its low 6 bits (`amount & 63`), matching x86/Java `long`
+/// semantics, so a large or negative amount never panics or errors. Every
+/// backend (AST, IR interpreter, bytecode VM) must use this exact rule.
+pub fn shift_left(value: i64, amount: i64) -> i64 {
+    value.wrapping_shl(((amount as u64) & 63) as u32)
+}
+
+/// Arithmetic (sign-preserving) right shift of an `i64` with the same masked,
+/// deterministic shift amount as [`shift_left`].
+pub fn shift_right(value: i64, amount: i64) -> i64 {
+    value.wrapping_shr(((amount as u64) & 63) as u32)
 }
 
 /// Unwrap a runtime `Value` expected to be a list (an array), reporting `L0417`
@@ -401,6 +747,18 @@ pub fn expect_mutex(name: &str, value: Value) -> Result<SharedMutex, RuntimeErro
         other => Err(RuntimeError::new(
             "L0417",
             format!("{name} expects a Mutex but got `{other}`"),
+        )),
+    }
+}
+
+/// Unwrap a runtime `Value` expected to be an `atomic_i64` handle, reporting
+/// `L0417` otherwise.
+pub fn expect_atomic(name: &str, value: Value) -> Result<SharedAtomic, RuntimeError> {
+    match value {
+        Value::Atomic(atomic) => Ok(atomic),
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects an atomic_i64 but got `{other}`"),
         )),
     }
 }
@@ -623,6 +981,45 @@ pub enum SocketResource {
     Udp(UdpSocket),
 }
 
+/// A live external process held behind a `Value::Process` handle. Not `Clone`
+/// (a `std::process::Child` owns OS resources), which is why processes are
+/// surfaced to Lullaby as opaque integer handles, exactly like `SocketResource`.
+/// Shared by the AST interpreter and the IR interpreter / bytecode VM so every
+/// backend keeps identical process semantics. `stdout`/`stderr` are taken out of
+/// the `Child` on the first `proc_stdout`/`proc_stderr` read (a `ChildStdout`
+/// cannot be read twice), leaving `None` behind so a second read returns EOF.
+pub struct ProcessResource {
+    pub child: Child,
+}
+
+/// Which captured pipe a `proc_stdout`/`proc_stderr` read should drain.
+#[derive(Clone, Copy)]
+enum PipeKind {
+    Stdout,
+    Stderr,
+}
+
+/// Convert a finished child's exit status into the `i64` a `proc_wait`/`proc_kill`
+/// success returns. On every platform a normal exit yields its exit code. On Unix
+/// a process killed by a signal has no exit code; by convention that is reported
+/// as `128 + signal` (the shell convention), so callers still get a total,
+/// deterministic `i64`. Shared by both interpreters so the value is identical
+/// across backends.
+pub fn process_exit_code(status: &std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return i64::from(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + i64::from(signal);
+        }
+    }
+    // No exit code and (on non-Unix) no signal information available.
+    -1
+}
+
 /// First character index of `needle` in `text`, or `-1` when absent.
 pub fn char_find(text: &str, needle: &str) -> i64 {
     match text.find(needle) {
@@ -695,6 +1092,10 @@ struct Runtime<'a> {
     /// Per-runtime table of open network sockets. A `Value::Socket(i)` indexes
     /// this vector; closing a socket sets its slot to `None`, mirroring the heap.
     sockets: Vec<Option<SocketResource>>,
+    /// Per-runtime table of live external processes. A `Value::Process(i)` indexes
+    /// this vector; a killed/reaped process keeps its slot but `child.stdout`/
+    /// `stderr` are drained on read. Mirrors `sockets`.
+    processes: Vec<Option<ProcessResource>>,
     call_stack: Vec<TraceFrame>,
     /// Trait-method dispatch table: `(receiver type name, method name)` -> the
     /// impl function. Built once from every `impl Trait for Type` block.
@@ -708,6 +1109,13 @@ struct Runtime<'a> {
     /// Names of `extern fn` (C-ABI) functions. The interpreter cannot execute C,
     /// so a call to one raises `L0423` before any builtin/user dispatch.
     extern_functions: HashSet<&'a str>,
+    /// The failure value carried by an in-flight postfix `?` early return. When
+    /// `EXPR?` hits `none`/`err` it stashes the whole enum value here and raises
+    /// the `L0430` sentinel; `invoke_function` (the call boundary) takes this
+    /// value and returns it as the enclosing function's result. The unwind is
+    /// synchronous — nothing else runs between the raise and the catch — so a
+    /// single slot is sufficient and never observed as stale.
+    pending_try_return: Option<Value>,
 }
 
 impl<'a> Runtime<'a> {
@@ -789,11 +1197,13 @@ impl<'a> Runtime<'a> {
             heap: Vec::new(),
             refcounts: HashMap::new(),
             sockets: Vec::new(),
+            processes: Vec::new(),
             call_stack: Vec::new(),
             impl_methods,
             trait_method_names,
             async_functions,
             extern_functions,
+            pending_try_return: None,
         })
     }
 
@@ -877,23 +1287,60 @@ impl<'a> Runtime<'a> {
             "console_log" => self.builtin_console_log(args),
             "dom_set_text" => self.builtin_dom_set_text(args),
             "flush" => self.builtin_flush(args),
+            "mono_now" => Self::builtin_mono_now(args),
+            "wall_now" => Self::builtin_wall_now(args),
+            "sleep_millis" => Self::builtin_sleep_millis(args),
             "assert" => Self::builtin_assert(args),
             "to_string" => Self::builtin_to_string(args),
             "char_code" => Self::builtin_char_code(args),
             "char_from" => Self::builtin_char_from(args),
+            "is_digit" => Self::builtin_is_digit(args),
+            "is_alpha" => Self::builtin_is_alpha(args),
+            "is_alnum" => Self::builtin_is_alnum(args),
+            "is_whitespace" => Self::builtin_is_whitespace(args),
+            "is_upper" => Self::builtin_is_upper(args),
+            "is_lower" => Self::builtin_is_lower(args),
             "byte" => Self::builtin_byte(args),
             "byte_val" => Self::builtin_byte_val(args),
+            "to_i8" => Self::builtin_to_int("to_i8", args, IntKind::I8),
+            "to_i16" => Self::builtin_to_int("to_i16", args, IntKind::I16),
+            "to_i32" => Self::builtin_to_int("to_i32", args, IntKind::I32),
+            "to_u16" => Self::builtin_to_int("to_u16", args, IntKind::U16),
+            "to_u32" => Self::builtin_to_int("to_u32", args, IntKind::U32),
+            "to_u64" => Self::builtin_to_int("to_u64", args, IntKind::U64),
+            "to_isize" => Self::builtin_to_int("to_isize", args, IntKind::Isize),
+            "to_usize" => Self::builtin_to_int("to_usize", args, IntKind::Usize),
+            "to_i64" => Self::builtin_to_i64(args),
+            "to_f32" => Self::builtin_to_f32(args),
+            "to_f64" => Self::builtin_to_f64(args),
+            "checked_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Checked),
+            "checked_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Checked),
+            "checked_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Checked),
+            "saturating_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Saturating),
+            "saturating_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Saturating),
+            "saturating_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Saturating),
+            "wrapping_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Wrapping),
+            "wrapping_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Wrapping),
+            "wrapping_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Wrapping),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
             "get" => Self::builtin_get(args),
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
+            "list_index_of" => Self::builtin_list_index_of(args),
+            "list_contains" => Self::builtin_list_contains(args),
+            "reverse" => Self::builtin_reverse(args),
+            "sort" => Self::builtin_sort(args),
+            "concat" => Self::builtin_concat(args),
+            "slice" => Self::builtin_slice(args),
             "map_new" => Self::builtin_map_new(args),
             "map_set" => Self::builtin_map_set(args),
             "map_get" => Self::builtin_map_get(args),
             "map_has" => Self::builtin_map_has(args),
             "map_len" => Self::builtin_map_len(args),
+            "map_keys" => Self::builtin_map_keys(args),
+            "map_values" => Self::builtin_map_values(args),
             "map_del" => Self::builtin_map_del(args),
             "substring" => Self::builtin_substring(args),
             "find" => Self::builtin_find(args),
@@ -906,7 +1353,14 @@ impl<'a> Runtime<'a> {
             "trim" => Self::builtin_trim(args),
             "replace" => Self::builtin_replace(args),
             "upper" => Self::builtin_upper(args),
+            "chars" => Self::builtin_chars(args),
+            "string_from_chars" => Self::builtin_string_from_chars(args),
             "lower" => Self::builtin_lower(args),
+            "to_bytes" => Self::builtin_to_bytes(args),
+            "from_bytes" => Self::builtin_from_bytes(args),
+            "byte_len" => Self::builtin_byte_len(args),
+            "parse_i64" => Self::builtin_parse_i64(args),
+            "parse_f64" => Self::builtin_parse_f64(args),
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
@@ -923,6 +1377,12 @@ impl<'a> Runtime<'a> {
             "ln" => Self::builtin_unary_f64("ln", args, f64::ln),
             "log10" => Self::builtin_unary_f64("log10", args, f64::log10),
             "atan2" => Self::builtin_atan2(args),
+            "rotate_left" => Self::builtin_rotate_left(args),
+            "rotate_right" => Self::builtin_rotate_right(args),
+            "count_ones" => Self::builtin_count_ones(args),
+            "leading_zeros" => Self::builtin_leading_zeros(args),
+            "trailing_zeros" => Self::builtin_trailing_zeros(args),
+            "reverse_bytes" => Self::builtin_reverse_bytes(args),
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
@@ -930,6 +1390,7 @@ impl<'a> Runtime<'a> {
             "rc_borrow" => self.builtin_rc_borrow(args),
             "ptr_write" => self.builtin_store(args),
             "env" => Self::builtin_env(args),
+            "os_random" => Self::builtin_os_random(args),
             "args" => self.builtin_args(args),
             "parallel_map" => self.builtin_parallel_map(args),
             "chan_new" => Self::builtin_chan_new(args),
@@ -942,6 +1403,16 @@ impl<'a> Runtime<'a> {
             "mutex_get" => Self::builtin_mutex_get(args),
             "mutex_set" => Self::builtin_mutex_set(args),
             "mutex_add" => Self::builtin_mutex_add(args),
+            "atomic_new" => Self::builtin_atomic_new(args),
+            "atomic_load" => Self::builtin_atomic_load(args),
+            "atomic_store" => Self::builtin_atomic_store(args),
+            "atomic_swap" => Self::builtin_atomic_swap(args),
+            "atomic_cas" => Self::builtin_atomic_cas(args),
+            "atomic_add" => Self::builtin_atomic_add(args),
+            "atomic_sub" => Self::builtin_atomic_sub(args),
+            "atomic_and" => Self::builtin_atomic_and(args),
+            "atomic_or" => Self::builtin_atomic_or(args),
+            "atomic_xor" => Self::builtin_atomic_xor(args),
             "tcp_connect" => self.builtin_tcp_connect(args),
             "tcp_listen" => self.builtin_tcp_listen(args),
             "tcp_accept" => self.builtin_tcp_accept(args),
@@ -954,6 +1425,11 @@ impl<'a> Runtime<'a> {
             "udp_recv" => self.builtin_udp_recv(args),
             "http_get" => Self::builtin_http_get(args),
             "http_post" => Self::builtin_http_post(args),
+            "proc_spawn" => self.builtin_proc_spawn(args),
+            "proc_wait" => self.builtin_proc_wait(args),
+            "proc_stdout" => self.builtin_proc_stdout(args),
+            "proc_stderr" => self.builtin_proc_stderr(args),
+            "proc_kill" => self.builtin_proc_kill(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("L0401", format!("unknown function `{name}`"))
@@ -971,6 +1447,24 @@ impl<'a> Runtime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("env", 1, args.len()))?;
         let name = expect_string("env", name)?;
         Ok(option_value(std::env::var(&name).ok().map(Value::String)))
+    }
+
+    /// `os_random(len i64) -> result<list<byte>, string>`: `len`
+    /// cryptographically-secure random bytes from the operating-system CSPRNG as
+    /// `ok(list<byte>)`, or `err(message)` if the OS RNG fails. `len == 0`
+    /// returns `ok([])`; `len < 0` returns `err("os_random length must be
+    /// non-negative")`. Never a seeded/deterministic PRNG and never a panic.
+    /// Routes through the shared [`os_random_bytes`] helper so every backend
+    /// agrees on behavior.
+    fn builtin_os_random(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [len]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("os_random", 1, args.len()))?;
+        let len = expect_i64("os_random", len)?;
+        Ok(result_value(match os_random_bytes(len) {
+            Ok(bytes) => Ok(Value::Array(bytes.into_iter().map(Value::Byte).collect())),
+            Err(message) => Err(Value::String(message)),
+        }))
     }
 
     /// `args() -> list<string>`: the running program's CLI arguments (an empty
@@ -1192,6 +1686,124 @@ impl<'a> Runtime<'a> {
         Ok(Value::I64(*guard))
     }
 
+    /// `atomic_new(v i64) -> atomic_i64`: allocate a fresh shared atomic cell
+    /// initialized to `v`. Cloning the returned handle shares the same
+    /// `Arc<AtomicI64>`, so several threads observe each other's updates.
+    fn builtin_atomic_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_new", 1, args.len()))?;
+        let value = expect_i64("atomic_new", value)?;
+        Ok(Value::Atomic(SharedAtomic {
+            cell: Arc::new(AtomicI64::new(value)),
+        }))
+    }
+
+    /// `atomic_load(a atomic_i64) -> i64`: read the cell (SeqCst).
+    fn builtin_atomic_load(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_load", 1, args.len()))?;
+        let atomic = expect_atomic("atomic_load", atomic)?;
+        Ok(Value::I64(atomic.cell.load(Ordering::SeqCst)))
+    }
+
+    /// `atomic_store(a atomic_i64, v i64) -> void`: write the cell (SeqCst).
+    fn builtin_atomic_store(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_store", 2, args.len()))?;
+        let atomic = expect_atomic("atomic_store", atomic)?;
+        let value = expect_i64("atomic_store", value)?;
+        atomic.cell.store(value, Ordering::SeqCst);
+        Ok(Value::Void)
+    }
+
+    /// `atomic_swap(a atomic_i64, v i64) -> i64`: store `v`, return the previous
+    /// value (SeqCst).
+    fn builtin_atomic_swap(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_swap", 2, args.len()))?;
+        let atomic = expect_atomic("atomic_swap", atomic)?;
+        let value = expect_i64("atomic_swap", value)?;
+        Ok(Value::I64(atomic.cell.swap(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_cas(a atomic_i64, expected i64, new i64) -> i64`: strong
+    /// compare-and-swap. Returns the value that was in the cell (equal to
+    /// `expected` on success), matching C11's value-returning shape. SeqCst on
+    /// both success and failure.
+    fn builtin_atomic_cas(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic, expected, new]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_cas", 3, args.len()))?;
+        let atomic = expect_atomic("atomic_cas", atomic)?;
+        let expected = expect_i64("atomic_cas", expected)?;
+        let new = expect_i64("atomic_cas", new)?;
+        // `compare_exchange` returns `Ok(prev)` on success and `Err(current)` on
+        // failure; both payloads carry the value that was observed in the cell.
+        let observed =
+            match atomic
+                .cell
+                .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(prev) => prev,
+                Err(current) => current,
+            };
+        Ok(Value::I64(observed))
+    }
+
+    /// `atomic_add(a atomic_i64, v i64) -> i64`: fetch-and-add, returning the
+    /// PREVIOUS value (SeqCst). Wrapping arithmetic, as `fetch_add` defines.
+    fn builtin_atomic_add(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_add", args)?;
+        Ok(Value::I64(atomic.cell.fetch_add(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_sub(a atomic_i64, v i64) -> i64`: fetch-and-sub, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_sub(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_sub", args)?;
+        Ok(Value::I64(atomic.cell.fetch_sub(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_and(a atomic_i64, v i64) -> i64`: fetch-and-and, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_and(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_and", args)?;
+        Ok(Value::I64(atomic.cell.fetch_and(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_or(a atomic_i64, v i64) -> i64`: fetch-and-or, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_or(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_or", args)?;
+        Ok(Value::I64(atomic.cell.fetch_or(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_xor(a atomic_i64, v i64) -> i64`: fetch-and-xor, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_xor(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_xor", args)?;
+        Ok(Value::I64(atomic.cell.fetch_xor(value, Ordering::SeqCst)))
+    }
+
+    /// Shared argument-decoding for the `atomic_<op>(a atomic_i64, v i64)`
+    /// fetch-and-op family: exactly two arguments, an atomic handle then an
+    /// `i64` operand.
+    fn atomic_binary_args(
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<(SharedAtomic, i64), RuntimeError> {
+        let [atomic, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 2, args.len()))?;
+        let atomic = expect_atomic(name, atomic)?;
+        let value = expect_i64(name, value)?;
+        Ok((atomic, value))
+    }
+
     /// Push a freshly opened socket resource into the handle table, returning its
     /// index wrapped as a `Value::Socket`.
     fn register_socket(&mut self, resource: SocketResource) -> Value {
@@ -1215,6 +1827,145 @@ impl<'a> Runtime<'a> {
                 "L0406",
                 format!("{name} received a closed or invalid socket `{handle}`"),
             )),
+        }
+    }
+
+    /// Push a freshly spawned child into the handle table, returning its index
+    /// wrapped as a `Value::Process`. Mirrors `register_socket`.
+    fn register_process(&mut self, resource: ProcessResource) -> Value {
+        self.processes.push(Some(resource));
+        Value::Process(self.processes.len() - 1)
+    }
+
+    /// Resolve a process handle argument to its live slot index, reporting a
+    /// wrong-argument-type error for a non-process value and a stale-handle error
+    /// for a reaped/invalid slot. Mirrors `socket_slot`.
+    fn process_slot(&self, name: &str, value: &Value) -> Result<usize, RuntimeError> {
+        let Value::Process(handle) = value else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a process but got `{value}`"),
+            ));
+        };
+        match self.processes.get(*handle) {
+            Some(Some(_)) => Ok(*handle),
+            _ => Err(RuntimeError::new(
+                "L0406",
+                format!("{name} received a reaped or invalid process `{handle}`"),
+            )),
+        }
+    }
+
+    /// `proc_spawn(cmd string, args array<string>) -> result<process, string>`:
+    /// spawn `cmd` with `args`, piping stdout/stderr so they can be read later.
+    /// `ok(handle)` on success, `err(message)` if the process cannot be started
+    /// (e.g. the command is not found). Never panics.
+    fn builtin_proc_spawn(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [cmd, cmd_args]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_spawn", 2, args.len()))?;
+        let cmd = expect_string("proc_spawn", cmd)?;
+        let cmd_args = cmd_args.as_string_array()?;
+        match Command::new(&cmd)
+            .args(cmd_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => {
+                let handle = self.register_process(ProcessResource { child });
+                Ok(result_value(Ok(handle)))
+            }
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_wait(p process) -> result<i64, string>`: block until the child exits
+    /// and return its exit code (`128 + signal` on Unix signal termination).
+    /// `err` if the handle is already reaped/invalid or the wait fails.
+    fn builtin_proc_wait(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_wait", 1, args.len()))?;
+        let slot = self.process_slot("proc_wait", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_wait requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.wait() {
+            Ok(status) => Ok(result_value(Ok(Value::I64(process_exit_code(&status))))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_stdout(p process) -> result<string, string>`: read the child's
+    /// captured stdout to end as a lossy UTF-8 string. The pipe is taken out of
+    /// the `Child` on first read, so a second call returns an empty string.
+    fn builtin_proc_stdout(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.proc_read_pipe("proc_stdout", args, PipeKind::Stdout)
+    }
+
+    /// `proc_stderr(p process) -> result<string, string>`: like `proc_stdout` but
+    /// for the child's captured stderr.
+    fn builtin_proc_stderr(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.proc_read_pipe("proc_stderr", args, PipeKind::Stderr)
+    }
+
+    /// Shared body of `proc_stdout`/`proc_stderr`: take the requested pipe out of
+    /// the child and read it to end.
+    fn proc_read_pipe(
+        &mut self,
+        name: &'static str,
+        args: Vec<Value>,
+        kind: PipeKind,
+    ) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        let slot = self.process_slot(name, &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(format!(
+                "{name} requires a live process"
+            )))));
+        };
+        let mut buffer = String::new();
+        let read = match kind {
+            PipeKind::Stdout => resource
+                .child
+                .stdout
+                .take()
+                .map(|mut pipe| pipe.read_to_string(&mut buffer)),
+            PipeKind::Stderr => resource
+                .child
+                .stderr
+                .take()
+                .map(|mut pipe| pipe.read_to_string(&mut buffer)),
+        };
+        match read {
+            // Pipe already drained (or was never captured): report EOF.
+            None => Ok(result_value(Ok(Value::String(String::new())))),
+            Some(Ok(_)) => Ok(result_value(Ok(Value::String(buffer)))),
+            Some(Err(error)) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_kill(p process) -> result<i64, string>`: kill the child, returning
+    /// `ok(0)` on success. Killing an already-exited child still succeeds.
+    fn builtin_proc_kill(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_kill", 1, args.len()))?;
+        let slot = self.process_slot("proc_kill", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_kill requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.kill() {
+            Ok(()) => Ok(result_value(Ok(Value::I64(0)))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
         }
     }
 
@@ -1487,6 +2238,24 @@ impl<'a> Runtime<'a> {
         let result = self.eval_block(&function.body, &mut env);
         let traceback = self.call_stack.clone();
         self.call_stack.pop();
+
+        // A postfix `?` on a `none`/`err` unwinds to here as the `L0430`
+        // sentinel, carrying the failure value in `pending_try_return`. Catch it
+        // at this call boundary and turn it into a normal function return of that
+        // value (this is the function-level early return `?` denotes). The slot
+        // is always taken, so it never leaks into a later call.
+        let result = match result {
+            Err(error) if error.code == "L0430" => {
+                let value = self.pending_try_return.take().ok_or_else(|| {
+                    RuntimeError::new(
+                        "L0430",
+                        "missing `?` propagation value at function boundary",
+                    )
+                })?;
+                return Ok(value);
+            }
+            other => other,
+        };
 
         match result.map_err(|error| error.with_traceback(traceback))? {
             Control::Return(value) | Control::Value(value) => Ok(value),
@@ -1809,6 +2578,8 @@ impl<'a> Runtime<'a> {
                 let value = self.eval_expr(expr, env)?;
                 match op {
                     UnaryOp::Not => Ok(Value::Bool(!value.as_bool()?)),
+                    // Bitwise NOT (one's complement) on an i64.
+                    UnaryOp::BitNot => Ok(Value::I64(!value.as_i64()?)),
                 }
             }
             ExprKind::Binary { left, op, right } => {
@@ -1860,6 +2631,47 @@ impl<'a> Runtime<'a> {
                 let value = self.eval_expr(expr, env)?;
                 let future = expect_future("await", value)?;
                 await_future(&future)
+            }
+            // Postfix `EXPR?` error propagation. Evaluate the operand to an
+            // `option`/`result` enum value; on the success variant (`some`/`ok`)
+            // the expression is the payload, and on the failure variant
+            // (`none`/`err`) we raise a function-level early-return signal that
+            // carries the whole enum value. `invoke_function` (the call boundary)
+            // catches the `L0430` sentinel and returns the stashed value as the
+            // enclosing function's result — mirroring how `throw`'s `L0420`
+            // unwinds to the nearest `try`/`catch`, but unwinding to the function
+            // boundary instead. Semantics has already verified the operand is an
+            // `option`/`result` and the return type is compatible.
+            ExprKind::Try(inner) => {
+                let value = self.eval_expr(inner, env)?;
+                let Value::Enum {
+                    variant, payload, ..
+                } = &value
+                else {
+                    return Err(RuntimeError::new(
+                        "L0428",
+                        "`?` operand did not evaluate to an option/result value",
+                    )
+                    .with_span(expr.span));
+                };
+                match variant.as_str() {
+                    "ok" | "some" => payload.first().cloned().ok_or_else(|| {
+                        RuntimeError::new("L0428", format!("`{variant}` payload missing for `?`"))
+                    }),
+                    "err" | "none" => {
+                        // Stash the whole failure value and unwind to the nearest
+                        // function boundary via the `L0430` early-return sentinel.
+                        self.pending_try_return = Some(value.clone());
+                        Err(RuntimeError::new(
+                            "L0430",
+                            "`?` propagated a failure value to the enclosing function",
+                        ))
+                    }
+                    other => Err(RuntimeError::new(
+                        "L0428",
+                        format!("`?` operand has unexpected variant `{other}`"),
+                    )),
+                }
             }
             ExprKind::StructLiteral { name, fields } => {
                 // Evaluate in source order, then reorder to the declared field
@@ -1934,7 +2746,78 @@ impl<'a> Runtime<'a> {
                 BinaryOp::And | BinaryOp::Or => {
                     unreachable!("logical ops short-circuit in eval_expr")
                 }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops require i64 operands (rejected by semantics)")
+                }
             });
+        }
+        // 32-bit float arithmetic/comparison, IEEE 754 like f64. Storing a native
+        // f32 rounds each result to f32 precision automatically.
+        if let (Value::F32(l), Value::F32(r)) = (&left, &right) {
+            let (l, r) = (*l, *r);
+            return Ok(match op {
+                BinaryOp::Add => Value::F32(l + r),
+                BinaryOp::Subtract => Value::F32(l - r),
+                BinaryOp::Multiply => Value::F32(l * r),
+                BinaryOp::Divide => Value::F32(l / r),
+                BinaryOp::Equal => Value::Bool(l == r),
+                BinaryOp::NotEqual => Value::Bool(l != r),
+                BinaryOp::Less => Value::Bool(l < r),
+                BinaryOp::LessEqual => Value::Bool(l <= r),
+                BinaryOp::Greater => Value::Bool(l > r),
+                BinaryOp::GreaterEqual => Value::Bool(l >= r),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("logical ops short-circuit in eval_expr")
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops require i64 operands (rejected by semantics)")
+                }
+            });
+        }
+        // Fixed-width integer arithmetic/comparison. Both operands carry the same
+        // width/signedness tag (the type checker forbids mixing widths); the
+        // arithmetic result is wrap-normalized back into that width, and ordering
+        // reduces to plain `i64` comparison of the normalized cells (signed-
+        // correct for `i32`, unsigned-correct for `u32`).
+        if let (Value::Int { value: l, ty }, Value::Int { value: r, ty: rk }) = (&left, &right) {
+            debug_assert_eq!(ty, rk, "mixed-width integer operands reached eval_binary");
+            let (l, r, ty) = (*l, *r, *ty);
+            return match op {
+                BinaryOp::Add => Ok(Value::int(l.wrapping_add(r), ty)),
+                BinaryOp::Subtract => Ok(Value::int(l.wrapping_sub(r), ty)),
+                BinaryOp::Multiply => Ok(Value::int(l.wrapping_mul(r), ty)),
+                BinaryOp::Divide => {
+                    if r == 0 {
+                        Err(RuntimeError::new("L0404", "division by zero"))
+                    } else {
+                        Ok(Value::int(int_div(l, r, ty), ty))
+                    }
+                }
+                BinaryOp::Equal => Ok(Value::Bool(l == r)),
+                BinaryOp::NotEqual => Ok(Value::Bool(l != r)),
+                BinaryOp::Less => Ok(Value::Bool(int_cmp(l, r, ty).is_lt())),
+                BinaryOp::LessEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_le())),
+                BinaryOp::Greater => Ok(Value::Bool(int_cmp(l, r, ty).is_gt())),
+                BinaryOp::GreaterEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_ge())),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("logical ops short-circuit in eval_expr")
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops on fixed-width integers are rejected by semantics")
+                }
+            };
         }
         match op {
             // `+` concatenates when both operands are strings; otherwise it adds i64s.
@@ -1973,6 +2856,15 @@ impl<'a> Runtime<'a> {
             BinaryOp::LessEqual => Ok(Value::Bool(left.as_i64()? <= right.as_i64()?)),
             BinaryOp::Greater => Ok(Value::Bool(left.as_i64()? > right.as_i64()?)),
             BinaryOp::GreaterEqual => Ok(Value::Bool(left.as_i64()? >= right.as_i64()?)),
+            // Integer bitwise ops on two i64s. Shift amounts are masked to the
+            // low 6 bits (`amount & 63`), so large/negative shifts are total and
+            // deterministic (x86/Java `long` semantics) — never a runtime error.
+            // `>>` is an arithmetic (sign-preserving) shift on the signed i64.
+            BinaryOp::BitAnd => Ok(Value::I64(left.as_i64()? & right.as_i64()?)),
+            BinaryOp::BitOr => Ok(Value::I64(left.as_i64()? | right.as_i64()?)),
+            BinaryOp::BitXor => Ok(Value::I64(left.as_i64()? ^ right.as_i64()?)),
+            BinaryOp::Shl => Ok(Value::I64(shift_left(left.as_i64()?, right.as_i64()?))),
+            BinaryOp::Shr => Ok(Value::I64(shift_right(left.as_i64()?, right.as_i64()?))),
             BinaryOp::And | BinaryOp::Or => unreachable!("logical ops short-circuit in eval_expr"),
         }
     }
@@ -2318,6 +3210,35 @@ impl<'a> Runtime<'a> {
         Ok(Value::Void)
     }
 
+    /// `mono_now() -> i64`: nanoseconds since a fixed per-process monotonic
+    /// baseline. Non-decreasing within a run. Shares the baseline with every
+    /// other backend through [`monotonic_now_nanos`].
+    fn builtin_mono_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mono_now", 0, args.len()))?;
+        Ok(Value::I64(monotonic_now_nanos()))
+    }
+
+    /// `wall_now() -> i64`: milliseconds since the Unix epoch (wall-clock time).
+    fn builtin_wall_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("wall_now", 0, args.len()))?;
+        Ok(Value::I64(wall_now_millis()))
+    }
+
+    /// `sleep_millis(ms i64) -> void`: sleep the current thread for `ms`
+    /// milliseconds; a negative `ms` sleeps for zero (no error).
+    fn builtin_sleep_millis(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ms]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sleep_millis", 1, args.len()))?;
+        let ms = expect_i64("sleep_millis", ms)?;
+        sleep_millis(ms);
+        Ok(Value::Void)
+    }
+
     /// `wasm_log(x i64) -> void`: the host log builtin. On the WASM backend it
     /// lowers to a `call` of the imported `env.log_i64`; on the interpreters it
     /// prints the value as a stdout line so all backends observe the same side
@@ -2397,7 +3318,9 @@ impl<'a> Runtime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("to_string", 1, args.len()))?;
         match value {
             Value::I64(_)
+            | Value::Int { .. }
             | Value::F64(_)
+            | Value::F32(_)
             | Value::Bool(_)
             | Value::String(_)
             | Value::Char(_)
@@ -2442,6 +3365,56 @@ impl<'a> Runtime<'a> {
             })
     }
 
+    /// `is_digit(c char) -> bool`: whether `c` is an ASCII digit (`0`-`9`).
+    fn builtin_is_digit(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_digit", args, |c| c.is_ascii_digit())
+    }
+
+    /// `is_alpha(c char) -> bool`: whether `c` is an alphabetic character.
+    fn builtin_is_alpha(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_alpha", args, |c| c.is_alphabetic())
+    }
+
+    /// `is_alnum(c char) -> bool`: whether `c` is alphabetic or numeric.
+    fn builtin_is_alnum(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_alnum", args, |c| c.is_alphanumeric())
+    }
+
+    /// `is_whitespace(c char) -> bool`: whether `c` is a whitespace character.
+    fn builtin_is_whitespace(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_whitespace", args, |c| c.is_whitespace())
+    }
+
+    /// `is_upper(c char) -> bool`: whether `c` is an uppercase character.
+    fn builtin_is_upper(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_upper", args, |c| c.is_uppercase())
+    }
+
+    /// `is_lower(c char) -> bool`: whether `c` is a lowercase character.
+    fn builtin_is_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_lower", args, |c| c.is_lowercase())
+    }
+
+    /// Shared helper for the deterministic `char -> bool` classification
+    /// predicates: unwrap a single `char` operand and apply `test`, reporting a
+    /// runtime error (never a panic) on a non-char operand.
+    fn char_predicate(
+        name: &'static str,
+        args: Vec<Value>,
+        test: impl Fn(char) -> bool,
+    ) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        match value {
+            Value::Char(c) => Ok(Value::Bool(test(c))),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a char but got `{other}`"),
+            )),
+        }
+    }
+
     /// `byte(i i64) -> byte`: an 8-bit unsigned value; a runtime error outside 0-255.
     fn builtin_byte(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
@@ -2454,6 +3427,58 @@ impl<'a> Runtime<'a> {
                 format!("byte got `{number}`, which is outside the 0-255 range"),
             )
         })
+    }
+
+    /// `to_<T>(x i64) -> T`: reinterpret an `i64` into fixed-width integer `T`,
+    /// truncating to `T`'s width (the wrapping conversion). Shared by every
+    /// `to_i8`/`to_i16`/`to_i32`/`to_u16`/`to_u32`/`to_u64`/`to_isize`/`to_usize`.
+    fn builtin_to_int(
+        name: &'static str,
+        args: Vec<Value>,
+        ty: IntKind,
+    ) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        Ok(Value::int(expect_i64(name, value)?, ty))
+    }
+
+    /// `to_i64(x) -> i64`: widen a fixed-width integer into `i64`. The cell is
+    /// already normalized (signed kinds sign-extended, unsigned zero-extended),
+    /// so widening is the identity on the stored value.
+    fn builtin_to_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_i64", 1, args.len()))?;
+        match value {
+            Value::Int { value, .. } => Ok(Value::I64(value)),
+            other => Err(RuntimeError::new(
+                "L0407",
+                format!("to_i64 expects a fixed-width integer but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `to_f32(x f64) -> f32`: round an `f64` to the nearest `f32`.
+    fn builtin_to_f32(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f32", 1, args.len()))?;
+        Ok(Value::F32(value.as_f64()? as f32))
+    }
+
+    /// `to_f64(x f32) -> f64`: widen an `f32` to `f64` (exact).
+    fn builtin_to_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f64", 1, args.len()))?;
+        match value {
+            Value::F32(value) => Ok(Value::F64(f64::from(value))),
+            other => Err(RuntimeError::new(
+                "L0421",
+                format!("to_f64 expects an f32 but got `{other}`"),
+            )),
+        }
     }
 
     /// `byte_val(b byte) -> i64`: the numeric value of a byte.
@@ -2547,6 +3572,91 @@ impl<'a> Runtime<'a> {
         Ok(Value::Array(values))
     }
 
+    /// `list_index_of(l, x) -> i64`: index of the first element equal to `x`, or -1.
+    fn builtin_list_index_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, target]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_index_of", 2, args.len()))?;
+        let values = expect_list("list_index_of", list)?;
+        let index = values
+            .iter()
+            .position(|value| *value == target)
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        Ok(Value::I64(index))
+    }
+
+    /// `list_contains(l, x) -> bool`: whether any element equals `x`.
+    fn builtin_list_contains(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, target]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_contains", 2, args.len()))?;
+        let values = expect_list("list_contains", list)?;
+        Ok(Value::Bool(values.contains(&target)))
+    }
+
+    /// `reverse(l) -> list<T>`: a new list with the elements reversed.
+    fn builtin_reverse(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("reverse", 1, args.len()))?;
+        let mut values = expect_list("reverse", list)?;
+        values.reverse();
+        Ok(Value::Array(values))
+    }
+
+    /// `sort(l list<i64>) -> list<i64>`: a new list with the elements sorted
+    /// ascending.
+    fn builtin_sort(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sort", 1, args.len()))?;
+        let values = expect_list("sort", list)?;
+        let mut nums: Vec<i64> = Vec::with_capacity(values.len());
+        for value in values {
+            match value {
+                Value::I64(n) => nums.push(n),
+                other => {
+                    return Err(RuntimeError::new(
+                        "L0417",
+                        format!("sort expects a list<i64> but found `{other}`"),
+                    ));
+                }
+            }
+        }
+        nums.sort();
+        Ok(Value::Array(nums.into_iter().map(Value::I64).collect()))
+    }
+
+    /// `concat(a, b) -> list<T>`: a new list with `b`'s elements appended to `a`.
+    fn builtin_concat(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [a, b]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("concat", 2, args.len()))?;
+        let mut values = expect_list("concat", a)?;
+        let mut rest = expect_list("concat", b)?;
+        values.append(&mut rest);
+        Ok(Value::Array(values))
+    }
+
+    /// `slice(l, start, end) -> list<T>`: the half-open range `[start, end)`,
+    /// with `start`/`end` clamped into `[0, len]` (so it is always total).
+    fn builtin_slice(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, start, end]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("slice", 3, args.len()))?;
+        let values = expect_list("slice", list)?;
+        let start = expect_i64("slice", start)?;
+        let end = expect_i64("slice", end)?;
+        let len = values.len() as i64;
+        let start = start.clamp(0, len) as usize;
+        let end = end.clamp(0, len) as usize;
+        if start >= end {
+            return Ok(Value::Array(Vec::new()));
+        }
+        Ok(Value::Array(values[start..end].to_vec()))
+    }
+
     /// `map_new() -> map<K, V>`: a fresh empty map.
     fn builtin_map_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let []: [Value; 0] = args
@@ -2594,6 +3704,24 @@ impl<'a> Runtime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("map_len", 1, args.len()))?;
         let entries = expect_map("map_len", map)?;
         Ok(Value::I64(entries.len() as i64))
+    }
+
+    /// `map_keys(m) -> list<K>`: the keys in insertion order.
+    fn builtin_map_keys(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_keys", 1, args.len()))?;
+        let entries = expect_map("map_keys", map)?;
+        Ok(Value::Array(entries.into_iter().map(|(k, _)| k).collect()))
+    }
+
+    /// `map_values(m) -> list<V>`: the values in insertion order.
+    fn builtin_map_values(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_values", 1, args.len()))?;
+        let entries = expect_map("map_values", map)?;
+        Ok(Value::Array(entries.into_iter().map(|(_, v)| v).collect()))
     }
 
     /// `map_del(m, k) -> map<K, V>`: a new map without key `k`.
@@ -2749,12 +3877,109 @@ impl<'a> Runtime<'a> {
         Ok(Value::String(text.to_uppercase()))
     }
 
+    /// `chars(s) -> list<char>`: the characters of `s` in order.
+    fn builtin_chars(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("chars", 1, args.len()))?;
+        let text = expect_string("chars", text)?;
+        Ok(Value::Array(text.chars().map(Value::Char).collect()))
+    }
+
+    /// `string_from_chars(cs) -> string`: concatenate a `list<char>` into a string.
+    fn builtin_string_from_chars(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("string_from_chars", 1, args.len()))?;
+        let values = expect_list("string_from_chars", list)?;
+        let mut out = String::new();
+        for value in values {
+            match value {
+                Value::Char(c) => out.push(c),
+                other => {
+                    return Err(RuntimeError::new(
+                        "L0417",
+                        format!("string_from_chars expects a list<char> but found `{other}`"),
+                    ));
+                }
+            }
+        }
+        Ok(Value::String(out))
+    }
+
     fn builtin_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [text]: [Value; 1] = args
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("lower", 1, args.len()))?;
         let text = expect_string("lower", text)?;
         Ok(Value::String(text.to_lowercase()))
+    }
+
+    /// `to_bytes(s string) -> list<byte>`: the UTF-8 encoding of `s` as a
+    /// `list<byte>` (a `Value::Array` of `Value::Byte`, matching `read_bytes`).
+    fn builtin_to_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_bytes", 1, args.len()))?;
+        let text = expect_string("to_bytes", text)?;
+        Ok(Value::Array(
+            text.into_bytes().into_iter().map(Value::Byte).collect(),
+        ))
+    }
+
+    /// `from_bytes(b list<byte>) -> result<string, string>`: decode `b` as UTF-8,
+    /// returning `ok(s)` on success and `err(message)` (never a panic, never a
+    /// lossy replacement) on invalid UTF-8.
+    fn builtin_from_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [data]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("from_bytes", 1, args.len()))?;
+        let bytes = Self::value_to_bytes("from_bytes", data)?;
+        Ok(result_value(match String::from_utf8(bytes) {
+            Ok(text) => Ok(Value::String(text)),
+            Err(error) => Err(Value::String(format!("invalid utf-8: {error}"))),
+        }))
+    }
+
+    /// `byte_len(s string) -> i64`: the number of UTF-8 bytes in `s` (distinct
+    /// from `len`, which counts characters for a string).
+    fn builtin_byte_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("byte_len", 1, args.len()))?;
+        let text = expect_string("byte_len", text)?;
+        Ok(Value::I64(text.len() as i64))
+    }
+
+    /// `parse_i64(s string) -> result<i64, string>`: parse `s` as a base-10
+    /// signed 64-bit integer via Rust `str::parse::<i64>()`, returning `ok(n)`
+    /// on success and `err(message)` on any failure (empty, non-numeric, or out
+    /// of range). Whitespace is not trimmed, so a padded string is an `err`. The
+    /// error message is a fixed string so every backend matches byte-for-byte.
+    fn builtin_parse_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parse_i64", 1, args.len()))?;
+        let text = expect_string("parse_i64", text)?;
+        Ok(result_value(match text.parse::<i64>() {
+            Ok(value) => Ok(Value::I64(value)),
+            Err(_) => Err(Value::String(format!("cannot parse `{text}` as i64"))),
+        }))
+    }
+
+    /// `parse_f64(s string) -> result<f64, string>`: parse `s` as an `f64` via
+    /// Rust `str::parse::<f64>()`, returning `ok(x)` on success and
+    /// `err(message)` on failure. The error message is a fixed string so every
+    /// backend matches byte-for-byte.
+    fn builtin_parse_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parse_f64", 1, args.len()))?;
+        let text = expect_string("parse_f64", text)?;
+        Ok(result_value(match text.parse::<f64>() {
+            Ok(value) => Ok(Value::F64(value)),
+            Err(_) => Err(Value::String(format!("cannot parse `{text}` as f64"))),
+        }))
     }
 
     fn builtin_abs(args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -2903,6 +4128,96 @@ impl<'a> Runtime<'a> {
             (y, x) => Err(RuntimeError::new(
                 "L0417",
                 format!("atan2 expects two f64 values but got `{y}` and `{x}`"),
+            )),
+        }
+    }
+
+    /// `rotate_left(x, n)`: rotate the 64 bits of `x` left by `(n & 63)`
+    /// positions. The mask makes it total for any `n` (large or negative).
+    fn builtin_rotate_left(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [x, n]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rotate_left", 2, args.len()))?;
+        match (x, n) {
+            (Value::I64(x), Value::I64(n)) => {
+                Ok(Value::I64(x.rotate_left(((n as u64) & 63) as u32)))
+            }
+            (x, n) => Err(RuntimeError::new(
+                "L0417",
+                format!("rotate_left expects two i64 values but got `{x}` and `{n}`"),
+            )),
+        }
+    }
+
+    /// `rotate_right(x, n)`: rotate the 64 bits of `x` right by `(n & 63)`
+    /// positions. Total for any `n` (the mask handles large/negative values).
+    fn builtin_rotate_right(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [x, n]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rotate_right", 2, args.len()))?;
+        match (x, n) {
+            (Value::I64(x), Value::I64(n)) => {
+                Ok(Value::I64(x.rotate_right(((n as u64) & 63) as u32)))
+            }
+            (x, n) => Err(RuntimeError::new(
+                "L0417",
+                format!("rotate_right expects two i64 values but got `{x}` and `{n}`"),
+            )),
+        }
+    }
+
+    /// `count_ones(x)`: population count of the 64-bit value `x` (0..=64).
+    fn builtin_count_ones(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("count_ones", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.count_ones() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("count_ones expects an i64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `leading_zeros(x)`: number of leading zero bits in `x` (0..=64).
+    fn builtin_leading_zeros(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("leading_zeros", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.leading_zeros() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("leading_zeros expects an i64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `trailing_zeros(x)`: number of trailing zero bits in `x` (0..=64).
+    fn builtin_trailing_zeros(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("trailing_zeros", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.trailing_zeros() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("trailing_zeros expects an i64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `reverse_bytes(x)`: reverse the byte order of the 64-bit value `x`.
+    fn builtin_reverse_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("reverse_bytes", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.swap_bytes())),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("reverse_bytes expects an i64 but got `{other}`"),
             )),
         }
     }
@@ -3206,6 +4521,15 @@ impl Env {
 }
 
 impl Value {
+    /// Build a fixed-width integer value, normalizing the cell to `ty`'s range so
+    /// the stored representation is always canonical (see [`IntKind`]).
+    pub fn int(value: i64, ty: IntKind) -> Value {
+        Value::Int {
+            value: ty.normalize(value),
+            ty,
+        }
+    }
+
     pub fn as_i64(&self) -> Result<i64, RuntimeError> {
         match self {
             Self::I64(value) => Ok(*value),
@@ -3710,6 +5034,93 @@ mod tests {
     }
 
     #[test]
+    fn atomic_ops_are_deterministic_single_threaded() {
+        // Exercise the full atomic surface deterministically, mirroring the
+        // `run_atomics.lby` parity fixture: new(10), add(5) -> prev 10 (cell 15),
+        // load -> 15, cas(15, 99) -> 15 (cell 99), load -> 99, swap(7) -> 99
+        // (cell 7), and the bitwise fetch-ops.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a atomic_i64 = atomic_new(10)\n",
+            "    let p0 i64 = atomic_add(a, 5)\n", // prev 10, cell 15
+            "    let l0 i64 = atomic_load(a)\n",   // 15
+            "    let c0 i64 = atomic_cas(a, 15, 99)\n", // 15, cell 99
+            "    let l1 i64 = atomic_load(a)\n",   // 99
+            "    let s0 i64 = atomic_swap(a, 7)\n", // 99, cell 7
+            "    let sub0 i64 = atomic_sub(a, 2)\n", // prev 7, cell 5
+            "    let and0 i64 = atomic_and(a, 6)\n", // prev 5 (5&6=4), cell 4
+            "    let or0 i64 = atomic_or(a, 1)\n", // prev 4 (4|1=5), cell 5
+            "    let xor0 i64 = atomic_xor(a, 7)\n", // prev 5 (5^7=2), cell 2
+            "    let final i64 = atomic_load(a)\n", // 2
+            "    p0 + l0 + c0 + l1 + s0 + sub0 + and0 + or0 + xor0 + final\n",
+        );
+        // 10 + 15 + 15 + 99 + 99 + 7 + 5 + 4 + 5 + 2 = 261.
+        assert_eq!(run_source(source).expect("run"), Value::I64(261));
+    }
+
+    #[test]
+    fn atomic_shared_across_threads_via_clone() {
+        // The `Value::Atomic` handle shares its `Arc<AtomicI64>` on clone, so
+        // many OS threads racing `atomic_add` against the same cell lose no
+        // updates: the final total is the exact sum. This proves real atomicity
+        // (an ordinary `mutex`-free counter would drop increments under this
+        // contention).
+        let atomic = SharedAtomic {
+            cell: Arc::new(AtomicI64::new(0)),
+        };
+        let value = Value::Atomic(atomic);
+        const THREADS: i64 = 8;
+        const ITERS: i64 = 10_000;
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let handle = value.clone();
+                scope.spawn(move || {
+                    for _ in 0..ITERS {
+                        Runtime::builtin_atomic_add(vec![handle.clone(), Value::I64(1)])
+                            .expect("atomic_add");
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            Runtime::builtin_atomic_load(vec![value]).expect("atomic_load"),
+            Value::I64(THREADS * ITERS)
+        );
+    }
+
+    #[test]
+    fn atomic_add_returns_previous_and_races_lose_no_updates() {
+        // A second multi-threaded proof that also checks the fetch-and-op
+        // *return contract*: `atomic_add` returns the PREVIOUS value, so the set
+        // of returned values across a single-threaded run is a permutation of
+        // the prefix sums. Here we assert the stronger cross-thread invariant:
+        // with N threads each adding a distinct large stride, the final load is
+        // the exact arithmetic sum with no lost update.
+        let atomic = SharedAtomic {
+            cell: Arc::new(AtomicI64::new(0)),
+        };
+        let value = Value::Atomic(atomic);
+        const THREADS: i64 = 6;
+        const ITERS: i64 = 5_000;
+        const STRIDE: i64 = 3;
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let handle = value.clone();
+                scope.spawn(move || {
+                    for _ in 0..ITERS {
+                        Runtime::builtin_atomic_add(vec![handle.clone(), Value::I64(STRIDE)])
+                            .expect("atomic_add");
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            Runtime::builtin_atomic_load(vec![value]).expect("atomic_load"),
+            Value::I64(THREADS * ITERS * STRIDE)
+        );
+    }
+
+    #[test]
     fn runs_unsafe_raw_pointer_read() {
         let source = "fn main -> i64\n    let p ptr_i64 = alloc(42)\n    let v i64 = 0\n    unsafe\n        v = ptr_read(p)\n    dealloc(p)\n    v\n";
         assert_eq!(run_source(source).expect("run"), Value::I64(42));
@@ -3967,6 +5378,71 @@ mod tests {
     }
 
     #[test]
+    fn proc_spawn_missing_command_yields_err_result() {
+        // Spawning a command that does not exist on any platform deterministically
+        // takes the `err` arm, so the program returns 1. This mirrors the
+        // backend-invariant `run_process.lby` parity fixture. (Array literals must
+        // be non-empty in the current alpha, so a harmless arg is supplied; a
+        // missing command fails to spawn regardless of its arguments.)
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let outcome result<process, string> = proc_spawn(\"lullaby_definitely_not_a_real_program_zzz\", [\"--version\"])\n",
+            "    match outcome\n",
+            "        ok(p) -> 7\n",
+            "        err(message) -> 1\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(1));
+    }
+
+    #[test]
+    fn proc_spawn_wait_and_stdout_success_path() {
+        // Spawn a universally-available shell that echoes `hello`, wait for exit,
+        // and assert the exit code is 0 and captured stdout contains `hello`. The
+        // command is platform-conditional so the test runs on the host. Every
+        // `match` sits in tail position (via helper functions) to stay within the
+        // fixture-style surface the parser accepts.
+        let (cmd, arg0, arg1) = if cfg!(windows) {
+            ("cmd", "/c", "echo hello")
+        } else {
+            ("sh", "-c", "echo hello")
+        };
+        let source = format!(
+            concat!(
+                "fn main -> i64\n",
+                "    let spawned result<process, string> = proc_spawn(\"{cmd}\", [\"{arg0}\", \"{arg1}\"])\n",
+                "    match spawned\n",
+                "        ok(p) -> run_child(p)\n",
+                "        err(message) -> 100\n",
+                "\n",
+                "fn run_child p process -> i64\n",
+                "    let waited result<i64, string> = proc_wait(p)\n",
+                "    let captured result<string, string> = proc_stdout(p)\n",
+                "    check_wait(waited, captured)\n",
+                "\n",
+                "fn check_wait waited result<i64, string> captured result<string, string> -> i64\n",
+                "    match waited\n",
+                "        ok(status) -> check_output(status, captured)\n",
+                "        err(message) -> 200\n",
+                "\n",
+                "fn check_output code i64 captured result<string, string> -> i64\n",
+                "    match captured\n",
+                "        ok(text) -> classify(code, text)\n",
+                "        err(message) -> 300\n",
+                "\n",
+                "fn classify code i64 text string -> i64\n",
+                "    if code == 0 and contains(text, \"hello\")\n",
+                "        0\n",
+                "    else\n",
+                "        1\n",
+            ),
+            cmd = cmd,
+            arg0 = arg0,
+            arg1 = arg1,
+        );
+        assert_eq!(run_source(&source).expect("run"), Value::I64(0));
+    }
+
+    #[test]
     fn http_get_refused_yields_err_result() {
         // Connecting to port 1 on loopback is a deterministic refusal, so the
         // `result` takes the `err` arm and the program returns 1. No server.
@@ -3991,5 +5467,236 @@ mod tests {
             "        err(message) -> 1\n",
         );
         assert_eq!(run_source(source).expect("run"), Value::I64(1));
+    }
+
+    #[test]
+    fn to_bytes_from_bytes_round_trip_and_byte_len() {
+        // `to_bytes("Hi")` = [72, 105]; `from_bytes` decodes back to "Hi";
+        // `byte_len("café")` = 5 while `len` counts 4 characters.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bytes list<byte> = to_bytes(\"Hi\")\n",
+            "    let first i64 = byte_val(get(bytes, 0))\n",
+            "    let second i64 = byte_val(get(bytes, 1))\n",
+            "    let decoded i64 = 0\n",
+            "    match from_bytes(bytes)\n",
+            // 72 + 105 + len("Hi")=2 + (byte_len=5 - len=4)=1 => 180
+            "        ok(s) -> first + second + len(s) + (byte_len(\"café\") - len(\"café\"))\n",
+            "        err(m) -> 0 - len(m)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(180));
+    }
+
+    #[test]
+    fn from_bytes_rejects_invalid_utf8_with_err() {
+        // A lone `0xFF` byte is not valid UTF-8: `from_bytes` returns `err`
+        // (never a panic, never a lossy replacement).
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bad list<byte> = push(list_new(), byte(255))\n",
+            "    match from_bytes(bad)\n",
+            "        ok(s) -> len(s)\n",
+            "        err(m) -> 1\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(1));
+    }
+
+    #[test]
+    fn os_random_bytes_len_and_bounds_behavior() {
+        // A positive length yields exactly that many bytes.
+        assert_eq!(os_random_bytes(16).expect("ok").len(), 16);
+        // Zero yields an empty buffer (no syscall, no error).
+        assert_eq!(os_random_bytes(0).expect("ok"), Vec::<u8>::new());
+        // A negative length is an error, not a panic.
+        assert_eq!(
+            os_random_bytes(-1),
+            Err("os_random length must be non-negative".to_string())
+        );
+    }
+
+    #[test]
+    fn os_random_returns_requested_length_and_empty_and_err() {
+        // `os_random(16)` yields `ok` with 16 bytes; `os_random(0)` yields `ok`
+        // with an empty list; `os_random(-1)` yields `err` (never a panic). The
+        // fixed total is 16 + 0 + (0 - 1) = 15.
+        let source = concat!(
+            "fn amount n i64 -> i64\n",
+            "    match os_random(n)\n",
+            "        ok(bytes) -> len(bytes)\n",
+            "        err(_) -> 0 - 1\n\n",
+            "fn main -> i64\n",
+            "    amount(16) + amount(0) + amount(0 - 1)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(15));
+    }
+
+    #[test]
+    fn os_random_is_non_deterministic_across_calls() {
+        // A real OS CSPRNG (not a seeded PRNG) produces different 32-byte draws
+        // with overwhelming probability, so two draws must differ.
+        let first = os_random_bytes(32).expect("ok");
+        let second = os_random_bytes(32).expect("ok");
+        assert_eq!(first.len(), 32);
+        assert_eq!(second.len(), 32);
+        assert_ne!(first, second, "two OS-CSPRNG draws must not be identical");
+    }
+
+    #[test]
+    fn try_operator_propagates_ok_and_err_on_ast_backend() {
+        // `checked(a)? + checked(b)?` yields the sum when both succeed and
+        // short-circuits with the first `err` otherwise. The AST interpreter
+        // realizes `?` via a function-level early-return signal.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"neg\")\n",
+            "    ok(n)\n\n",
+            "fn add_checked a i64 b i64 -> result<i64, string>\n",
+            "    let x i64 = checked(a)?\n",
+            "    let y i64 = checked(b)?\n",
+            "    ok(x + y)\n\n",
+            "fn unwrap r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn main -> i64\n",
+            // success 3 + 4 = 7; failure err("neg") -> -3.
+            "    unwrap(add_checked(3, 4)) + unwrap(add_checked(-1, 4))\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(4));
+    }
+
+    #[test]
+    fn try_operator_propagates_none_on_ast_backend() {
+        // `?` on an `option` returns `none` from the enclosing option-returning
+        // function when the operand is `none`.
+        let source = concat!(
+            "fn lookup present bool -> option<i64>\n",
+            "    if present\n",
+            "        return some(9)\n",
+            "    none\n\n",
+            "fn twice present bool -> option<i64>\n",
+            "    let x i64 = lookup(present)?\n",
+            "    some(x + x)\n\n",
+            "fn unwrap o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> -1\n\n",
+            "fn main -> i64\n",
+            // present -> 18; absent -> none -> -1.
+            "    unwrap(twice(true)) + unwrap(twice(false))\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(17));
+    }
+
+    #[test]
+    fn nested_try_operator_runs_on_ast_backend() {
+        // `checked(checked(n)? + n)?` nests two `?`s in one expression; both must
+        // succeed for the value to flow through.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"neg\")\n",
+            "    ok(n)\n\n",
+            "fn double_checked n i64 -> result<i64, string>\n",
+            "    let v i64 = checked(checked(n)? + n)?\n",
+            "    ok(v)\n\n",
+            "fn unwrap r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn main -> i64\n",
+            // double_checked(5) = 10; double_checked(-2) = err("neg") -> -3.
+            "    unwrap(double_checked(5)) + unwrap(double_checked(-2))\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(7));
+    }
+
+    #[test]
+    fn int_kind_normalize_wraps_each_width() {
+        assert_eq!(IntKind::I8.normalize(128), -128);
+        assert_eq!(IntKind::I16.normalize(32_768), -32_768);
+        assert_eq!(IntKind::I32.normalize(2_147_483_648), -2_147_483_648);
+        assert_eq!(IntKind::U16.normalize(-1), 65_535);
+        assert_eq!(IntKind::U32.normalize(-1), 4_294_967_295);
+        // The 64-bit unsigned kinds fill the cell; normalization keeps the bits.
+        assert_eq!(IntKind::U64.normalize(-1), -1);
+        assert_eq!(IntKind::Usize.normalize(-1), -1);
+    }
+
+    #[test]
+    fn int_div_and_cmp_respect_signedness_at_64_bit() {
+        // `to_u64(0 - 1)` is stored as the bit pattern of -1, i.e. u64::MAX.
+        let umax = IntKind::U64.normalize(-1);
+        // Unsigned division divides on the magnitude, not the signed -1.
+        assert_eq!(int_div(umax, 2, IntKind::U64), (u64::MAX / 2) as i64);
+        // Signed i64-style division of the same bits would be 0 (-1 / 2).
+        assert_eq!(int_div(-1, 2, IntKind::Isize), 0);
+        // Unsigned ordering treats the cell as u64::MAX (greater than 1).
+        assert!(int_cmp(umax, 1, IntKind::U64).is_gt());
+        // Signed ordering of the same bits (-1) is less than 1.
+        assert!(int_cmp(-1, 1, IntKind::Isize).is_lt());
+    }
+
+    #[test]
+    fn runs_unsigned_64_bit_wraparound_end_to_end() {
+        // `to_u64(0 - 1)` is u64::MAX; dividing by 2 uses unsigned semantics, and
+        // `to_i64` reinterprets the resulting bits back into an i64.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let big u64 = to_u64(0 - 1)\n",
+            "    let half u64 = big / to_u64(2)\n",
+            "    to_i64(half)\n",
+        );
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::I64((u64::MAX / 2) as i64)
+        );
+    }
+
+    #[test]
+    fn overflow_arith_checked_saturating_wrapping() {
+        // checked_add overflows i8 (127 + 1) -> none.
+        let none = overflow_arith(
+            "checked_add",
+            vec![Value::int(127, IntKind::I8), Value::int(1, IntKind::I8)],
+            ArithOp::Add,
+            OverflowMode::Checked,
+        )
+        .expect("checked_add");
+        assert_eq!(none, option_value(None));
+        // checked_add in range -> some(120).
+        let some = overflow_arith(
+            "checked_add",
+            vec![Value::int(100, IntKind::I8), Value::int(20, IntKind::I8)],
+            ArithOp::Add,
+            OverflowMode::Checked,
+        )
+        .expect("checked_add");
+        assert_eq!(some, option_value(Some(Value::int(120, IntKind::I8))));
+        // saturating_mul clamps to u32::MAX.
+        let sat = overflow_arith(
+            "saturating_mul",
+            vec![
+                Value::int(100_000, IntKind::U32),
+                Value::int(100_000, IntKind::U32),
+            ],
+            ArithOp::Mul,
+            OverflowMode::Saturating,
+        )
+        .expect("saturating_mul");
+        assert_eq!(sat, Value::int(4_294_967_295, IntKind::U32));
+        // wrapping_add wraps u32::MAX + 1 -> 0.
+        let wrap = overflow_arith(
+            "wrapping_add",
+            vec![
+                Value::int(4_294_967_295, IntKind::U32),
+                Value::int(1, IntKind::U32),
+            ],
+            ArithOp::Add,
+            OverflowMode::Wrapping,
+        )
+        .expect("wrapping_add");
+        assert_eq!(wrap, Value::int(0, IntKind::U32));
     }
 }

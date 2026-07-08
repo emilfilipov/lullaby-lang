@@ -631,11 +631,21 @@ pub enum ExprKind {
     Await {
         expr: Box<Expr>,
     },
+    /// Postfix error-propagation `EXPR?`. On a `result<T, E>` operand it yields
+    /// `T` for `ok(t)` and immediately returns `err(e)` from the enclosing
+    /// function otherwise; on an `option<T>` operand it yields `T` for `some(t)`
+    /// and returns `none` otherwise. This node exists only in the parser AST: the
+    /// AST interpreter realizes it directly via a function-level early-return
+    /// signal, and the IR lowerer desugars it into `let`/`match`/`return` so no
+    /// IR node (and thus no native/WASM backend change) is needed.
+    Try(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Not,
+    /// Bitwise NOT (`~`, one's complement) on an `i64`.
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -652,6 +662,17 @@ pub enum BinaryOp {
     GreaterEqual,
     And,
     Or,
+    /// Bitwise AND (`&`) on two `i64`s.
+    BitAnd,
+    /// Bitwise OR (`|`) on two `i64`s.
+    BitOr,
+    /// Bitwise XOR (`^`) on two `i64`s.
+    BitXor,
+    /// Left shift (`<<`) of an `i64` by an `i64` amount (masked to 6 bits).
+    Shl,
+    /// Arithmetic (sign-preserving) right shift (`>>`) of an `i64` by an `i64`
+    /// amount (masked to 6 bits).
+    Shr,
 }
 
 /// Validate and remove `_` digit separators from a numeric literal. A separator
@@ -677,6 +698,191 @@ fn normalize_number_literal(value: &str) -> Option<String> {
     Some(value.chars().filter(|ch| *ch != '_').collect())
 }
 
+/// Parse a base-prefixed integer literal (`0x`/`0X`, `0b`/`0B`, `0o`/`0O`) into
+/// an `i64`. The prefix is matched case-insensitively; the remaining text must be
+/// non-empty radix digits with optional `_` separators strictly between two valid
+/// radix digits (a leading, trailing, doubled, or prefix-adjacent underscore is
+/// rejected). An out-of-radix digit, empty digits, a `.`, or an `i64` overflow all
+/// return `None`. A decimal literal (no recognized base prefix) also returns
+/// `None` so the caller falls through to the existing decimal/float path.
+fn parse_radix_literal(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'0' {
+        return None;
+    }
+    let radix = match bytes[1] {
+        b'x' | b'X' => 16,
+        b'b' | b'B' => 2,
+        b'o' | b'O' => 8,
+        _ => return None,
+    };
+    let digits = &value[2..];
+    if digits.is_empty() {
+        return None;
+    }
+    let digit_bytes = digits.as_bytes();
+    let mut cleaned = String::with_capacity(digits.len());
+    for (index, &byte) in digit_bytes.iter().enumerate() {
+        if byte == b'_' {
+            let prev_ok = index
+                .checked_sub(1)
+                .is_some_and(|prev| (digit_bytes[prev] as char).is_digit(radix));
+            let next_ok = digit_bytes
+                .get(index + 1)
+                .is_some_and(|next| (*next as char).is_digit(radix));
+            if !(prev_ok && next_ok) {
+                return None;
+            }
+            continue;
+        }
+        if !(byte as char).is_digit(radix) {
+            return None;
+        }
+        cleaned.push(byte as char);
+    }
+    i64::from_str_radix(&cleaned, radix).ok()
+}
+
+/// Recognized typed numeric-literal suffixes, longest first so `usize`/`isize`
+/// are matched before any shorter candidate. `i64`/`f64` are the defaults; the
+/// rest desugar to the corresponding `to_<T>` conversion builtin.
+const NUMBER_SUFFIXES: &[&str] = &[
+    "usize", "isize", "i16", "i32", "i64", "u16", "u32", "u64", "f32", "f64", "i8",
+];
+
+/// True when `s` carries a `0x`/`0b`/`0o` base prefix.
+fn is_radix_prefixed(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 2
+        && bytes[0] == b'0'
+        && matches!(bytes[1], b'x' | b'X' | b'b' | b'B' | b'o' | b'O')
+}
+
+/// The inclusive `[min, max]` range of an integer suffix as `i128`. Returns
+/// `None` for the float suffixes. (The `u64`/`usize` range is the full type
+/// range; a separate writable-literal cap at `i64::MAX` applies when packing the
+/// desugared cell.)
+fn int_suffix_range(suffix: &str) -> Option<(i128, i128)> {
+    Some(match suffix {
+        "i8" => (i128::from(i8::MIN), i128::from(i8::MAX)),
+        "i16" => (i128::from(i16::MIN), i128::from(i16::MAX)),
+        "i32" => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        "i64" | "isize" => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        "u16" => (0, i128::from(u16::MAX)),
+        "u32" => (0, i128::from(u32::MAX)),
+        "u64" | "usize" => (0, i128::from(u64::MAX)),
+        _ => return None,
+    })
+}
+
+/// Parse a (possibly base-prefixed) integer literal body into `i128`. Radix
+/// bodies reuse [`parse_radix_literal`] (values up to `i64::MAX`); decimal bodies
+/// parse the full `i128` range so large `u64`/`usize` literals validate exactly.
+fn literal_base_to_i128(base: &str) -> Option<i128> {
+    if is_radix_prefixed(base) {
+        parse_radix_literal(base).map(i128::from)
+    } else {
+        normalize_number_literal(base)?.parse::<i128>().ok()
+    }
+}
+
+/// Build a `to_<name>(literal)` call expression, the desugaring of a typed
+/// numeric-literal suffix; the synthetic literal argument carries the same span.
+fn conversion_call(name: &str, argument: ExprKind, span: Span) -> ExprKind {
+    ExprKind::Call {
+        name: name.to_string(),
+        args: vec![Expr {
+            kind: argument,
+            span,
+        }],
+    }
+}
+
+/// Turn a `Number` token's text into an expression. A recognized type suffix
+/// (`0u8`… → err, `1i32`, `2.0f32`, `0xFFu16`, …) is range-checked and desugared
+/// to the matching `to_<T>` conversion; `i64`/`f64` suffixes and unsuffixed
+/// literals produce a plain `Integer`/`Float`. Unsigned 64-bit literals above
+/// `i64::MAX` are supported (their `i64` bit pattern is passed to `to_u64`).
+fn parse_number_literal(value: &str, span: Span) -> Result<ExprKind, String> {
+    for &suffix in NUMBER_SUFFIXES {
+        let Some(base) = value.strip_suffix(suffix) else {
+            continue;
+        };
+        if base.is_empty() {
+            continue;
+        }
+        let is_float_suffix = suffix.starts_with('f');
+        // A float suffix never applies to a base-prefixed literal — `0xABF32` is
+        // the hex number 0xABF32, not `0xAB` with an `f32` suffix.
+        if is_float_suffix && is_radix_prefixed(base) {
+            continue;
+        }
+        if is_float_suffix {
+            let normalized = normalize_number_literal(base)
+                .ok_or_else(|| format!("invalid float literal `{value}`"))?;
+            let parsed = normalized
+                .parse::<f64>()
+                .map_err(|_| format!("invalid float literal `{value}`"))?;
+            if suffix == "f64" {
+                return Ok(ExprKind::Float(parsed));
+            }
+            return Ok(conversion_call("to_f32", ExprKind::Float(parsed), span));
+        }
+        // Integer suffix.
+        if base.contains('.') {
+            return Err(format!("integer literal `{value}` must not contain `.`"));
+        }
+        let (min, max) = int_suffix_range(suffix).expect("integer suffix has a range");
+        let magnitude = literal_base_to_i128(base)
+            .ok_or_else(|| format!("invalid integer literal `{value}`"))?;
+        if magnitude < min || magnitude > max {
+            return Err(format!(
+                "integer literal `{value}` is out of range for `{suffix}`"
+            ));
+        }
+        if suffix == "i64" {
+            return Ok(ExprKind::Integer(magnitude as i64));
+        }
+        // The literal is desugared to `to_<T>(<i64>)`, so its magnitude must be
+        // expressible as a non-negative `i64` literal. Every fixed-width value is
+        // — except a `u64`/`usize` above `i64::MAX`, whose cell would be a
+        // negative `i64` that has no round-trippable literal form. Reject those
+        // with a precise pointer to the conversion builtin (the value is valid
+        // for the type, just not writable as a literal).
+        if magnitude > i128::from(i64::MAX) {
+            return Err(format!(
+                "`{suffix}` literal `{value}` exceeds the writable maximum {}; \
+                 build larger `{suffix}` values with `to_{suffix}`",
+                i64::MAX
+            ));
+        }
+        return Ok(conversion_call(
+            &format!("to_{suffix}"),
+            ExprKind::Integer(magnitude as i64),
+            span,
+        ));
+    }
+    // No recognized suffix: base-prefixed integer, else decimal integer or float.
+    if is_radix_prefixed(value) {
+        let parsed = parse_radix_literal(value)
+            .ok_or_else(|| format!("invalid integer literal `{value}`"))?;
+        return Ok(ExprKind::Integer(parsed));
+    }
+    let normalized = normalize_number_literal(value)
+        .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
+    if normalized.contains('.') {
+        let parsed = normalized
+            .parse::<f64>()
+            .map_err(|_| format!("invalid float literal `{value}`"))?;
+        Ok(ExprKind::Float(parsed))
+    } else {
+        let parsed = normalized
+            .parse::<i64>()
+            .map_err(|_| format!("invalid integer literal `{value}`"))?;
+        Ok(ExprKind::Integer(parsed))
+    }
+}
+
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
@@ -691,6 +897,12 @@ struct Parser<'a> {
     tokens: &'a [Token],
     cursor: usize,
     diagnostics: Vec<Diagnostic>,
+    /// A count of `>` closers still owed from a `>>` token that was split while
+    /// closing a nested generic type (`option<array<i64>>` lexes the trailing
+    /// `>>` as one shift token). The type parser consumes these before advancing
+    /// the cursor, so nested generics close correctly even though `<<`/`>>` are
+    /// single tokens for the bitwise shift operators.
+    pending_generic_close: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -699,6 +911,32 @@ impl<'a> Parser<'a> {
             tokens,
             cursor: 0,
             diagnostics: Vec::new(),
+            pending_generic_close: 0,
+        }
+    }
+
+    /// Consume a single `>` that closes a generic type-argument list. A `>>`
+    /// token (the bitwise shift) is split so its second `>` remains available
+    /// for the enclosing generic. Returns `false` if the next token is neither a
+    /// pending split, a `>`, nor a `>>`.
+    fn eat_generic_close(&mut self) -> bool {
+        if self.pending_generic_close > 0 {
+            self.pending_generic_close -= 1;
+            return true;
+        }
+        match &self.peek().kind {
+            TokenKind::Symbol(symbol) if symbol == ">" => {
+                self.advance();
+                true
+            }
+            TokenKind::Symbol(symbol) if symbol == ">>" => {
+                // Split `>>` into two generic closers: consume the token now and
+                // owe one more `>` to the enclosing generic.
+                self.advance();
+                self.pending_generic_close += 1;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1781,7 +2019,7 @@ impl<'a> Parser<'a> {
                             args.push(self.expect_type("expected generic type argument")?);
                         }
                     }
-                    if !self.eat_symbol(">") {
+                    if !self.eat_generic_close() {
                         self.error(
                             "L0203",
                             "expected `>` after generic type argument",
@@ -2149,6 +2387,19 @@ impl<'a> ExprParser<'a> {
                     span: token.span,
                 })
             }
+            // Unary bitwise NOT (`~`) binds like `not`: as a prefix operator over
+            // a unary expression, so `~a & b` parses as `(~a) & b`.
+            TokenKind::Symbol(ref symbol) if symbol == "~" => {
+                self.cursor += 1;
+                let expr = self.parse_unary()?;
+                Ok(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::BitNot,
+                        expr: Box::new(expr),
+                    },
+                    span: token.span,
+                })
+            }
             TokenKind::Symbol(symbol) if symbol == "-" => {
                 self.cursor += 1;
                 let value = self.parse_unary()?;
@@ -2221,6 +2472,16 @@ impl<'a> ExprParser<'a> {
                         span,
                     };
                 }
+            } else if self.eat_symbol("?") {
+                // Postfix error-propagation `expr?`. It binds tighter than every
+                // binary operator (it lives in the postfix loop, above
+                // `parse_binary`), so `a + b?` parses as `a + (b?)` and `f()?`
+                // applies `?` to the call. Chaining `x??` reuses the same loop.
+                let span = expr.span;
+                expr = Expr {
+                    kind: ExprKind::Try(Box::new(expr)),
+                    span,
+                };
             } else {
                 break;
             }
@@ -2233,21 +2494,10 @@ impl<'a> ExprParser<'a> {
         self.cursor += 1;
         match token.kind {
             TokenKind::Number(value) => {
-                // Validate and strip `_` digit separators before parsing.
-                let normalized = normalize_number_literal(&value)
-                    .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
-                // A `.` in the literal marks a floating-point (`f64`) literal.
-                let kind = if normalized.contains('.') {
-                    let parsed = normalized
-                        .parse::<f64>()
-                        .map_err(|_| format!("invalid float literal `{value}`"))?;
-                    ExprKind::Float(parsed)
-                } else {
-                    let parsed = normalized
-                        .parse::<i64>()
-                        .map_err(|_| format!("invalid integer literal `{value}`"))?;
-                    ExprKind::Integer(parsed)
-                };
+                // A recognized type suffix (`1i32`, `2.0f32`, `0xFFu16`, …) is
+                // range-checked and desugared to the matching `to_<T>` conversion;
+                // `i64`/`f64` and unsuffixed literals stay plain `Integer`/`Float`.
+                let kind = parse_number_literal(&value, token.span)?;
                 Ok(Expr {
                     kind,
                     span: token.span,
@@ -2357,10 +2607,19 @@ impl<'a> ExprParser<'a> {
                 "<=" => (BinaryOp::LessEqual, 3),
                 ">" => (BinaryOp::Greater, 3),
                 ">=" => (BinaryOp::GreaterEqual, 3),
-                "+" => (BinaryOp::Add, 4),
-                "-" => (BinaryOp::Subtract, 4),
-                "*" => (BinaryOp::Multiply, 5),
-                "/" => (BinaryOp::Divide, 5),
+                // Bitwise-logical operators bind tighter than comparison and
+                // looser than the shifts. C-like ordering among themselves:
+                // `|` (loosest) < `^` < `&` (tightest).
+                "|" => (BinaryOp::BitOr, 4),
+                "^" => (BinaryOp::BitXor, 5),
+                "&" => (BinaryOp::BitAnd, 6),
+                // Shifts bind just below additive.
+                "<<" => (BinaryOp::Shl, 7),
+                ">>" => (BinaryOp::Shr, 7),
+                "+" => (BinaryOp::Add, 8),
+                "-" => (BinaryOp::Subtract, 8),
+                "*" => (BinaryOp::Multiply, 9),
+                "/" => (BinaryOp::Divide, 9),
                 _ => return None,
             }),
             _ => None,
@@ -2438,6 +2697,106 @@ mod tests {
         assert_eq!(program.functions[0].return_type.name, "i64");
     }
 
+    /// Extract the single expression that is the body of a one-line
+    /// `fn main -> i64` (used to inspect parsed operator structure).
+    fn body_expr(source: &str) -> Expr {
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        match &program.functions[0].body[0] {
+            Stmt::Expr(expr) => expr.clone(),
+            other => panic!("expected an expression statement, got {other:?}"),
+        }
+    }
+
+    fn as_binary(expr: &Expr) -> (BinaryOp, &Expr, &Expr) {
+        match &expr.kind {
+            ExprKind::Binary { left, op, right } => (*op, left, right),
+            other => panic!("expected a binary expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_bitwise_operators() {
+        let expr = body_expr("fn main -> i64\n    5 & 3\n");
+        let (op, _, _) = as_binary(&expr);
+        assert_eq!(op, BinaryOp::BitAnd);
+
+        let expr = body_expr("fn main -> i64\n    ~5\n");
+        assert!(matches!(
+            expr.kind,
+            ExprKind::Unary {
+                op: UnaryOp::BitNot,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bitwise_precedence_matches_c_like_ordering() {
+        // Shifts bind tighter than `&`, which binds tighter than `^`, which
+        // binds tighter than `|`. `a | b ^ c & d << e` == `a | (b ^ (c & (d << e)))`.
+        let expr = body_expr("fn main -> i64\n    1 | 2 ^ 3 & 4 << 5\n");
+        let (top, _, or_right) = as_binary(&expr);
+        assert_eq!(top, BinaryOp::BitOr, "top of tree is `|`");
+        let (xor_op, _, xor_right) = as_binary(or_right);
+        assert_eq!(xor_op, BinaryOp::BitXor, "right of `|` is `^`");
+        let (and_op, _, and_right) = as_binary(xor_right);
+        assert_eq!(and_op, BinaryOp::BitAnd, "right of `^` is `&`");
+        let (shl_op, _, _) = as_binary(and_right);
+        assert_eq!(shl_op, BinaryOp::Shl, "right of `&` is `<<`");
+    }
+
+    #[test]
+    fn shift_binds_below_additive_and_bitwise_below_comparison() {
+        // `a + b << c` == `(a + b) << c` (additive tighter than shift).
+        let expr = body_expr("fn main -> i64\n    1 + 2 << 3\n");
+        let (top, left, _) = as_binary(&expr);
+        assert_eq!(top, BinaryOp::Shl);
+        assert_eq!(as_binary(left).0, BinaryOp::Add);
+
+        // `a & b == c` == `(a & b) == c` (bitwise tighter than comparison).
+        let expr = body_expr("fn main -> i64\n    1 & 2 == 3\n");
+        let (top, left, _) = as_binary(&expr);
+        assert_eq!(top, BinaryOp::Equal);
+        assert_eq!(as_binary(left).0, BinaryOp::BitAnd);
+
+        // Unary `~` binds tighter than `&`: `~a & b` == `(~a) & b`.
+        let expr = body_expr("fn main -> i64\n    ~1 & 2\n");
+        let (top, left, _) = as_binary(&expr);
+        assert_eq!(top, BinaryOp::BitAnd);
+        assert!(matches!(
+            left.kind,
+            ExprKind::Unary {
+                op: UnaryOp::BitNot,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn bitwise_operators_format_idempotently() {
+        // The formatter must render the new operators and re-parse to the same
+        // canonical text (idempotency), parenthesizing only where precedence
+        // requires it.
+        let source = "fn main -> i64\n    1 | 2 ^ 3 & 4 << 5 >> 6\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let once = format_program(&program);
+        let reparsed = parse(&lex(&once).expect("lex")).expect("parse");
+        let twice = format_program(&reparsed);
+        assert_eq!(once, twice, "formatter is idempotent");
+        assert!(
+            once.contains("1 | 2 ^ 3 & 4 << 5 >> 6"),
+            "no spurious parens for right-descending precedence chain: {once}"
+        );
+
+        // `~` renders with no space and parenthesizes a binary operand.
+        let source = "fn main -> i64\n    ~5 & 3\n";
+        let program = parse(&lex(source).expect("lex")).expect("parse");
+        let out = format_program(&program);
+        assert!(out.contains("~5 & 3"), "renders unary bitwise not: {out}");
+    }
+
     #[test]
     fn parses_void_function() {
         let tokens = lex("fn main -> void\n    return\n").expect("lex");
@@ -2493,6 +2852,100 @@ mod tests {
         );
     }
 
+    /// The single expression statement of `main`'s body (a one-statement fn).
+    fn only_expr(source: &str) -> Expr {
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        match &program.functions[0].body[0] {
+            Stmt::Expr(expr) => expr.clone(),
+            other => panic!("expected an expression statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_postfix_try_on_call() {
+        // `f()?` applies `?` to the call result.
+        let expr = only_expr("fn main -> result<i64, string>\n    f()?\n");
+        match expr.kind {
+            ExprKind::Try(inner) => {
+                assert!(
+                    matches!(inner.kind, ExprKind::Call { .. }),
+                    "operand is a call"
+                );
+            }
+            other => panic!("expected Try, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chained_try() {
+        // `x??` is a `Try` of a `Try` (left-to-right postfix application).
+        let expr = only_expr("fn main -> option<i64>\n    x??\n");
+        match expr.kind {
+            ExprKind::Try(outer) => match outer.kind {
+                ExprKind::Try(inner) => {
+                    assert!(
+                        matches!(inner.kind, ExprKind::Variable(_)),
+                        "innermost is a variable"
+                    );
+                }
+                other => panic!("expected nested Try, got {other:?}"),
+            },
+            other => panic!("expected Try, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_binds_tighter_than_binary() {
+        // `a + b?` parses as `a + (b?)`, so the `?` applies only to `b`.
+        let expr = only_expr("fn main -> result<i64, string>\n    a + b?\n");
+        match expr.kind {
+            ExprKind::Binary { right, op, .. } => {
+                assert_eq!(op, BinaryOp::Add);
+                assert!(
+                    matches!(right.kind, ExprKind::Try(_)),
+                    "right operand is `b?`"
+                );
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_try_inside_call_argument() {
+        // `f(g()?)` places a `Try` in the argument position; nested `?` works.
+        let expr = only_expr("fn main -> result<i64, string>\n    f(g()?)\n");
+        match expr.kind {
+            ExprKind::Call { name, args } => {
+                assert_eq!(name, "f");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0].kind, ExprKind::Try(_)), "arg is `g()?`");
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_try_operator_round_trip() {
+        // The formatter renders `expr?` and is idempotent: a compound operand is
+        // parenthesized, a call/variable operand is not, and `x??` stays `x??`.
+        let source = concat!(
+            "fn main -> result<i64, string>\n",
+            "    let a i64 = f()?\n",
+            "    let b i64 = g()??\n",
+            "    ok(a + b)\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let once = format_program(&program);
+        assert!(once.contains("f()?"), "renders call?: {once}");
+        assert!(once.contains("g()??"), "renders chained ??: {once}");
+        // Idempotent: re-parsing and re-formatting yields the same text.
+        let tokens2 = lex(&once).expect("re-lex");
+        let program2 = parse(&tokens2).expect("re-parse");
+        assert_eq!(once, format_program(&program2), "formatter is idempotent");
+    }
+
     #[test]
     fn parses_imports_and_pub_visibility() {
         let source = concat!(
@@ -2508,6 +2961,21 @@ mod tests {
         assert!(program.structs[0].is_public);
         assert!(program.functions[0].is_public);
         assert!(!program.functions[1].is_public);
+    }
+
+    #[test]
+    fn nested_generic_type_closes_across_shift_token() {
+        // `option<array<i64>>` and deeper nesting lex the trailing `>>`/`>>>` as
+        // shift tokens; the type parser must split them to close each generic.
+        let source = concat!(
+            "fn f a option<array<i64>> b option<option<option<i64>>> -> void\n",
+            "    return\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let params = &program.functions[0].params;
+        assert_eq!(params[0].ty.name, "option<array<i64>>");
+        assert_eq!(params[1].ty.name, "option<option<option<i64>>>");
     }
 
     #[test]
@@ -2665,6 +3133,84 @@ mod tests {
     }
 
     #[test]
+    fn typed_integer_suffix_desugars_to_conversion_call() {
+        // `100i32` becomes `to_i32(100)`; the plain `i64`/`f64` suffixes stay
+        // literals.
+        let tokens = lex("fn main -> i32\n    100i32\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a conversion call, got {:?}", expr.kind);
+        };
+        assert_eq!(name, "to_i32");
+        assert!(matches!(args[0].kind, ExprKind::Integer(100)));
+
+        // A hex body with an unsigned suffix: `0xFFu16` -> `to_u16(255)`.
+        let tokens = lex("fn main -> u16\n    0xFFu16\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a conversion call");
+        };
+        assert_eq!(name, "to_u16");
+        assert!(matches!(args[0].kind, ExprKind::Integer(255)));
+
+        // `42i64` stays a plain integer (i64 is the default width).
+        let tokens = lex("fn main -> i64\n    42i64\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(matches!(expr.kind, ExprKind::Integer(42)));
+    }
+
+    #[test]
+    fn typed_float_suffix_desugars_and_defaults_stay_literals() {
+        // `2.5f32` -> `to_f32(2.5)`.
+        let tokens = lex("fn main -> f32\n    2.5f32\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a conversion call");
+        };
+        assert_eq!(name, "to_f32");
+        assert!(matches!(args[0].kind, ExprKind::Float(value) if (value - 2.5).abs() < 1e-9));
+
+        // A hex body is never read as an `f32` suffix: `0xABF32` is a hex number.
+        let tokens = lex("fn main -> i64\n    0xABF32\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(matches!(expr.kind, ExprKind::Integer(0xABF32)));
+    }
+
+    #[test]
+    fn out_of_range_typed_literal_is_rejected() {
+        // 256 does not fit i8; the parser rejects the literal.
+        let tokens = lex("fn main -> i8\n    256i8\n").expect("lex");
+        assert!(parse(&tokens).is_err(), "256i8 must be rejected");
+        // A decimal point is invalid with an integer suffix.
+        let tokens = lex("fn main -> i32\n    1.5i32\n").expect("lex");
+        assert!(parse(&tokens).is_err(), "1.5i32 must be rejected");
+        // A `u64` literal is writable up to i64::MAX; larger values must use
+        // `to_u64` (their i64 cell would be negative, with no literal form).
+        let tokens = lex("fn main -> u64\n    9223372036854775807u64\n").expect("lex");
+        assert!(parse(&tokens).is_ok(), "i64::MAX as u64 must be accepted");
+        let tokens = lex("fn main -> u64\n    9223372036854775808u64\n").expect("lex");
+        assert!(
+            parse(&tokens).is_err(),
+            "a u64 literal above i64::MAX must be rejected"
+        );
+    }
+
+    #[test]
     fn parses_digit_separators_in_integer_and_float_literals() {
         let tokens = lex("fn main -> i64\n    1_000_000\n").expect("lex");
         let program = parse(&tokens).expect("parse");
@@ -2691,6 +3237,55 @@ mod tests {
                 "expected `{bad}` to be rejected as a malformed literal"
             );
         }
+    }
+
+    #[test]
+    fn parses_base_prefixed_integer_literals() {
+        for (source, expected) in [
+            ("0xFF", 255i64),
+            ("0b1010", 10),
+            ("0o17", 15),
+            ("0xFF_FF", 65535),
+            ("0b1010_0101", 165),
+            ("0XdeadBEEF", 0xdead_beef),
+        ] {
+            let program = parse(&lex(&format!("fn main -> i64\n    {source}\n")).expect("lex"))
+                .expect("parse");
+            let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+                panic!("expected expression statement for `{source}`");
+            };
+            assert!(
+                matches!(expr.kind, ExprKind::Integer(value) if value == expected),
+                "expected `{source}` to parse as {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_base_prefixed_literals() {
+        for bad in ["0x", "0xG", "0b2", "0o8", "0x1.5", "0xF__F", "0x_F", "0xF_"] {
+            let source = format!("fn main -> i64\n    {bad}\n");
+            let tokens = lex(&source).expect("lex");
+            assert!(
+                parse(&tokens).is_err(),
+                "expected `{bad}` to be rejected as a malformed literal"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_radix_literal_helper() {
+        assert_eq!(parse_radix_literal("0xFF"), Some(255));
+        assert_eq!(parse_radix_literal("0b1010"), Some(10));
+        assert_eq!(parse_radix_literal("0o17"), Some(15));
+        assert_eq!(parse_radix_literal("0xFF_FF"), Some(65535));
+        assert_eq!(parse_radix_literal("0x"), None);
+        assert_eq!(parse_radix_literal("0xG"), None);
+        assert_eq!(parse_radix_literal("0b2"), None);
+        assert_eq!(parse_radix_literal("0o8"), None);
+        assert_eq!(parse_radix_literal("0xF__F"), None);
+        // A plain decimal literal is not a base-prefixed literal.
+        assert_eq!(parse_radix_literal("42"), None);
     }
 
     #[test]

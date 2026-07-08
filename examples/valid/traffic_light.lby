@@ -1,0 +1,27 @@
+# traffic_light.lby — a state machine over an enum, driven by match.
+# next(state) returns the successor light; name(state) renders it.
+# Steps through several cycles and prints each state name.
+# Run: lullaby run examples/valid/traffic_light.lby
+
+enum Light
+    Red
+    Green
+    Yellow
+
+fn next state Light -> Light
+    match state
+        Red -> Green
+        Green -> Yellow
+        Yellow -> Red
+
+fn name state Light -> string
+    match state
+        Red -> "RED"
+        Green -> "GREEN"
+        Yellow -> "YELLOW"
+
+fn main -> void
+    let state Light = Red
+    for step from 0 to 5
+        println("step " + to_string(step) + ": " + name(state))
+        state = next(state)

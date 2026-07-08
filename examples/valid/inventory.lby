@@ -1,0 +1,30 @@
+# inventory.lby — a map<string, i64> inventory with lookups over option.
+# Adds items, adjusts a count, looks one up via match on map_get's option,
+# and prints a small report. Composes map + option/match.
+# Run: lullaby run examples/valid/inventory.lby
+
+fn count_of inv map<string, i64> item string -> i64
+    match map_get(inv, item)
+        some(n) -> n
+        none -> 0
+
+fn report inv map<string, i64> item string -> void
+    let n i64 = count_of(inv, item)
+    if map_has(inv, item)
+        println("  " + item + ": " + to_string(n))
+    else
+        println("  " + item + ": (not stocked)")
+
+fn main -> void
+    let inv map<string, i64> = map_new()
+    inv = map_set(inv, "apples", 12)
+    inv = map_set(inv, "bread", 4)
+    inv = map_set(inv, "eggs", 24)
+    # Sold six eggs.
+    inv = map_set(inv, "eggs", count_of(inv, "eggs") - 6)
+    println("inventory report")
+    report(inv, "apples")
+    report(inv, "bread")
+    report(inv, "eggs")
+    report(inv, "milk")
+    println("distinct items: " + to_string(map_len(inv)))

@@ -1,0 +1,44 @@
+# Integration: a trait with two impls (one struct, one enum), a bounded generic
+# fn describe<T: Rank> that calls a trait method, and a plain generic fn used at
+# two concrete types.
+
+trait Rank
+    fn rank self -> i64
+
+struct Card
+    value i64
+
+enum Coin
+    Heads
+    Tails
+
+impl Rank for Card
+    fn rank self -> i64
+        self.value * 10
+
+impl Rank for Coin
+    fn rank self -> i64
+        match self
+            Heads -> 1
+            Tails -> 2
+
+fn describe<T: Rank> v T -> i64
+    v.rank() + 100
+
+fn pair_sum<T> a T b T combine fn(T, T) -> i64 -> i64
+    combine(a, b)
+
+fn add_i64 a i64 b i64 -> i64
+    a + b
+
+fn main -> i64
+    let c Card = Card(4)
+    let coin Coin = Tails
+    # bounded generic dispatches rank() on the concrete runtime type
+    let dc i64 = describe(c)
+    let dk i64 = describe(coin)
+    # plain generic fn used at two concrete types
+    let si i64 = pair_sum(3, 5, add_i64)
+    let sl i64 = pair_sum(100, 200, add_i64)
+    # dc=140, dk=102, si=8, sl=300
+    dc + dk + si + sl

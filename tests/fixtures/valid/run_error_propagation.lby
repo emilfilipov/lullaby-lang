@@ -1,0 +1,70 @@
+# Postfix `?` error-propagation operator across result<T, E> and option<T>.
+#
+# `expr?` yields the payload on the success variant (`ok`/`some`) and otherwise
+# immediately returns the failure value (`err(e)`/`none`) from the enclosing
+# function. The enclosing return type must be compatible: a `result<T, E>`
+# operand requires a `result<U, E>` return (same `E`); an `option<T>` operand
+# requires an `option<U>` return. `?` chains and nests. Every helper is consumed
+# by `main` through `match` into one deterministic i64.
+
+# A fallible parse: negative inputs fail, everything else succeeds.
+fn checked n i64 -> result<i64, string>
+    if n < 0
+        return err("negative")
+    ok(n)
+
+# Propagates two `?`s in one expression: both must succeed for the sum to be
+# returned; the first failing operand short-circuits with its `err`.
+fn add_checked a i64 b i64 -> result<i64, string>
+    let x i64 = checked(a)?
+    let y i64 = checked(b)?
+    ok(x + y)
+
+# Nested `?`: `checked(...)?` feeds a call whose result is itself `?`-propagated.
+# Doubling a checked value stays fallible end to end.
+fn double_checked n i64 -> result<i64, string>
+    let v i64 = checked(checked(n)? + n)?
+    ok(v)
+
+# option<T> propagation: `first`/`second` model optional lookups.
+fn first present bool -> option<i64>
+    if present
+        return some(10)
+    none
+
+fn second present bool -> option<i64>
+    if present
+        return some(20)
+    none
+
+# Both `?`s must be `some` for the sum; a `none` short-circuits to `none`.
+fn combine a bool b bool -> option<i64>
+    let x i64 = first(a)?
+    let y i64 = second(b)?
+    some(x + y)
+
+# Unwrap a result into an i64, folding the error branch to a sentinel.
+fn unwrap_result r result<i64, string> -> i64
+    match r
+        ok(v) -> v
+        err(m) -> 0 - len(m)
+
+# Unwrap an option into an i64, folding `none` to a sentinel.
+fn unwrap_option o option<i64> -> i64
+    match o
+        some(v) -> v
+        none -> -1
+
+fn main -> i64
+    # result: success path (3 + 4 = 7) and failure path (err "negative").
+    let ok_sum i64 = unwrap_result(add_checked(3, 4))
+    let err_sum i64 = unwrap_result(add_checked(-1, 4))
+    # nested `?`: double_checked(5) = 5 + 5 = 10; double_checked(-2) fails.
+    let doubled i64 = unwrap_result(double_checked(5))
+    let doubled_err i64 = unwrap_result(double_checked(-2))
+    # option: both-present (10 + 20 = 30) and a `none` short-circuit.
+    let both i64 = unwrap_option(combine(true, true))
+    let missing i64 = unwrap_option(combine(true, false))
+    # 7 + (0 - 8) + 10 + (0 - 8) + 30 + (-1)
+    #   = 7 - 8 + 10 - 8 + 30 - 1 = 30
+    ok_sum + err_sum + doubled + doubled_err + both + missing

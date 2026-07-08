@@ -1,0 +1,20 @@
+fn decode b list<byte> -> i64
+    match from_bytes(b)
+        ok(s) -> len(s)
+        err(m) -> 0 - len(m)
+
+fn main -> i64
+    let bytes list<byte> = to_bytes("Hi")
+    let b0 i64 = byte_val(get(bytes, 0))
+    let b1 i64 = byte_val(get(bytes, 1))
+    let round_trip i64 = decode(bytes)
+
+    let accented string = "café"
+    let char_count i64 = len(accented)
+    let byte_count i64 = byte_len(accented)
+    let extra i64 = byte_count - char_count
+
+    let ascii string = "abc"
+    let ascii_bytes i64 = byte_len(ascii) - len(ascii)
+
+    b0 + b1 + round_trip + char_count + byte_count + extra + ascii_bytes

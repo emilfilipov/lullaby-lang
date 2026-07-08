@@ -1,0 +1,26 @@
+fn to_int s string -> i64
+    match parse_i64(s)
+        ok(n) -> n
+        err(m) -> 0 - len(m)
+
+fn parse_or_flag s string -> i64
+    match parse_i64(s)
+        ok(n) -> n
+        err(m) -> 100
+
+fn to_float s string -> f64
+    match parse_f64(s)
+        ok(x) -> x
+        err(m) -> 0.0
+
+fn main -> i64
+    let base i64 = to_int("40")
+    let increment i64 = to_int("2") + base
+    let bad i64 = parse_or_flag("not a number")
+
+    let three f64 = to_float("3")
+    let float_ok i64 = 0
+    if three == 3.0
+        float_ok = 1
+
+    base + increment + bad + float_ok

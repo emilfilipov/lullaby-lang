@@ -1,0 +1,23 @@
+fn build -> list<i64>
+    let l list<i64> = list_new()
+    l = push(l, 10)
+    l = push(l, 20)
+    l = push(l, 30)
+    l
+
+fn main -> i64
+    let a list<i64> = build()
+    let r list<i64> = reverse(a)
+    let rev0 i64 = get(r, 0)
+    let both list<i64> = concat(a, r)
+    let n i64 = len(both)
+    let mid list<i64> = slice(both, 1, 4)
+    let mlen i64 = len(mid)
+    let s0 i64 = get(mid, 0)
+    let s1 i64 = get(mid, 1)
+    let s2 i64 = get(mid, 2)
+    let empty list<i64> = slice(both, 4, 2)
+    let elen i64 = len(empty)
+    let clamped list<i64> = slice(both, 0, 100)
+    let clen i64 = len(clamped)
+    rev0 + n + mlen + s0 + s1 + s2 + elen + clen

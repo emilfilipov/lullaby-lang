@@ -1,0 +1,27 @@
+# Overflow-aware fixed-width arithmetic: checked_* (option<T>, none on
+# overflow), saturating_* (clamp to bounds), and wrapping_* (wrap modulo width).
+# Deterministic i64 (4294967541) on the AST, IR, and bytecode backends.
+
+# checked_add on i8, unwrapping the option<i8> to i64 or a fallback.
+fn checked_i8_or m i8 n i8 fallback i64 -> i64
+    match checked_add(m, n)
+        some(v) -> to_i64(v)
+        none -> fallback
+
+fn main -> i64
+    # 127 + 1 overflows i8 -> none -> -1
+    let a i64 = checked_i8_or(to_i8(127), to_i8(1), 0 - 1)
+    # 100 + 20 stays in range -> some(120)
+    let b i64 = checked_i8_or(to_i8(100), to_i8(20), 0 - 1)
+
+    # saturating_add clamps to i8::MAX (127 + 100 -> 127)
+    let c i8 = saturating_add(to_i8(127), to_i8(100))
+
+    # saturating_mul clamps to u32::MAX (100000 * 100000 -> 4294967295)
+    let d u32 = saturating_mul(to_u32(100000), to_u32(100000))
+
+    # wrapping_add wraps u32 (u32::MAX + 1 -> 0)
+    let e u32 = wrapping_add(to_u32(4294967295), to_u32(1))
+
+    # -1 + 120 + 127 + 4294967295 + 0 = 4294967541
+    a + b + to_i64(c) + to_i64(d) + to_i64(e)

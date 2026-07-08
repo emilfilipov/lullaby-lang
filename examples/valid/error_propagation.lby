@@ -1,0 +1,23 @@
+# The ? operator propagates errors: when a helper returns err, the ? short-
+# circuits and returns that err from the caller, so success paths stay flat.
+
+fn checked_div a i64 b i64 -> result<i64, string>
+    if b == 0
+        return err("divide by zero")
+    ok(a / b)
+
+fn sum_ratios x i64 d1 i64 d2 i64 -> result<i64, string>
+    let a i64 = checked_div(x, d1)?
+    let b i64 = checked_div(x, d2)?
+    ok(a + b)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok: " + to_string(v)
+        err(m) -> "err: " + m
+
+fn main -> void
+    # 12/2 + 12/3 = 10
+    println(describe(sum_ratios(12, 2, 3)))
+    # a zero divisor makes checked_div return err, which ? propagates
+    println(describe(sum_ratios(12, 4, 0)))

@@ -1,0 +1,20 @@
+# Parse strings into numbers with parse_i64 / parse_f64, matching on the result
+# so failures are handled instead of crashing.
+
+fn to_int s string -> i64
+    match parse_i64(s)
+        ok(n) -> n
+        err(m) -> 0 - 1
+
+fn main -> void
+    let a i64 = to_int("40")
+    let b i64 = to_int("2")
+    println("40 + 2 = " + to_string(a + b))
+
+    match parse_i64("not a number")
+        ok(n) -> println("parsed: " + to_string(n))
+        err(m) -> println("error: " + m)
+
+    match parse_f64("3.14")
+        ok(x) -> println("parsed a float ok")
+        err(m) -> println("float error: " + m)

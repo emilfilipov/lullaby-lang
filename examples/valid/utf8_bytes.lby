@@ -1,0 +1,17 @@
+# UTF-8 bytes: encode a string, inspect its bytes, and round-trip it back.
+# Shows to_bytes / from_bytes / byte_len and the char-count vs byte-count
+# distinction for non-ASCII text.
+
+fn describe label string s string -> void
+    println(label + ": '" + s + "' has " + to_string(len(s)) + " chars, " + to_string(byte_len(s)) + " bytes")
+
+fn main -> void
+    describe("ascii", "Hello")
+    describe("utf-8", "café")
+
+    let bytes list<byte> = to_bytes("Hello")
+    println("first byte of 'Hello' = " + to_string(byte_val(get(bytes, 0))))
+
+    match from_bytes(bytes)
+        ok(s) -> println("round-trip ok: " + s)
+        err(m) -> println("decode failed: " + m)

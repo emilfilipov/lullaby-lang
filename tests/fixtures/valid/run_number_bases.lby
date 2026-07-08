@@ -1,0 +1,2 @@
+fn main -> i64
+    return 0xFF + 0b1010 + 0o17

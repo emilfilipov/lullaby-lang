@@ -1,0 +1,5 @@
+fn main -> i64
+    let outcome result<process, string> = proc_spawn("lullaby_definitely_not_a_real_program_zzz", ["--version"])
+    match outcome
+        ok(p) -> 7
+        err(message) -> 1

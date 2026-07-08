@@ -23,8 +23,8 @@ fn arg_or i i64 fallback string -> string
 fn main -> i64
     let port_arg string = arg_or(0, "8080")
     let count_arg string = arg_or(1, "1")
-    let port i64 = parse_i64(port_arg)
-    let count i64 = parse_i64(count_arg)
+    let port i64 = parse_uint(port_arg)
+    let count i64 = parse_uint(count_arg)
     let bound result<Socket, string> = tcp_listen("127.0.0.1", port)
     match bound
         ok(listener) -> serve(listener, count)

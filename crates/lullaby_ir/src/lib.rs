@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
@@ -10,11 +11,14 @@ use lullaby_parser::{
     TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
-    Future, ResolvedPlace, RuntimeError, SharedMutex, SocketResource, Task, Value, apply_compound,
-    asm_interpreter_error, await_future, char_find, expect_chan, expect_future, expect_i64,
-    expect_list, expect_map, expect_mutex, expect_string, expect_task, extern_call_error,
-    get_place, http_exchange, join_task, net_err, new_chan, option_value, result_value,
-    scalar_order_keys, set_place, value_type_name,
+    ArithOp, Future, IntKind, OverflowMode, ProcessResource, ResolvedPlace, RuntimeError,
+    SharedAtomic, SharedMutex, SocketResource, Task, Value, apply_compound, asm_interpreter_error,
+    await_future, char_find, expect_atomic, expect_chan, expect_future, expect_i64, expect_list,
+    expect_map, expect_mutex, expect_string, expect_task, extern_call_error, get_place,
+    http_exchange, int_cmp, int_div, join_task, monotonic_now_nanos, net_err, new_chan,
+    option_value, os_random_bytes, overflow_arith, process_exit_code, result_value,
+    scalar_order_keys, set_place, shift_left, shift_right, sleep_millis, value_type_name,
+    wall_now_millis,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -2106,6 +2110,10 @@ impl ConstantFolder {
                     (UnaryOp::Not, IrExprKind::Bool(value)) => {
                         self.literal(expr, IrExprKind::Bool(!value))
                     }
+                    // Fold `~` over an integer literal (one's complement).
+                    (UnaryOp::BitNot, IrExprKind::Integer(value)) => {
+                        self.literal(expr, IrExprKind::Integer(!value))
+                    }
                     _ => IrExpr {
                         kind: IrExprKind::Unary {
                             op: *op,
@@ -2235,6 +2243,23 @@ fn fold_binary(left: &IrExpr, op: BinaryOp, right: &IrExpr) -> Option<IrExprKind
         }
         (IrExprKind::String(left), BinaryOp::NotEqual, IrExprKind::String(right)) => {
             Some(IrExprKind::Bool(left != right))
+        }
+        // Integer bitwise folds. Shifts reuse the shared masked-shift helpers so
+        // a folded constant is bit-identical to the interpreted result.
+        (IrExprKind::Integer(left), BinaryOp::BitAnd, IrExprKind::Integer(right)) => {
+            Some(IrExprKind::Integer(left & right))
+        }
+        (IrExprKind::Integer(left), BinaryOp::BitOr, IrExprKind::Integer(right)) => {
+            Some(IrExprKind::Integer(left | right))
+        }
+        (IrExprKind::Integer(left), BinaryOp::BitXor, IrExprKind::Integer(right)) => {
+            Some(IrExprKind::Integer(left ^ right))
+        }
+        (IrExprKind::Integer(left), BinaryOp::Shl, IrExprKind::Integer(right)) => {
+            Some(IrExprKind::Integer(shift_left(*left, *right)))
+        }
+        (IrExprKind::Integer(left), BinaryOp::Shr, IrExprKind::Integer(right)) => {
+            Some(IrExprKind::Integer(shift_right(*left, *right)))
         }
         _ => None,
     }
@@ -3563,6 +3588,9 @@ struct IrRuntime<'a> {
     /// Per-runtime table of open network sockets, mirroring the AST interpreter.
     /// A `Value::Socket(i)` indexes this vector; closing a socket clears its slot.
     sockets: Vec<Option<SocketResource>>,
+    /// Per-runtime table of live external processes, mirroring the AST interpreter.
+    /// A `Value::Process(i)` indexes this vector.
+    processes: Vec<Option<ProcessResource>>,
     call_stack: Vec<TraceFrame>,
     /// Trait-method dispatch table: `(receiver type name, method name)` -> impl
     /// function. Built once from every `impl` in the module.
@@ -3646,6 +3674,7 @@ impl<'a> IrRuntime<'a> {
             heap: Vec::new(),
             refcounts: HashMap::new(),
             sockets: Vec::new(),
+            processes: Vec::new(),
             call_stack: Vec::new(),
             impl_methods,
             trait_method_names,
@@ -3731,23 +3760,60 @@ impl<'a> IrRuntime<'a> {
             "console_log" => self.builtin_console_log(args),
             "dom_set_text" => self.builtin_dom_set_text(args),
             "flush" => self.builtin_flush(args),
+            "mono_now" => Self::builtin_mono_now(args),
+            "wall_now" => Self::builtin_wall_now(args),
+            "sleep_millis" => Self::builtin_sleep_millis(args),
             "assert" => Self::builtin_assert(args),
             "to_string" => Self::builtin_to_string(args),
             "char_code" => Self::builtin_char_code(args),
             "char_from" => Self::builtin_char_from(args),
+            "is_digit" => Self::builtin_is_digit(args),
+            "is_alpha" => Self::builtin_is_alpha(args),
+            "is_alnum" => Self::builtin_is_alnum(args),
+            "is_whitespace" => Self::builtin_is_whitespace(args),
+            "is_upper" => Self::builtin_is_upper(args),
+            "is_lower" => Self::builtin_is_lower(args),
             "byte" => Self::builtin_byte(args),
             "byte_val" => Self::builtin_byte_val(args),
+            "to_i8" => Self::builtin_to_int("to_i8", args, IntKind::I8),
+            "to_i16" => Self::builtin_to_int("to_i16", args, IntKind::I16),
+            "to_i32" => Self::builtin_to_int("to_i32", args, IntKind::I32),
+            "to_u16" => Self::builtin_to_int("to_u16", args, IntKind::U16),
+            "to_u32" => Self::builtin_to_int("to_u32", args, IntKind::U32),
+            "to_u64" => Self::builtin_to_int("to_u64", args, IntKind::U64),
+            "to_isize" => Self::builtin_to_int("to_isize", args, IntKind::Isize),
+            "to_usize" => Self::builtin_to_int("to_usize", args, IntKind::Usize),
+            "to_i64" => Self::builtin_to_i64(args),
+            "to_f32" => Self::builtin_to_f32(args),
+            "to_f64" => Self::builtin_to_f64(args),
+            "checked_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Checked),
+            "checked_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Checked),
+            "checked_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Checked),
+            "saturating_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Saturating),
+            "saturating_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Saturating),
+            "saturating_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Saturating),
+            "wrapping_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Wrapping),
+            "wrapping_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Wrapping),
+            "wrapping_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Wrapping),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
             "get" => Self::builtin_get(args),
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
+            "list_index_of" => Self::builtin_list_index_of(args),
+            "list_contains" => Self::builtin_list_contains(args),
+            "reverse" => Self::builtin_reverse(args),
+            "sort" => Self::builtin_sort(args),
+            "concat" => Self::builtin_concat(args),
+            "slice" => Self::builtin_slice(args),
             "map_new" => Self::builtin_map_new(args),
             "map_set" => Self::builtin_map_set(args),
             "map_get" => Self::builtin_map_get(args),
             "map_has" => Self::builtin_map_has(args),
             "map_len" => Self::builtin_map_len(args),
+            "map_keys" => Self::builtin_map_keys(args),
+            "map_values" => Self::builtin_map_values(args),
             "map_del" => Self::builtin_map_del(args),
             "substring" => Self::builtin_substring(args),
             "find" => Self::builtin_find(args),
@@ -3760,7 +3826,14 @@ impl<'a> IrRuntime<'a> {
             "trim" => Self::builtin_trim(args),
             "replace" => Self::builtin_replace(args),
             "upper" => Self::builtin_upper(args),
+            "chars" => Self::builtin_chars(args),
+            "string_from_chars" => Self::builtin_string_from_chars(args),
             "lower" => Self::builtin_lower(args),
+            "to_bytes" => Self::builtin_to_bytes(args),
+            "from_bytes" => Self::builtin_from_bytes(args),
+            "byte_len" => Self::builtin_byte_len(args),
+            "parse_i64" => Self::builtin_parse_i64(args),
+            "parse_f64" => Self::builtin_parse_f64(args),
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
@@ -3774,6 +3847,12 @@ impl<'a> IrRuntime<'a> {
             "ln" => Self::builtin_unary_f64("ln", args, f64::ln),
             "log10" => Self::builtin_unary_f64("log10", args, f64::log10),
             "atan2" => Self::builtin_atan2(args),
+            "rotate_left" => Self::builtin_rotate_left(args),
+            "rotate_right" => Self::builtin_rotate_right(args),
+            "count_ones" => Self::builtin_count_ones(args),
+            "leading_zeros" => Self::builtin_leading_zeros(args),
+            "trailing_zeros" => Self::builtin_trailing_zeros(args),
+            "reverse_bytes" => Self::builtin_reverse_bytes(args),
             "floor" => Self::builtin_floor(args),
             "ceil" => Self::builtin_ceil(args),
             "round" => Self::builtin_round(args),
@@ -3784,6 +3863,7 @@ impl<'a> IrRuntime<'a> {
             "rc_borrow" => self.builtin_rc_borrow(args),
             "ptr_write" => self.builtin_store(args),
             "env" => Self::builtin_env(args),
+            "os_random" => Self::builtin_os_random(args),
             "args" => self.builtin_args(args),
             "parallel_map" => self.builtin_parallel_map(args),
             "chan_new" => Self::builtin_chan_new(args),
@@ -3796,6 +3876,16 @@ impl<'a> IrRuntime<'a> {
             "mutex_get" => Self::builtin_mutex_get(args),
             "mutex_set" => Self::builtin_mutex_set(args),
             "mutex_add" => Self::builtin_mutex_add(args),
+            "atomic_new" => Self::builtin_atomic_new(args),
+            "atomic_load" => Self::builtin_atomic_load(args),
+            "atomic_store" => Self::builtin_atomic_store(args),
+            "atomic_swap" => Self::builtin_atomic_swap(args),
+            "atomic_cas" => Self::builtin_atomic_cas(args),
+            "atomic_add" => Self::builtin_atomic_add(args),
+            "atomic_sub" => Self::builtin_atomic_sub(args),
+            "atomic_and" => Self::builtin_atomic_and(args),
+            "atomic_or" => Self::builtin_atomic_or(args),
+            "atomic_xor" => Self::builtin_atomic_xor(args),
             "tcp_connect" => self.builtin_tcp_connect(args),
             "tcp_listen" => self.builtin_tcp_listen(args),
             "tcp_accept" => self.builtin_tcp_accept(args),
@@ -3808,6 +3898,11 @@ impl<'a> IrRuntime<'a> {
             "udp_recv" => self.builtin_udp_recv(args),
             "http_get" => Self::builtin_http_get(args),
             "http_post" => Self::builtin_http_post(args),
+            "proc_spawn" => self.builtin_proc_spawn(args),
+            "proc_wait" => self.builtin_proc_wait(args),
+            "proc_stdout" => self.builtin_proc_stdout(args),
+            "proc_stderr" => self.builtin_proc_stderr(args),
+            "proc_kill" => self.builtin_proc_kill(args),
             // A region-creation marker has no runtime effect in the current
             // analysis-only region model.
             "region_create" => Ok(Value::Void),
@@ -4162,6 +4257,8 @@ impl<'a> IrRuntime<'a> {
                 let value = self.eval_expr(expr, env)?;
                 match op {
                     UnaryOp::Not => Ok(Value::Bool(!value.as_bool()?)),
+                    // Bitwise NOT (one's complement) on an i64.
+                    UnaryOp::BitNot => Ok(Value::I64(!value.as_i64()?)),
                 }
             }
             IrExprKind::Binary { left, op, right } => {
@@ -4245,7 +4342,76 @@ impl<'a> IrRuntime<'a> {
                 BinaryOp::And | BinaryOp::Or => {
                     unreachable!("logical ops short-circuit in eval_expr")
                 }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops require i64 operands (rejected by semantics)")
+                }
             });
+        }
+        // 32-bit float arithmetic/comparison, identical to the AST runtime; the
+        // native f32 storage rounds each result to f32 precision.
+        if let (Value::F32(l), Value::F32(r)) = (&left, &right) {
+            let (l, r) = (*l, *r);
+            return Ok(match op {
+                BinaryOp::Add => Value::F32(l + r),
+                BinaryOp::Subtract => Value::F32(l - r),
+                BinaryOp::Multiply => Value::F32(l * r),
+                BinaryOp::Divide => Value::F32(l / r),
+                BinaryOp::Equal => Value::Bool(l == r),
+                BinaryOp::NotEqual => Value::Bool(l != r),
+                BinaryOp::Less => Value::Bool(l < r),
+                BinaryOp::LessEqual => Value::Bool(l <= r),
+                BinaryOp::Greater => Value::Bool(l > r),
+                BinaryOp::GreaterEqual => Value::Bool(l >= r),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("logical ops short-circuit in eval_expr")
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops require i64 operands (rejected by semantics)")
+                }
+            });
+        }
+        // Fixed-width integer arithmetic/comparison, identical to the AST runtime:
+        // same-tag operands, wrap-normalized result, plain `i64` ordering of the
+        // normalized cells. Kept byte-for-byte in step with the other backends.
+        if let (Value::Int { value: l, ty }, Value::Int { value: r, ty: rk }) = (&left, &right) {
+            debug_assert_eq!(ty, rk, "mixed-width integer operands reached eval_binary");
+            let (l, r, ty) = (*l, *r, *ty);
+            return match op {
+                BinaryOp::Add => Ok(Value::int(l.wrapping_add(r), ty)),
+                BinaryOp::Subtract => Ok(Value::int(l.wrapping_sub(r), ty)),
+                BinaryOp::Multiply => Ok(Value::int(l.wrapping_mul(r), ty)),
+                BinaryOp::Divide => {
+                    if r == 0 {
+                        Err(RuntimeError::new("L0404", "division by zero"))
+                    } else {
+                        Ok(Value::int(int_div(l, r, ty), ty))
+                    }
+                }
+                BinaryOp::Equal => Ok(Value::Bool(l == r)),
+                BinaryOp::NotEqual => Ok(Value::Bool(l != r)),
+                BinaryOp::Less => Ok(Value::Bool(int_cmp(l, r, ty).is_lt())),
+                BinaryOp::LessEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_le())),
+                BinaryOp::Greater => Ok(Value::Bool(int_cmp(l, r, ty).is_gt())),
+                BinaryOp::GreaterEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_ge())),
+                BinaryOp::And | BinaryOp::Or => {
+                    unreachable!("logical ops short-circuit in eval_expr")
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr => {
+                    unreachable!("bitwise ops on fixed-width integers are rejected by semantics")
+                }
+            };
         }
         match op {
             BinaryOp::Add if matches!((&left, &right), (Value::String(_), Value::String(_))) => {
@@ -4283,6 +4449,13 @@ impl<'a> IrRuntime<'a> {
             BinaryOp::LessEqual => Ok(Value::Bool(left.as_i64()? <= right.as_i64()?)),
             BinaryOp::Greater => Ok(Value::Bool(left.as_i64()? > right.as_i64()?)),
             BinaryOp::GreaterEqual => Ok(Value::Bool(left.as_i64()? >= right.as_i64()?)),
+            // Integer bitwise ops on two i64s, using the shared masked-shift
+            // helpers so the AST, IR, and bytecode backends are bit-identical.
+            BinaryOp::BitAnd => Ok(Value::I64(left.as_i64()? & right.as_i64()?)),
+            BinaryOp::BitOr => Ok(Value::I64(left.as_i64()? | right.as_i64()?)),
+            BinaryOp::BitXor => Ok(Value::I64(left.as_i64()? ^ right.as_i64()?)),
+            BinaryOp::Shl => Ok(Value::I64(shift_left(left.as_i64()?, right.as_i64()?))),
+            BinaryOp::Shr => Ok(Value::I64(shift_right(left.as_i64()?, right.as_i64()?))),
             BinaryOp::And | BinaryOp::Or => unreachable!("logical ops short-circuit in eval_expr"),
         }
     }
@@ -4628,6 +4801,36 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::Void)
     }
 
+    /// `mono_now() -> i64`: nanoseconds since a fixed per-process monotonic
+    /// baseline. Non-decreasing within a run. Routes through the shared
+    /// `monotonic_now_nanos` baseline so the IR interpreter, the bytecode VM
+    /// (which runs on this interpreter), and the AST runtime agree.
+    fn builtin_mono_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mono_now", 0, args.len()))?;
+        Ok(Value::I64(monotonic_now_nanos()))
+    }
+
+    /// `wall_now() -> i64`: milliseconds since the Unix epoch (wall-clock time).
+    fn builtin_wall_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("wall_now", 0, args.len()))?;
+        Ok(Value::I64(wall_now_millis()))
+    }
+
+    /// `sleep_millis(ms i64) -> void`: sleep the current thread for `ms`
+    /// milliseconds; a negative `ms` sleeps for zero (no error).
+    fn builtin_sleep_millis(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ms]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sleep_millis", 1, args.len()))?;
+        let ms = expect_i64("sleep_millis", ms)?;
+        sleep_millis(ms);
+        Ok(Value::Void)
+    }
+
     /// `wasm_log(x i64) -> void`: the host log builtin. On the WASM backend it
     /// lowers to a `call` of the imported `env.log_i64`; on the interpreters it
     /// prints the value as a stdout line, kept at parity with the AST runtime so
@@ -4705,7 +4908,9 @@ impl<'a> IrRuntime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("to_string", 1, args.len()))?;
         match value {
             Value::I64(_)
+            | Value::Int { .. }
             | Value::F64(_)
+            | Value::F32(_)
             | Value::Bool(_)
             | Value::String(_)
             | Value::Char(_)
@@ -4750,6 +4955,56 @@ impl<'a> IrRuntime<'a> {
             })
     }
 
+    /// `is_digit(c char) -> bool`: whether `c` is an ASCII digit (`0`-`9`).
+    fn builtin_is_digit(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_digit", args, |c| c.is_ascii_digit())
+    }
+
+    /// `is_alpha(c char) -> bool`: whether `c` is an alphabetic character.
+    fn builtin_is_alpha(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_alpha", args, |c| c.is_alphabetic())
+    }
+
+    /// `is_alnum(c char) -> bool`: whether `c` is alphabetic or numeric.
+    fn builtin_is_alnum(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_alnum", args, |c| c.is_alphanumeric())
+    }
+
+    /// `is_whitespace(c char) -> bool`: whether `c` is a whitespace character.
+    fn builtin_is_whitespace(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_whitespace", args, |c| c.is_whitespace())
+    }
+
+    /// `is_upper(c char) -> bool`: whether `c` is an uppercase character.
+    fn builtin_is_upper(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_upper", args, |c| c.is_uppercase())
+    }
+
+    /// `is_lower(c char) -> bool`: whether `c` is a lowercase character.
+    fn builtin_is_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_lower", args, |c| c.is_lowercase())
+    }
+
+    /// Shared helper for the deterministic `char -> bool` classification
+    /// predicates: unwrap a single `char` operand and apply `test`, reporting a
+    /// runtime error (never a panic) on a non-char operand.
+    fn char_predicate(
+        name: &'static str,
+        args: Vec<Value>,
+        test: impl Fn(char) -> bool,
+    ) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        match value {
+            Value::Char(c) => Ok(Value::Bool(test(c))),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a char but got `{other}`"),
+            )),
+        }
+    }
+
     /// `byte(i i64) -> byte`: an 8-bit unsigned value; a runtime error outside 0-255.
     fn builtin_byte(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
@@ -4774,6 +5029,56 @@ impl<'a> IrRuntime<'a> {
             other => Err(RuntimeError::new(
                 "L0417",
                 format!("byte_val expects a byte but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `to_<T>(x i64) -> T`: wrapping reinterpret of an `i64` into fixed-width
+    /// integer `T`; shared by every `to_i8`/`to_i16`/…/`to_usize` conversion.
+    fn builtin_to_int(
+        name: &'static str,
+        args: Vec<Value>,
+        ty: IntKind,
+    ) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        Ok(Value::int(expect_i64(name, value)?, ty))
+    }
+
+    /// `to_i64(x) -> i64`: widen a fixed-width integer into `i64` (identity on
+    /// the already-normalized cell).
+    fn builtin_to_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_i64", 1, args.len()))?;
+        match value {
+            Value::Int { value, .. } => Ok(Value::I64(value)),
+            other => Err(RuntimeError::new(
+                "L0407",
+                format!("to_i64 expects a fixed-width integer but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `to_f32(x f64) -> f32`: round an `f64` to the nearest `f32`.
+    fn builtin_to_f32(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f32", 1, args.len()))?;
+        Ok(Value::F32(value.as_f64()? as f32))
+    }
+
+    /// `to_f64(x f32) -> f64`: widen an `f32` to `f64` (exact).
+    fn builtin_to_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_f64", 1, args.len()))?;
+        match value {
+            Value::F32(value) => Ok(Value::F64(f64::from(value))),
+            other => Err(RuntimeError::new(
+                "L0421",
+                format!("to_f64 expects an f32 but got `{other}`"),
             )),
         }
     }
@@ -4808,6 +5113,25 @@ impl<'a> IrRuntime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("env", 1, args.len()))?;
         let name = expect_string("env", name)?;
         Ok(option_value(std::env::var(&name).ok().map(Value::String)))
+    }
+
+    /// `os_random(len i64) -> result<list<byte>, string>`: `len`
+    /// cryptographically-secure random bytes from the operating-system CSPRNG as
+    /// `ok(list<byte>)`, or `err(message)` if the OS RNG fails. `len == 0`
+    /// returns `ok([])`; `len < 0` returns `err("os_random length must be
+    /// non-negative")`. Never a seeded/deterministic PRNG and never a panic.
+    /// Routes through the shared [`os_random_bytes`] helper so the IR
+    /// interpreter, the bytecode VM (which runs on it), and the AST runtime all
+    /// agree on behavior.
+    fn builtin_os_random(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [len]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("os_random", 1, args.len()))?;
+        let len = expect_i64("os_random", len)?;
+        Ok(result_value(match os_random_bytes(len) {
+            Ok(bytes) => Ok(Value::Array(bytes.into_iter().map(Value::Byte).collect())),
+            Err(message) => Err(Value::String(message)),
+        }))
     }
 
     /// `args() -> list<string>`: the running program's CLI arguments (an empty
@@ -5021,6 +5345,121 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::I64(*guard))
     }
 
+    /// `atomic_new(v i64) -> atomic_i64`: allocate a fresh shared atomic cell
+    /// initialized to `v`. Cloning the returned handle shares the same
+    /// `Arc<AtomicI64>`, so several threads observe each other's updates.
+    fn builtin_atomic_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_new", 1, args.len()))?;
+        let value = expect_i64("atomic_new", value)?;
+        Ok(Value::Atomic(SharedAtomic {
+            cell: Arc::new(AtomicI64::new(value)),
+        }))
+    }
+
+    /// `atomic_load(a atomic_i64) -> i64`: read the cell (SeqCst).
+    fn builtin_atomic_load(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_load", 1, args.len()))?;
+        let atomic = expect_atomic("atomic_load", atomic)?;
+        Ok(Value::I64(atomic.cell.load(Ordering::SeqCst)))
+    }
+
+    /// `atomic_store(a atomic_i64, v i64) -> void`: write the cell (SeqCst).
+    fn builtin_atomic_store(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_store", 2, args.len()))?;
+        let atomic = expect_atomic("atomic_store", atomic)?;
+        let value = expect_i64("atomic_store", value)?;
+        atomic.cell.store(value, Ordering::SeqCst);
+        Ok(Value::Void)
+    }
+
+    /// `atomic_swap(a atomic_i64, v i64) -> i64`: store `v`, return the previous
+    /// value (SeqCst).
+    fn builtin_atomic_swap(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_swap", 2, args.len()))?;
+        let atomic = expect_atomic("atomic_swap", atomic)?;
+        let value = expect_i64("atomic_swap", value)?;
+        Ok(Value::I64(atomic.cell.swap(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_cas(a atomic_i64, expected i64, new i64) -> i64`: strong
+    /// compare-and-swap. Returns the value that was in the cell (equal to
+    /// `expected` on success). SeqCst on both success and failure.
+    fn builtin_atomic_cas(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [atomic, expected, new]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("atomic_cas", 3, args.len()))?;
+        let atomic = expect_atomic("atomic_cas", atomic)?;
+        let expected = expect_i64("atomic_cas", expected)?;
+        let new = expect_i64("atomic_cas", new)?;
+        let observed =
+            match atomic
+                .cell
+                .compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(prev) => prev,
+                Err(current) => current,
+            };
+        Ok(Value::I64(observed))
+    }
+
+    /// `atomic_add(a atomic_i64, v i64) -> i64`: fetch-and-add, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_add(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_add", args)?;
+        Ok(Value::I64(atomic.cell.fetch_add(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_sub(a atomic_i64, v i64) -> i64`: fetch-and-sub, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_sub(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_sub", args)?;
+        Ok(Value::I64(atomic.cell.fetch_sub(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_and(a atomic_i64, v i64) -> i64`: fetch-and-and, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_and(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_and", args)?;
+        Ok(Value::I64(atomic.cell.fetch_and(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_or(a atomic_i64, v i64) -> i64`: fetch-and-or, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_or(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_or", args)?;
+        Ok(Value::I64(atomic.cell.fetch_or(value, Ordering::SeqCst)))
+    }
+
+    /// `atomic_xor(a atomic_i64, v i64) -> i64`: fetch-and-xor, returning the
+    /// PREVIOUS value (SeqCst).
+    fn builtin_atomic_xor(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let (atomic, value) = Self::atomic_binary_args("atomic_xor", args)?;
+        Ok(Value::I64(atomic.cell.fetch_xor(value, Ordering::SeqCst)))
+    }
+
+    /// Shared argument-decoding for the `atomic_<op>(a atomic_i64, v i64)`
+    /// fetch-and-op family: exactly two arguments, an atomic handle then an
+    /// `i64` operand.
+    fn atomic_binary_args(
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<(SharedAtomic, i64), RuntimeError> {
+        let [atomic, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 2, args.len()))?;
+        let atomic = expect_atomic(name, atomic)?;
+        let value = expect_i64(name, value)?;
+        Ok((atomic, value))
+    }
+
     /// Push a freshly opened socket resource into the handle table, returning its
     /// index wrapped as a `Value::Socket`.
     fn register_socket(&mut self, resource: SocketResource) -> Value {
@@ -5044,6 +5483,140 @@ impl<'a> IrRuntime<'a> {
                 "L0406",
                 format!("{name} received a closed or invalid socket `{handle}`"),
             )),
+        }
+    }
+
+    /// Push a freshly spawned child into the handle table, returning its index
+    /// wrapped as a `Value::Process`. Mirrors `register_socket` and the AST
+    /// interpreter's `register_process`.
+    fn register_process(&mut self, resource: ProcessResource) -> Value {
+        self.processes.push(Some(resource));
+        Value::Process(self.processes.len() - 1)
+    }
+
+    /// Resolve a process handle argument to its live slot index. Mirrors
+    /// `socket_slot` and the AST interpreter's `process_slot`.
+    fn process_slot(&self, name: &str, value: &Value) -> Result<usize, RuntimeError> {
+        let Value::Process(handle) = value else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a process but got `{value}`"),
+            ));
+        };
+        match self.processes.get(*handle) {
+            Some(Some(_)) => Ok(*handle),
+            _ => Err(RuntimeError::new(
+                "L0406",
+                format!("{name} received a reaped or invalid process `{handle}`"),
+            )),
+        }
+    }
+
+    /// `proc_spawn(cmd string, args array<string>) -> result<process, string>`:
+    /// mirrors the AST interpreter's `builtin_proc_spawn` exactly.
+    fn builtin_proc_spawn(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [cmd, cmd_args]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_spawn", 2, args.len()))?;
+        let cmd = expect_string("proc_spawn", cmd)?;
+        let cmd_args = cmd_args.as_string_array()?;
+        match Command::new(&cmd)
+            .args(cmd_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => {
+                let handle = self.register_process(ProcessResource { child });
+                Ok(result_value(Ok(handle)))
+            }
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_wait(p process) -> result<i64, string>`: mirrors the AST interpreter.
+    fn builtin_proc_wait(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_wait", 1, args.len()))?;
+        let slot = self.process_slot("proc_wait", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_wait requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.wait() {
+            Ok(status) => Ok(result_value(Ok(Value::I64(process_exit_code(&status))))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_stdout(p process) -> result<string, string>`: mirrors the AST
+    /// interpreter; the pipe is taken on first read (second read is EOF).
+    fn builtin_proc_stdout(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_stdout", 1, args.len()))?;
+        let slot = self.process_slot("proc_stdout", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_stdout requires a live process".to_string(),
+            ))));
+        };
+        let mut buffer = String::new();
+        match resource
+            .child
+            .stdout
+            .take()
+            .map(|mut pipe| pipe.read_to_string(&mut buffer))
+        {
+            None => Ok(result_value(Ok(Value::String(String::new())))),
+            Some(Ok(_)) => Ok(result_value(Ok(Value::String(buffer)))),
+            Some(Err(error)) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_stderr(p process) -> result<string, string>`: mirrors the AST
+    /// interpreter; the pipe is taken on first read (second read is EOF).
+    fn builtin_proc_stderr(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_stderr", 1, args.len()))?;
+        let slot = self.process_slot("proc_stderr", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_stderr requires a live process".to_string(),
+            ))));
+        };
+        let mut buffer = String::new();
+        match resource
+            .child
+            .stderr
+            .take()
+            .map(|mut pipe| pipe.read_to_string(&mut buffer))
+        {
+            None => Ok(result_value(Ok(Value::String(String::new())))),
+            Some(Ok(_)) => Ok(result_value(Ok(Value::String(buffer)))),
+            Some(Err(error)) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_kill(p process) -> result<i64, string>`: mirrors the AST interpreter.
+    fn builtin_proc_kill(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_kill", 1, args.len()))?;
+        let slot = self.process_slot("proc_kill", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_kill requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.kill() {
+            Ok(()) => Ok(result_value(Ok(Value::I64(0)))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
         }
     }
 
@@ -5339,6 +5912,90 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::Array(values))
     }
 
+    /// `list_index_of(l, x) -> i64`: index of the first element equal to `x`, or -1.
+    fn builtin_list_index_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, target]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_index_of", 2, args.len()))?;
+        let values = expect_list("list_index_of", list)?;
+        let index = values
+            .iter()
+            .position(|value| *value == target)
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        Ok(Value::I64(index))
+    }
+
+    /// `list_contains(l, x) -> bool`: whether any element equals `x`.
+    fn builtin_list_contains(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, target]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_contains", 2, args.len()))?;
+        let values = expect_list("list_contains", list)?;
+        Ok(Value::Bool(values.contains(&target)))
+    }
+
+    /// `reverse(l) -> list<T>`: a new list with the elements reversed.
+    fn builtin_reverse(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("reverse", 1, args.len()))?;
+        let mut values = expect_list("reverse", list)?;
+        values.reverse();
+        Ok(Value::Array(values))
+    }
+
+    /// `sort(l list<i64>) -> list<i64>`: a new list sorted ascending.
+    fn builtin_sort(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sort", 1, args.len()))?;
+        let values = expect_list("sort", list)?;
+        let mut nums: Vec<i64> = Vec::with_capacity(values.len());
+        for value in values {
+            match value {
+                Value::I64(n) => nums.push(n),
+                other => {
+                    return Err(RuntimeError::new(
+                        "L0417",
+                        format!("sort expects a list<i64> but found `{other}`"),
+                    ));
+                }
+            }
+        }
+        nums.sort();
+        Ok(Value::Array(nums.into_iter().map(Value::I64).collect()))
+    }
+
+    /// `concat(a, b) -> list<T>`: a new list with `b`'s elements appended to `a`.
+    fn builtin_concat(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [a, b]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("concat", 2, args.len()))?;
+        let mut values = expect_list("concat", a)?;
+        let mut rest = expect_list("concat", b)?;
+        values.append(&mut rest);
+        Ok(Value::Array(values))
+    }
+
+    /// `slice(l, start, end) -> list<T>`: the half-open range `[start, end)`,
+    /// with `start`/`end` clamped into `[0, len]` (so it is always total).
+    fn builtin_slice(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, start, end]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("slice", 3, args.len()))?;
+        let values = expect_list("slice", list)?;
+        let start = expect_i64("slice", start)?;
+        let end = expect_i64("slice", end)?;
+        let len = values.len() as i64;
+        let start = start.clamp(0, len) as usize;
+        let end = end.clamp(0, len) as usize;
+        if start >= end {
+            return Ok(Value::Array(Vec::new()));
+        }
+        Ok(Value::Array(values[start..end].to_vec()))
+    }
+
     /// `map_new() -> map<K, V>`: a fresh empty map.
     fn builtin_map_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let []: [Value; 0] = args
@@ -5386,6 +6043,24 @@ impl<'a> IrRuntime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("map_len", 1, args.len()))?;
         let entries = expect_map("map_len", map)?;
         Ok(Value::I64(entries.len() as i64))
+    }
+
+    /// `map_keys(m) -> list<K>`: the keys in insertion order.
+    fn builtin_map_keys(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_keys", 1, args.len()))?;
+        let entries = expect_map("map_keys", map)?;
+        Ok(Value::Array(entries.into_iter().map(|(k, _)| k).collect()))
+    }
+
+    /// `map_values(m) -> list<V>`: the values in insertion order.
+    fn builtin_map_values(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_values", 1, args.len()))?;
+        let entries = expect_map("map_values", map)?;
+        Ok(Value::Array(entries.into_iter().map(|(_, v)| v).collect()))
     }
 
     /// `map_del(m, k) -> map<K, V>`: a new map without key `k`.
@@ -5541,12 +6216,109 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::String(text.to_uppercase()))
     }
 
+    /// `chars(s) -> list<char>`: the characters of `s` in order.
+    fn builtin_chars(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("chars", 1, args.len()))?;
+        let text = expect_string("chars", text)?;
+        Ok(Value::Array(text.chars().map(Value::Char).collect()))
+    }
+
+    /// `string_from_chars(cs) -> string`: concatenate a `list<char>` into a string.
+    fn builtin_string_from_chars(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("string_from_chars", 1, args.len()))?;
+        let values = expect_list("string_from_chars", list)?;
+        let mut out = String::new();
+        for value in values {
+            match value {
+                Value::Char(c) => out.push(c),
+                other => {
+                    return Err(RuntimeError::new(
+                        "L0417",
+                        format!("string_from_chars expects a list<char> but found `{other}`"),
+                    ));
+                }
+            }
+        }
+        Ok(Value::String(out))
+    }
+
     fn builtin_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [text]: [Value; 1] = args
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("lower", 1, args.len()))?;
         let text = expect_string("lower", text)?;
         Ok(Value::String(text.to_lowercase()))
+    }
+
+    /// `to_bytes(s string) -> list<byte>`: the UTF-8 encoding of `s` as a
+    /// `list<byte>` (a `Value::Array` of `Value::Byte`, matching `read_bytes`).
+    fn builtin_to_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("to_bytes", 1, args.len()))?;
+        let text = expect_string("to_bytes", text)?;
+        Ok(Value::Array(
+            text.into_bytes().into_iter().map(Value::Byte).collect(),
+        ))
+    }
+
+    /// `from_bytes(b list<byte>) -> result<string, string>`: decode `b` as UTF-8,
+    /// returning `ok(s)` on success and `err(message)` (never a panic, never a
+    /// lossy replacement) on invalid UTF-8.
+    fn builtin_from_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [data]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("from_bytes", 1, args.len()))?;
+        let bytes = Self::value_to_bytes("from_bytes", data)?;
+        Ok(result_value(match String::from_utf8(bytes) {
+            Ok(text) => Ok(Value::String(text)),
+            Err(error) => Err(Value::String(format!("invalid utf-8: {error}"))),
+        }))
+    }
+
+    /// `byte_len(s string) -> i64`: the number of UTF-8 bytes in `s` (distinct
+    /// from `len`, which counts characters for a string).
+    fn builtin_byte_len(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("byte_len", 1, args.len()))?;
+        let text = expect_string("byte_len", text)?;
+        Ok(Value::I64(text.len() as i64))
+    }
+
+    /// `parse_i64(s string) -> result<i64, string>`: parse `s` as a base-10
+    /// signed 64-bit integer via Rust `str::parse::<i64>()`, returning `ok(n)`
+    /// on success and `err(message)` on any failure (empty, non-numeric, or out
+    /// of range). Whitespace is not trimmed, so a padded string is an `err`. The
+    /// error message is a fixed string so every backend matches byte-for-byte.
+    fn builtin_parse_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parse_i64", 1, args.len()))?;
+        let text = expect_string("parse_i64", text)?;
+        Ok(result_value(match text.parse::<i64>() {
+            Ok(value) => Ok(Value::I64(value)),
+            Err(_) => Err(Value::String(format!("cannot parse `{text}` as i64"))),
+        }))
+    }
+
+    /// `parse_f64(s string) -> result<f64, string>`: parse `s` as an `f64` via
+    /// Rust `str::parse::<f64>()`, returning `ok(x)` on success and
+    /// `err(message)` on failure. The error message is a fixed string so every
+    /// backend matches byte-for-byte.
+    fn builtin_parse_f64(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("parse_f64", 1, args.len()))?;
+        let text = expect_string("parse_f64", text)?;
+        Ok(result_value(match text.parse::<f64>() {
+            Ok(value) => Ok(Value::F64(value)),
+            Err(_) => Err(Value::String(format!("cannot parse `{text}` as f64"))),
+        }))
     }
 
     fn builtin_abs(args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -5655,6 +6427,96 @@ impl<'a> IrRuntime<'a> {
             (y, x) => Err(RuntimeError::new(
                 "L0417",
                 format!("atan2 expects two f64 values but got `{y}` and `{x}`"),
+            )),
+        }
+    }
+
+    /// `rotate_left(x, n)`: rotate the 64 bits of `x` left by `(n & 63)`
+    /// positions, matching the AST runtime so every backend agrees.
+    fn builtin_rotate_left(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [x, n]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rotate_left", 2, args.len()))?;
+        match (x, n) {
+            (Value::I64(x), Value::I64(n)) => {
+                Ok(Value::I64(x.rotate_left(((n as u64) & 63) as u32)))
+            }
+            (x, n) => Err(RuntimeError::new(
+                "L0417",
+                format!("rotate_left expects two i64 values but got `{x}` and `{n}`"),
+            )),
+        }
+    }
+
+    /// `rotate_right(x, n)`: rotate the 64 bits of `x` right by `(n & 63)`
+    /// positions, matching the AST runtime.
+    fn builtin_rotate_right(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [x, n]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("rotate_right", 2, args.len()))?;
+        match (x, n) {
+            (Value::I64(x), Value::I64(n)) => {
+                Ok(Value::I64(x.rotate_right(((n as u64) & 63) as u32)))
+            }
+            (x, n) => Err(RuntimeError::new(
+                "L0417",
+                format!("rotate_right expects two i64 values but got `{x}` and `{n}`"),
+            )),
+        }
+    }
+
+    /// `count_ones(x)`: population count of the 64-bit value `x` (0..=64).
+    fn builtin_count_ones(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("count_ones", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.count_ones() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("count_ones expects an i64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `leading_zeros(x)`: number of leading zero bits in `x` (0..=64).
+    fn builtin_leading_zeros(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("leading_zeros", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.leading_zeros() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("leading_zeros expects an i64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `trailing_zeros(x)`: number of trailing zero bits in `x` (0..=64).
+    fn builtin_trailing_zeros(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("trailing_zeros", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.trailing_zeros() as i64)),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("trailing_zeros expects an i64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `reverse_bytes(x)`: reverse the byte order of the 64-bit value `x`.
+    fn builtin_reverse_bytes(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("reverse_bytes", 1, args.len()))?;
+        match value {
+            Value::I64(x) => Ok(Value::I64(x.swap_bytes())),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("reverse_bytes expects an i64 but got `{other}`"),
             )),
         }
     }
@@ -5867,6 +6729,17 @@ struct Lowerer<'a> {
     /// `return EXPR` and a function's final expression can supply the expected
     /// type that `none`/`ok`/`err` need. Set at the start of each function.
     current_return_type: std::cell::RefCell<TypeRef>,
+    /// Statements hoisted while desugaring postfix `?` operators in the statement
+    /// currently being lowered. Each `EXPR?` pushes a `let __q = <operand>`, a
+    /// typed `let __v`, and a `match __q` (writing `__v` on success, `return`ing
+    /// the failure value otherwise) here, then rewrites its position to reference
+    /// `__v`. The block lowerers drain this in order before the statement, so the
+    /// `?` node never reaches the IR — only `let`/`assign`/`match`/`return`, which
+    /// every backend already handles.
+    try_prelude: std::cell::RefCell<Vec<IrStmt>>,
+    /// Monotonic counter for fresh `?`-desugar temp names, unique per program so
+    /// hoisted temporaries never collide with user bindings or each other.
+    next_try_temp: std::cell::Cell<usize>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -5875,6 +6748,8 @@ impl<'a> Lowerer<'a> {
             program,
             signatures,
             current_return_type: std::cell::RefCell::new(TypeRef::new("void")),
+            try_prelude: std::cell::RefCell::new(Vec::new()),
+            next_try_temp: std::cell::Cell::new(0),
         }
     }
 
@@ -6048,10 +6923,22 @@ impl<'a> Lowerer<'a> {
                 Stmt::Unsafe { body, .. } => {
                     lowered.extend(self.lower_block(body, scope)?);
                 }
-                other => lowered.push(self.lower_statement(other, scope)?),
+                other => {
+                    let stmt = self.lower_statement(other, scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(stmt);
+                }
             }
         }
         Ok(lowered)
+    }
+
+    /// Move any `?`-desugar statements accumulated while lowering the current
+    /// statement (see [`Lowerer::try_prelude`]) to the front of the statement's
+    /// emitted output, preserving their left-to-right / inner-before-outer order.
+    fn drain_try_prelude_into(&self, out: &mut Vec<IrStmt>) {
+        let mut prelude = self.try_prelude.borrow_mut();
+        out.extend(prelude.drain(..));
     }
 
     /// Lower a function body. A trailing bare expression statement is lowered
@@ -6076,9 +6963,14 @@ impl<'a> Lowerer<'a> {
                         && !matches!(expr.kind, ExprKind::Match { .. }) =>
                 {
                     let lowered_expr = self.lower_expr_expected(expr, Some(&return_type), scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
                     lowered.push(IrStmt::Expr(lowered_expr));
                 }
-                other => lowered.push(self.lower_statement(other, scope)?),
+                other => {
+                    let stmt = self.lower_statement(other, scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(stmt);
+                }
             }
         }
         Ok(lowered)
@@ -6464,7 +7356,11 @@ impl<'a> Lowerer<'a> {
                     op: *op,
                     expr: Box::new(self.lower_expr(expr, scope)?),
                 },
-                TypeRef::new("bool"),
+                match op {
+                    UnaryOp::Not => TypeRef::new("bool"),
+                    // Bitwise NOT is `i64 -> i64`.
+                    UnaryOp::BitNot => TypeRef::new("i64"),
+                },
             ),
             ExprKind::Binary { left, op, right } => {
                 let left = self.lower_expr(left, scope)?;
@@ -6480,6 +7376,12 @@ impl<'a> Lowerer<'a> {
                     BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
                         TypeRef::new("i64")
                     }
+                    // Integer bitwise ops are `i64 x i64 -> i64`.
+                    BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr => TypeRef::new("i64"),
                     BinaryOp::Equal
                     | BinaryOp::NotEqual
                     | BinaryOp::Less
@@ -6606,6 +7508,16 @@ impl<'a> Lowerer<'a> {
                     ty,
                 )
             }
+            // Postfix `EXPR?` is desugared here so no `Try` node ever reaches the
+            // IR (and the native/WASM backends never see it). We hoist the
+            // supporting `let`/`match`/`return` into the statement prelude and
+            // rewrite this position to a reference to the success temporary. The
+            // recursive `lower_expr` on the operand desugars any inner `?` first,
+            // so nested `?` hoist inner-before-outer.
+            ExprKind::Try(inner) => {
+                let (kind, ty) = self.desugar_try(inner, expr.span, scope)?;
+                (kind, ty)
+            }
         };
 
         Ok(IrExpr {
@@ -6613,6 +7525,169 @@ impl<'a> Lowerer<'a> {
             ty,
             span: expr.span,
         })
+    }
+
+    /// Desugar a postfix `EXPR?`. Lowers the operand, hoists the propagation
+    /// scaffolding into [`Lowerer::try_prelude`], and returns the `(kind, ty)` of
+    /// a reference to the freshly bound success temporary `__try_v_N: T`.
+    ///
+    /// For a `result<T, E>` operand it emits, in order:
+    ///
+    /// ```text
+    /// let __try_q_N = <operand>          # result<T, E>
+    /// let __try_v_N: T = __try_q_N       # initial binding, overwritten below
+    /// match __try_q_N
+    ///     ok(__try_ok_N) -> __try_v_N = __try_ok_N
+    ///     err(__try_err_N) -> return err(__try_err_N)
+    /// ```
+    ///
+    /// and for an `option<T>` operand the analogous `some`/`none` shape. The
+    /// initial binding is immediately overwritten by the `ok`/`some` arm before
+    /// any read, and the failure arm `return`s first, so its value is never
+    /// observed; the interpreters are dynamically typed and the native/WASM
+    /// backends demote any function containing a `match` to the interpreter, so
+    /// the desugared IR runs identically on every backend.
+    fn desugar_try(
+        &self,
+        inner: &Expr,
+        span: Span,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Result<(IrExprKind, TypeRef), IrLoweringError> {
+        let operand = self.lower_expr(inner, scope)?;
+        let operand_ty = operand.ty.clone();
+        let return_type = self.current_return_type.borrow().clone();
+
+        // Fresh, collision-free temp names for this `?` site.
+        let id = self.next_try_temp.get();
+        self.next_try_temp.set(id + 1);
+        let q_name = format!("__try_q_{id}");
+        let v_name = format!("__try_v_{id}");
+        let bind_name = format!("__try_x_{id}");
+
+        // Resolve `(success variant, failure variant, payload type T)` from the
+        // operand type. Semantics guarantees the operand is an `option`/`result`
+        // and the return type is compatible, so anything else is a lowering bug.
+        let (success_variant, failure_variant, payload_ty) =
+            if let Some((ok_ty, _)) = operand_ty.result_args() {
+                ("ok", "err", ok_ty)
+            } else if let Some(payload) = operand_ty.option_element() {
+                ("some", "none", payload)
+            } else {
+                return Err(IrLoweringError::new(
+                    format!(
+                        "`?` operand has non-option/result type `{}`",
+                        operand_ty.name
+                    ),
+                    Some(span),
+                ));
+            };
+
+        // `let __try_q_N = <operand>`
+        let q_let = IrStmt::Let {
+            name: q_name.clone(),
+            ty: operand_ty.clone(),
+            value: operand,
+            span,
+        };
+
+        // `let __try_v_N: T = __try_q_N` (initial binding, overwritten by the
+        // success arm before any read).
+        let v_let = IrStmt::Let {
+            name: v_name.clone(),
+            ty: payload_ty.clone(),
+            value: IrExpr {
+                kind: IrExprKind::Variable(q_name.clone()),
+                ty: operand_ty.clone(),
+                span,
+            },
+            span,
+        };
+
+        // Success arm: `variant(__try_x_N) -> __try_v_N = __try_x_N`.
+        let success_arm = IrMatchArm {
+            pattern: IrMatchPattern::Variant {
+                name: success_variant.to_string(),
+                bindings: vec![bind_name.clone()],
+            },
+            body: vec![IrStmt::Assign {
+                name: v_name.clone(),
+                path: Vec::new(),
+                op: AssignOp::Replace,
+                value: IrExpr {
+                    kind: IrExprKind::Variable(bind_name.clone()),
+                    ty: payload_ty.clone(),
+                    span,
+                },
+                span,
+            }],
+        };
+
+        // Failure arm: `err(__try_x_N) -> return err(__try_x_N)` (or the `none`
+        // analogue), rebuilding the failure value at the function's return type.
+        let failure_arm = if failure_variant == "err" {
+            let err_bind = format!("__try_e_{id}");
+            let (_, err_ty) = operand_ty.result_args().ok_or_else(|| {
+                IrLoweringError::new(
+                    format!("`?` operand `{}` is not a result", operand_ty.name),
+                    Some(span),
+                )
+            })?;
+            IrMatchArm {
+                pattern: IrMatchPattern::Variant {
+                    name: "err".to_string(),
+                    bindings: vec![err_bind.clone()],
+                },
+                body: vec![IrStmt::Return(Some(IrExpr {
+                    kind: IrExprKind::Call {
+                        name: "err".to_string(),
+                        args: vec![IrExpr {
+                            kind: IrExprKind::Variable(err_bind),
+                            ty: err_ty,
+                            span,
+                        }],
+                    },
+                    ty: return_type.clone(),
+                    span,
+                }))],
+            }
+        } else {
+            // `none -> return none` (a unit variant lowered as a no-arg `Call`,
+            // matching how bare `none` construction lowers elsewhere).
+            IrMatchArm {
+                pattern: IrMatchPattern::Variant {
+                    name: "none".to_string(),
+                    bindings: Vec::new(),
+                },
+                body: vec![IrStmt::Return(Some(IrExpr {
+                    kind: IrExprKind::Call {
+                        name: "none".to_string(),
+                        args: Vec::new(),
+                    },
+                    ty: return_type.clone(),
+                    span,
+                }))],
+            }
+        };
+
+        let match_stmt = IrStmt::Match {
+            scrutinee: IrExpr {
+                kind: IrExprKind::Variable(q_name),
+                ty: operand_ty,
+                span,
+            },
+            arms: vec![success_arm, failure_arm],
+            span,
+        };
+
+        // Hoist the scaffolding, in order, ahead of the statement being lowered.
+        {
+            let mut prelude = self.try_prelude.borrow_mut();
+            prelude.push(q_let);
+            prelude.push(v_let);
+            prelude.push(match_stmt);
+        }
+
+        Ok((IrExprKind::Variable(v_name), payload_ty))
     }
 
     /// Lower a built-in `option`/`result` constructor to a variant `Call` IR
@@ -6870,34 +7945,73 @@ impl<'a> Lowerer<'a> {
             }
             "store" | "dealloc" | "write_file" | "append_file" | "write_bytes" | "make_dir"
             | "remove_file" | "remove_dir" | "print" | "println" | "warn" | "wasm_log"
-            | "console_log" | "dom_set_text" | "flush" | "assert" | "rc_release" | "ptr_write"
-            | "region_create" | "tcp_close" | "tcp_shutdown" => TypeRef::new("void"),
+            | "console_log" | "dom_set_text" | "flush" | "sleep_millis" | "assert"
+            | "rc_release" | "ptr_write" | "region_create" | "tcp_close" | "tcp_shutdown" => {
+                TypeRef::new("void")
+            }
             // Network builtins report failures as runtime `result` values.
             "tcp_connect" | "tcp_listen" | "tcp_accept" | "udp_bind" => {
                 generic_type("result", &[TypeRef::new("Socket"), TypeRef::new("string")])
             }
-            "tcp_read" | "udp_recv" | "http_get" | "http_post" => {
+            "tcp_read" | "udp_recv" | "http_get" | "http_post" | "from_bytes" | "proc_stdout"
+            | "proc_stderr" => {
                 generic_type("result", &[TypeRef::new("string"), TypeRef::new("string")])
             }
-            "tcp_write" | "udp_send_to" => {
+            "tcp_write" | "udp_send_to" | "parse_i64" | "proc_wait" | "proc_kill" => {
                 generic_type("result", &[TypeRef::new("i64"), TypeRef::new("string")])
+            }
+            "parse_f64" => generic_type("result", &[TypeRef::new("f64"), TypeRef::new("string")]),
+            // Process spawn returns a `process` handle in the `ok` arm.
+            "proc_spawn" => {
+                generic_type("result", &[TypeRef::new("process"), TypeRef::new("string")])
             }
             "read_file" | "sys_output" | "to_string" | "substring" | "join" | "trim"
             | "replace" | "upper" | "lower" | "repeat" => TypeRef::new("string"),
             "read_lines" | "list_dir" => {
                 generic_type("list", std::slice::from_ref(&TypeRef::new("string")))
             }
-            "read_bytes" => generic_type("list", std::slice::from_ref(&TypeRef::new("byte"))),
+            "read_bytes" | "to_bytes" => {
+                generic_type("list", std::slice::from_ref(&TypeRef::new("byte")))
+            }
             "file_exists" | "is_file" | "is_dir" | "contains" | "starts_with" | "ends_with"
-            | "map_has" => TypeRef::new("bool"),
-            "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val" => {
+            | "map_has" | "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper"
+            | "is_lower" | "list_contains" => TypeRef::new("bool"),
+            "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
+            | "byte_len" | "mono_now" | "wall_now" | "list_index_of" | "to_i64" => {
                 TypeRef::new("i64")
+            }
+            "to_i8" => TypeRef::new("i8"),
+            "to_i16" => TypeRef::new("i16"),
+            "to_i32" => TypeRef::new("i32"),
+            "to_u16" => TypeRef::new("u16"),
+            "to_u32" => TypeRef::new("u32"),
+            "to_u64" => TypeRef::new("u64"),
+            "to_isize" => TypeRef::new("isize"),
+            "to_usize" => TypeRef::new("usize"),
+            "to_f32" => TypeRef::new("f32"),
+            // saturating/wrapping arithmetic returns the operand width `T`.
+            "saturating_add" | "saturating_sub" | "saturating_mul" | "wrapping_add"
+            | "wrapping_sub" | "wrapping_mul" => args
+                .first()
+                .map(|operand| operand.ty.clone())
+                .ok_or_else(|| {
+                    IrLoweringError::new(format!("{name} call missing operand"), Some(span))
+                })?,
+            // checked arithmetic returns `option<T>`.
+            "checked_add" | "checked_sub" | "checked_mul" => {
+                let operand = args
+                    .first()
+                    .map(|operand| operand.ty.clone())
+                    .ok_or_else(|| {
+                        IrLoweringError::new(format!("{name} call missing operand"), Some(span))
+                    })?;
+                generic_type("option", std::slice::from_ref(&operand))
             }
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
-            // `push`/`set`/`pop` return a new `list<T>` of the same type as their
-            // list argument (already spelled `list<T>`).
-            "push" | "set" | "pop" => {
+            // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
+            // of the same type as their (first) list argument (spelled `list<T>`).
+            "push" | "set" | "pop" | "reverse" | "sort" | "concat" | "slice" => {
                 args.first().map(|list| list.ty.clone()).ok_or_else(|| {
                     IrLoweringError::new(format!("{name} call missing list argument"), Some(span))
                 })?
@@ -6936,10 +8050,42 @@ impl<'a> Lowerer<'a> {
                     })?;
                 generic_type("option", std::slice::from_ref(&value))
             }
+            // `map_keys(m) -> list<K>` and `map_values(m) -> list<V>`.
+            "map_keys" | "map_values" => {
+                let map = args.first().ok_or_else(|| {
+                    IrLoweringError::new(format!("{name} call missing map argument"), Some(span))
+                })?;
+                let mut kv = map
+                    .ty
+                    .generic_args("map")
+                    .filter(|args| args.len() == 2)
+                    .ok_or_else(|| {
+                        IrLoweringError::new(
+                            format!("{name} call argument is not a map"),
+                            Some(span),
+                        )
+                    })?;
+                let element = if name == "map_keys" {
+                    kv.remove(0)
+                } else {
+                    kv.remove(1)
+                };
+                generic_type("list", std::slice::from_ref(&element))
+            }
             "split" => TypeRef::new("array<string>"),
+            "chars" => generic_type("list", std::slice::from_ref(&TypeRef::new("char"))),
+            "string_from_chars" => TypeRef::new("string"),
             // `env(name)` yields `option<string>`; `args()` yields `list<string>`.
             "env" => generic_type("option", std::slice::from_ref(&TypeRef::new("string"))),
             "args" => generic_type("list", std::slice::from_ref(&TypeRef::new("string"))),
+            // `os_random(len)` yields `result<list<byte>, string>`.
+            "os_random" => generic_type(
+                "result",
+                &[
+                    generic_type("list", std::slice::from_ref(&TypeRef::new("byte"))),
+                    TypeRef::new("string"),
+                ],
+            ),
             // `parallel_map(f, list<i64>)` maps `fn(i64) -> i64` over the list,
             // yielding a `list<i64>` in input order.
             "parallel_map" => generic_type("list", std::slice::from_ref(&TypeRef::new("i64"))),
@@ -6950,8 +8096,18 @@ impl<'a> Lowerer<'a> {
             "recv" | "mutex_get" | "mutex_add" => TypeRef::new("i64"),
             "try_recv" => generic_type("option", std::slice::from_ref(&TypeRef::new("i64"))),
             "send" | "task_join" | "mutex_set" => TypeRef::new("void"),
+            // Atomic (`atomic_i64`) builtins: the constructor yields the handle,
+            // `atomic_store` is `void`, and every access/RMW yields `i64`.
+            "atomic_new" => TypeRef::new("atomic_i64"),
+            "atomic_store" => TypeRef::new("void"),
+            "atomic_load" | "atomic_swap" | "atomic_cas" | "atomic_add" | "atomic_sub"
+            | "atomic_and" | "atomic_or" | "atomic_xor" => TypeRef::new("i64"),
             "sqrt" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan" | "atan" | "exp" | "ln"
-            | "log10" | "atan2" => TypeRef::new("f64"),
+            | "log10" | "atan2" | "to_f64" => TypeRef::new("f64"),
+            // Bit intrinsics on i64: rotations, popcount, leading/trailing zero
+            // counts, and byte swap all return i64.
+            "rotate_left" | "rotate_right" | "count_ones" | "leading_zeros" | "trailing_zeros"
+            | "reverse_bytes" => TypeRef::new("i64"),
             "abs" | "min" | "max" | "pow" => {
                 let value = args.first().ok_or_else(|| {
                     IrLoweringError::new(format!("{name} call missing argument"), Some(span))
@@ -7970,6 +9126,81 @@ mod tests {
     }
 
     #[test]
+    fn to_bytes_from_bytes_byte_len_match_across_backend_variants() {
+        // Round-trips "Hi" through `to_bytes`/`from_bytes`, checks byte values,
+        // and contrasts `byte_len` (UTF-8 bytes) with `len` (characters) on a
+        // multi-byte string. 72 + 105 + len("Hi")=2 + (byte_len=5 - len=4)=1.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bytes list<byte> = to_bytes(\"Hi\")\n",
+            "    let first i64 = byte_val(get(bytes, 0))\n",
+            "    let second i64 = byte_val(get(bytes, 1))\n",
+            "    match from_bytes(bytes)\n",
+            "        ok(s) -> first + second + len(s) + (byte_len(\"café\") - len(\"café\"))\n",
+            "        err(m) -> 0 - len(m)\n",
+        );
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(180));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
+    fn from_bytes_invalid_utf8_err_matches_across_backend_variants() {
+        // A lone `0xFF` byte is invalid UTF-8: every backend takes the `err`
+        // branch identically (no panic, no lossy replacement).
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let bad list<byte> = push(list_new(), byte(255))\n",
+            "    match from_bytes(bad)\n",
+            "        ok(s) -> len(s)\n",
+            "        err(m) -> 1\n",
+        );
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(1));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
+    fn os_random_structural_result_matches_across_backend_variants() {
+        // `os_random` bytes are non-deterministic, so this asserts only
+        // structural, backend-invariant facts: `os_random(16)` yields 16 bytes,
+        // `os_random(0)` yields an empty list, and `os_random(-1)` yields `err`
+        // (never a panic). Fixed total: 1 + 1 + 1 = 3 on every backend.
+        let source = concat!(
+            "fn ok_len n i64 -> i64\n",
+            "    match os_random(n)\n",
+            "        ok(bytes) -> len(bytes)\n",
+            "        err(_) -> 0 - 1\n\n",
+            "fn main -> i64\n",
+            "    let a i64 = 0\n",
+            "    if ok_len(16) == 16\n",
+            "        a = 1\n",
+            "    let b i64 = 0\n",
+            "    if ok_len(0) == 0\n",
+            "        b = 1\n",
+            "    let c i64 = 0\n",
+            "    if ok_len(0 - 1) == 0 - 1\n",
+            "        c = 1\n",
+            "    a + b + c\n",
+        );
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(3));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
     fn executable_valid_fixtures_match_across_backend_variants() {
         cleanup_parity_files();
         let fixture_dir = workspace_root().join("tests/fixtures/valid");
@@ -8014,6 +9245,9 @@ mod tests {
         assert!(covered.contains(&"run_store.lby".to_string()));
         assert!(covered.contains(&"run_for_step.lby".to_string()));
         assert!(covered.contains(&"run_option_result.lby".to_string()));
+        // The `?` error-propagation fixture exercises the AST early-return signal
+        // and the IR `?`-desugar at parity across all five backend variants.
+        assert!(covered.contains(&"run_error_propagation.lby".to_string()));
     }
 
     #[test]
@@ -8045,6 +9279,89 @@ mod tests {
 
         let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
             run_all_backend_variants(source);
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
+    fn try_operator_desugars_to_let_match_return_and_runs_at_parity() {
+        // The IR never contains a `?`/`Try` node (there is no such IrExprKind):
+        // `?` is desugared during lowering into a `let __try_q`, a typed
+        // `let __try_v`, and a `match` whose failure arm `return`s. The success
+        // temporary is what the original position references.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"neg\")\n",
+            "    ok(n)\n\n",
+            "fn use_it a i64 -> result<i64, string>\n",
+            "    let x i64 = checked(a)?\n",
+            "    ok(x + 1)\n\n",
+            "fn unwrap r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn main -> i64\n",
+            "    unwrap(use_it(4)) + unwrap(use_it(-1))\n",
+        );
+        let module = lower_source(source);
+        let use_it = module
+            .functions
+            .iter()
+            .find(|function| function.name == "use_it")
+            .expect("use_it function");
+
+        // The `?`-desugar scaffolding was hoisted ahead of the `let x` binding:
+        // `let __try_q_*`, then a typed `let __try_v_*`, then a `match` with a
+        // `return`ing failure arm.
+        assert!(
+            matches!(&use_it.body[0], IrStmt::Let { name, .. } if name.starts_with("__try_q_")),
+            "first hoisted statement binds the operand temp: {:?}",
+            use_it.body[0]
+        );
+        let IrStmt::Let {
+            name: v_name,
+            ty: v_ty,
+            ..
+        } = &use_it.body[1]
+        else {
+            panic!(
+                "expected the success temp binding, got {:?}",
+                use_it.body[1]
+            );
+        };
+        assert!(
+            v_name.starts_with("__try_v_"),
+            "success temp name: {v_name}"
+        );
+        assert_eq!(
+            *v_ty,
+            TypeRef::new("i64"),
+            "success temp is typed as the payload"
+        );
+        let IrStmt::Match { arms, .. } = &use_it.body[2] else {
+            panic!("expected the propagation match, got {:?}", use_it.body[2]);
+        };
+        // Two arms: `ok(..) -> __try_v = ..` and `err(..) -> return err(..)`.
+        assert_eq!(arms.len(), 2, "ok + err arms");
+        let has_returning_err_arm = arms.iter().any(|arm| {
+            matches!(&arm.pattern, IrMatchPattern::Variant { name, .. } if name == "err")
+                && matches!(arm.body.as_slice(), [IrStmt::Return(Some(_))])
+        });
+        assert!(has_returning_err_arm, "err arm returns the failure value");
+        // The original `let x` position now references the success temp.
+        let IrStmt::Let { value, .. } = &use_it.body[3] else {
+            panic!("expected the rewritten `let x`, got {:?}", use_it.body[3]);
+        };
+        assert_eq!(value.kind, IrExprKind::Variable(v_name.clone()));
+
+        // All five backend variants agree on the observable result.
+        // unwrap(use_it(4)) = 5; unwrap(use_it(-1)) = -len("neg") = -3.
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(2));
         assert_eq!(ir, ast);
         assert_eq!(bytecode, ast);
         assert_eq!(optimized_ir, ast);

@@ -1,0 +1,35 @@
+# Integration: several result-returning helpers consumed with match on both the
+# success and error paths, combined into a deterministic i64.
+
+fn parse_positive n i64 -> result<i64, string>
+    if n <= 0
+        return err("not positive")
+    ok(n)
+
+fn checked_div n i64 d i64 -> result<i64, string>
+    if d == 0
+        return err("div by zero")
+    ok(n / d)
+
+fn fail msg string -> result<i64, string>
+    err(msg)
+
+fn step a i64 b i64 -> result<i64, string>
+    match parse_positive(a)
+        ok(v) -> checked_div(v, b)
+        err(m) -> fail(m)
+
+fn score r result<i64, string> -> i64
+    match r
+        ok(v) -> v
+        err(m) -> 0 - len(m)
+
+fn main -> i64
+    # success path: parse_positive(20) ok, div 20/4 -> ok(5)
+    let good i64 = score(step(20, 4))
+    # error in first stage: parse_positive(-3) -> err("not positive") len=12 -> -12
+    let bad1 i64 = score(step(0 - 3, 4))
+    # error in second stage: div by zero -> err("div by zero") len=11 -> -11
+    let bad2 i64 = score(step(9, 0))
+    # good=5, bad1=-12, bad2=-11 => 5 - 12 - 11 = -18
+    good + bad1 + bad2

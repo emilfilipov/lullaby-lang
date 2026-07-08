@@ -12,37 +12,47 @@ Lullaby is a next-generation compiled systems programming language designed with
 
 **Target Use Case**: Systems programming for operating system development and other low-level applications requiring type safety, performance optimization, and memory efficiency.
 
-## Current Alpha Implementation
+## Status
 
-The current Rust toolchain implements a small executable subset while the wider systems-language design remains in progress. The frozen installable Alpha 1 surface is canonical in [alpha1_language_surface.md](alpha1_language_surface.md):
+Lullaby is a real, working language in active development toward its 1.0 release. It is **not** a frozen prototype: the Rust toolchain compiles and runs a broad, cohesive language across multiple backends today, and the remaining work is a defined set of primitives on the road to 1.0. The plan and the definition of 1.0 are canonical in [roadmap_1_0.md](roadmap_1_0.md); the earliest installable surface is preserved for reference in [alpha1_language_surface.md](alpha1_language_surface.md).
 
-- Source files use the `.lby` extension.
-- Blocks are indentation-only. Curly braces and semicolon terminators are compile errors.
-- Functions use `fn name param Type -> ReturnType` and return the last reachable expression unless an explicit `return` exits earlier.
-- Void functions use `-> void` and may use bare `return`.
-- Local bindings use `let name Type = expression` for explicit annotations or `let name = expression` when the initializer type is unambiguous.
-- Existing local bindings can be updated with `name = expression` or numeric compound assignments `+=`, `-=`, `*=`, and `/=`.
-- Implemented scalar types are `i64`, `bool`, `string`, and `void`.
-- Implemented homogeneous arrays use `array<T>` type spelling, non-empty literals such as `[1, 2, 3]`, and bounds-checked indexing such as `values[0]`.
-- Omitted local binding annotations are inferred from literals, function calls, array literals, and other expressions that already have a concrete type. Empty arrays and `void` initializers cannot infer a local type.
-- The current pointer spelling is an interim concrete type name such as `ptr_i64`.
-- Implemented expressions include literals, array literals, array indexing, variables, function calls with parentheses, arithmetic, comparisons, logical operators `and`/`or`/`not`, and grouped expressions.
-- Equality comparisons require matching operand types. Ordering comparisons `<`, `<=`, `>`, and `>=` currently require `i64` operands.
-- Implemented control flow is `if`/`elif`/`else`, `while`, range `for`, `loop`, `break`, and `continue` with indentation-only bodies.
-- Implemented memory builtins are `alloc(value)`, `load(ptr)`, `store(ptr, value)`, and `dealloc(ptr)`.
-- Implemented text file I/O builtins are `read_file(path)`, `write_file(path, content)`, `append_file(path, content)`, and `file_exists(path)`.
-- Implemented system command builtins are `sys_status(program, args)` and `sys_output(program, args)`, where `args` is `array<string>`. These execute a program with an argv array directly and do not invoke a shell.
-- Runtime resource failures use structured CLI formatting such as `L0414 [resource]: failed to read ...`.
-- The default execution backend is the AST runtime. `lullaby run` also supports `--backend ir` and `--backend bytecode` for the current alpha subset.
-- IR and bytecode execution can opt into the initial deterministic optimizer with `--optimize constant-fold`, `--optimize dead-code`, or `--optimize alpha`; the alpha pipeline currently includes constant folding, conservative CSE, conservative loop-invariant motion, conservative copy propagation, and dead-code elimination. The default is `--optimize none`.
-- `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] <file.lby>` emits a versioned `.lbc` instruction-bytecode artifact with metadata, a function table, and ordered memory operation metadata. `lullaby build` accepts the same artifact-generation options as an alias. `lullaby inspect <file.lbc>` summarizes that artifact, and `lullaby run <file.lbc>` executes it after compatibility checks.
-- CLI commands are `lullaby check [--verbose|--format json] <file.lby>`, `lullaby compile [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>`, `lullaby build [--optimize none|constant-fold|dead-code|alpha] [-o output.lbc] [--verbose|--format json] <file.lby>`, `lullaby inspect [--verbose|--format json] <file.lbc>`, `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|alpha] [--verbose|--format json] <file.lby|file.lbc>`, `lullaby docs`, and `lullaby examples`. During development, these are also available through `cargo run -p lullaby_cli -- ...`. `--diagnostic-format json` is accepted as a JSON diagnostics alias.
+1.0 is not yet released. Lullaby 1.0 is defined as being technically capable of expressing any program (shipping the spanning set of low-level primitives) *and* being easy to install across Windows, Linux, and macOS. This document describes the language as it exists now, and marks genuinely-planned work as roadmap items.
 
-The current parser grammar is drafted in [formal_grammar.md](formal_grammar.md).
+### Currently implemented
 
-## Planned Design Material
+The language today includes:
 
-The remaining sections describe the intended full systems language. They are design material unless a feature is explicitly listed in the current Alpha implementation above or in [alpha1_language_surface.md](alpha1_language_surface.md). Examples in those sections may use planned syntax that the Alpha 1 compiler rejects today.
+- **Source and scope.** `.lby` source files, indentation-only blocks (curly braces and semicolon terminators are compile errors), and a canonical formatter (`lullaby fmt`).
+- **Functions.** `fn name param Type -> ReturnType`, last-expression return with explicit early `return`, `-> void` procedures, **first-class function values** (`fn(T) -> R` types; passing/returning functions), and **generic functions** (`fn name<T> ...` and bounded `<T: Trait>`) with call-site inference. `async fn`/`await`/`Future<T>` are supported on the interpreter backends.
+- **Types and inference.** Scalars `i64`, `f64`, `bool`, `char`, `byte`, `string`, and `void`; local-binding type inference; nominal **structs** (positional and named construction, field access/mutation, UFCS methods); **enums** (tagged unions) with exhaustive **`match`**; built-in generic enums **`option<T>`** and **`result<T, E>`** with the postfix **`?`** error-propagation operator; **`list<T>`** (growable) and **`map<K, V>`** (hash map) with iteration and `sort`.
+- **Traits and generics.** `trait` declarations, `impl Trait for Type`, receiver-type method dispatch, and trait bounds on generic functions (`<T: Ord>`).
+- **Modules.** File-as-module with `import NAME` and `pub` exports, multi-file projects via a `lullaby.json` manifest with local path dependencies.
+- **Control flow.** `if`/`elif`/`else`, `while`, range `for`, `loop`, `break`, `continue`, and `throw`/`try`/`catch` structured error handling.
+- **Operators.** Arithmetic, comparison, logical `and`/`or`/`not`, and full **bitwise** operators `& | ^ ~ << >>` plus bit intrinsics (`rotate_left`/`rotate_right`, `count_ones`, `leading_zeros`, `trailing_zeros`, `reverse_bytes`). Integer literals support `_` digit separators and `0x`/`0b`/`0o` base prefixes.
+- **Concurrency.** Threads via `spawn`/`task_join`, `i64` channels (`chan_new`/`send`/`recv`/`try_recv`), a shared `Mutex`, **atomics** (`atomic_i64` with load/store/swap/CAS/fetch-ops), and data-parallel `parallel_map`.
+- **Memory.** Heap-slot builtins (`alloc`/`load`/`store`/`dealloc`), reference counting (`rc<T>`/`ref<T>` with `rc_new`/`rc_clone`/`rc_release`/`rc_get`/`rc_borrow`/`ref_get`), and `unsafe`-gated raw pointer read/write.
+- **Standard library / builtins (the prelude).** Numeric conversions and a rich **math** library (`abs`/`min`/`max`/`pow`/`sqrt`/`floor`/`ceil`/`round` plus transcendental `sin`/`cos`/`tan`/`atan`/`atan2`/`exp`/`ln`/`log10`); **string** operations (`substring`/`find`/`contains`/`split`/`join`/`trim`/`replace`/`upper`/`lower`/`starts_with`/`ends_with`/`repeat`) and **string↔bytes/UTF-8** primitives (`to_bytes`/`from_bytes`/`byte_len`); number parsing (`parse_i64`/`parse_f64`); `list`/`map` utilities; and an `assert` testing builtin (with a `lullaby test` runner). The full catalog is in [standard_library.md](standard_library.md).
+- **Platform I/O.** Text and binary file I/O, directory operations, TCP/UDP sockets, an **HTTP client and server**, process/environment access (`env`/`args`), time/clock (`mono_now`/`wall_now`/`sleep_millis`), and OS randomness (`os_random`).
+- **Backends.** Five execution/codegen paths at parity: an **AST interpreter** (default), a **typed IR interpreter**, a **bytecode VM** (with a versioned `.lbc` artifact and a deterministic optimizer), a **WebAssembly** backend (scalar subset plus heap types in linear memory and JS/DOM host imports), and a **native x86-64** backend (COFF object + linking to a Windows `.exe`, with a **freestanding/no-std mode**, **inline assembly**, C-callable exports, and C-ABI FFI declarations). The interpreter grammar is drafted in [formal_grammar.md](formal_grammar.md).
+- **Tooling.** A CLI (`check`/`compile`/`build`/`run`/`test`/`wasm`/`native`/`fmt`/`inspect`/`lsp`/`docs`/`examples`), a Language Server (`lullaby lsp`), and a self-contained offline HTML documentation bundle.
+
+### On the roadmap to 1.0
+
+The following are designed and planned but not yet fully implemented (see [roadmap_1_0.md](roadmap_1_0.md) for scope and order):
+
+- Wider integer types (`i8`–`u64`, `usize`/`isize`) and `f32`, typed literal suffixes, and total conversion/cast rules.
+- Environment-capturing closures; generic user *types*, trait objects/`dyn`, associated types, and default trait bodies.
+- Broader FFI / C-ABI coverage across calling conventions, marshalling, callbacks, and header generation; native ARM64 and ELF/Mach-O output.
+- The WASM heap/allocator phase and richer DOM interop; raw-memory completeness (`sizeof`/`alignof`/`offsetof`, volatile MMIO) and atomic memory orderings/fences.
+- Packaging and ease-of-access work (installers, `lullaby new` scaffolding).
+
+### CLI summary
+
+Current commands: `lullaby check`, `compile`, `build`, `inspect`, `run` (with `--backend ast|ir|bytecode` and `--optimize none|constant-fold|dead-code|alpha`), `test`, `wasm`, `native` (with `--freestanding`/`--no-std`, `--debug`/`-g`), `fmt`, `lsp`, `docs`, `examples`, `help`, and `--version`. During development these are also available through `cargo run -p lullaby_cli -- ...`. `--format json` (alias `--diagnostic-format json`) selects deterministic JSON diagnostics.
+
+## Design Material Notes
+
+The sections below are the broader language and systems-programming design. Where a section shows syntax the current compiler does not yet accept (for example wider integer types or capturing closures), treat it as a roadmap illustration rather than current behavior; the "Currently implemented" list above and [standard_library.md](standard_library.md) are authoritative for what runs today.
 
 ## Language Philosophy
 
@@ -88,13 +98,13 @@ Reference-counted memory with automatic lifetime management:
 - Region-based organization
 - Type-safe operations
 
-**Key Types**:
-- `num` - Unified integers and floats
-- `str` - Strings
+**Key Types** (current):
+- `i64`, `f64` - Integer and floating-point numbers
+- `string`, `char`, `byte` - Text and byte scalars
 - `bool` - Boolean values
-- `array<T>` - Homogeneous arrays
-- `map<K,V>` - Key-value mappings
-- `ptr<T>`, `ref<T>` - Pointers and references
+- `list<T>` - Growable lists (fixed `array<T>` literals also exist)
+- `map<K, V>` - Key-value mappings
+- `rc<T>`, `ref<T>`, `ptr<T>` - Reference-counted values, references, and raw pointers
 
 ### 3. Control Structures (See: `lullaby_control_structures.md`)
 
@@ -129,18 +139,12 @@ continue  // Skip remaining statements in iteration
 
 Pragmatic type system for systems programming:
 
-- **Zero-cost abstractions**: Types compile away at runtime
-- **Union types**: Single type can hold multiple representations
-- **Pattern matching**: Declarative value decomposition
-- **Type inference**: Automatic type detection from usage
+- **Static typing with inference**: Types are checked at compile time; local-binding annotations are inferred where the initializer type is unambiguous.
+- **Nominal structs and enums**: `struct` records and `enum` tagged unions, decomposed with exhaustive `match`.
+- **Generics and traits**: Generic functions with call-site inference, `trait`/`impl`, and trait bounds on type parameters.
+- **Built-in generic enums**: `option<T>` and `result<T, E>` with the postfix `?` operator.
 
-**Core Types**:
-```lullaby
-type Integer is num  int, uint
-type Float is num  float, double
-type Bool is bool  false, true
-type Text is str  string, char
-```
+**Core scalar types** (current): `i64`, `f64`, `bool`, `char`, `byte`, `string`, `void`. Wider integer widths (`i8`–`u64`, `usize`/`isize`) and `f32` are on the roadmap.
 
 ### 5. I/O and Concurrency (See: `lullaby_input_output.md`)
 
@@ -184,12 +188,16 @@ none  // Represents absence of value
 
 ### Operators
 
-**Arithmetic**: `+ - * / % ^ //`
-**Comparison**: `== != < > <= >= is_none is_defined`
-**Logical**: `and or not`; `xor` is planned.
-**Assignment**: `+= -= *= /= ^= +=` (compound operators)
-**Bitwise**: `& | ^ << >> inv(x)`
-**Functional**: `map reduce fold select min max avg sum mode`
+Implemented today:
+
+**Arithmetic**: `+ - * /` (there is no `%` operator; use an integer-remainder helper)
+**Comparison**: `== != < > <= >=` (equality requires matching operand types; ordering is on numeric/char/byte operands)
+**Logical**: `and or not` (short-circuiting)
+**Assignment**: `= += -= *= /=` (compound operators on numeric locals)
+**Bitwise**: `& | ^ ~ << >>`, plus bit intrinsics `rotate_left`/`rotate_right`/`count_ones`/`leading_zeros`/`trailing_zeros`/`reverse_bytes`
+**Error propagation**: postfix `?` on `option`/`result`
+
+Planned: a `%`/modulo operator, `xor`, `^=`, and closure-based functional helpers (`map`/`reduce`/`filter`). `min`/`max`/`sum`-style helpers exist as math/collection builtins — see [standard_library.md](standard_library.md).
 
 ### Control Flow
 ```lullaby
@@ -222,34 +230,35 @@ fn side_effect message string -> void
 ```
 
 ### Structs and Objects
+Structs are implemented as nominal records with indentation-only `name type` fields, positional and named construction, `.` field access and mutation, and UFCS methods (a `p.norm2()` call desugars to `norm2(p)`):
 ```lullaby
-struct Type
-    field1: type1  // Explicit typing
-    field2        // Inferred typing
-    method(params): return_type:
-        code
+struct Point
+    x i64
+    y i64
 
-ptr_type = new Type()   // Pointer creation
-ref_ref = ref(ptr_type) // Reference copy
+fn norm2 p Point -> i64
+    p.x * p.x + p.y * p.y
 
-type_instance = Type(field1: value1, field2: value2)  // Direct construction
+fn main -> i64
+    let a Point = Point(3, 4)                  // positional
+    let b Point = Point(y: 4, x: 3)            // named, any order
+    a.norm2() + b.x                            // UFCS method + field access
 ```
+See [struct_design.md](struct_design.md) for the full struct model.
 
 ### Collections
+Fixed arrays, growable `list<T>`, and `map<K, V>` are implemented today:
 ```lullaby
 let values array<i64> = [1, 2, 3]
-values[0]
+values[0]              // bounds-checked indexing
 
-# Planned collection helpers:
-map[key] = [key_value_pairs]
+let l list<i64> = list_new()
+l = push(l, 10)        // push/get/set/pop/len, reverse/concat/slice, sort
 
-len(collection)      // Length check
-index(collection, i) // Element access
-slice(arr, start, end)  // Range extraction
-contains(coll, item)  // Membership test
-sort(coll)           // Ordering
-filter(coll, pred)   // Selective collection
+let m map<string, i64> = map_new()
+m = map_set(m, "a", 1) // map_get -> option<V>, map_has/map_len/map_del, map_keys/map_values
 ```
+See [standard_library.md](standard_library.md) for the full collection builtin catalog. A closure-based `filter` awaits capturing closures.
 
 ### Memory Operations
 ```lullaby
@@ -300,26 +309,26 @@ mm_data = mm_file.data_pointer
 ```
 
 ### Concurrency Primitives
+Implemented today (see [concurrency_design.md](concurrency_design.md)):
 ```lullaby
-thread func = spawn_thread(func, args)
-result = wait(thread)
+# Threads + i64 channels
+let ch Chan = chan_new()
+let t Task = spawn(worker, ch)   # worker sends into ch
+task_join(t)
+let v i64 = recv(ch)             # also try_recv
 
-mutex sync = create_mutex()
-lock(sync)
-    protected_code
-end_lock
+# Shared mutex
+let m Mutex = mutex_new()
+mutex_add(m, 1)                  # mutex_get/mutex_set
 
-async def async_func(params):
-    result = await operation()
-    return result
+# Atomics (SeqCst)
+let a Atomic = atomic_new(0)
+atomic_add(a, 1)                 # atomic_load/store/swap/cas/sub/and/or/xor
 
-tasks = []
-for param in params:
-    task = spawn_task(async_func, param)
-    tasks.append(task)
-
-results = await_all(tasks)
+# Data parallelism (scoped threads)
+let out list<i64> = parallel_map(square, inputs)
 ```
+`async fn`/`await`/`Future<T>` also run on the interpreter backends. Generic channels, `select`, and cross-thread socket sharing are on the roadmap.
 
 ## Design Principles Summary
 
@@ -361,25 +370,7 @@ results = await_all(tasks)
 
 ## Implementation Roadmap
 
-1. **Phase 1**: Core language specification and compiler design
-   - Grammar definition
-   - Type system specification
-   - Compiler frontend (parsing, semantic analysis)
-
-2. **Phase 2**: Runtime infrastructure development
-   - Memory allocator implementation
-   - Virtual machine design
-   - JIT/AOT compilation strategies
-
-3. **Phase 3**: Standard library creation
-   - Basic I/O operations
-   - Concurrency primitives
-   - Data structure implementations
-
-4. **Phase 4**: Systems programming toolkit
-   - OS development templates
-   - Hardware abstraction layer
-   - Performance optimization guides
+The frontend (grammar, type system, semantic analysis), the runtime/VM, the standard-library builtins, the concurrency primitives, and the core data structures are already implemented and running across the backends described above. The remaining road to 1.0 — completing the spanning primitive set (wider numerics, FFI breadth, the WASM heap phase, raw-memory completeness) and making the toolchain easy to install everywhere — is planned in detail in [roadmap_1_0.md](roadmap_1_0.md). Granular tracking lives in the ClickUp `Lullaby` folder.
 
 ## Getting Started Examples
 
@@ -449,14 +440,19 @@ fn main -> i64
     values[2]
 ```
 
-## Future Extensions (Planned Features)
+## Already Delivered From The Original Roadmap
 
-- **Generative AI Integration**: Built-in model training and inference APIs
-- **WebAssembly Target**: Native WASM compilation for browser deployment
-- **SQL Query Language**: Embedded database query syntax
-- **DSL Support**: Domain-specific language embedding capabilities
-- **Testing Framework**: Assertion-based testing primitives
-- **Profiling Tools**: Performance analysis and optimization hints
+Several items once listed as future work are now implemented:
+
+- **WebAssembly target**: a WASM backend compiles the scalar subset plus heap types to `.wasm` with JS/DOM host imports.
+- **Native code generation**: an x86-64 backend emits COFF objects and links Windows executables, with a freestanding/no-std mode and inline assembly.
+- **Testing framework**: the `assert` builtin plus the `lullaby test` runner (`test_*` functions with pass/fail reporting).
+
+## Future Extensions (Genuinely Planned)
+
+- **Wider numeric lattice and FFI breadth**: full integer widths, `f32`, and broader C-ABI interop.
+- **Generic user types, trait objects (`dyn`), and capturing closures**.
+- **DSL / embedding support** and **profiling/optimization tooling**.
 
 ## Conclusion
 
@@ -465,5 +461,5 @@ Lullaby represents a fresh approach to systems programming, combining the perfor
 This specification provides the foundation for both human developers building complex systems programs and AI models generating correct, optimized code. The minimalist design philosophy ensures that as LLM capabilities improve, Lullaby will continue to benefit from more sophisticated generation while maintaining its core advantages of simplicity and efficiency.
 
 ---
-**Language Version**: 1.0 (Alpha Specification)
-**Design Goals Achieved**: Minimalism yes | Token Efficiency yes | LLM-Friendly yes | Type Safety yes | Uniqueness yes | Systems Programming yes
+**Status**: In active development toward 1.0 (1.0 not yet released). See [roadmap_1_0.md](roadmap_1_0.md) for scope and order.
+**Design Goals**: Minimalism | Token Efficiency | LLM-Friendly | Type Safety | Memory Safety | Systems Programming

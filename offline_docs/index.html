@@ -239,7 +239,7 @@
   <header>
     <div class="top">
       <h1>Lullaby</h1>
-      <p class="tagline">Offline documentation for the current Lullaby alpha: a compiled systems language prototype with concise indentation-only syntax, strong typing, and an executable Rust-based frontend/runtime.</p>
+      <p class="tagline">Offline documentation for the current state of Lullaby: a compiled systems language in active development toward 1.0, with concise indentation-only syntax, strong typing, and an executable Rust-based frontend, runtime, and backends.</p>
     </div>
   </header>
 
@@ -277,8 +277,8 @@
     <main>
       <section id="overview">
         <h2>Overview</h2>
-        <p>Lullaby is implemented in Rust. The current alpha focuses on a clear, testable compiler frontend plus AST, IR, and initial bytecode execution paths before native code generation.</p>
-        <p>The Alpha 1 language surface is frozen in <code>documents/alpha1_language_surface.md</code>. Broader Markdown design docs are planned material unless the feature appears in that file or on this page.</p>
+        <p>Lullaby is implemented in Rust and in active development toward 1.0. It runs today through a clear, testable compiler frontend plus AST, typed IR, and instruction-bytecode execution paths, a scalar-subset WebAssembly backend, and an i64-scalar native x86-64 backend.</p>
+        <p>The currently implemented language surface is recorded in <code>documents/alpha1_language_surface.md</code>. Anything documented on this page is accepted by the compiler; features only in the broader Markdown design docs are planned material unless they appear here.</p>
         <div class="status-grid">
           <div class="status-item"><strong>Extension</strong><code>.lby</code> is the canonical source file extension.</div>
           <div class="status-item"><strong>Blocks</strong>Indentation defines scope. Curly braces are rejected.</div>
@@ -308,7 +308,7 @@
 cargo run -p lullaby_cli -- build --optimize alpha -o hello-build.lbc hello.lby
 cargo run -p lullaby_cli -- inspect hello.lbc
 cargo run -p lullaby_cli -- run hello.lbc</code></pre>
-        <p>During development, the CLI is available through Cargo. The Alpha 1 portable package builds a direct <code>bin\lullaby.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, ships user-facing examples such as <code>examples\valid\calculator.lby</code>, emits <code>lullaby-alpha1-windows-x64.zip.sha256</code>, and supports <code>lullaby docs</code> and <code>lullaby examples</code> to locate local resources. The cross-platform package driver also prepares <code>install.sh</code> and <code>uninstall.sh</code> for Linux/macOS portable archives after those targets are validated.</p>
+        <p>During development, the CLI is available through Cargo. The Windows portable package builds a direct <code>bin\lullaby.exe</code> command, bundles <code>docs\index.html</code>, includes <code>install.cmd</code> and <code>uninstall.cmd</code> for optional user PATH setup, ships user-facing examples such as <code>examples\valid\calculator.lby</code>, emits <code>lullaby-alpha1-windows-x64.zip.sha256</code>, and supports <code>lullaby docs</code> and <code>lullaby examples</code> to locate local resources. The cross-platform package driver also prepares <code>install.sh</code> and <code>uninstall.sh</code> for Linux/macOS portable archives after those targets are validated.</p>
       </section>
 
       <section id="source-files">
@@ -427,19 +427,19 @@ fn main -> i64
     total *= 42
     total</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_count_assignment.lby</code>.</p>
-        <p>Numeric literals may use <code>_</code> as a digit separator between digits for readability &mdash; <code>1_000_000</code> and <code>3.141_592</code> &mdash; which does not change the value. A leading, trailing, doubled, or <code>.</code>-adjacent underscore is a malformed-literal parse error, and <code>lullaby fmt</code> renders literals without separators.</p>
+        <p>Numeric literals may use <code>_</code> as a digit separator between digits for readability &mdash; <code>1_000_000</code> and <code>3.141_592</code> &mdash; which does not change the value. A leading, trailing, doubled, or <code>.</code>-adjacent underscore is a malformed-literal parse error, and <code>lullaby fmt</code> renders literals without separators. Integers may also be written in hexadecimal (<code>0xFF</code>), binary (<code>0b1010</code>), or octal (<code>0o17</code>), with the same digit-separator rules; a base-prefixed literal is integer-only and an empty, out-of-radix, or fractional form is a parse error.</p>
       </section>
 
       <section id="arrays">
         <h2>Arrays</h2>
-        <p>The alpha supports homogeneous arrays with <code>array&lt;T&gt;</code> type spelling, non-empty array literals, and bounds-checked indexing.</p>
+        <p>Lullaby supports homogeneous arrays with <code>array&lt;T&gt;</code> type spelling, non-empty array literals, and bounds-checked indexing.</p>
         <pre data-fixture="tests/fixtures/valid/run_array.lby" data-mode="run"><code>fn main -> i64
     let values array&lt;i64&gt; = [2, 4, 6]
     values[2]</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_array.lby</code>.</p>
         <ul>
           <li>Array literal values must all have the same static type.</li>
-          <li>Empty array literals are not accepted yet because empty-array inference is not implemented.</li>
+          <li>Empty array literals are not accepted yet because empty-array inference is not implemented (use <code>list&lt;T&gt;</code> for growable, initially empty collections).</li>
           <li>Index expressions require an <code>i64</code> index.</li>
           <li>Out-of-bounds indexes are runtime errors.</li>
         </ul>
@@ -454,12 +454,138 @@ fn main -> i64
 
       <section id="char-byte">
         <h2>Char And Byte</h2>
-        <p>The alpha adds two scalar types beyond the numeric ones. A <code>char</code> is a single Unicode scalar written with single quotes (<code>'a'</code>); a char literal must hold exactly one character (an empty, multi-character, or unterminated literal is lexer error <code>L0105</code>). A <code>byte</code> is an 8-bit unsigned integer (0&ndash;255) with no literal form. Both compare with <code>==</code>/<code>!=</code> and order with <code>&lt;</code>/<code>&lt;=</code>/<code>&gt;</code>/<code>&gt;=</code> &mdash; chars by code point, bytes numerically.</p>
+        <p>Lullaby adds two scalar types beyond the numeric ones. A <code>char</code> is a single Unicode scalar written with single quotes (<code>'a'</code>); a char literal must hold exactly one character (an empty, multi-character, or unterminated literal is lexer error <code>L0105</code>). A <code>byte</code> is an 8-bit unsigned integer (0&ndash;255) with no literal form. Both compare with <code>==</code>/<code>!=</code> and order with <code>&lt;</code>/<code>&lt;=</code>/<code>&gt;</code>/<code>&gt;=</code> &mdash; chars by code point, bytes numerically.</p>
         <ul>
           <li><code>char_code(c char)</code> returns the Unicode scalar value as <code>i64</code>; <code>char_from(i i64)</code> returns the <code>char</code> for a scalar value (runtime error on an invalid scalar).</li>
+          <li>Character classification predicates return <code>bool</code>: <code>is_digit</code> (ASCII <code>0</code>&ndash;<code>9</code>), <code>is_alpha</code>, <code>is_alnum</code>, <code>is_whitespace</code>, <code>is_upper</code>, and <code>is_lower</code> — useful for writing tokenizers and parsers in Lullaby.</li>
           <li><code>byte(i i64)</code> returns a <code>byte</code> (runtime error outside 0&ndash;255); <code>byte_val(b byte)</code> returns its <code>i64</code> value.</li>
-          <li><code>to_string(x)</code> also accepts a <code>char</code> or a <code>byte</code>. Wrong argument types or arities to these builtins report <code>L0389</code>. No byte arithmetic is implemented for Alpha 1, and other sized integer types (<code>i32</code>, <code>u32</code>, &hellip;) remain planned.</li>
+          <li><code>to_string(x)</code> renders any scalar — the whole numeric lattice (<code>i64</code>/<code>f64</code>/<code>i8</code>&hellip;<code>usize</code>/<code>f32</code>), <code>bool</code>, <code>string</code>, <code>char</code>, or <code>byte</code>. Wrong argument types or arities to these builtins report <code>L0389</code>.</li>
         </ul>
+        <h3>Fixed-width integers</h3>
+        <p>Beyond the default <code>i64</code>, Lullaby has the fixed-width integer types <code>i8</code>, <code>i16</code>, <code>i32</code>, <code>u16</code>, <code>u32</code>, <code>u64</code>, and the pointer-sized <code>isize</code>/<code>usize</code> (64-bit on the current targets). There is <strong>no implicit numeric coercion</strong>: a fixed-width integer never mixes with an <code>i64</code> or a different width in one arithmetic or comparison expression (mixing widths is an <code>L0307</code> type error). Convert explicitly:</p>
+        <ul>
+          <li><code>to_i8</code>/<code>to_i16</code>/<code>to_i32</code>/<code>to_u16</code>/<code>to_u32</code>/<code>to_u64</code>/<code>to_isize</code>/<code>to_usize</code> reinterpret an <code>i64</code> into that width, truncating to the width's low bits (the wrapping conversion).</li>
+          <li><code>to_i64(x)</code> widens any fixed-width integer back to <code>i64</code>; the bit pattern is reinterpreted, so a <code>u64</code> above <code>i64::MAX</code> reads as a negative <code>i64</code>.</li>
+        </ul>
+        <p>Arithmetic (<code>+ - * /</code>) on a fixed-width integer <strong>wraps</strong> modulo the type width — total and deterministic, never a trap — and division and comparison respect signedness. The same bit pattern reads as a large magnitude for an unsigned type but a negative value for a signed one: <code>to_u32(0 - 1)</code> is <code>4294967295</code>, while <code>to_i32(0 - 1)</code> is <code>-1</code>, and <code>to_u64(0 - 1) / to_u64(2)</code> divides on the unsigned magnitude. Every backend normalizes at the same points, so results agree bit-for-bit.</p>
+        <h3>Typed numeric-literal suffixes</h3>
+        <p>A numeric literal can pin its type directly with a suffix instead of calling a conversion: <code>100i32</code>, <code>4000000000u32</code>, <code>0xFFu16</code>, <code>120i8</code>, <code>2.5f32</code>. The <code>i64</code>/<code>f64</code> suffixes are the defaults. The literal is <strong>range-checked at parse time</strong> — <code>256i8</code> and <code>100000u16</code> are rejected, and a decimal point with an integer suffix (<code>1.5i32</code>) is an error. A <code>u64</code>/<code>usize</code> literal is writable up to <code>i64::MAX</code>; larger (still valid) values are built with <code>to_u64</code>. A suffix never applies to a base-prefixed float form: <code>0xABF32</code> is the hex integer <code>0xABF32</code>, not <code>0xAB</code> with an <code>f32</code> suffix.</p>
+        <pre data-fixture="tests/fixtures/valid/run_typed_literals.lby" data-mode="run"><code># Typed numeric-literal suffixes: a suffix pins a literal to a fixed-width type
+# directly (range-checked at parse time), desugaring to the matching to_<T>
+# conversion. Deterministic i64 (4000000519) on the AST, IR, and bytecode
+# backends.
+fn main -> i64
+    let a i32 = 100i32
+    let b u32 = 4000000000u32
+    let c i8 = 120i8
+    let d u16 = 0xFFu16
+    let f i64 = 42i64
+
+    # A large u64 literal (writable up to i64::MAX).
+    let g u64 = 9000000000000000000u64
+    let g_flag i64 = 0
+    if g &gt; to_u64(0)
+        g_flag = 1
+
+    # f32 suffix on a decimal literal.
+    let e f32 = 2.5f32
+    let e_flag i64 = 0
+    if e &gt; to_f32(2.0)
+        e_flag = 1
+
+    # 100 + 4000000000 + 120 + 255 + 42 + 1 + 1 = 4000000519
+    to_i64(a) + to_i64(b) + to_i64(c) + to_i64(d) + f + g_flag + e_flag</code></pre>
+        <h3>Overflow-aware integer arithmetic</h3>
+        <p>The <code>+ - *</code> operators on a fixed-width integer wrap by default. When wrapping is wrong, these builtins give explicit control. Each takes two operands of the <strong>same</strong> fixed-width type <code>T</code> (not <code>i64</code>, whose default arithmetic already traps on overflow):</p>
+        <ul>
+          <li><code>checked_add</code>/<code>checked_sub</code>/<code>checked_mul</code> return <code>option&lt;T&gt;</code> — <code>none</code> on overflow.</li>
+          <li><code>saturating_add</code>/<code>saturating_sub</code>/<code>saturating_mul</code> return <code>T</code>, clamped to <code>T</code>'s bounds.</li>
+          <li><code>wrapping_add</code>/<code>wrapping_sub</code>/<code>wrapping_mul</code> return <code>T</code>, wrapping modulo the width (the explicit form of the default).</li>
+        </ul>
+        <pre data-fixture="tests/fixtures/valid/run_overflow_arith.lby" data-mode="run"><code># Overflow-aware fixed-width arithmetic: checked_* (option<T>, none on
+# overflow), saturating_* (clamp to bounds), and wrapping_* (wrap modulo width).
+# Deterministic i64 (4294967541) on the AST, IR, and bytecode backends.
+
+# checked_add on i8, unwrapping the option<i8> to i64 or a fallback.
+fn checked_i8_or m i8 n i8 fallback i64 -> i64
+    match checked_add(m, n)
+        some(v) -> to_i64(v)
+        none -> fallback
+
+fn main -> i64
+    # 127 + 1 overflows i8 -> none -> -1
+    let a i64 = checked_i8_or(to_i8(127), to_i8(1), 0 - 1)
+    # 100 + 20 stays in range -> some(120)
+    let b i64 = checked_i8_or(to_i8(100), to_i8(20), 0 - 1)
+
+    # saturating_add clamps to i8::MAX (127 + 100 -> 127)
+    let c i8 = saturating_add(to_i8(127), to_i8(100))
+
+    # saturating_mul clamps to u32::MAX (100000 * 100000 -> 4294967295)
+    let d u32 = saturating_mul(to_u32(100000), to_u32(100000))
+
+    # wrapping_add wraps u32 (u32::MAX + 1 -> 0)
+    let e u32 = wrapping_add(to_u32(4294967295), to_u32(1))
+
+    # -1 + 120 + 127 + 4294967295 + 0 = 4294967541
+    a + b + to_i64(c) + to_i64(d) + to_i64(e)</code></pre>
+        <h3>32-bit floats</h3>
+        <p>Alongside the default <code>f64</code>, Lullaby has the single-precision float <code>f32</code>. As with the integer widths, an <code>f32</code> never mixes with an <code>f64</code> in one arithmetic or comparison expression (mixing is an <code>L0307</code> type error): <code>to_f32(x f64)</code> rounds an <code>f64</code> to single precision and <code>to_f64(x f32)</code> widens back exactly. Every <code>f32</code> operation is rounded to <code>f32</code> precision, so it loses resolution an <code>f64</code> keeps — <code>2^24 + 1</code> rounds back to <code>2^24</code> in <code>f32</code> but is exact in <code>f64</code>.</p>
+        <pre data-fixture="tests/fixtures/valid/run_f32.lby" data-mode="run"><code># 32-bit floats: f32 arithmetic rounds to single precision, so it loses
+# resolution an f64 keeps. 2^24 is the largest integer with a unique f32; adding
+# 1 rounds back to 2^24 in f32 but is exact in f64. Deterministic i64 (3) on the
+# AST, IR, and bytecode backends.
+fn main -> i64
+    let total i64 = 0
+
+    # f32 cannot represent 2^24 + 1, so the increment rounds away.
+    let big f32 = to_f32(16777216.0)
+    let bumped f32 = big + to_f32(1.0)
+    if bumped == big
+        total = total + 1
+
+    # f64 keeps the extra bit of precision.
+    let big64 f64 = 16777216.0
+    if big64 + 1.0 &gt; big64
+        total = total + 1
+
+    # Basic f32 arithmetic and comparison, plus a round-trip widening to f64.
+    let half f32 = to_f32(1.0) / to_f32(2.0)
+    if to_f64(half) &lt; 1.0
+        total = total + 1
+
+    total</code></pre>
+        <pre data-fixture="tests/fixtures/valid/run_int_widths.lby" data-mode="run"><code># Fixed-width integer lattice (i32/u32): wrapping arithmetic, signed vs
+# unsigned comparison, and conversions to/from i64. Every operation is
+# width-normalized identically on the AST, IR, and bytecode backends, so this
+# returns a fixed i64.
+fn main -> i64
+    # u32 subtraction wraps: 0 - 1 => 4294967295
+    let a u32 = to_u32(0)
+    let b u32 = to_u32(1)
+    let wrapped i64 = to_i64(a - b)
+
+    # i32 addition wraps at its max: 2147483647 + 1 => -2147483648
+    let big i32 = to_i32(2147483647)
+    let one i32 = to_i32(1)
+    let overflow i64 = to_i64(big + one)
+
+    # u32 multiplication wraps: 65536 * 65536 = 2^32 => 0
+    let m u32 = to_u32(65536)
+    let squared i64 = to_i64(m * m)
+
+    # Same bit pattern (-1) reads as a huge u32 but a signed i32.
+    let u_neg u32 = to_u32(0 - 1)
+    let s_neg i32 = to_i32(0 - 1)
+    let unsigned_big i64 = 0
+    if u_neg &gt; to_u32(5)
+        unsigned_big = 1
+    let signed_small i64 = 0
+    if s_neg &lt; to_i32(5)
+        signed_small = 1
+
+    # 4294967295 + (-2147483648) + 0 + 1 + 1 => 2147483649
+    wrapped + overflow + squared + unsigned_big + signed_small</code></pre>
         <pre data-fixture="tests/fixtures/valid/run_char_byte.lby" data-mode="run"><code>fn main -> i64
     let a char = 'A'
     let b char = char_from(char_code(a) + 1)
@@ -552,6 +678,7 @@ fn main -&gt; i64
           <li>Type spelling reuses the generic form with a comma-separated argument list: <code>option&lt;i64&gt;</code>, <code>result&lt;i64, string&gt;</code>, <code>option&lt;array&lt;i64&gt;&gt;</code>.</li>
           <li>Building <code>none</code>/<code>ok</code>/<code>err</code> takes its type from context — a <code>let</code> annotation, a function return type, a <code>match</code> scrutinee, or a call argument's parameter type (so <code>describe(ok(5))</code> and <code>f(none)</code> infer without a separate annotated <code>let</code>). Without any such context it reports <code>L0386</code>; a payload whose type disagrees with the annotation reports <code>L0303</code>.</li>
           <li><code>match</code> over an <code>option&lt;U&gt;</code> covers <code>some</code> + <code>none</code> (or <code>_</code>); over a <code>result&lt;T, E&gt;</code> it covers <code>ok</code> + <code>err</code> (or <code>_</code>), reusing <code>L0384</code>/<code>L0385</code>.</li>
+          <li>The postfix <code>?</code> operator propagates errors: <code>expr?</code> evaluates to the payload on <code>ok</code>/<code>some</code> and otherwise returns <code>err(e)</code>/<code>none</code> from the enclosing function. The enclosing function must return a compatible <code>result&lt;U, E&gt;</code> (same <code>E</code>) or <code>option&lt;U&gt;</code>; misuse reports <code>L0427</code>/<code>L0428</code>/<code>L0429</code>. It desugars to a <code>match</code> with an early return, so it behaves identically on every backend.</li>
           <li><code>option</code>/<code>result</code> construct and match identically across the AST, IR, and bytecode backends, including under optimization.</li>
         </ul>
         <h3>Growable lists (<code>list&lt;T&gt;</code>)</h3>
@@ -577,6 +704,7 @@ fn main -&gt; i64
           <li><code>list&lt;T&gt;</code> is a growable, value-semantic list. Its "mutating" builtins are functional and return a new list, so the idiom is <code>l = push(l, x)</code>.</li>
           <li><code>list_new()</code> builds an empty list and takes its element type from the expected <code>list&lt;...&gt;</code> type (a <code>let</code> annotation, a function return type, or a call argument's parameter type — so <code>push(list_new(), byte(65))</code> inside a <code>let list&lt;byte&gt;</code> infers <code>list&lt;byte&gt;</code>); missing that context reports <code>L0387</code>.</li>
           <li><code>push(l, x)</code> appends, <code>get(l, i)</code> reads (bounds-checked, <code>L0413</code>), <code>set(l, i, x)</code> replaces at an index, <code>pop(l)</code> drops the last element, and <code>len(l)</code> returns the <code>i64</code> length. Wrong argument types or arities report <code>L0387</code>.</li>
+          <li><code>reverse(l)</code> returns a new reversed list, <code>concat(a, b)</code> appends two lists of the same element type, and <code>slice(l, start, end)</code> returns the half-open range <code>[start, end)</code> with the bounds clamped into <code>[0, len]</code> (an empty list when <code>start &gt;= end</code>). <code>sort(l)</code> returns a new <code>list&lt;i64&gt;</code> sorted ascending. <code>list_index_of(l, x)</code> returns the index of the first element equal to <code>x</code> (or <code>-1</code>), and <code>list_contains(l, x)</code> returns a <code>bool</code> — the search value must match the element type.</li>
         </ul>
         <h3>Hash maps (<code>map&lt;K, V&gt;</code>)</h3>
         <pre data-fixture="tests/fixtures/valid/run_map.lby" data-mode="run"><code>fn build -&gt; map&lt;string, i64&gt;
@@ -611,7 +739,7 @@ fn main -&gt; i64
         <ul>
           <li><code>map&lt;K, V&gt;</code> is an insertion-ordered, value-semantic hash map with keys restricted to <code>i64</code> or <code>string</code>. Its "mutating" builtins are functional and return a new map, so the idiom is <code>m = map_set(m, k, v)</code>.</li>
           <li><code>map_new()</code> builds an empty map and takes its key/value types from the expected <code>map&lt;...&gt;</code> type (a <code>let</code> annotation, a function return type, or a call argument's parameter type — so <code>map_set(map_new(), "x", 7)</code> inside a <code>let map&lt;string, i64&gt;</code> infers <code>map&lt;string, i64&gt;</code>); missing that context, an unsupported key type, or a wrong argument reports <code>L0388</code>.</li>
-          <li><code>map_get(m, k)</code> returns <code>option&lt;V&gt;</code> (<code>some(v)</code> or <code>none</code>), <code>map_has(m, k)</code> returns a <code>bool</code>, <code>map_len(m)</code> returns the <code>i64</code> entry count, and <code>map_del(m, k)</code> removes a key. Reads are unwrapped with <code>match</code>.</li>
+          <li><code>map_get(m, k)</code> returns <code>option&lt;V&gt;</code> (<code>some(v)</code> or <code>none</code>), <code>map_has(m, k)</code> returns a <code>bool</code>, <code>map_len(m)</code> returns the <code>i64</code> entry count, and <code>map_del(m, k)</code> removes a key. <code>map_keys(m)</code> and <code>map_values(m)</code> return the keys and values as a <code>list&lt;K&gt;</code> / <code>list&lt;V&gt;</code> in insertion order (so a map can be iterated). Reads are unwrapped with <code>match</code>.</li>
         </ul>
       </section>
 
@@ -665,6 +793,7 @@ fn main -&gt; i64
       <section id="concurrency">
         <h2>Concurrency</h2>
         <p><code>parallel_map(f fn(i64) -&gt; i64, args list&lt;i64&gt;) -&gt; list&lt;i64&gt;</code> evaluates <code>f(arg)</code> for every element of <code>args</code> concurrently on separate OS threads and returns the results in the <strong>same order as <code>args</code></strong>, so the output is deterministic regardless of thread scheduling. Each thread builds a fresh interpreter over the shared program, so heaps are per-thread with no shared mutable state and no locking; <code>f</code> must be an ordinary top-level <code>fn(i64) -&gt; i64</code>. It runs identically on the AST, IR, and bytecode backends. Wrong arity, a non-<code>fn(i64) -&gt; i64</code> first argument, or a non-<code>list&lt;i64&gt;</code> second argument report <code>L0334</code>.</p>
+        <p><strong>Atomics.</strong> <code>atomic_i64</code> is a shared, thread-safe 64-bit counter created with <code>atomic_new(v i64) -&gt; atomic_i64</code>. All operations use sequentially-consistent ordering: <code>atomic_load(a) -&gt; i64</code>, <code>atomic_store(a, v)</code>, <code>atomic_swap(a, v) -&gt; i64</code> (returns the previous value), <code>atomic_cas(a, expected, new) -&gt; i64</code> (strong compare-and-swap, returns the value found), and the fetch-and-op family <code>atomic_add</code>/<code>atomic_sub</code>/<code>atomic_and</code>/<code>atomic_or</code>/<code>atomic_xor</code> (each returns the previous value). The handle is shared across threads, so concurrent updates never lose writes. Weaker memory orderings are a planned optimization.</p>
         <pre data-fixture="tests/fixtures/valid/run_parallel.lby" data-mode="run"><code>fn sq x i64 -> i64
     x * x
 
@@ -795,11 +924,12 @@ fn main -> i64
 
       <section id="boolean-logic">
         <h2>Boolean Logic</h2>
-        <p>The alpha supports boolean logic with <code>and</code>, <code>or</code>, and unary <code>not</code>. Logical operands must be <code>bool</code>, and <code>and</code>/<code>or</code> short-circuit during runtime execution.</p>
+        <p>Lullaby supports boolean logic with <code>and</code>, <code>or</code>, and unary <code>not</code>. Logical operands must be <code>bool</code>, and <code>and</code>/<code>or</code> short-circuit during runtime execution.</p>
         <pre data-fixture="tests/fixtures/valid/run_logic.lby" data-mode="run"><code>fn main -> bool
     not false and true or false</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_logic.lby</code>.</p>
         <p>Logical expressions can be used anywhere a <code>bool</code> is required, including branch and loop conditions.</p>
+        <p><strong>Bitwise operators</strong> work on <code>i64</code> values: <code>&amp;</code> (and), <code>|</code> (or), <code>^</code> (xor), <code>~</code> (not), <code>&lt;&lt;</code> (shift left), and <code>&gt;&gt;</code> (arithmetic shift right, sign-preserving). Precedence, tightest to loosest, is <code>~</code>, then <code>* /</code>, <code>+ -</code>, <code>&lt;&lt; &gt;&gt;</code>, <code>&amp;</code>, <code>^</code>, <code>|</code>, then comparisons and <code>and</code>/<code>or</code>. The shift amount is masked to its low 6 bits (<code>amount &amp; 63</code>), so shifting by a large or negative amount is total and deterministic — never a panic or error. Both operands must be <code>i64</code>.</p>
         <pre data-fixture="tests/fixtures/valid/docs_ready_logic.lby" data-mode="check"><code>fn ready value i64 enabled bool -> bool
     enabled and value &gt; 0</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_ready_logic.lby</code>.</p>
@@ -813,7 +943,8 @@ fn main -> i64
 
       <section id="math-builtins">
         <h2>Math Builtins</h2>
-        <p>The alpha includes a small, type-directed math library over <code>i64</code> and <code>f64</code>. <code>abs(x)</code> returns the magnitude (<code>i64-&gt;i64</code> or <code>f64-&gt;f64</code>). <code>min(a, b)</code> and <code>max(a, b)</code> take two matching numeric operands and return the smaller or larger. <code>pow(base, exp)</code> raises to a power; the integer form requires <code>exp &gt;= 0</code> (a negative integer exponent is runtime <code>L0417</code>). <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, and <code>round</code> take one <code>f64</code> and return <code>f64</code>. The transcendental builtins also take and return <code>f64</code>: <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>atan</code>, <code>exp</code>, <code>ln</code>, and <code>log10</code> are unary, and <code>atan2(y, x)</code> takes two <code>f64</code>s and returns the angle in radians. A wrong or mismatched operand type reports <code>L0374</code>.</p>
+        <p>Lullaby includes a small, type-directed math library over <code>i64</code> and <code>f64</code>. <code>abs(x)</code> returns the magnitude (<code>i64-&gt;i64</code> or <code>f64-&gt;f64</code>). <code>min(a, b)</code> and <code>max(a, b)</code> take two matching numeric operands and return the smaller or larger. <code>pow(base, exp)</code> raises to a power; the integer form requires <code>exp &gt;= 0</code> (a negative integer exponent is runtime <code>L0417</code>). <code>sqrt</code>, <code>floor</code>, <code>ceil</code>, and <code>round</code> take one <code>f64</code> and return <code>f64</code>. The transcendental builtins also take and return <code>f64</code>: <code>sin</code>, <code>cos</code>, <code>tan</code>, <code>atan</code>, <code>exp</code>, <code>ln</code>, and <code>log10</code> are unary, and <code>atan2(y, x)</code> takes two <code>f64</code>s and returns the angle in radians. A wrong or mismatched operand type reports <code>L0374</code>.</p>
+        <p><strong>Bitwise intrinsics</strong> operate on <code>i64</code>: <code>rotate_left(x, n)</code> / <code>rotate_right(x, n)</code> rotate the 64 bits by <code>n &amp; 63</code> positions; <code>count_ones(x)</code> is the population count; <code>leading_zeros(x)</code> / <code>trailing_zeros(x)</code> count high/low zero bits (0&ndash;64); and <code>reverse_bytes(x)</code> swaps byte order. All are total and deterministic.</p>
         <pre data-fixture="tests/fixtures/valid/docs_math.lby" data-mode="run"><code>fn main -> i64
     let magnitude i64 = abs(0 - 7)
     let smaller i64 = min(magnitude, 4)
@@ -828,7 +959,7 @@ fn main -> i64
 
       <section id="memory-builtins">
         <h2>Memory Builtins</h2>
-        <p>The alpha runtime includes heap-slot builtins. These are an interim executable model while the full region/ARC memory design is still being implemented.</p>
+        <p>Lullaby's runtime includes heap-slot builtins. These are an interim executable model while the full region/ARC memory design is still being implemented.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -851,7 +982,7 @@ fn main -> i64
 
       <section id="io-system">
         <h2>I/O And System Builtins</h2>
-        <p>The alpha runtime includes flat text and binary file I/O builtins, directory operations, and a conservative system command abstraction. All file-system builtins are one-shot: dotted <code>io.*</code> APIs, stateful file handles, seeking, buffered streams, memory mapping, async, and IPC are planned rather than current syntax. TCP/UDP sockets are covered separately under <a href="#networking">Networking</a>.</p>
+        <p>Lullaby's runtime includes flat text and binary file I/O builtins, directory operations, and a conservative system command abstraction. All file-system builtins are one-shot: dotted <code>io.*</code> APIs, stateful file handles, seeking, buffered streams, memory mapping, async, and IPC are planned rather than current syntax. TCP/UDP sockets are covered separately under <a href="#networking">Networking</a>.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -871,8 +1002,16 @@ fn main -> i64
             <tr><td><code>remove_file(path)</code> / <code>remove_dir(path)</code></td><td>Removes a file / an empty directory.</td></tr>
             <tr><td><code>sys_status(program, args)</code></td><td>Runs a program directly with an <code>array&lt;string&gt;</code> argv and returns its exit status.</td></tr>
             <tr><td><code>sys_output(program, args)</code></td><td>Runs a program directly with an <code>array&lt;string&gt;</code> argv and returns stdout.</td></tr>
+            <tr><td><code>proc_spawn(program, args)</code></td><td>Spawns a live child process (captured stdout/stderr) and returns a <code>result&lt;process, string&gt;</code> handle — <code>ok(process)</code> on success, <code>err</code> when the command cannot be launched. Unlike <code>sys_status</code>/<code>sys_output</code>, the child runs concurrently until you <code>proc_wait</code> it.</td></tr>
+            <tr><td><code>proc_wait(p)</code></td><td>Waits for the child to exit and returns <code>result&lt;i64, string&gt;</code> — the exit code (on Unix, a signal-terminated child reports <code>128 + signal</code>).</td></tr>
+            <tr><td><code>proc_stdout(p)</code> / <code>proc_stderr(p)</code></td><td>Returns the child's captured stdout / stderr as <code>result&lt;string, string&gt;</code> after it has been waited on.</td></tr>
+            <tr><td><code>proc_kill(p)</code></td><td>Forcibly terminates the child, returning <code>result&lt;i64, string&gt;</code>.</td></tr>
             <tr><td><code>env(name)</code></td><td>Reads an environment variable, returning <code>option&lt;string&gt;</code> (<code>some(value)</code> when set, <code>none</code> otherwise).</td></tr>
             <tr><td><code>args()</code></td><td>Returns the running program's CLI arguments as a <code>list&lt;string&gt;</code> (empty when none were passed). <code>lullaby run &lt;file.lby&gt; [args...]</code> supplies trailing tokens after the source path.</td></tr>
+            <tr><td><code>mono_now()</code></td><td>A monotonic clock in nanoseconds (<code>i64</code>) since a fixed per-process baseline — non-decreasing, for measuring durations.</td></tr>
+            <tr><td><code>wall_now()</code></td><td>Wall-clock time as milliseconds since the Unix epoch (<code>i64</code>).</td></tr>
+            <tr><td><code>sleep_millis(ms)</code></td><td>Sleeps the current thread for <code>ms</code> (<code>i64</code>) milliseconds; a negative value sleeps zero.</td></tr>
+            <tr><td><code>os_random(len)</code></td><td>Returns <code>len</code> cryptographically-secure random bytes from the OS RNG as <code>result&lt;list&lt;byte&gt;, string&gt;</code> (a real CSPRNG, never seeded). <code>len == 0</code> yields an empty list; <code>len &lt; 0</code> yields <code>err</code> (no panic).</td></tr>
           </tbody>
         </table>
         <pre data-fixture="tests/fixtures/valid/run_file_io.lby" data-mode="run"><code>fn main -> string
@@ -897,7 +1036,7 @@ fn main -> i64
 
       <section id="string-builtins">
         <h2>String Builtins</h2>
-        <p>The alpha runtime includes a small character-indexed string library. All indices are character indices (like <code>len</code> on a <code>string</code>), not byte offsets. Wrong argument types report <code>L0375</code>.</p>
+        <p>Lullaby's runtime includes a small character-indexed string library. All indices are character indices (like <code>len</code> on a <code>string</code>), not byte offsets. Wrong argument types report <code>L0375</code>.</p>
         <table>
           <thead>
             <tr><th>Builtin</th><th>Current behavior</th></tr>
@@ -914,6 +1053,13 @@ fn main -> i64
             <tr><td><code>starts_with(s, prefix)</code></td><td>Returns a <code>bool</code> for whether <code>s</code> begins with <code>prefix</code>.</td></tr>
             <tr><td><code>ends_with(s, suffix)</code></td><td>Returns a <code>bool</code> for whether <code>s</code> ends with <code>suffix</code>.</td></tr>
             <tr><td><code>repeat(s, count)</code></td><td>Returns <code>s</code> concatenated <code>count</code> (<code>i64</code>) times; <code>count &lt;= 0</code> yields the empty string.</td></tr>
+            <tr><td><code>to_bytes(s)</code></td><td>Returns the UTF-8 encoding of <code>s</code> as a <code>list&lt;byte&gt;</code>.</td></tr>
+            <tr><td><code>from_bytes(b)</code></td><td>Decodes a <code>list&lt;byte&gt;</code> as UTF-8, returning <code>result&lt;string, string&gt;</code> — <code>ok(s)</code> on success, <code>err(message)</code> on invalid UTF-8 (no lossy replacement).</td></tr>
+            <tr><td><code>byte_len(s)</code></td><td>Returns the number of UTF-8 <em>bytes</em> in <code>s</code> as an <code>i64</code> (distinct from <code>len</code>, which counts characters).</td></tr>
+            <tr><td><code>parse_i64(s)</code></td><td>Parses <code>s</code> as a base-10 <code>i64</code>, returning <code>result&lt;i64, string&gt;</code> — <code>err</code> on an empty, non-numeric, out-of-range, or whitespace-padded string (no trim). Never panics.</td></tr>
+            <tr><td><code>parse_f64(s)</code></td><td>Parses <code>s</code> as an <code>f64</code>, returning <code>result&lt;f64, string&gt;</code> — <code>err</code> on failure.</td></tr>
+            <tr><td><code>chars(s)</code></td><td>Decomposes a string into its characters (Unicode scalars) in order as a <code>list&lt;char&gt;</code>.</td></tr>
+            <tr><td><code>string_from_chars(cs)</code></td><td>Recomposes a <code>list&lt;char&gt;</code> back into a <code>string</code> (the inverse of <code>chars</code>). With the <code>char</code> predicates, this enables writing tokenizers/parsers in Lullaby.</td></tr>
           </tbody>
         </table>
         <pre data-fixture="tests/fixtures/valid/docs_string.lby" data-mode="run"><code>fn main -> string
@@ -974,7 +1120,7 @@ fn main -> i64
             <tr><td><code>cargo run -p lullaby_cli -- examples</code></td><td>Print the local valid example directory. In the portable package, use <code>bin\lullaby.exe examples</code> or <code>lullaby examples</code> after adding <code>bin</code> to <code>PATH</code>.</td></tr>
             <tr><td><code>cargo run -p lullaby_cli -- check --verbose path/to/file.lby</code></td><td>Print source excerpts, caret markers, root cause, and suggested fix text for diagnostics.</td></tr>
             <tr><td><code>cargo run -p lullaby_cli -- check --format json path/to/file.lby</code></td><td>Print deterministic JSON diagnostics for tools, CI, editors, and LLM agents. <code>--diagnostic-format json</code> is also accepted.</td></tr>
-            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Alpha 1 Windows portable package with <code>bin\lullaby.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid and invalid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, a zip archive, and a SHA-256 checksum file.</td></tr>
+            <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\package_windows_portable.ps1</code></td><td>Build the Windows portable package with <code>bin\lullaby.exe</code>, <code>docs\index.html</code>, <code>RELEASE_NOTES.md</code>, valid and invalid examples, <code>install.cmd</code>, <code>uninstall.cmd</code>, package metadata, any repository license file, a zip archive, and a SHA-256 checksum file.</td></tr>
             <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\verify_release.ps1</code></td><td>Run the full release gate and smoke-test the packaged toolchain, including <code>lullaby inspect</code>, <code>lullaby examples</code>, invalid example diagnostics, checksum verification, and dry-run PATH helper scripts.</td></tr>
             <tr><td><code>powershell -ExecutionPolicy Bypass -File scripts\publish_github_release.ps1</code></td><td>Verify the package, tag the current commit, and create a GitHub prerelease with the zip and checksum assets.</td></tr>
           </tbody>
@@ -1040,12 +1186,12 @@ Suggested fix:
             <tr><td><code>L0102</code></td><td>Curly braces are forbidden as block delimiters.</td></tr>
             <tr><td><code>L0103</code></td><td>Semicolons are forbidden as statement terminators.</td></tr>
             <tr><td><code>L0105</code></td><td>Invalid char literal: a <code>'...'</code> literal was empty, held more than one character, or was never closed.</td></tr>
-            <tr><td><code>L0211</code></td><td>Planned syntax such as imports, modules, pattern matching (<code>match</code>), or unions is not supported in Alpha 1.</td></tr>
+            <tr><td><code>L0211</code></td><td>A still-reserved keyword is not yet supported. <code>import</code>, modules via <code>pub</code>, <code>struct</code>, <code>enum</code>, <code>match</code>, and <code>try</code>/<code>catch</code> are now implemented; this rejects only genuinely not-yet-implemented keywords such as <code>module</code>, <code>package</code>, <code>union</code>, <code>interface</code>, <code>class</code>, <code>switch</code>, and <code>coroutine</code>.</td></tr>
             <tr><td><code>L0208</code></td><td>Parser expected an assignment operator.</td></tr>
             <tr><td><code>L0301+</code></td><td>Semantic errors such as unknown names, type mismatch, invalid returns, or invalid loop control.</td></tr>
             <tr><td><code>L0324</code></td><td>Array literal values do not all have the same type.</td></tr>
             <tr><td><code>L0326</code></td><td>Array index expression is not <code>i64</code>.</td></tr>
-            <tr><td><code>L0327</code></td><td>Ordering comparison operands are not both the same orderable scalar (<code>i64</code>, <code>f64</code>, <code>char</code>, or <code>byte</code>).</td></tr>
+            <tr><td><code>L0327</code></td><td>Ordering comparison operands are not both the same orderable scalar (<code>i64</code>, <code>f64</code>, <code>i32</code>, <code>u32</code>, <code>char</code>, or <code>byte</code>).</td></tr>
             <tr><td><code>L0328</code></td><td><code>store</code> value type does not match the pointer element type.</td></tr>
             <tr><td><code>L0329</code></td><td>Executable source passed to <code>compile</code>, <code>build</code>, or source <code>run</code> is missing zero-argument <code>main</code>.</td></tr>
             <tr><td><code>L0332</code></td><td>Process builtin argument type or arity mismatch: <code>env</code> needs one <code>string</code> and <code>args()</code> takes no arguments.</td></tr>
@@ -1094,15 +1240,16 @@ Suggested fix:
       <section id="limitations">
         <h2>Current Limitations</h2>
         <div class="note">
-          <p>This page documents the current executable alpha. Planned syntax and systems features in the broader Markdown specs may not be accepted by the compiler yet.</p>
+          <p>This page documents the currently implemented language. Lullaby is in active development toward 1.0, so some systems features described in the broader Markdown specs are still planned and may not be accepted by the compiler yet.</p>
         </div>
         <ul>
-          <li>No native code generation yet. Execution currently supports AST, typed IR, an instruction-bytecode backend, and versioned <code>.lbc</code> bytecode artifacts. The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
-          <li>Typed IR now reports Alpha 1 memory operations and bounds-checked indexing with sequence and safety metadata for backend work, and version 5 <code>.lbc</code> artifacts preserve that metadata in <code>memory_operations</code>. The full region memory model, ARC/reference counting, cleanup insertion, and lifetime analysis are pending.</li>
-          <li>The type system currently covers the alpha scalar, array, call, local binding, assignment, control-flow, and interim pointer subset.</li>
-          <li>The current I/O surface is limited to text/binary file builtins, direct program-plus-argv command calls, and basic TCP/UDP sockets; buffered streams, memory mapping, async, and IPC are future work.</li>
-          <li>Modules, generics beyond array element spelling, structs, packages, and a full installer are future work. The current Alpha 1 distribution path is a Windows portable archive with optional user PATH helper scripts; the cross-platform package driver also prepares Unix PATH helpers for future Linux/macOS archives.</li>
-          <li>Planned syntax keywords such as <code>import</code>, <code>module</code>, <code>struct</code>, <code>match</code>, and <code>try</code> are rejected with <code>L0211 [parser]</code> until their feature areas are implemented.</li>
+          <li>Execution runs on AST, typed IR, and instruction-bytecode interpreters plus versioned <code>.lbc</code> bytecode artifacts; a scalar-subset WebAssembly backend (<code>lullaby wasm</code>) and an i64-scalar native x86-64 backend (<code>lullaby native</code>) exist. The native and WASM backends cover only a subset (scalar / i64-scalar functions); non-eligible functions still run on the interpreters. Full native lowering of the whole language is still in progress.</li>
+          <li>The optimizer currently exposes opt-in constant folding, conservative common subexpression elimination, conservative loop-invariant motion, conservative block-local copy propagation, block-local dead-code elimination, and the combined alpha pipeline.</li>
+          <li>Typed IR reports memory operations and bounds-checked indexing with sequence and safety metadata, and version 5 <code>.lbc</code> artifacts preserve that metadata in <code>memory_operations</code>. The full region memory model, ARC/reference counting, cleanup insertion, and lifetime analysis are still pending.</li>
+          <li>The current I/O surface is text/binary file builtins, directory operations, direct program-plus-argv command calls, TCP/UDP sockets, and a minimal HTTP/1.1 client; buffered streams, memory mapping, async, IPC, and TLS/HTTPS are future work.</li>
+          <li>Structs, enums, pattern matching (<code>match</code>), traits with bounded generics, generic functions, <code>option</code>/<code>result</code>/<code>list</code>/<code>map</code>, modules and visibility (<code>import</code>/<code>pub</code>), multi-directory projects (<code>lullaby.json</code>), structured error handling (<code>throw</code>/<code>try</code>/<code>catch</code>), and threads/channels/mutex concurrency are all implemented today. Still planned: default trait methods, trait objects (<code>dyn</code>), associated types and supertraits, capturing closures (lambda literals), enum methods and generics over enums, wider integer types (<code>i32</code>, <code>u32</code>, &hellip;), and byte arithmetic.</li>
+          <li>The current distribution path is a Windows portable archive with optional user PATH helper scripts; the cross-platform package driver also prepares Unix PATH helpers for Linux/macOS archives, which still need non-Windows host validation and active CI runs. A full graphical installer is future work.</li>
+          <li>Genuinely reserved keywords that are not yet implemented &mdash; <code>module</code>, <code>package</code>, <code>union</code>, <code>interface</code>, <code>class</code>, <code>switch</code>, <code>catch</code> (as a standalone statement), and <code>coroutine</code> &mdash; are rejected with <code>L0211 [parser]</code> until their feature areas are implemented.</li>
           <li>Inline assembly (<code>asm b0, b1, ...</code>, a list of raw <code>0..=255</code> machine-code bytes inside an <code>unsafe</code> block) is emitted verbatim into the current function's <code>.text</code> by the native backend only. It is inherently unsafe: the bytes are trusted and not decoded, relocated, or register-modeled, and a trailing <code>asm</code> that leaves a value in <code>rax</code> becomes the function's return value. The AST, IR, and bytecode interpreters cannot execute raw machine code, so any <code>asm</code> statement is rejected with <code>L0425</code>; compile with <code>lullaby native</code> to emit and link it. Out-of-range bytes or use outside <code>unsafe</code> are caught at check time (<code>L0425</code> / <code>L0330</code>).</li>
           <li>The native backend (<code>lullaby native</code>) compiles the i64-scalar subset to an x86-64 Windows COFF object and, best-effort, links it into a runnable <code>.exe</code>. Adding <code>--freestanding</code> (alias <code>--no-std</code>) builds a no-C-runtime executable: it links <code>kernel32.lib</code> only (zero <code>ucrt</code>/<code>vcruntime</code>/<code>msvcrt</code>) and terminates through the minimal OS import <code>kernel32!ExitProcess</code>, bypassing the C runtime startup. It is still a Windows PE, not a bare-metal binary; true bare-metal (raw-syscall exit with no OS imports, other object formats, a custom entry and linker script) is deferred. A freestanding build that declares an <code>extern fn</code> (which needs the C runtime) is rejected with <code>L0426</code>. Adding <code>--debug</code> (alias <code>-g</code>) emits native source-line debug info: a CodeView <code>.debug$S</code> section maps each compiled function's entry offset to its <code>.lby</code> declaration line (per-function granularity) so a debugger can break at a function and show its source line; <code>--debug</code> is opt-in and without it the object bytes are unchanged. Per-statement line mapping, variable/type info, and a full compiler-emitted PDB are deferred.</li>
           <li>The checked-in documentation bundle is currently hand-authored HTML. The standard-library generator from canonical docs is available at <code>offline_docs/generate_offline_docs.py</code>, emits package-ready quick start, CLI reference, package layout, diagnostics, limitations, shipped-doc parity sections, and fixture-backed examples, and is now used by the Windows portable package path.</li>
@@ -1127,7 +1274,7 @@ Suggested fix:
   </div>
 
   <footer>
-    Lullaby offline documentation alpha. Last maintained with the repository source and tests.
+    Lullaby offline documentation, in active development toward 1.0. Last maintained with the repository source and tests.
   </footer>
 </body>
 </html>

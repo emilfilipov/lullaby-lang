@@ -1,0 +1,20 @@
+# word_count.lby — split a sentence, count words, and derive stats.
+# Composes the string library (split) with array length and a loop.
+# Run: lullaby run examples/valid/word_count.lby
+
+fn main -> void
+    let sentence string = "the quick brown fox jumps over the lazy dog"
+    let words array<string> = split(sentence, " ")
+    let n_words i64 = len(words)
+    let total_chars i64 = 0
+    let longest i64 = 0
+    for i from 0 to n_words - 1
+        let w string = words[i]
+        let l i64 = len(w)
+        total_chars += l
+        if l > longest
+            longest = l
+    println("sentence: " + sentence)
+    println("words: " + to_string(n_words))
+    println("letters: " + to_string(total_chars))
+    println("longest word length: " + to_string(longest))

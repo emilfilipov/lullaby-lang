@@ -1,0 +1,26 @@
+fn score b bool weight i64 -> i64
+    if b
+        weight
+    else
+        0
+
+fn main -> i64
+    let digit char = '7'
+    let letter char = 'a'
+    let upper char = 'Z'
+    let space char = ' '
+    let bang char = '!'
+    let total i64 = 0
+    total = total + score(is_digit(digit), 1)
+    total = total + score(is_digit(letter), 2)
+    total = total + score(is_alpha(letter), 4)
+    total = total + score(is_alpha(bang), 8)
+    total = total + score(is_alnum(upper), 16)
+    total = total + score(is_alnum(space), 32)
+    total = total + score(is_whitespace(space), 64)
+    total = total + score(is_whitespace(bang), 128)
+    total = total + score(is_upper(upper), 256)
+    total = total + score(is_upper(letter), 512)
+    total = total + score(is_lower(letter), 1024)
+    total = total + score(is_lower(upper), 2048)
+    total

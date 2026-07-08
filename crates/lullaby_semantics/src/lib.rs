@@ -1736,6 +1736,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Field { target, .. } => self.check_freed_uses(target, freed, function),
             ExprKind::Await { expr } => self.check_freed_uses(expr, freed, function),
+            ExprKind::Try(inner) => self.check_freed_uses(inner, freed, function),
             ExprKind::Unary { expr, .. } => self.check_freed_uses(expr, freed, function),
             ExprKind::Binary { left, right, .. } => {
                 self.check_freed_uses(left, freed, function);
@@ -1880,6 +1881,20 @@ impl<'a> Checker<'a> {
                             None
                         }
                     }
+                    UnaryOp::BitNot => {
+                        // Bitwise NOT is `i64 -> i64` only.
+                        if expr_type.as_ref() == Some(&TypeRef::new("i64")) {
+                            Some(TypeRef::new("i64"))
+                        } else {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0307",
+                                "operand of `~` must be i64",
+                                Some(function.name.clone()),
+                                expr.span,
+                            ));
+                            None
+                        }
+                    }
                 }
             }
             ExprKind::Binary { left, op, right } => {
@@ -1899,7 +1914,7 @@ impl<'a> Checker<'a> {
                         } else {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0307",
-                                "operands of `+` must both be i64, both be f64, or both be string",
+                                "operands of `+` must both be the same numeric type or both be string",
                                 Some(function.name.clone()),
                                 expr.span,
                             ));
@@ -1912,7 +1927,7 @@ impl<'a> Checker<'a> {
                         } else {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0307",
-                                "arithmetic operands must both be i64 or both be f64",
+                                "arithmetic operands must both be the same numeric type",
                                 Some(function.name.clone()),
                                 expr.span,
                             ));
@@ -1936,15 +1951,16 @@ impl<'a> Checker<'a> {
                     | BinaryOp::LessEqual
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => {
-                        // Ordering compares two i64s, two f64s, two chars (by code
-                        // point), or two bytes (numerically).
+                        // Ordering compares two values of the same numeric type
+                        // (i64, f64, i32, u32), two chars (by code point), or two
+                        // bytes (numerically).
                         if same_numeric.is_some() || same_orderable_scalar(&left_type, &right_type)
                         {
                             Some(TypeRef::new("bool"))
                         } else {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0327",
-                                "ordering comparison operands must both be i64, both be f64, both be char, or both be byte",
+                                "ordering comparison operands must both be the same numeric type, both be char, or both be byte",
                                 Some(function.name.clone()),
                                 expr.span,
                             ));
@@ -1960,6 +1976,28 @@ impl<'a> Checker<'a> {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0320",
                                 "logical operands must both be bool",
+                                Some(function.name.clone()),
+                                expr.span,
+                            ));
+                            None
+                        }
+                    }
+                    BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr => {
+                        // Integer bitwise ops are `i64 x i64 -> i64` only. Byte
+                        // and wider-integer bitwise is deferred to its own ticket.
+                        let i64_type = TypeRef::new("i64");
+                        if left_type.as_ref() == Some(&i64_type)
+                            && right_type.as_ref() == Some(&i64_type)
+                        {
+                            Some(i64_type)
+                        } else {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0307",
+                                "bitwise operands (`& | ^ << >>`) must both be i64",
                                 Some(function.name.clone()),
                                 expr.span,
                             ));
@@ -2044,6 +2082,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            ExprKind::Try(inner) => self.check_try(inner, expr.span, scope, function),
         };
 
         if let Some(ty) = &inferred {
@@ -2099,6 +2138,83 @@ impl<'a> Checker<'a> {
                 Some(self.check_map_new(args, expected, expr.span, function))
             }
             _ => None,
+        }
+    }
+
+    /// Type-check a postfix `EXPR?` error-propagation operator.
+    ///
+    /// The operand must be an `option<T>` or a `result<T, E>` (else `L0428`).
+    /// The enclosing function's return type must be a *compatible* propagation
+    /// target: for a `result<T, E>` operand the function must return
+    /// `result<U, E>` — the SAME error type `E` (a wrong `E` is `L0429`); for an
+    /// `option<T>` operand it must return `option<U>`. A return type that is not
+    /// a matching `result`/`option` at all is `L0427`. The expression's type is
+    /// the payload `T`.
+    fn check_try(
+        &mut self,
+        inner: &Expr,
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let operand_type = self.check_expr(inner, scope, function)?;
+        let return_type = &function.return_type;
+        if let Some((ok_ty, err_ty)) = operand_type.result_args() {
+            // A `result<T, E>` operand requires a `result<U, E>` return type.
+            match return_type.result_args() {
+                Some((_, return_err)) if return_err == err_ty => Some(ok_ty),
+                Some((_, return_err)) => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0429",
+                        format!(
+                            "`?` on a `{}` requires the enclosing function to return a `result` with the same error type `{}`, but `{}` returns error type `{}`",
+                            operand_type.name, err_ty.name, function.name, return_err.name
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                    None
+                }
+                None => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0427",
+                        format!(
+                            "`?` on a `{}` requires the enclosing function `{}` to return a `result<..., {}>`, but it returns `{}`",
+                            operand_type.name, function.name, err_ty.name, return_type.name
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                    None
+                }
+            }
+        } else if let Some(payload) = operand_type.option_element() {
+            // An `option<T>` operand requires an `option<U>` return type.
+            if return_type.option_element().is_some() {
+                Some(payload)
+            } else {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0427",
+                    format!(
+                        "`?` on a `{}` requires the enclosing function `{}` to return an `option<...>`, but it returns `{}`",
+                        operand_type.name, function.name, return_type.name
+                    ),
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0428",
+                format!(
+                    "`?` can only be applied to an `option` or `result` value, but the operand has type `{}`",
+                    operand_type.name
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+            None
         }
     }
 
@@ -2622,6 +2738,25 @@ impl<'a> Checker<'a> {
                 self.expect_arg_count(name, args, 0, function)?;
                 Some(TypeRef::new("void"))
             }
+            "mono_now" => {
+                // `mono_now() -> i64`: a monotonic clock in nanoseconds since a
+                // fixed per-process baseline. Non-decreasing within a run.
+                self.expect_arg_count(name, args, 0, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "wall_now" => {
+                // `wall_now() -> i64`: wall-clock time as milliseconds since the
+                // Unix epoch.
+                self.expect_arg_count(name, args, 0, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "sleep_millis" => {
+                // `sleep_millis(ms i64) -> void`: sleep the current thread for
+                // `ms` milliseconds; a negative `ms` sleeps for zero.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
             "assert" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let arg_type = self.check_expr(&args[0], scope, function)?;
@@ -2640,16 +2775,17 @@ impl<'a> Checker<'a> {
             "to_string" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let arg_type = self.check_expr(&args[0], scope, function)?;
-                if matches!(
-                    arg_type.name.as_str(),
-                    "i64" | "f64" | "bool" | "string" | "char" | "byte"
-                ) {
+                // Every scalar renders: the full numeric lattice plus bool,
+                // string, char, and byte.
+                if is_numeric_type_name(&arg_type.name)
+                    || matches!(arg_type.name.as_str(), "bool" | "string" | "char" | "byte")
+                {
                     Some(TypeRef::new("string"))
                 } else {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0313",
                         format!(
-                            "to_string expects an i64, f64, bool, string, char, or byte value but got `{}`",
+                            "to_string expects a scalar value (a numeric type, bool, string, char, or byte) but got `{}`",
                             arg_type.name
                         ),
                         Some(function.name.clone()),
@@ -2709,6 +2845,30 @@ impl<'a> Checker<'a> {
                 self.expect_arg_type(name, 2, &args[1], "i64", scope, function)?;
                 Some(element)
             }
+            "list_index_of" | "list_contains" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                let value_type =
+                    self.check_expr_expected(&args[1], Some(&element), scope, function)?;
+                if value_type != element {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`{name}` search value must be `{}` but got `{}`",
+                            element.name, value_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new(if name == "list_index_of" {
+                    "i64"
+                } else {
+                    "bool"
+                }))
+            }
             "set" => {
                 self.expect_arg_count(name, args, 3, function)?;
                 let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
@@ -2734,6 +2894,66 @@ impl<'a> Checker<'a> {
                 self.expect_arg_count(name, args, 1, function)?;
                 let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                Some(list_type(&element))
+            }
+            "reverse" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                Some(list_type(&element))
+            }
+            "sort" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                if element.name != "i64" {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`sort` expects a `list<i64>` but got `list<{}>`",
+                            element.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                }
+                Some(list_type(&element))
+            }
+            "concat" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                // `concat` returns `list<T>`, so the outer expected `list<T>`
+                // flows into the first list argument (inferring a nested
+                // `list_new()`); the resolved element type then flows into `b`.
+                let a_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &a_ty, args[0].span, function)?;
+                let b_ty = self.check_expr_expected(
+                    &args[1],
+                    Some(&list_type(&element)),
+                    scope,
+                    function,
+                )?;
+                let b_element = self.expect_list_arg(name, &b_ty, args[1].span, function)?;
+                if b_element != element {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`concat` requires both lists to have the same element type, but got `{}` and `{}`",
+                            element.name, b_element.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(list_type(&element))
+            }
+            "slice" => {
+                self.expect_arg_count(name, args, 3, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                self.expect_arg_type(name, 2, &args[1], "i64", scope, function)?;
+                self.expect_arg_type(name, 3, &args[2], "i64", scope, function)?;
                 Some(list_type(&element))
             }
             "map_set" => {
@@ -2815,6 +3035,18 @@ impl<'a> Checker<'a> {
                 let map_ty = self.check_expr(&args[0], scope, function)?;
                 self.expect_map_arg(name, &map_ty, args[0].span, function)?;
                 Some(TypeRef::new("i64"))
+            }
+            "map_keys" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (key, _value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                Some(list_type(&key))
+            }
+            "map_values" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (_key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                Some(list_type(&value))
             }
             "map_del" => {
                 self.expect_arg_count(name, args, 2, function)?;
@@ -2901,6 +3133,57 @@ impl<'a> Checker<'a> {
                 self.expect_arg_count(name, args, 1, function)?;
                 self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
                 Some(TypeRef::new("string"))
+            }
+            "chars" => {
+                // `chars(s string) -> list<char>`: the characters of `s` in order.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(list_type(&TypeRef::new("char")))
+            }
+            "string_from_chars" => {
+                // `string_from_chars(cs list<char>) -> string`: the inverse of `chars`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "list<char>", scope, function)?;
+                Some(TypeRef::new("string"))
+            }
+            "to_bytes" => {
+                // `to_bytes(s string) -> list<byte>`: the UTF-8 encoding of `s`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(list_type(&TypeRef::new("byte")))
+            }
+            "from_bytes" => {
+                // `from_bytes(b list<byte>) -> result<string, string>`: decode the
+                // bytes as UTF-8, yielding `err(message)` on invalid input.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "list<byte>", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("string"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "byte_len" => {
+                // `byte_len(s string) -> i64`: the UTF-8 byte length of `s`
+                // (distinct from `len`, which counts characters for a string).
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "parse_i64" => {
+                // `parse_i64(s string) -> result<i64, string>`: parse `s` as a
+                // base-10 signed 64-bit integer, yielding `err(message)` on any
+                // failure (empty, non-numeric, or out of range). Whitespace is
+                // not trimmed, so a padded string is an `err`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(result_type(&TypeRef::new("i64"), &TypeRef::new("string")))
+            }
+            "parse_f64" => {
+                // `parse_f64(s string) -> result<f64, string>`: parse `s` as an
+                // `f64`, yielding `err(message)` on failure.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(result_type(&TypeRef::new("f64"), &TypeRef::new("string")))
             }
             "abs" => {
                 self.expect_arg_count(name, args, 1, function)?;
@@ -2994,6 +3277,45 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
+            "rotate_left" | "rotate_right" => {
+                // Bit rotation: `rotate_left(x, n)` / `rotate_right(x, n)` rotate
+                // the 64 bits of `x` by `(n & 63)` positions; both args are i64
+                // and the result is i64.
+                self.expect_arg_count(name, args, 2, function)?;
+                let x = self.check_expr(&args[0], scope, function)?;
+                let n = self.check_expr(&args[1], scope, function)?;
+                if x.name == "i64" && n.name == "i64" {
+                    Some(TypeRef::new("i64"))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0374",
+                        format!(
+                            "{name} expects two i64 values but got `{}` and `{}`",
+                            x.name, n.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
+            "count_ones" | "leading_zeros" | "trailing_zeros" | "reverse_bytes" => {
+                // Unary bit intrinsics on i64: population count, leading/trailing
+                // zero count, and byte swap. Each takes and returns i64.
+                self.expect_arg_count(name, args, 1, function)?;
+                let arg_type = self.check_expr(&args[0], scope, function)?;
+                if arg_type.name == "i64" {
+                    Some(TypeRef::new("i64"))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0374",
+                        format!("{name} expects an i64 value but got `{}`", arg_type.name),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
             "rc_new" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let value_type = self.check_expr(&args[0], scope, function)?;
@@ -3066,6 +3388,14 @@ impl<'a> Checker<'a> {
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "i64", scope, function)?;
                 Some(TypeRef::new("char"))
             }
+            "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper" | "is_lower" => {
+                // Deterministic `char -> bool` classification predicates backed by
+                // the corresponding Rust `char` methods. Each takes exactly one
+                // `char` argument and yields a `bool`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "char", scope, function)?;
+                Some(TypeRef::new("bool"))
+            }
             "byte" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "i64", scope, function)?;
@@ -3076,6 +3406,70 @@ impl<'a> Checker<'a> {
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "byte", scope, function)?;
                 Some(TypeRef::new("i64"))
             }
+            // Fixed-width integer conversions. Each `to_<T>` reinterprets an
+            // `i64` into width `T` (wrapping); `to_i64` widens a fixed-width
+            // integer back to `i64`. No implicit coercion exists, so these
+            // explicit conversions are the only bridge between widths.
+            "to_i8" | "to_i16" | "to_i32" | "to_u16" | "to_u32" | "to_u64" | "to_isize"
+            | "to_usize" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "i64", scope, function)?;
+                // The target width is the builtin name with the `to_` prefix removed.
+                Some(TypeRef::new(&name[3..]))
+            }
+            "to_i64" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let arg_type = self.check_expr(&args[0], scope, function)?;
+                if !is_fixed_width_int_name(&arg_type.name) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0307",
+                        format!(
+                            "to_i64 expects a fixed-width integer argument but got `{}`",
+                            arg_type.name
+                        ),
+                        Some(function.name.clone()),
+                        call_span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new("i64"))
+            }
+            // Float conversions: `to_f32` rounds an `f64` to `f32`; `to_f64`
+            // widens an `f32` back to `f64`. No implicit float coercion exists.
+            "to_f32" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "f64", scope, function)?;
+                Some(TypeRef::new("f32"))
+            }
+            "to_f64" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "f32", scope, function)?;
+                Some(TypeRef::new("f64"))
+            }
+            // Overflow-aware arithmetic on a fixed-width integer `T`: both operands
+            // must be the same fixed-width type. `checked_*` yields `option<T>`
+            // (`none` on overflow); `saturating_*`/`wrapping_*` yield `T`. `i64`
+            // is excluded — its default arithmetic already traps on overflow.
+            "checked_add" | "checked_sub" | "checked_mul" | "saturating_add" | "saturating_sub"
+            | "saturating_mul" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let left = self.check_expr(&args[0], scope, function)?;
+                let right = self.check_expr(&args[1], scope, function)?;
+                if !is_fixed_width_int_name(&left.name) || left != right {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0307",
+                        format!("{name} operands must both be the same fixed-width integer type"),
+                        Some(function.name.clone()),
+                        call_span,
+                    ));
+                    return None;
+                }
+                if name.starts_with("checked_") {
+                    Some(option_type(&left))
+                } else {
+                    Some(left)
+                }
+            }
             "env" => {
                 self.expect_process_arg_count(name, args, 1, call_span, function)?;
                 self.expect_process_arg(name, 1, &args[0], "string", scope, function)?;
@@ -3084,6 +3478,18 @@ impl<'a> Checker<'a> {
             "args" => {
                 self.expect_process_arg_count(name, args, 0, call_span, function)?;
                 Some(list_type(&TypeRef::new("string")))
+            }
+            "os_random" => {
+                // `os_random(len i64) -> result<list<byte>, string>`: `len`
+                // cryptographically-secure random bytes from the OS RNG as
+                // `ok(list<byte>)`, or `err(message)` on RNG failure. `len < 0`
+                // yields `err` at runtime (not a compile error).
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
+                Some(result_type(
+                    &list_type(&TypeRef::new("byte")),
+                    &TypeRef::new("string"),
+                ))
             }
             "parallel_map" => {
                 // `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>`:
@@ -3209,6 +3615,49 @@ impl<'a> Checker<'a> {
                 self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
                 Some(TypeRef::new("i64"))
             }
+            "atomic_new" => {
+                // `atomic_new(v i64) -> atomic_i64`: a shared atomic cell.
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "i64", scope, function)?;
+                Some(TypeRef::new("atomic_i64"))
+            }
+            "atomic_load" => {
+                // `atomic_load(a atomic_i64) -> i64`.
+                self.expect_concurrency_arity(name, args, 1, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "atomic_i64", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "atomic_store" => {
+                // `atomic_store(a atomic_i64, v i64) -> void`.
+                self.expect_concurrency_arity(name, args, 2, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "atomic_i64", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
+            "atomic_swap" => {
+                // `atomic_swap(a atomic_i64, v i64) -> i64` (returns previous).
+                self.expect_concurrency_arity(name, args, 2, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "atomic_i64", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "atomic_cas" => {
+                // `atomic_cas(a atomic_i64, expected i64, new i64) -> i64`
+                // (strong CAS; returns the observed value).
+                self.expect_concurrency_arity(name, args, 3, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "atomic_i64", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                self.expect_concurrency_arg(name, 3, &args[2], "i64", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "atomic_add" | "atomic_sub" | "atomic_and" | "atomic_or" | "atomic_xor" => {
+                // Fetch-and-op: `atomic_<op>(a atomic_i64, v i64) -> i64`
+                // (returns the previous value).
+                self.expect_concurrency_arity(name, args, 2, call_span, function)?;
+                self.expect_concurrency_arg(name, 1, &args[0], "atomic_i64", scope, function)?;
+                self.expect_concurrency_arg(name, 2, &args[1], "i64", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
             "tcp_connect" | "tcp_listen" | "udp_bind" => {
                 // `(host string, port i64) -> result<Socket, string>`.
                 self.expect_socket_arg_count(name, args, 2, function)?;
@@ -3290,6 +3739,36 @@ impl<'a> Checker<'a> {
                 self.expect_http_arg_count(name, args, 2, function)?;
                 self.expect_http_arg_type(name, 1, &args[0], scope, function)?;
                 self.expect_http_arg_type(name, 2, &args[1], scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("string"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "proc_spawn" => {
+                // `(cmd string, args array<string>) -> result<process, string>`.
+                // Spawns a live child process capturing stdout/stderr; extends the
+                // one-shot `sys_status`/`sys_output`. Reuses the socket/network
+                // handle diagnostic family (`L0335`).
+                self.expect_socket_arg_count(name, args, 2, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_socket_arg_type(name, 2, &args[1], "array<string>", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("process"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "proc_wait" | "proc_kill" => {
+                // `(p process) -> result<i64, string>`: block for exit / kill the
+                // child, returning an exit code (`proc_wait`) or `0` (`proc_kill`).
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "process", scope, function)?;
+                Some(result_type(&TypeRef::new("i64"), &TypeRef::new("string")))
+            }
+            "proc_stdout" | "proc_stderr" => {
+                // `(p process) -> result<string, string>`: the child's captured
+                // stdout / stderr, read to end.
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "process", scope, function)?;
                 Some(result_type(
                     &TypeRef::new("string"),
                     &TypeRef::new("string"),
@@ -4617,9 +5096,29 @@ fn future_inner(ty: &TypeRef) -> Option<TypeRef> {
 /// If both operand types are the same numeric type (`i64` or `f64`), return it.
 fn same_numeric_type(left: &Option<TypeRef>, right: &Option<TypeRef>) -> Option<TypeRef> {
     match (left, right) {
-        (Some(l), Some(r)) if l == r && matches!(l.name.as_str(), "i64" | "f64") => Some(l.clone()),
+        (Some(l), Some(r)) if l == r && is_numeric_type_name(&l.name) => Some(l.clone()),
         _ => None,
     }
+}
+
+/// True for every scalar numeric type: the default `i64`/`f64` plus the
+/// fixed-width integer lattice. Arithmetic and ordering require both operands to
+/// share one of these (no implicit width mixing); the shared type is the result.
+fn is_numeric_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "i64" | "f64" | "f32" | "i8" | "i16" | "i32" | "u16" | "u32" | "u64" | "isize" | "usize"
+    )
+}
+
+/// The fixed-width integer type names produced by the `to_<T>` conversions (the
+/// numeric lattice minus the default `i64`/`f64`). A `to_i64` argument must be
+/// one of these.
+fn is_fixed_width_int_name(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16" | "i32" | "u16" | "u32" | "u64" | "isize" | "usize"
+    )
 }
 
 /// True when both operands are the same orderable scalar type beyond the numeric
@@ -4665,6 +5164,44 @@ mod tests {
     #[test]
     fn non_void_function_may_return_last_expression() {
         assert!(validate_source("fn add x i64 y i64 -> i64\n    x + y\n").is_ok());
+    }
+
+    #[test]
+    fn accepts_i64_bitwise_operators() {
+        // `& | ^ << >>` and unary `~` are all `i64 -> i64`.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a i64 = 6 & 3\n",
+            "    let b i64 = 6 | 1\n",
+            "    let c i64 = 6 ^ 3\n",
+            "    let d i64 = 1 << 4\n",
+            "    let e i64 = 64 >> 2\n",
+            "    let f i64 = ~0\n",
+            "    a + b + c + d + e + f\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_i64_bitwise_operand() {
+        // A `bool` operand to a bitwise op reuses the arithmetic operand family
+        // (`L0307`); bitwise ops are strictly `i64`.
+        let source = "fn main -> i64\n    let x bool = true\n    x & 1\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "expected L0307 for a non-i64 bitwise operand: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_i64_bitwise_not_operand() {
+        let source = "fn main -> i64\n    let x f64 = 1.0\n    ~x\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "expected L0307 for a non-i64 `~` operand: {diagnostics:?}"
+        );
     }
 
     #[test]
@@ -4898,6 +5435,40 @@ mod tests {
     }
 
     #[test]
+    fn os_random_type_checks_and_yields_result_of_list_byte() {
+        // `os_random(len i64) -> result<list<byte>, string>`: an `i64` argument
+        // type-checks, and the `ok` payload is a `list<byte>` (so `len` on it is
+        // valid and the whole program is well-typed).
+        let source = concat!(
+            "fn count n i64 -> i64\n",
+            "    match os_random(n)\n",
+            "        ok(bytes) -> len(bytes)\n",
+            "        err(_) -> 0\n\n",
+            "fn main -> i64\n",
+            "    count(16)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "os_random should type-check with an i64 argument and a list<byte> ok payload"
+        );
+    }
+
+    #[test]
+    fn rejects_os_random_wrong_argument_type() {
+        // A `string` where `os_random` expects an `i64` is an argument-type
+        // error (`L0313`), never accepted.
+        let diagnostics =
+            validate_source("fn main -> i64\n    match os_random(\"16\")\n        ok(b) -> len(b)\n        err(_) -> 0\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0313"),
+            "expected L0313 for a non-i64 os_random argument: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn rejects_repeat_wrong_count_type() {
         let diagnostics = validate_source("fn main -> i64\n    repeat(\"ab\", \"x\")\n    0\n")
             .expect_err("semantic");
@@ -4916,6 +5487,36 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn accepts_bit_intrinsics() {
+        let source = "fn main -> i64\n    let a i64 = rotate_left(1, 4)\n    let b i64 = rotate_right(a, 4)\n    let c i64 = count_ones(255)\n    let d i64 = leading_zeros(1)\n    let e i64 = trailing_zeros(16)\n    let f i64 = reverse_bytes(b)\n    a + b + c + d + e + f\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_rotate_left_with_non_i64_argument() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    let x i64 = rotate_left(1, 2.0)\n    x\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0374")
+        );
+    }
+
+    #[test]
+    fn rejects_count_ones_with_non_i64_argument() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    let x i64 = count_ones(1.0)\n    x\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0374")
         );
     }
 
@@ -5357,6 +5958,46 @@ mod tests {
     }
 
     #[test]
+    fn accepts_list_search_and_rejects_element_mismatch() {
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 3)\n",
+            "    list_index_of(l, 3)\n",
+        );
+        assert!(validate_source(ok).is_ok(), "{:?}", validate_source(ok));
+
+        let bad = concat!(
+            "fn main -> bool\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 3)\n",
+            "    list_contains(l, true)\n",
+        );
+        let diagnostics = validate_source(bad).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_chars_round_trip_and_rejects_wrong_types() {
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let cs list<char> = chars(\"hi\")\n",
+            "    len(string_from_chars(cs))\n",
+        );
+        assert!(validate_source(ok).is_ok(), "{:?}", validate_source(ok));
+
+        // `chars` needs a string; `string_from_chars` needs a list<char>.
+        let bad1 = validate_source("fn main -> i64\n    len(chars(5))\n").expect_err("semantic");
+        assert!(bad1.iter().any(|d| d.code == "L0375"), "{bad1:?}");
+        let bad2 = validate_source("fn main -> i64\n    len(string_from_chars(\"x\"))\n")
+            .expect_err("semantic");
+        assert!(bad2.iter().any(|d| d.code == "L0375"), "{bad2:?}");
+    }
+
+    #[test]
     fn validates_trig_exp_and_log_builtins() {
         let source = concat!(
             "fn main -> i64\n",
@@ -5536,6 +6177,44 @@ mod tests {
     }
 
     #[test]
+    fn validates_char_classification_predicates() {
+        // The six `char -> bool` classification predicates each take one `char`
+        // and yield a `bool` usable in a condition.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let c char = '7'\n",
+            "    let flags i64 = 0\n",
+            "    if is_digit(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_alpha(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_alnum(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_whitespace(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_upper(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_lower(c)\n",
+            "        flags = flags + 1\n",
+            "    flags\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_char_classification_predicate_with_wrong_argument_type() {
+        // `is_digit` requires a `char`; passing an `i64` is an `L0389` argument
+        // type error.
+        let diagnostics =
+            validate_source("fn main -> bool\n    is_digit(7)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0389")
+        );
+    }
+
+    #[test]
     fn validates_env_and_args_process_builtins() {
         // `env(name)` yields `option<string>`; `args()` yields `list<string>`.
         let source = concat!(
@@ -5612,6 +6291,28 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0312")
+        );
+    }
+
+    #[test]
+    fn validates_time_builtins() {
+        let source = concat!(
+            "fn main -> void\n",
+            "    let a i64 = mono_now()\n",
+            "    let b i64 = wall_now()\n",
+            "    sleep_millis(0)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn catches_sleep_millis_argument_type_mismatch() {
+        let diagnostics =
+            validate_source("fn bad -> void\n    sleep_millis(\"x\")\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0313")
         );
     }
 
@@ -5725,6 +6426,55 @@ mod tests {
     }
 
     #[test]
+    fn accepts_atomic_builtins_with_matching_types() {
+        // The full `atomic_i64` surface type-checks: construct, load/store,
+        // swap, strong CAS, and every fetch-and-op. Each op takes the
+        // `atomic_i64` handle first and returns the documented type.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a atomic_i64 = atomic_new(10)\n",
+            "    let p i64 = atomic_add(a, 5)\n",
+            "    atomic_sub(a, 1)\n",
+            "    atomic_and(a, 15)\n",
+            "    atomic_or(a, 1)\n",
+            "    atomic_xor(a, 2)\n",
+            "    atomic_store(a, 42)\n",
+            "    let s i64 = atomic_swap(a, 7)\n",
+            "    let c i64 = atomic_cas(a, 7, 99)\n",
+            "    p + s + c + atomic_load(a)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_atomic_load_non_atomic_first_argument() {
+        // `atomic_load` requires an `atomic_i64` handle as its first argument;
+        // a bare `i64` is rejected with the concurrency-builtin code L0337.
+        let source = "fn main -> i64\n    atomic_load(5)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0337"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_atomic_add_wrong_operand_type() {
+        // The `v` operand of a fetch-and-op must be an `i64`, not a string.
+        let source =
+            "fn main -> i64\n    let a atomic_i64 = atomic_new(0)\n    atomic_add(a, \"x\")\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0337"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn catches_write_bytes_data_type_mismatch() {
         // `write_bytes` requires a `list<byte>` data argument.
         let diagnostics =
@@ -5734,6 +6484,109 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0333")
+        );
+    }
+
+    #[test]
+    fn string_bytes_builtins_type_check() {
+        // `to_bytes` -> `list<byte>`, `from_bytes` -> `result<string, string>`
+        // (unwrapped with `match`), and `byte_len` -> `i64`.
+        validate_source(concat!(
+            "fn f -> i64\n",
+            "    let b list<byte> = to_bytes(\"hi\")\n",
+            "    let n i64 = byte_len(\"café\")\n",
+            "    match from_bytes(b)\n",
+            "        ok(s) -> len(s) + n + byte_val(get(b, 0))\n",
+            "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect("string↔bytes builtins type-check");
+    }
+
+    #[test]
+    fn catches_to_bytes_argument_type_mismatch() {
+        // `to_bytes` requires a `string` argument; a wrong type reports the
+        // string-builtin family code `L0375`.
+        let diagnostics =
+            validate_source("fn bad -> i64\n    len(to_bytes(7))\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn catches_from_bytes_argument_type_mismatch() {
+        // `from_bytes` requires a `list<byte>` argument; a `string` is rejected
+        // with the string-builtin family code `L0375`.
+        let diagnostics = validate_source(concat!(
+            "fn bad -> i64\n",
+            "    match from_bytes(\"not bytes\")\n",
+            "        ok(s) -> len(s)\n",
+            "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn parse_number_builtins_type_check() {
+        // `parse_i64` -> `result<i64, string>` and `parse_f64` ->
+        // `result<f64, string>`, unwrapped with `match` in a helper's tail.
+        validate_source(concat!(
+            "fn to_int s string -> i64\n",
+            "    match parse_i64(s)\n",
+            "        ok(n) -> n\n",
+            "        err(m) -> 0 - len(m)\n",
+            "fn to_float s string -> f64\n",
+            "    match parse_f64(s)\n",
+            "        ok(x) -> x\n",
+            "        err(m) -> 0.0\n",
+            "fn f -> f64\n",
+            "    to_float(\"3.5\") + sqrt(to_float(\"4.0\"))\n",
+            "fn g -> i64\n",
+            "    to_int(\"42\")\n",
+        ))
+        .expect("parse_i64/parse_f64 builtins type-check");
+    }
+
+    #[test]
+    fn catches_parse_i64_argument_type_mismatch() {
+        // `parse_i64` requires a `string` argument; an `i64` is rejected with
+        // the string-builtin family code `L0375`.
+        let diagnostics = validate_source(concat!(
+            "fn bad -> i64\n",
+            "    match parse_i64(7)\n",
+            "        ok(n) -> n\n",
+            "        err(m) -> 0 - len(m)\n",
+        ))
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
+        );
+    }
+
+    #[test]
+    fn catches_parse_f64_argument_type_mismatch() {
+        // `parse_f64` requires a `string` argument; an `i64` is rejected with
+        // the string-builtin family code `L0375`.
+        let diagnostics = validate_source(concat!(
+            "fn bad -> f64\n",
+            "    match parse_f64(7)\n",
+            "        ok(x) -> x\n",
+            "        err(m) -> 0.0\n",
+        ))
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0375")
         );
     }
 
@@ -6052,6 +6905,66 @@ mod tests {
     }
 
     #[test]
+    fn accepts_list_ext_builtins() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 10)\n",
+            "    l = push(l, 20)\n",
+            "    let r list<i64> = reverse(l)\n",
+            "    let both list<i64> = concat(l, r)\n",
+            "    let mid list<i64> = slice(both, 1, 3)\n",
+            "    len(both) + len(mid)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_concat_element_type_mismatch() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a list<i64> = list_new()\n",
+            "    a = push(a, 1)\n",
+            "    let b list<bool> = list_new()\n",
+            "    b = push(b, true)\n",
+            "    let c list<i64> = concat(a, b)\n",
+            "    len(c)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_sort_on_i64_list_and_rejects_other_element_types() {
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 3)\n",
+            "    len(sort(l))\n",
+        );
+        assert!(validate_source(ok).is_ok(), "{:?}", validate_source(ok));
+
+        let bad = concat!(
+            "fn main -> i64\n",
+            "    let l list<bool> = list_new()\n",
+            "    l = push(l, true)\n",
+            "    len(sort(l))\n",
+        );
+        let diagnostics = validate_source(bad).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn infers_nested_constructor_in_call_argument_position() {
         // Argument-position inference: a nested `list_new()`/`map_new()` inside a
         // collection-growing builtin, and a nested `ok`/`none`/`some` inside a
@@ -6100,6 +7013,33 @@ mod tests {
             validate_source(source).is_ok(),
             "{:?}",
             validate_source(source)
+        );
+    }
+
+    #[test]
+    fn accepts_map_keys_and_values() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let m map<string, i64> = map_new()\n",
+            "    m = map_set(m, \"a\", 5)\n",
+            "    let ks list<string> = map_keys(m)\n",
+            "    let vs list<i64> = map_values(m)\n",
+            "    len(ks) + get(vs, 0)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_map_keys_on_non_map() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    len(map_keys(3))\n").expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0388"),
+            "{diagnostics:?}"
         );
     }
 
@@ -6511,6 +7451,274 @@ mod tests {
         let diagnostics = validate_source(source).expect_err("non-bool assert argument");
         assert!(
             diagnostics.iter().any(|d| d.code == "L0342"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn try_operator_on_result_type_checks_and_types_as_payload() {
+        // `checked(a)?` is `i64` (the `ok` payload) inside a `result<i64, string>`
+        // function; the `?` desugars to a propagate-on-`err` early return.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"bad\")\n",
+            "    ok(n)\n\n",
+            "fn use_it a i64 -> result<i64, string>\n",
+            "    let x i64 = checked(a)?\n",
+            "    ok(x + 1)\n",
+        );
+        validate_source(source).expect("`?` on result in a result-returning fn");
+    }
+
+    #[test]
+    fn try_operator_on_option_type_checks() {
+        let source = concat!(
+            "fn maybe present bool -> option<i64>\n",
+            "    if present\n",
+            "        return some(7)\n",
+            "    none\n\n",
+            "fn use_it p bool -> option<i64>\n",
+            "    let x i64 = maybe(p)?\n",
+            "    some(x + 1)\n",
+        );
+        validate_source(source).expect("`?` on option in an option-returning fn");
+    }
+
+    #[test]
+    fn try_operator_in_incompatible_return_type_is_l0427() {
+        // `?` on a `result` inside a plain `i64`-returning function has no
+        // compatible propagation target, so it is `L0427`.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    ok(n)\n\n",
+            "fn bad a i64 -> i64\n",
+            "    let x i64 = checked(a)?\n",
+            "    x\n",
+        );
+        let diagnostics = validate_source(source).expect_err("`?` needs a compatible return type");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0427"),
+            "expected L0427: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn try_operator_with_mismatched_error_type_is_l0429() {
+        // A `result<i64, string>` operand requires the function to return a
+        // `result` with the SAME error type; returning `result<i64, i64>` is
+        // `L0429`.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    ok(n)\n\n",
+            "fn bad a i64 -> result<i64, i64>\n",
+            "    let x i64 = checked(a)?\n",
+            "    ok(x)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("`?` error type must match");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0429"),
+            "expected L0429: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn try_operator_on_non_option_result_is_l0428() {
+        // `?` on a plain `i64` value is `L0428`.
+        let source = concat!(
+            "fn bad -> result<i64, string>\n",
+            "    let n i64 = 5\n",
+            "    let x i64 = n?\n",
+            "    ok(x)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("`?` needs an option/result operand");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0428"),
+            "expected L0428: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn process_builtins_type_check_end_to_end() {
+        // `proc_spawn` yields `result<process, string>`; the `process` handle
+        // threads into `proc_wait`/`proc_stdout`/`proc_stderr`/`proc_kill`, each
+        // returning the documented `result` type. This exercises the whole
+        // process handle surface through the type checker.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let spawned result<process, string> = proc_spawn(\"echo\", [\"hello\"])\n",
+            "    match spawned\n",
+            "        ok(p) -> drive(p)\n",
+            "        err(message) -> 1\n",
+            "\n",
+            "fn drive p process -> i64\n",
+            "    let waited result<i64, string> = proc_wait(p)\n",
+            "    let out result<string, string> = proc_stdout(p)\n",
+            "    let errs result<string, string> = proc_stderr(p)\n",
+            "    let killed result<i64, string> = proc_kill(p)\n",
+            "    0\n",
+        );
+        validate_source(source).expect("process builtins type-check");
+    }
+
+    #[test]
+    fn rejects_proc_spawn_wrong_arg_type_with_l0335() {
+        // `proc_spawn` expects `(string, array<string>)`; passing an i64 command
+        // is rejected with the socket/network handle diagnostic family `L0335`.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let spawned result<process, string> = proc_spawn(5, [\"hello\"])\n",
+            "    match spawned\n",
+            "        ok(p) -> 0\n",
+            "        err(message) -> 1\n",
+        );
+        let diagnostics = validate_source(source).expect_err("wrong proc_spawn arg type");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0335"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn fixed_width_integer_arithmetic_and_conversions_type_check() {
+        // i32/u32 values arithmetic and compare among themselves and convert to
+        // and from i64 through the explicit `to_*` builtins.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a u32 = to_u32(10)\n",
+            "    let b u32 = to_u32(3)\n",
+            "    let c i32 = to_i32(0 - 1)\n",
+            "    if c < to_i32(0)\n",
+            "        return to_i64(a - b)\n",
+            "    to_i64(a + b)\n",
+        );
+        validate_source(source).expect("i32/u32 arithmetic and conversions type-check");
+    }
+
+    #[test]
+    fn overflow_arith_builtins_type_check_and_reject_i64() {
+        // checked/saturating/wrapping on a fixed-width integer type-check; the
+        // checked form yields option<T>, the others yield T.
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let s u32 = saturating_add(to_u32(1), to_u32(2))\n",
+            "    let w u32 = wrapping_mul(to_u32(3), to_u32(4))\n",
+            "    match checked_sub(to_u32(1), to_u32(2))\n",
+            "        some(v) -> to_i64(v)\n",
+            "        none -> to_i64(s) + to_i64(w)\n",
+        );
+        validate_source(ok).expect("overflow arithmetic on u32 type-checks");
+        // i64 is rejected: its default arithmetic already traps on overflow.
+        let bad = concat!("fn main -> i64\n", "    checked_add(5, 6)\n");
+        let diagnostics = validate_source(bad).expect_err("checked_add on i64 rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn to_string_accepts_the_numeric_lattice() {
+        // to_string renders every numeric type, not just i64/f64.
+        let source = concat!(
+            "fn main -> string\n",
+            "    to_string(to_i32(1)) + to_string(to_u64(2)) + to_string(to_f32(3.0))\n",
+        );
+        validate_source(source).expect("to_string on fixed-width ints and f32 type-checks");
+    }
+
+    #[test]
+    fn f32_arithmetic_and_conversions_type_check() {
+        // f32 values arithmetic and compare among themselves and convert to and
+        // from f64 through `to_f32`/`to_f64`; f32 never mixes with f64 directly.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a f32 = to_f32(1.5)\n",
+            "    let b f32 = to_f32(2.5)\n",
+            "    let sum f32 = a + b\n",
+            "    if to_f64(sum) > 3.0\n",
+            "        return 1\n",
+            "    0\n",
+        );
+        validate_source(source).expect("f32 arithmetic and conversions type-check");
+    }
+
+    #[test]
+    fn rejects_f32_f64_mixed_operands_with_l0307() {
+        // No implicit float coercion: `f32 + f64` has no common numeric type.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a f32 = to_f32(1.0)\n",
+            "    let bad f32 = a + 2.0\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("f32 + f64 must be rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn wide_fixed_width_conversions_type_check() {
+        // The full integer lattice (i8/i16/u16/u64/isize/usize) converts from and
+        // back to i64, and each width arithmetic and compares among itself.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a i8 = to_i8(127)\n",
+            "    let b i16 = to_i16(32767)\n",
+            "    let c u16 = to_u16(0 - 1)\n",
+            "    let d u64 = to_u64(0 - 1)\n",
+            "    let e isize = to_isize(0 - 5)\n",
+            "    let f usize = to_usize(9)\n",
+            "    let g u64 = d / to_u64(2)\n",
+            "    if a < to_i8(0)\n",
+            "        return to_i64(g)\n",
+            "    to_i64(b) + to_i64(c) + to_i64(e) + to_i64(f)\n",
+        );
+        validate_source(source).expect("wide fixed-width conversions type-check");
+    }
+
+    #[test]
+    fn rejects_mixed_width_integer_operands_with_l0307() {
+        // No implicit width mixing: `u32 + i32` has no common numeric type.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a u32 = to_u32(1)\n",
+            "    let b i32 = to_i32(1)\n",
+            "    let c u32 = a + b\n",
+            "    to_i64(c)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("u32 + i32 must be rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_fixed_width_mixed_with_i64_with_l0307() {
+        // A fixed-width integer does not silently mix with the default `i64`.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a i32 = to_i32(1)\n",
+            "    let total i32 = a + 5\n",
+            "    to_i64(total)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("i32 + i64 must be rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_to_i64_on_plain_i64_with_l0307() {
+        // `to_i64` widens an i32/u32; a plain i64 argument is a type error.
+        let source = concat!("fn main -> i64\n", "    to_i64(5)\n");
+        let diagnostics = validate_source(source).expect_err("to_i64 needs an i32/u32 argument");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
             "{diagnostics:?}"
         );
     }
