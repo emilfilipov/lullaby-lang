@@ -42,6 +42,21 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `byte` | `byte(i i64) -> byte` | runtime error outside 0–255 |
 | `byte_val` | `byte_val(b byte) -> i64` | |
 
+## Character classification
+
+Deterministic `char -> bool` predicates for classifying a single Unicode scalar.
+Each takes exactly one `char` argument and returns a `bool`; passing a non-`char`
+argument is a compile-time `L0389` type error.
+
+| Function | Signature | Notes |
+|----------|-----------|-------|
+| `is_digit` | `is_digit(c char) -> bool` | ASCII digit `0`–`9` |
+| `is_alpha` | `is_alpha(c char) -> bool` | alphabetic (Unicode) |
+| `is_alnum` | `is_alnum(c char) -> bool` | alphabetic or numeric (Unicode) |
+| `is_whitespace` | `is_whitespace(c char) -> bool` | whitespace (Unicode) |
+| `is_upper` | `is_upper(c char) -> bool` | uppercase (Unicode) |
+| `is_lower` | `is_lower(c char) -> bool` | lowercase (Unicode) |
+
 ## Collections
 
 | Function | Signature | Notes |

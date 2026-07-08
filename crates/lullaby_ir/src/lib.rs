@@ -3761,6 +3761,12 @@ impl<'a> IrRuntime<'a> {
             "to_string" => Self::builtin_to_string(args),
             "char_code" => Self::builtin_char_code(args),
             "char_from" => Self::builtin_char_from(args),
+            "is_digit" => Self::builtin_is_digit(args),
+            "is_alpha" => Self::builtin_is_alpha(args),
+            "is_alnum" => Self::builtin_is_alnum(args),
+            "is_whitespace" => Self::builtin_is_whitespace(args),
+            "is_upper" => Self::builtin_is_upper(args),
+            "is_lower" => Self::builtin_is_lower(args),
             "byte" => Self::builtin_byte(args),
             "byte_val" => Self::builtin_byte_val(args),
             "len" => Self::builtin_len(args),
@@ -4848,6 +4854,56 @@ impl<'a> IrRuntime<'a> {
                     format!("char_from got `{code}`, which is not a valid Unicode scalar value"),
                 )
             })
+    }
+
+    /// `is_digit(c char) -> bool`: whether `c` is an ASCII digit (`0`-`9`).
+    fn builtin_is_digit(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_digit", args, |c| c.is_ascii_digit())
+    }
+
+    /// `is_alpha(c char) -> bool`: whether `c` is an alphabetic character.
+    fn builtin_is_alpha(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_alpha", args, |c| c.is_alphabetic())
+    }
+
+    /// `is_alnum(c char) -> bool`: whether `c` is alphabetic or numeric.
+    fn builtin_is_alnum(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_alnum", args, |c| c.is_alphanumeric())
+    }
+
+    /// `is_whitespace(c char) -> bool`: whether `c` is a whitespace character.
+    fn builtin_is_whitespace(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_whitespace", args, |c| c.is_whitespace())
+    }
+
+    /// `is_upper(c char) -> bool`: whether `c` is an uppercase character.
+    fn builtin_is_upper(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_upper", args, |c| c.is_uppercase())
+    }
+
+    /// `is_lower(c char) -> bool`: whether `c` is a lowercase character.
+    fn builtin_is_lower(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Self::char_predicate("is_lower", args, |c| c.is_lowercase())
+    }
+
+    /// Shared helper for the deterministic `char -> bool` classification
+    /// predicates: unwrap a single `char` operand and apply `test`, reporting a
+    /// runtime error (never a panic) on a non-char operand.
+    fn char_predicate(
+        name: &'static str,
+        args: Vec<Value>,
+        test: impl Fn(char) -> bool,
+    ) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        match value {
+            Value::Char(c) => Ok(Value::Bool(test(c))),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a char but got `{other}`"),
+            )),
+        }
     }
 
     /// `byte(i i64) -> byte`: an 8-bit unsigned value; a runtime error outside 0-255.
@@ -7577,7 +7633,8 @@ impl<'a> Lowerer<'a> {
                 generic_type("list", std::slice::from_ref(&TypeRef::new("byte")))
             }
             "file_exists" | "is_file" | "is_dir" | "contains" | "starts_with" | "ends_with"
-            | "map_has" => TypeRef::new("bool"),
+            | "map_has" | "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper"
+            | "is_lower" => TypeRef::new("bool"),
             "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
             | "byte_len" | "mono_now" | "wall_now" => TypeRef::new("i64"),
             "char_from" => TypeRef::new("char"),

@@ -3350,6 +3350,14 @@ impl<'a> Checker<'a> {
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "i64", scope, function)?;
                 Some(TypeRef::new("char"))
             }
+            "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper" | "is_lower" => {
+                // Deterministic `char -> bool` classification predicates backed by
+                // the corresponding Rust `char` methods. Each takes exactly one
+                // `char` argument and yields a `bool`.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_scalar_builtin_arg(name, 1, &args[0], "char", scope, function)?;
+                Some(TypeRef::new("bool"))
+            }
             "byte" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "i64", scope, function)?;
@@ -5969,6 +5977,44 @@ mod tests {
     fn rejects_char_builtin_with_wrong_argument_type() {
         let diagnostics =
             validate_source("fn main -> i64\n    char_code(65)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0389")
+        );
+    }
+
+    #[test]
+    fn validates_char_classification_predicates() {
+        // The six `char -> bool` classification predicates each take one `char`
+        // and yield a `bool` usable in a condition.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let c char = '7'\n",
+            "    let flags i64 = 0\n",
+            "    if is_digit(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_alpha(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_alnum(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_whitespace(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_upper(c)\n",
+            "        flags = flags + 1\n",
+            "    if is_lower(c)\n",
+            "        flags = flags + 1\n",
+            "    flags\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_char_classification_predicate_with_wrong_argument_type() {
+        // `is_digit` requires a `char`; passing an `i64` is an `L0389` argument
+        // type error.
+        let diagnostics =
+            validate_source("fn main -> bool\n    is_digit(7)\n").expect_err("semantic");
         assert!(
             diagnostics
                 .iter()
