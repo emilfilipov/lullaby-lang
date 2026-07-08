@@ -3785,6 +3785,80 @@ fn ffi_calls_c_abs_when_linkable() {
     assert_eq!(exit, 7, "llabs(-7) via C FFI must exit 7");
 }
 
+/// C-ABI FFI (non-`i64` scalar width): a program that declares
+/// `extern fn toupper c i32 -> i32` and returns `to_i64(toupper(to_i32(97)))`.
+/// `toupper('a')` is `'A'` (65), so the `.exe` exits with code 65. This exercises
+/// the extended scalar marshalling: an `i32` C argument passed in the low bits of
+/// `rcx` and an `i32` C return re-normalized in `rax` (`movsxd rax, eax`). On the
+/// interpreters the extern call is rejected with `L0423`. Native-compiled and
+/// linked against `ucrt.lib` (which provides `toupper`), the `.exe` calls the real
+/// C `toupper`. Gated on `rust-lld` + `kernel32.lib` + `ucrt.lib`; skips otherwise.
+#[test]
+fn ffi_calls_c_toupper_i32_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/native_only/ffi_toupper.lby");
+
+    // `check` validates the extern declaration and its call site.
+    let check = lullaby()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(check.status.success(), "{}", stderr(&check));
+
+    // Every interpreter backend rejects the extern call with L0423.
+    for backend in ["ast", "ir", "bytecode"] {
+        let run = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(
+            !run.status.success(),
+            "extern call must fail on the {backend} interpreter"
+        );
+        let rendered = format!("{}{}", stdout(&run), stderr(&run));
+        assert!(
+            rendered.contains("L0423"),
+            "expected L0423 on {backend}: {rendered}"
+        );
+    }
+
+    // Native codegen: emit + link + run.
+    let out = std::env::temp_dir().join("lullaby_ffi_toupper.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    assert!(
+        stdout(&emit).contains("compiled main"),
+        "expected `main` compiled: {}",
+        stdout(&emit)
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() || !ucrt_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib/ucrt.lib (via the LIB env var) not available; \
+             skipping i32 C-ABI FFI link+run"
+        );
+        return;
+    }
+
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(exit, 65, "toupper('a') via C FFI must exit 65 ('A')");
+}
+
 /// Inline assembly: a `main` whose `unsafe` `asm` block emits the seven bytes of
 /// `mov rax, 42` (`0x48,0xC7,0xC0,0x2A,0x00,0x00,0x00`). On the interpreters the
 /// `asm` is rejected with `L0425` (raw machine code needs native codegen). Native-

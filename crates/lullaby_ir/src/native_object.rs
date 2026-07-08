@@ -75,6 +75,25 @@ fn emit_normalize_rax(code: &mut Vec<u8>, kind: IntKind) {
     }
 }
 
+/// Whether a Lullaby type name is a native-FFI integer scalar, and — when it is —
+/// the [`IntKind`] a narrow C return of that type must be re-normalized to in
+/// `rax`. `None` return means "no normalization needed" (the value already fills
+/// the 64-bit cell: `i64`/`u64`/`isize`/`usize`). A non-integer-scalar type
+/// (float, pointer, aggregate, string) yields the outer `None`, demoting an
+/// extern caller that uses it to the interpreters.
+///
+/// Per §5.1: `bool` marshals as `_Bool` (0/1, `u8`-class), `char` as `uint32_t`
+/// (`u32`-class), `byte` as `uint8_t` (`u8`-class). The signed/unsigned fixed
+/// widths map to their `IntKind`; `i64` is the un-normalized 64-bit cell.
+fn ffi_scalar_int_kind(type_name: &str) -> Option<Option<IntKind>> {
+    match type_name {
+        "i64" | "u64" | "isize" | "usize" => Some(None),
+        "bool" | "byte" => Some(Some(IntKind::U8)),
+        "char" => Some(Some(IntKind::U32)),
+        _ => fixed_int_kind(type_name).map(Some),
+    }
+}
+
 const AMD64_MACHINE: u16 = 0x8664;
 const COFF_HEADER_SIZE: u32 = 20;
 const SECTION_HEADER_SIZE: u32 = 40;
@@ -847,6 +866,13 @@ pub fn emit_alpha1_native_program_with_debug(
         for name in &module.extern_functions {
             callable.insert(name.as_str());
         }
+        // C-ABI signatures for the declared externs, keyed by name, so an extern
+        // call marshals its arguments/return to the correct C scalar widths.
+        let extern_sigs: HashMap<&str, &crate::IrExternSignature> = module
+            .extern_signatures
+            .iter()
+            .map(|sig| (sig.name.as_str(), sig))
+            .collect();
         let mut lowered: Vec<LoweredNativeFunction> = Vec::new();
         let mut demoted: Option<NativeSkippedFunction> = None;
         // String constants are interned fresh each attempt so a demotion that
@@ -859,7 +885,13 @@ pub fn emit_alpha1_native_program_with_debug(
                 .iter()
                 .find(|f| &f.name == name)
                 .expect("eligible name exists");
-            match lower_native_function(function, &callable, &module.structs, &mut strings) {
+            match lower_native_function(
+                function,
+                &callable,
+                &extern_sigs,
+                &module.structs,
+                &mut strings,
+            ) {
                 Ok(l) => lowered.push(l),
                 Err(reason) => {
                     demoted = Some(NativeSkippedFunction {
@@ -1163,6 +1195,11 @@ struct NativeCtx<'a> {
     frame_size: i32,
     /// The set of function names that can be called (compiled functions).
     callable: &'a std::collections::HashSet<&'a str>,
+    /// C-ABI signatures of the declared `extern fn` symbols, keyed by name. A
+    /// call whose target is here marshals its arguments/return to the C scalar
+    /// widths in the signature (integer-register subset) rather than the internal
+    /// Lullaby i64 convention.
+    extern_sigs: &'a HashMap<&'a str, &'a crate::IrExternSignature>,
     /// Relocations accumulated while emitting this function.
     relocations: Vec<CodeRelocation>,
     /// Program-wide interned string constants (`.rdata`), shared across all
@@ -1178,6 +1215,7 @@ impl<'a> NativeCtx<'a> {
     fn plan(
         function: &'a BytecodeFunction,
         callable: &'a std::collections::HashSet<&'a str>,
+        extern_sigs: &'a HashMap<&'a str, &'a crate::IrExternSignature>,
         structs: &'a [IrStructDef],
         strings: &'a mut StringPool,
     ) -> Result<Self, String> {
@@ -1212,6 +1250,7 @@ impl<'a> NativeCtx<'a> {
             locals,
             frame_size,
             callable,
+            extern_sigs,
             relocations: Vec::new(),
             strings,
         })
@@ -1402,10 +1441,11 @@ struct NativeLoop {
 fn lower_native_function(
     function: &BytecodeFunction,
     callable: &std::collections::HashSet<&str>,
+    extern_sigs: &HashMap<&str, &crate::IrExternSignature>,
     structs: &[IrStructDef],
     strings: &mut StringPool,
 ) -> Result<LoweredNativeFunction, String> {
-    let mut ctx = NativeCtx::plan(function, callable, structs, strings)?;
+    let mut ctx = NativeCtx::plan(function, callable, extern_sigs, structs, strings)?;
     let mut code = Vec::new();
 
     // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size.
@@ -2306,8 +2346,39 @@ fn lower_native_expr(
                     args.len()
                 ));
             }
+            // If the target is an `extern fn` (a C symbol), marshal it across the
+            // Win64 C ABI: validate that every parameter and the return type is a
+            // marshallable integer scalar (the integer-register subset of §5.1 in
+            // ffi_design.md), then normalize a narrow C return in `rax`. Float
+            // (`f32`/`f64`) externs need XMM argument routing and are deferred:
+            // such a caller is demoted to the interpreters (which reject it with
+            // `L0423`). A non-extern call keeps the internal i64 convention.
+            let extern_return = if let Some(sig) = ctx.extern_sigs.get(name.as_str()) {
+                for param_ty in &sig.params {
+                    ffi_scalar_int_kind(&param_ty.name).ok_or_else(|| {
+                        format!(
+                            "extern `{name}` parameter type `{}` is not a native FFI \
+                             integer scalar (floats/pointers/aggregates are deferred)",
+                            param_ty.name
+                        )
+                    })?;
+                }
+                Some(ffi_scalar_int_kind(&sig.return_type.name).ok_or_else(|| {
+                    format!(
+                        "extern `{name}` return type `{}` is not a native FFI integer \
+                         scalar (floats/pointers/aggregates are deferred)",
+                        sig.return_type.name
+                    )
+                })?)
+            } else {
+                None
+            };
             // Evaluate args left-to-right, pushing each result. Then pop into the
-            // Win64 argument registers in order.
+            // Win64 argument registers in order. An integer scalar already sits in
+            // the low bits of `rax` normalized to its width (the interpreter's
+            // cell model), which is exactly what Win64 passes in the low bits of
+            // the argument register, so no per-argument marshalling is needed for
+            // the integer subset.
             for arg in args {
                 lower_native_expr(ctx, arg, code)?;
                 code.push(0x50); // push rax
@@ -2330,6 +2401,15 @@ fn lower_native_expr(
                 offset: site as u32,
                 symbol: name.clone(),
             });
+            // Normalize an extern's C return value into its canonical `i64` cell.
+            // The Win64 ABI leaves the upper bits of a narrow integer return
+            // undefined, so a returned `i8`/`i16`/`i32`/`u8`/`u16`/`u32` is
+            // re-normalized (sign/zero extended) so downstream Lullaby code sees
+            // the same cell the interpreters produce. `i64`/64-bit kinds are a
+            // no-op.
+            if let Some(Some(fixed)) = extern_return {
+                emit_normalize_rax(code, fixed);
+            }
             Ok(())
         }
         BytecodeExprKind::Field { .. } | BytecodeExprKind::Index { .. } => {
@@ -4026,6 +4106,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            extern_signatures: Vec::new(),
             export_functions: Vec::new(),
             closures: Vec::new(),
             functions: vec![BytecodeFunction {
@@ -4084,6 +4165,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            extern_signatures: Vec::new(),
             export_functions: Vec::new(),
             closures: Vec::new(),
             functions: vec![BytecodeFunction {
@@ -4147,6 +4229,7 @@ mod tests {
             trait_methods: Vec::new(),
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
+            extern_signatures: Vec::new(),
             export_functions: Vec::new(),
             closures: Vec::new(),
             functions: vec![BytecodeFunction {
@@ -4635,6 +4718,80 @@ mod native_program_tests {
         assert!(
             program.bytes.windows(8).any(|w| w == needle),
             "expected an `llabs` external symbol record"
+        );
+    }
+
+    #[test]
+    fn emits_i32_extern_call_with_import_and_return_normalization() {
+        // An `extern fn` with an `i32` C signature (e.g. `toupper(int) -> int`)
+        // now compiles: the call lowers to a REL32 relocation against an undefined
+        // external symbol, requests the C runtime import library, and — because
+        // Win64 leaves the upper bits of a narrow integer return undefined — the
+        // emitter normalizes the `i32` return with `movsxd rax, eax` (48 63 C0).
+        let program = emit_alpha1_native_program(&module_for(
+            "extern fn toupper c i32 -> i32\n\nfn main -> i64\n    to_i64(toupper(to_i32(97)))\n",
+        ))
+        .expect("emit native program for an i32 extern");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert_eq!(
+            program.import_libs,
+            vec![C_RUNTIME_IMPORT_LIB.to_string()],
+            "an i32 extern call still requires the C runtime import library"
+        );
+
+        // The undefined external symbol `toupper` (<= 8 bytes) is stored inline.
+        assert!(
+            program.bytes.windows(8).any(|w| w == b"toupper\0"),
+            "expected a `toupper` external symbol record"
+        );
+
+        // `main`'s text contains `movsxd rax, eax` (48 63 C0) — the i32 C return
+        // normalization emitted after the `call`.
+        let text = text_bytes(&program);
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0x63, 0xC0]),
+            "expected an i32 return normalization (`movsxd rax, eax`) after the extern call"
+        );
+    }
+
+    #[test]
+    fn emits_u8_extern_call_with_zero_extend_return_normalization() {
+        // A `u8`/`byte`-class C return is zero-extended (`movzx rax, al` = 48 0F
+        // B6 C0). This also exercises the `bool`/`byte` -> u8 marshalling class.
+        let program = emit_alpha1_native_program(&module_for(
+            "extern fn tolower c u8 -> u8\n\nfn main -> i64\n    to_i64(tolower(to_u8(65)))\n",
+        ))
+        .expect("emit native program for a u8 extern");
+        let text = text_bytes(&program);
+        assert!(
+            text.windows(4).any(|w| w == [0x48, 0x0F, 0xB6, 0xC0]),
+            "expected a u8 return normalization (`movzx rax, al`) after the extern call"
+        );
+    }
+
+    #[test]
+    fn skips_float_extern_caller_gracefully() {
+        // A float (`f64`/`f32`) extern needs XMM argument/return routing, which is
+        // deferred. A caller of such an extern must skip gracefully (demoted to the
+        // interpreters, which reject the extern call with `L0423`) rather than
+        // miscompiling — leaving nothing eligible here.
+        let err = emit_alpha1_native_program(&module_for(concat!(
+            "extern fn cfloor x f64 -> f64\n\n",
+            "fn main -> i64\n",
+            "    let r f64 = cfloor(3.7)\n",
+            "    let flag i64 = 0\n",
+            "    if r > 3.0\n",
+            "        flag = 1\n",
+            "    flag\n",
+        )))
+        .expect_err("float extern is deferred on native");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(
+            err.skipped
+                .iter()
+                .any(|s| s.name == "main" && s.reason.contains("cfloor")),
+            "skip reason should name the deferred float extern: {:?}",
+            err.skipped
         );
     }
 

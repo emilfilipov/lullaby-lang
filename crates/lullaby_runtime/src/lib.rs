@@ -4927,6 +4927,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_extern_call_on_the_ast_interpreter() {
+        // A C-ABI `extern fn` call is native-only; the AST interpreter rejects it
+        // with `L0423` regardless of the C scalar width (here an `i32` signature),
+        // rather than executing C or silently no-op-ing.
+        let source =
+            "extern fn toupper c i32 -> i32\n\nfn main -> i64\n    to_i64(toupper(to_i32(97)))\n";
+        let error = run_source(source).expect_err("extern call must not run on an interpreter");
+        assert_eq!(error.code, "L0423");
+        assert!(
+            error.message.contains("toupper") && error.message.contains("lullaby native"),
+            "L0423 names the extern and points at `lullaby native`: {}",
+            error.message
+        );
+    }
+
+    #[test]
     fn dispatches_trait_method_by_receiver_type() {
         // `p.show()` dispatches to Point's `Show` impl; the bounded generic
         // `describe(p)` calls the same trait method on the concrete type.
