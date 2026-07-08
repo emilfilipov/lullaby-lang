@@ -318,6 +318,59 @@ fn runs_parallel_map_fixture_on_all_backends() {
 }
 
 #[test]
+fn runs_list_map_fixture_on_all_backends() {
+    // `list_map` squares [1,2,3,4] -> [1,4,9,16] (sum 30) and doubles them via
+    // a closure -> [2,4,6,8] (sum 20); `list_reduce` folds each. The
+    // deterministic total is 50 on the AST, IR, and bytecode interpreters.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_list_map.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "50",
+            "{backend} result"
+        );
+    }
+}
+
+#[test]
+fn runs_list_higher_order_fixture_on_all_backends() {
+    // `list_filter` keeps the small elements [1,2,3] (sum 6, named predicate)
+    // and the big elements [4,5,6] (sum 15, closure predicate); `list_reduce`
+    // folds each with a two-argument closure. The deterministic total is 21 on
+    // the AST, IR, and bytecode interpreters.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_list_higher_order.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "21",
+            "{backend} result"
+        );
+    }
+}
+
+#[test]
 fn runs_spawn_channel_mutex_fixture_on_all_backends() {
     // Four detached `spawn`ed workers each `send(ch, v * v)`; `main` joins them
     // and sums the four received squares (order-independent â†’ 30), then a mutex

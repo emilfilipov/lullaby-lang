@@ -151,6 +151,9 @@ argument is a compile-time `L0389` type error.
 | `list_sum` | `list_sum(l list<T>) -> T` | sum of a numeric list (`T` is `i64` or `f64`); `i64` sums **wrap** (matching `+`), `f64` sums as `f64`; an empty list yields `0`/`0.0` |
 | `list_min` | `list_min(l list<T>) -> option<T>` | smallest element of a numeric list (`T` is `i64` or `f64`), or `none` on an empty list |
 | `list_max` | `list_max(l list<T>) -> option<T>` | largest element of a numeric list (`T` is `i64` or `f64`), or `none` on an empty list |
+| `list_map` | `list_map(l list<T>, f fn(T) -> U) -> list<U>` | apply `f` to each element in order, returning the mapped `list<U>`; `f` may be a named function or a closure literal (interpreter-level; the native/WASM backends fall back to the interpreter) |
+| `list_filter` | `list_filter(l list<T>, pred fn(T) -> bool) -> list<T>` | keep the elements for which `pred` returns `true`, order preserved (returns a new list; interpreter-level with native/WASM fallback) |
+| `list_reduce` | `list_reduce(l list<T>, init U, f fn(U, T) -> U) -> U` | left fold: `acc = init`, then `acc = f(acc, element)` for each element in order, returning the final accumulator (interpreter-level with native/WASM fallback) |
 | `map_new` | `map_new() -> map<K, V>` | key/value types inferred from context |
 | `map_set` | `map_set(m map<K, V>, k K, v V) -> map<K, V>` | insert/replace |
 | `map_get` | `map_get(m map<K, V>, k K) -> option<V>` | `some`/`none` |

@@ -3000,6 +3000,57 @@ impl<'a> Checker<'a> {
                 self.expect_arg_type(name, 3, &args[2], "i64", scope, function)?;
                 Some(list_type(&element))
             }
+            "list_map" => {
+                // `list_map(l list<T>, f fn(T) -> U) -> list<U>`: apply `f` to
+                // each element in order, returning the mapped `list<U>`. `U` is
+                // read from the function argument's declared return type.
+                self.expect_arg_count(name, args, 2, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                let (_, ret) = self.expect_fn_arg(
+                    name,
+                    2,
+                    &args[1],
+                    (std::slice::from_ref(&element), None),
+                    scope,
+                    function,
+                )?;
+                Some(list_type(&ret))
+            }
+            "list_filter" => {
+                // `list_filter(l list<T>, pred fn(T) -> bool) -> list<T>`: keep
+                // the elements for which `pred` returns `true`, order preserved.
+                self.expect_arg_count(name, args, 2, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                self.expect_fn_arg(
+                    name,
+                    2,
+                    &args[1],
+                    (std::slice::from_ref(&element), Some(&TypeRef::new("bool"))),
+                    scope,
+                    function,
+                )?;
+                Some(list_type(&element))
+            }
+            "list_reduce" => {
+                // `list_reduce(l list<T>, init U, f fn(U, T) -> U) -> U`: a left
+                // fold. `U` is fixed by `init`; the folding function must be
+                // `fn(U, T) -> U`.
+                self.expect_arg_count(name, args, 3, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                let acc = self.check_expr(&args[1], scope, function)?;
+                self.expect_fn_arg(
+                    name,
+                    3,
+                    &args[2],
+                    (&[acc.clone(), element], Some(&acc)),
+                    scope,
+                    function,
+                )?;
+                Some(acc)
+            }
             "map_set" => {
                 self.expect_arg_count(name, args, 3, function)?;
                 // `map_set` returns `map<K, V>`, so the outer expected `map<K, V>`
@@ -4701,6 +4752,53 @@ impl<'a> Checker<'a> {
                 None
             }
         }
+    }
+
+    /// Check a function-valued argument at position `index` (1-based) of a
+    /// higher-order list builtin. The argument must be a `fn(...)` value whose
+    /// parameter types equal `expected_params`; when `expected_ret` is `Some`,
+    /// the return type must match it too. On success the function's
+    /// `(param types, return type)` is returned. Failures reuse the general
+    /// `list<T>` builtin diagnostic `L0387` (a mismatched or non-function
+    /// argument to a list builtin).
+    fn expect_fn_arg(
+        &mut self,
+        name: &str,
+        index: usize,
+        arg: &Expr,
+        expected: (&[TypeRef], Option<&TypeRef>),
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<(Vec<TypeRef>, TypeRef)> {
+        let (expected_params, expected_ret) = expected;
+        let arg_ty = self.check_expr(arg, scope, function)?;
+        let Some((params, ret)) = arg_ty.function_signature() else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0387",
+                format!(
+                    "`{name}` argument {index} must be a function value but got `{}`",
+                    arg_ty.name
+                ),
+                Some(function.name.clone()),
+                arg.span,
+            ));
+            return None;
+        };
+        if params != expected_params || expected_ret.is_some_and(|expected| &ret != expected) {
+            let expected_ret_name = expected_ret.map(|ty| ty.name.as_str()).unwrap_or("U");
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0387",
+                format!(
+                    "`{name}` argument {index} must be a `{}` but got `{}`",
+                    function_type(expected_params, &TypeRef::new(expected_ret_name)).name,
+                    arg_ty.name
+                ),
+                Some(function.name.clone()),
+                arg.span,
+            ));
+            return None;
+        }
+        Some((params, ret))
     }
 
     /// Verify `ty` is a `map<K, V>` and return its `(K, V)` pair.
@@ -6724,6 +6822,63 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0334")
+        );
+    }
+
+    #[test]
+    fn accepts_list_map_with_named_and_closure_functions() {
+        // `list_map(list<i64>, fn(i64) -> U)` yields `list<U>`; a named function
+        // and a closure literal are both accepted, and `U` may differ from `T`.
+        let named = "fn sq x i64 -> i64\n    x * x\n\nfn main -> list<i64>\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_map(base, sq)\n";
+        validate_source(named).expect("list_map with named function");
+        let closure = "fn tag x i64 -> bool\n    x > 0\n\nfn main -> list<bool>\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_map(base, fn x i64 -> x > 1)\n";
+        validate_source(closure).expect("list_map with closure returning a different type");
+    }
+
+    #[test]
+    fn accepts_list_filter_and_list_reduce() {
+        let filter = "fn keep x i64 -> bool\n    x > 1\n\nfn main -> list<i64>\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_filter(base, keep)\n";
+        validate_source(filter).expect("list_filter with predicate");
+        let reduce = "fn main -> i64\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_reduce(base, 0, fn acc i64 x i64 -> acc + x)\n";
+        validate_source(reduce).expect("list_reduce with folding closure");
+    }
+
+    #[test]
+    fn rejects_list_map_non_function_second_argument() {
+        // The second argument must be a function value, not a plain list. A
+        // wrong list-builtin argument reports the general `L0387` code.
+        let source = "fn main -> list<i64>\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_map(base, base)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0387")
+        );
+    }
+
+    #[test]
+    fn rejects_list_filter_non_bool_predicate() {
+        // `list_filter`'s predicate must return `bool`; `fn(i64) -> i64` is
+        // rejected with the list-builtin diagnostic `L0387`.
+        let source = "fn sq x i64 -> i64\n    x * x\n\nfn main -> list<i64>\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_filter(base, sq)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0387")
+        );
+    }
+
+    #[test]
+    fn rejects_list_reduce_wrong_function_arity() {
+        // `list_reduce`'s folder must be `fn(U, T) -> U`; a single-argument
+        // function is the wrong arity and reports `L0387`.
+        let source = "fn inc x i64 -> i64\n    x + 1\n\nfn main -> i64\n    let base list<i64> = list_new()\n    base = push(base, 2)\n    list_reduce(base, 0, inc)\n";
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0387")
         );
     }
 

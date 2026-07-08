@@ -519,8 +519,8 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         code: "L0387",
         phase: DiagnosticPhase::Semantic,
         explanation: "A `list<T>` builtin call had a wrong argument or an uninferable element type.",
-        root_cause: "A `list_new`/`push`/`get`/`set`/`pop` call used the wrong argument type or arity, or `list_new` had no expected `list<...>` type to fix its element type.",
-        suggested_fix: "Pass a `list<T>` and matching `T` element, and give `list_new()` a `list<...>` annotation or return type so its element type is known.",
+        root_cause: "A `list_new`/`push`/`get`/`set`/`pop`/`list_map`/`list_filter`/`list_reduce` call used the wrong argument type or arity, passed a non-function (or wrong `fn(...)` signature) where a higher-order builtin expects a mapping/predicate/folding function, or `list_new` had no expected `list<...>` type to fix its element type.",
+        suggested_fix: "Pass a `list<T>` and matching `T` element (and, for `list_map`/`list_filter`/`list_reduce`, a `fn(T) -> U`/`fn(T) -> bool`/`fn(U, T) -> U` function value), and give `list_new()` a `list<...>` annotation or return type so its element type is known.",
     },
     DiagnosticEntry {
         code: "L0388",

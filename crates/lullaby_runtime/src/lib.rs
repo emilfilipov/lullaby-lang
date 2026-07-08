@@ -1664,6 +1664,9 @@ impl<'a> Runtime<'a> {
             "sort" => Self::builtin_sort(args),
             "concat" => Self::builtin_concat(args),
             "slice" => Self::builtin_slice(args),
+            "list_map" => self.builtin_list_map(args),
+            "list_filter" => self.builtin_list_filter(args),
+            "list_reduce" => self.builtin_list_reduce(args),
             "map_new" => Self::builtin_map_new(args),
             "map_set" => Self::builtin_map_set(args),
             "map_get" => Self::builtin_map_get(args),
@@ -4073,6 +4076,72 @@ impl<'a> Runtime<'a> {
             return Ok(Value::Array(Vec::new()));
         }
         Ok(Value::Array(values[start..end].to_vec()))
+    }
+
+    /// Invoke a first-class function value (`Value::Func` name or a capturing
+    /// `Value::Closure`) with `args`, reusing the same invocation path that
+    /// `parallel_map`/direct call dispatch use. Shared by the higher-order list
+    /// builtins so closures capture correctly and named functions resolve
+    /// through the normal call machinery.
+    fn invoke_callable(
+        &mut self,
+        builtin: &str,
+        callee: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        match callee {
+            Value::Func(name) => self.call_function(&name, args),
+            Value::Closure(closure) => self.invoke_closure(&closure, args),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("{builtin} expects a function but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `list_map(l list<T>, f fn(T) -> U) -> list<U>`: apply `f` to each element
+    /// in order, collecting the mapped values into a new list.
+    fn builtin_list_map(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, callee]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_map", 2, args.len()))?;
+        let values = expect_list("list_map", list)?;
+        let mut mapped = Vec::with_capacity(values.len());
+        for value in values {
+            mapped.push(self.invoke_callable("list_map", callee.clone(), vec![value])?);
+        }
+        Ok(Value::Array(mapped))
+    }
+
+    /// `list_filter(l list<T>, pred fn(T) -> bool) -> list<T>`: keep the elements
+    /// for which `pred` returns `true`, preserving input order.
+    fn builtin_list_filter(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, callee]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_filter", 2, args.len()))?;
+        let values = expect_list("list_filter", list)?;
+        let mut kept = Vec::new();
+        for value in values {
+            let keep = self.invoke_callable("list_filter", callee.clone(), vec![value.clone()])?;
+            if keep.as_bool()? {
+                kept.push(value);
+            }
+        }
+        Ok(Value::Array(kept))
+    }
+
+    /// `list_reduce(l list<T>, init U, f fn(U, T) -> U) -> U`: a left fold,
+    /// threading the accumulator (starting at `init`) through `f(acc, element)`.
+    fn builtin_list_reduce(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, init, callee]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_reduce", 3, args.len()))?;
+        let values = expect_list("list_reduce", list)?;
+        let mut acc = init;
+        for value in values {
+            acc = self.invoke_callable("list_reduce", callee.clone(), vec![acc, value])?;
+        }
+        Ok(acc)
     }
 
     /// `map_new() -> map<K, V>`: a fresh empty map.
