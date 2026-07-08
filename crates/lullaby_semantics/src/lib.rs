@@ -3678,6 +3678,36 @@ impl<'a> Checker<'a> {
                     &TypeRef::new("string"),
                 ))
             }
+            "proc_spawn" => {
+                // `(cmd string, args array<string>) -> result<process, string>`.
+                // Spawns a live child process capturing stdout/stderr; extends the
+                // one-shot `sys_status`/`sys_output`. Reuses the socket/network
+                // handle diagnostic family (`L0335`).
+                self.expect_socket_arg_count(name, args, 2, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "string", scope, function)?;
+                self.expect_socket_arg_type(name, 2, &args[1], "array<string>", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("process"),
+                    &TypeRef::new("string"),
+                ))
+            }
+            "proc_wait" | "proc_kill" => {
+                // `(p process) -> result<i64, string>`: block for exit / kill the
+                // child, returning an exit code (`proc_wait`) or `0` (`proc_kill`).
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "process", scope, function)?;
+                Some(result_type(&TypeRef::new("i64"), &TypeRef::new("string")))
+            }
+            "proc_stdout" | "proc_stderr" => {
+                // `(p process) -> result<string, string>`: the child's captured
+                // stdout / stderr, read to end.
+                self.expect_socket_arg_count(name, args, 1, function)?;
+                self.expect_socket_arg_type(name, 1, &args[0], "process", scope, function)?;
+                Some(result_type(
+                    &TypeRef::new("string"),
+                    &TypeRef::new("string"),
+                ))
+            }
             _ => {
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     self.diagnostics.push(SemanticDiagnostic::at(
@@ -7419,6 +7449,47 @@ mod tests {
         assert!(
             diagnostics.iter().any(|d| d.code == "L0428"),
             "expected L0428: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn process_builtins_type_check_end_to_end() {
+        // `proc_spawn` yields `result<process, string>`; the `process` handle
+        // threads into `proc_wait`/`proc_stdout`/`proc_stderr`/`proc_kill`, each
+        // returning the documented `result` type. This exercises the whole
+        // process handle surface through the type checker.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let spawned result<process, string> = proc_spawn(\"echo\", [\"hello\"])\n",
+            "    match spawned\n",
+            "        ok(p) -> drive(p)\n",
+            "        err(message) -> 1\n",
+            "\n",
+            "fn drive p process -> i64\n",
+            "    let waited result<i64, string> = proc_wait(p)\n",
+            "    let out result<string, string> = proc_stdout(p)\n",
+            "    let errs result<string, string> = proc_stderr(p)\n",
+            "    let killed result<i64, string> = proc_kill(p)\n",
+            "    0\n",
+        );
+        validate_source(source).expect("process builtins type-check");
+    }
+
+    #[test]
+    fn rejects_proc_spawn_wrong_arg_type_with_l0335() {
+        // `proc_spawn` expects `(string, array<string>)`; passing an i64 command
+        // is rejected with the socket/network handle diagnostic family `L0335`.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let spawned result<process, string> = proc_spawn(5, [\"hello\"])\n",
+            "    match spawned\n",
+            "        ok(p) -> 0\n",
+            "        err(message) -> 1\n",
+        );
+        let diagnostics = validate_source(source).expect_err("wrong proc_spawn arg type");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0335"),
+            "{diagnostics:?}"
         );
     }
 }

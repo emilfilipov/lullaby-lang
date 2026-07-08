@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,7 @@ pub fn value_type_name(value: &Value) -> String {
         Value::Func(_) => "fn".to_string(),
         Value::Ptr(_) => "ptr".to_string(),
         Value::Socket(_) => "Socket".to_string(),
+        Value::Process(_) => "process".to_string(),
         Value::Chan(_) => "Chan".to_string(),
         Value::Task(_) => "Task".to_string(),
         Value::Future(_) => "Future".to_string(),
@@ -164,6 +165,11 @@ pub enum Value {
     /// `TcpStream`, or `UdpSocket`) is not `Clone`, so sockets are represented
     /// as opaque integer handles, mirroring how `Ptr` indexes the heap.
     Socket(usize),
+    /// A live external-process handle: an index into the interpreter's per-runtime
+    /// `processes` table. The underlying `std::process::Child` is not `Clone`, so a
+    /// spawned process is surfaced to Lullaby as an opaque integer handle, exactly
+    /// like `Socket`.
+    Process(usize),
     /// An unbounded `i64` message-passing channel; shared on clone.
     Chan(Chan),
     /// A one-shot handle to a spawned detached thread; `join`ed once.
@@ -230,6 +236,7 @@ impl fmt::Display for Value {
             }
             Self::Func(name) => write!(formatter, "fn {name}"),
             Self::Socket(handle) => write!(formatter, "socket({handle})"),
+            Self::Process(handle) => write!(formatter, "process({handle})"),
             Self::Chan(_) => write!(formatter, "chan"),
             Self::Task(_) => write!(formatter, "task"),
             Self::Future(_) => write!(formatter, "future"),
@@ -736,6 +743,45 @@ pub enum SocketResource {
     Udp(UdpSocket),
 }
 
+/// A live external process held behind a `Value::Process` handle. Not `Clone`
+/// (a `std::process::Child` owns OS resources), which is why processes are
+/// surfaced to Lullaby as opaque integer handles, exactly like `SocketResource`.
+/// Shared by the AST interpreter and the IR interpreter / bytecode VM so every
+/// backend keeps identical process semantics. `stdout`/`stderr` are taken out of
+/// the `Child` on the first `proc_stdout`/`proc_stderr` read (a `ChildStdout`
+/// cannot be read twice), leaving `None` behind so a second read returns EOF.
+pub struct ProcessResource {
+    pub child: Child,
+}
+
+/// Which captured pipe a `proc_stdout`/`proc_stderr` read should drain.
+#[derive(Clone, Copy)]
+enum PipeKind {
+    Stdout,
+    Stderr,
+}
+
+/// Convert a finished child's exit status into the `i64` a `proc_wait`/`proc_kill`
+/// success returns. On every platform a normal exit yields its exit code. On Unix
+/// a process killed by a signal has no exit code; by convention that is reported
+/// as `128 + signal` (the shell convention), so callers still get a total,
+/// deterministic `i64`. Shared by both interpreters so the value is identical
+/// across backends.
+pub fn process_exit_code(status: &std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return i64::from(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + i64::from(signal);
+        }
+    }
+    // No exit code and (on non-Unix) no signal information available.
+    -1
+}
+
 /// First character index of `needle` in `text`, or `-1` when absent.
 pub fn char_find(text: &str, needle: &str) -> i64 {
     match text.find(needle) {
@@ -808,6 +854,10 @@ struct Runtime<'a> {
     /// Per-runtime table of open network sockets. A `Value::Socket(i)` indexes
     /// this vector; closing a socket sets its slot to `None`, mirroring the heap.
     sockets: Vec<Option<SocketResource>>,
+    /// Per-runtime table of live external processes. A `Value::Process(i)` indexes
+    /// this vector; a killed/reaped process keeps its slot but `child.stdout`/
+    /// `stderr` are drained on read. Mirrors `sockets`.
+    processes: Vec<Option<ProcessResource>>,
     call_stack: Vec<TraceFrame>,
     /// Trait-method dispatch table: `(receiver type name, method name)` -> the
     /// impl function. Built once from every `impl Trait for Type` block.
@@ -909,6 +959,7 @@ impl<'a> Runtime<'a> {
             heap: Vec::new(),
             refcounts: HashMap::new(),
             sockets: Vec::new(),
+            processes: Vec::new(),
             call_stack: Vec::new(),
             impl_methods,
             trait_method_names,
@@ -1116,6 +1167,11 @@ impl<'a> Runtime<'a> {
             "udp_recv" => self.builtin_udp_recv(args),
             "http_get" => Self::builtin_http_get(args),
             "http_post" => Self::builtin_http_post(args),
+            "proc_spawn" => self.builtin_proc_spawn(args),
+            "proc_wait" => self.builtin_proc_wait(args),
+            "proc_stdout" => self.builtin_proc_stdout(args),
+            "proc_stderr" => self.builtin_proc_stderr(args),
+            "proc_kill" => self.builtin_proc_kill(args),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("L0401", format!("unknown function `{name}`"))
@@ -1513,6 +1569,145 @@ impl<'a> Runtime<'a> {
                 "L0406",
                 format!("{name} received a closed or invalid socket `{handle}`"),
             )),
+        }
+    }
+
+    /// Push a freshly spawned child into the handle table, returning its index
+    /// wrapped as a `Value::Process`. Mirrors `register_socket`.
+    fn register_process(&mut self, resource: ProcessResource) -> Value {
+        self.processes.push(Some(resource));
+        Value::Process(self.processes.len() - 1)
+    }
+
+    /// Resolve a process handle argument to its live slot index, reporting a
+    /// wrong-argument-type error for a non-process value and a stale-handle error
+    /// for a reaped/invalid slot. Mirrors `socket_slot`.
+    fn process_slot(&self, name: &str, value: &Value) -> Result<usize, RuntimeError> {
+        let Value::Process(handle) = value else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a process but got `{value}`"),
+            ));
+        };
+        match self.processes.get(*handle) {
+            Some(Some(_)) => Ok(*handle),
+            _ => Err(RuntimeError::new(
+                "L0406",
+                format!("{name} received a reaped or invalid process `{handle}`"),
+            )),
+        }
+    }
+
+    /// `proc_spawn(cmd string, args array<string>) -> result<process, string>`:
+    /// spawn `cmd` with `args`, piping stdout/stderr so they can be read later.
+    /// `ok(handle)` on success, `err(message)` if the process cannot be started
+    /// (e.g. the command is not found). Never panics.
+    fn builtin_proc_spawn(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [cmd, cmd_args]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_spawn", 2, args.len()))?;
+        let cmd = expect_string("proc_spawn", cmd)?;
+        let cmd_args = cmd_args.as_string_array()?;
+        match Command::new(&cmd)
+            .args(cmd_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => {
+                let handle = self.register_process(ProcessResource { child });
+                Ok(result_value(Ok(handle)))
+            }
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_wait(p process) -> result<i64, string>`: block until the child exits
+    /// and return its exit code (`128 + signal` on Unix signal termination).
+    /// `err` if the handle is already reaped/invalid or the wait fails.
+    fn builtin_proc_wait(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_wait", 1, args.len()))?;
+        let slot = self.process_slot("proc_wait", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_wait requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.wait() {
+            Ok(status) => Ok(result_value(Ok(Value::I64(process_exit_code(&status))))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_stdout(p process) -> result<string, string>`: read the child's
+    /// captured stdout to end as a lossy UTF-8 string. The pipe is taken out of
+    /// the `Child` on first read, so a second call returns an empty string.
+    fn builtin_proc_stdout(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.proc_read_pipe("proc_stdout", args, PipeKind::Stdout)
+    }
+
+    /// `proc_stderr(p process) -> result<string, string>`: like `proc_stdout` but
+    /// for the child's captured stderr.
+    fn builtin_proc_stderr(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.proc_read_pipe("proc_stderr", args, PipeKind::Stderr)
+    }
+
+    /// Shared body of `proc_stdout`/`proc_stderr`: take the requested pipe out of
+    /// the child and read it to end.
+    fn proc_read_pipe(
+        &mut self,
+        name: &'static str,
+        args: Vec<Value>,
+        kind: PipeKind,
+    ) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        let slot = self.process_slot(name, &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(format!(
+                "{name} requires a live process"
+            )))));
+        };
+        let mut buffer = String::new();
+        let read = match kind {
+            PipeKind::Stdout => resource
+                .child
+                .stdout
+                .take()
+                .map(|mut pipe| pipe.read_to_string(&mut buffer)),
+            PipeKind::Stderr => resource
+                .child
+                .stderr
+                .take()
+                .map(|mut pipe| pipe.read_to_string(&mut buffer)),
+        };
+        match read {
+            // Pipe already drained (or was never captured): report EOF.
+            None => Ok(result_value(Ok(Value::String(String::new())))),
+            Some(Ok(_)) => Ok(result_value(Ok(Value::String(buffer)))),
+            Some(Err(error)) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_kill(p process) -> result<i64, string>`: kill the child, returning
+    /// `ok(0)` on success. Killing an already-exited child still succeeds.
+    fn builtin_proc_kill(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_kill", 1, args.len()))?;
+        let slot = self.process_slot("proc_kill", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_kill requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.kill() {
+            Ok(()) => Ok(result_value(Ok(Value::I64(0)))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
         }
     }
 
@@ -4795,6 +4990,71 @@ mod tests {
             "        err(message) -> 1\n",
         );
         assert_eq!(run_source(source).expect("run"), Value::I64(1));
+    }
+
+    #[test]
+    fn proc_spawn_missing_command_yields_err_result() {
+        // Spawning a command that does not exist on any platform deterministically
+        // takes the `err` arm, so the program returns 1. This mirrors the
+        // backend-invariant `run_process.lby` parity fixture. (Array literals must
+        // be non-empty in the current alpha, so a harmless arg is supplied; a
+        // missing command fails to spawn regardless of its arguments.)
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let outcome result<process, string> = proc_spawn(\"lullaby_definitely_not_a_real_program_zzz\", [\"--version\"])\n",
+            "    match outcome\n",
+            "        ok(p) -> 7\n",
+            "        err(message) -> 1\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(1));
+    }
+
+    #[test]
+    fn proc_spawn_wait_and_stdout_success_path() {
+        // Spawn a universally-available shell that echoes `hello`, wait for exit,
+        // and assert the exit code is 0 and captured stdout contains `hello`. The
+        // command is platform-conditional so the test runs on the host. Every
+        // `match` sits in tail position (via helper functions) to stay within the
+        // fixture-style surface the parser accepts.
+        let (cmd, arg0, arg1) = if cfg!(windows) {
+            ("cmd", "/c", "echo hello")
+        } else {
+            ("sh", "-c", "echo hello")
+        };
+        let source = format!(
+            concat!(
+                "fn main -> i64\n",
+                "    let spawned result<process, string> = proc_spawn(\"{cmd}\", [\"{arg0}\", \"{arg1}\"])\n",
+                "    match spawned\n",
+                "        ok(p) -> run_child(p)\n",
+                "        err(message) -> 100\n",
+                "\n",
+                "fn run_child p process -> i64\n",
+                "    let waited result<i64, string> = proc_wait(p)\n",
+                "    let captured result<string, string> = proc_stdout(p)\n",
+                "    check_wait(waited, captured)\n",
+                "\n",
+                "fn check_wait waited result<i64, string> captured result<string, string> -> i64\n",
+                "    match waited\n",
+                "        ok(status) -> check_output(status, captured)\n",
+                "        err(message) -> 200\n",
+                "\n",
+                "fn check_output code i64 captured result<string, string> -> i64\n",
+                "    match captured\n",
+                "        ok(text) -> classify(code, text)\n",
+                "        err(message) -> 300\n",
+                "\n",
+                "fn classify code i64 text string -> i64\n",
+                "    if code == 0 and contains(text, \"hello\")\n",
+                "        0\n",
+                "    else\n",
+                "        1\n",
+            ),
+            cmd = cmd,
+            arg0 = arg0,
+            arg1 = arg1,
+        );
+        assert_eq!(run_source(&source).expect("run"), Value::I64(0));
     }
 
     #[test]

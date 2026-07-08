@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -11,12 +11,13 @@ use lullaby_parser::{
     TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
-    Future, ResolvedPlace, RuntimeError, SharedAtomic, SharedMutex, SocketResource, Task, Value,
-    apply_compound, asm_interpreter_error, await_future, char_find, expect_atomic, expect_chan,
-    expect_future, expect_i64, expect_list, expect_map, expect_mutex, expect_string, expect_task,
-    extern_call_error, get_place, http_exchange, join_task, monotonic_now_nanos, net_err, new_chan,
-    option_value, os_random_bytes, result_value, scalar_order_keys, set_place, shift_left,
-    shift_right, sleep_millis, value_type_name, wall_now_millis,
+    Future, ProcessResource, ResolvedPlace, RuntimeError, SharedAtomic, SharedMutex,
+    SocketResource, Task, Value, apply_compound, asm_interpreter_error, await_future, char_find,
+    expect_atomic, expect_chan, expect_future, expect_i64, expect_list, expect_map, expect_mutex,
+    expect_string, expect_task, extern_call_error, get_place, http_exchange, join_task,
+    monotonic_now_nanos, net_err, new_chan, option_value, os_random_bytes, process_exit_code,
+    result_value, scalar_order_keys, set_place, shift_left, shift_right, sleep_millis,
+    value_type_name, wall_now_millis,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -3586,6 +3587,9 @@ struct IrRuntime<'a> {
     /// Per-runtime table of open network sockets, mirroring the AST interpreter.
     /// A `Value::Socket(i)` indexes this vector; closing a socket clears its slot.
     sockets: Vec<Option<SocketResource>>,
+    /// Per-runtime table of live external processes, mirroring the AST interpreter.
+    /// A `Value::Process(i)` indexes this vector.
+    processes: Vec<Option<ProcessResource>>,
     call_stack: Vec<TraceFrame>,
     /// Trait-method dispatch table: `(receiver type name, method name)` -> impl
     /// function. Built once from every `impl` in the module.
@@ -3669,6 +3673,7 @@ impl<'a> IrRuntime<'a> {
             heap: Vec::new(),
             refcounts: HashMap::new(),
             sockets: Vec::new(),
+            processes: Vec::new(),
             call_stack: Vec::new(),
             impl_methods,
             trait_method_names,
@@ -3872,6 +3877,11 @@ impl<'a> IrRuntime<'a> {
             "udp_recv" => self.builtin_udp_recv(args),
             "http_get" => Self::builtin_http_get(args),
             "http_post" => Self::builtin_http_post(args),
+            "proc_spawn" => self.builtin_proc_spawn(args),
+            "proc_wait" => self.builtin_proc_wait(args),
+            "proc_stdout" => self.builtin_proc_stdout(args),
+            "proc_stderr" => self.builtin_proc_stderr(args),
+            "proc_kill" => self.builtin_proc_kill(args),
             // A region-creation marker has no runtime effect in the current
             // analysis-only region model.
             "region_create" => Ok(Value::Void),
@@ -5338,6 +5348,140 @@ impl<'a> IrRuntime<'a> {
                 "L0406",
                 format!("{name} received a closed or invalid socket `{handle}`"),
             )),
+        }
+    }
+
+    /// Push a freshly spawned child into the handle table, returning its index
+    /// wrapped as a `Value::Process`. Mirrors `register_socket` and the AST
+    /// interpreter's `register_process`.
+    fn register_process(&mut self, resource: ProcessResource) -> Value {
+        self.processes.push(Some(resource));
+        Value::Process(self.processes.len() - 1)
+    }
+
+    /// Resolve a process handle argument to its live slot index. Mirrors
+    /// `socket_slot` and the AST interpreter's `process_slot`.
+    fn process_slot(&self, name: &str, value: &Value) -> Result<usize, RuntimeError> {
+        let Value::Process(handle) = value else {
+            return Err(RuntimeError::new(
+                "L0417",
+                format!("{name} expects a process but got `{value}`"),
+            ));
+        };
+        match self.processes.get(*handle) {
+            Some(Some(_)) => Ok(*handle),
+            _ => Err(RuntimeError::new(
+                "L0406",
+                format!("{name} received a reaped or invalid process `{handle}`"),
+            )),
+        }
+    }
+
+    /// `proc_spawn(cmd string, args array<string>) -> result<process, string>`:
+    /// mirrors the AST interpreter's `builtin_proc_spawn` exactly.
+    fn builtin_proc_spawn(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [cmd, cmd_args]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_spawn", 2, args.len()))?;
+        let cmd = expect_string("proc_spawn", cmd)?;
+        let cmd_args = cmd_args.as_string_array()?;
+        match Command::new(&cmd)
+            .args(cmd_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => {
+                let handle = self.register_process(ProcessResource { child });
+                Ok(result_value(Ok(handle)))
+            }
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_wait(p process) -> result<i64, string>`: mirrors the AST interpreter.
+    fn builtin_proc_wait(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_wait", 1, args.len()))?;
+        let slot = self.process_slot("proc_wait", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_wait requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.wait() {
+            Ok(status) => Ok(result_value(Ok(Value::I64(process_exit_code(&status))))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_stdout(p process) -> result<string, string>`: mirrors the AST
+    /// interpreter; the pipe is taken on first read (second read is EOF).
+    fn builtin_proc_stdout(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_stdout", 1, args.len()))?;
+        let slot = self.process_slot("proc_stdout", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_stdout requires a live process".to_string(),
+            ))));
+        };
+        let mut buffer = String::new();
+        match resource
+            .child
+            .stdout
+            .take()
+            .map(|mut pipe| pipe.read_to_string(&mut buffer))
+        {
+            None => Ok(result_value(Ok(Value::String(String::new())))),
+            Some(Ok(_)) => Ok(result_value(Ok(Value::String(buffer)))),
+            Some(Err(error)) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_stderr(p process) -> result<string, string>`: mirrors the AST
+    /// interpreter; the pipe is taken on first read (second read is EOF).
+    fn builtin_proc_stderr(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        use std::io::Read;
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_stderr", 1, args.len()))?;
+        let slot = self.process_slot("proc_stderr", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_stderr requires a live process".to_string(),
+            ))));
+        };
+        let mut buffer = String::new();
+        match resource
+            .child
+            .stderr
+            .take()
+            .map(|mut pipe| pipe.read_to_string(&mut buffer))
+        {
+            None => Ok(result_value(Ok(Value::String(String::new())))),
+            Some(Ok(_)) => Ok(result_value(Ok(Value::String(buffer)))),
+            Some(Err(error)) => Ok(result_value(Err(Value::String(error.to_string())))),
+        }
+    }
+
+    /// `proc_kill(p process) -> result<i64, string>`: mirrors the AST interpreter.
+    fn builtin_proc_kill(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [proc]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("proc_kill", 1, args.len()))?;
+        let slot = self.process_slot("proc_kill", &proc)?;
+        let Some(resource) = self.processes[slot].as_mut() else {
+            return Ok(result_value(Err(Value::String(
+                "proc_kill requires a live process".to_string(),
+            ))));
+        };
+        match resource.child.kill() {
+            Ok(()) => Ok(result_value(Ok(Value::I64(0)))),
+            Err(error) => Ok(result_value(Err(Value::String(error.to_string())))),
         }
     }
 
@@ -7674,13 +7818,18 @@ impl<'a> Lowerer<'a> {
             "tcp_connect" | "tcp_listen" | "tcp_accept" | "udp_bind" => {
                 generic_type("result", &[TypeRef::new("Socket"), TypeRef::new("string")])
             }
-            "tcp_read" | "udp_recv" | "http_get" | "http_post" | "from_bytes" => {
+            "tcp_read" | "udp_recv" | "http_get" | "http_post" | "from_bytes" | "proc_stdout"
+            | "proc_stderr" => {
                 generic_type("result", &[TypeRef::new("string"), TypeRef::new("string")])
             }
-            "tcp_write" | "udp_send_to" | "parse_i64" => {
+            "tcp_write" | "udp_send_to" | "parse_i64" | "proc_wait" | "proc_kill" => {
                 generic_type("result", &[TypeRef::new("i64"), TypeRef::new("string")])
             }
             "parse_f64" => generic_type("result", &[TypeRef::new("f64"), TypeRef::new("string")]),
+            // Process spawn returns a `process` handle in the `ok` arm.
+            "proc_spawn" => {
+                generic_type("result", &[TypeRef::new("process"), TypeRef::new("string")])
+            }
             "read_file" | "sys_output" | "to_string" | "substring" | "join" | "trim"
             | "replace" | "upper" | "lower" | "repeat" => TypeRef::new("string"),
             "read_lines" | "list_dir" => {

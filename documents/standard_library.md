@@ -250,6 +250,39 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   trailing tokens after the source path as those program arguments.
 - Wrong argument types or arities to `env`/`args` report `L0332`.
 
+### Live external processes
+
+`sys_status`/`sys_output` above are **one-shot**: they run a command to
+completion and hand back just the exit code or captured stdout. The `process`
+handle extends that with a **live** child you can spawn, wait on, read both
+streams from, and kill. A `process` is an opaque handle to an OS child process,
+backed by a per-runtime handle table exactly like a `Socket`. Every process
+builtin is fallible and returns a `result<T, string>`, so failures are ordinary
+runtime values matched with `match` (`err(message)`) rather than panics.
+Processes run identically on the AST, IR, and bytecode backends.
+
+- `proc_spawn(cmd string, args array<string>) -> result<process, string>` —
+  spawn `cmd` with `args`, capturing stdout and stderr through pipes. `ok(handle)`
+  on success; `err(message)` if the process cannot be started (e.g. the command
+  is not found). No shell is invoked. The `args` array must be non-empty in the
+  current alpha (array literals require at least one element); pass a placeholder
+  argument when a command takes none.
+- `proc_wait(p process) -> result<i64, string>` — block until the child exits and
+  return its exit code as an `i64`. On Unix a child terminated by a signal has no
+  exit code; by convention that is reported as `128 + signal` (the shell
+  convention), so the result is always a total `i64`. `err` if the handle is
+  invalid or the wait fails.
+- `proc_stdout(p process) -> result<string, string>` — read the child's captured
+  stdout to end as a UTF-8 string. Call after `proc_wait`, or it returns whatever
+  is available up to EOF. The pipe is drained on the first read, so a second call
+  returns an empty string.
+- `proc_stderr(p process) -> result<string, string>` — like `proc_stdout`, for
+  the child's captured stderr.
+- `proc_kill(p process) -> result<i64, string>` — kill the child; `ok(0)` on
+  success (killing an already-exited child still succeeds).
+- Wrong argument types or arities to the `proc_*` builtins report `L0335` (the
+  shared socket/network handle diagnostic family).
+
 ## Concurrency
 
 - `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>` evaluates
