@@ -618,6 +618,9 @@ fn collect_expr_references(expr: &Expr, out: &mut Vec<(String, Span)>) {
         ExprKind::Field { target, .. } => collect_expr_references(target, out),
         ExprKind::Await { expr } => collect_expr_references(expr, out),
         ExprKind::Try(inner) => collect_expr_references(inner, out),
+        // A closure body may reference top-level names (call a function), so
+        // recurse into it for module dependency analysis.
+        ExprKind::Closure { body, .. } => collect_expr_references(body, out),
         ExprKind::Match { scrutinee, arms } => {
             collect_expr_references(scrutinee, out);
             for MatchArm { body, .. } in arms {

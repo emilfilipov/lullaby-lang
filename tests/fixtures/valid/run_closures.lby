@@ -1,0 +1,7 @@
+fn apply f fn(i64) -> i64 v i64 -> i64
+    f(v)
+
+fn main -> i64
+    let n i64 = 10
+    let add_n fn(i64) -> i64 = fn x i64 -> x + n
+    apply(add_n, 5) + add_n(2)

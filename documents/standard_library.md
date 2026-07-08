@@ -358,14 +358,60 @@ Processes run identically on the AST, IR, and bytecode backends.
 - Wrong argument types or arities to the `proc_*` builtins report `L0335` (the
   shared socket/network handle diagnostic family).
 
+## Closures
+
+An inline **closure literal** `fn PARAMS -> EXPR` is an anonymous function value
+that captures the enclosing scope's locals. It reuses the `fn` keyword (no new
+keyword) and appears only in expression position — the right side of a
+`let`/assignment, a call argument, or a returned value; top-level `fn`
+declarations are unchanged.
+
+- **Syntax.** `PARAMS` is zero or more `name type` pairs (the exact shape a
+  top-level `fn` uses — explicit types, no parentheses, no inference), and the
+  body is a **single expression** after `->`. A multi-statement/indented body is
+  deferred.
+- **Value type.** A closure's value type is `fn(param types) -> typeof(EXPR)` in
+  the canonical spelling (e.g. `fn(i64) -> i64`), so it interoperates with
+  everything that already accepts a function value: a function-typed `let`, a
+  function-typed parameter (`apply`), `parallel_map`, and returning a function
+  from a function.
+- **Capture by value.** At the moment the literal evaluates, each captured local
+  is cloned into the closure (an eager snapshot). Value-semantic collections
+  (`list`/`map`/`array`) snapshot independently; reference-semantic handles
+  (`Chan`/`Mutex`/`rc`) share the same underlying resource because their own
+  clone shares. Mutating an enclosing local *after* the closure is built does
+  **not** change the captured copy, and captured names are read-only inside the
+  body.
+- **Capture timing.** Capture happens when the literal is evaluated, so a closure
+  built inside a loop iteration (or returned from a function) captures that
+  point's values. Each evaluation produces a distinct closure with its own
+  snapshot.
+
+Example (`tests/fixtures/valid/run_closures.lby`, returns `27`):
+
+```lby
+fn apply f fn(i64) -> i64 v i64 -> i64
+    f(v)
+
+fn main -> i64
+    let n i64 = 10
+    let add_n fn(i64) -> i64 = fn x i64 -> x + n
+    apply(add_n, 5) + add_n(2)
+```
+
+Closures run on the AST, IR, and bytecode interpreters at parity. The native and
+WASM backends do not compile closures in this increment: a function that
+constructs or calls a closure is skipped and runs on the interpreters instead.
+
 ## Concurrency
 
 - `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>` evaluates
   `f(arg)` for every element of `args` concurrently on separate OS threads and
   returns the results in the **same order as `args`** (deterministic regardless
   of scheduling). Each thread runs a fresh interpreter over the shared program,
-  so heaps are per-thread with no shared mutable state; `f` must be an ordinary
-  top-level `fn(i64) -> i64`.
+  so heaps are per-thread with no shared mutable state; `f` may be an ordinary
+  top-level `fn(i64) -> i64` **or a capturing closure** of that type (the closure
+  is self-contained and crosses the thread boundary with its captured snapshot).
 - Wrong arity, a non-`fn(i64) -> i64` first argument, or a non-`list<i64>`
   second argument report `L0334`.
 

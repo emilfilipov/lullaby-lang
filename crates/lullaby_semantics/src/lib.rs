@@ -1758,6 +1758,9 @@ impl<'a> Checker<'a> {
                     self.walk_lifetimes(&arm.body, &mut freed.clone(), function);
                 }
             }
+            // A closure body may reference a freed binding through capture, so
+            // recurse into it under the same freed set.
+            ExprKind::Closure { body, .. } => self.check_freed_uses(body, freed, function),
             ExprKind::Integer(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
@@ -2096,6 +2099,25 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Try(inner) => self.check_try(inner, expr.span, scope, function),
+            // A closure literal `fn PARAMS -> BODY` type-checks in a child scope
+            // that layers its parameters over the enclosing locals, so the body
+            // can read captured locals (and parameters shadow them). Its value
+            // type is `fn(param types) -> typeof(BODY)` in the canonical spelling,
+            // so it unifies structurally with any expected `fn(...) -> ...` type
+            // (a function-typed `let`, an `apply`/`parallel_map` argument, a
+            // returned function value).
+            ExprKind::Closure { params, body, .. } => {
+                let mut body_scope = scope.clone();
+                for param in params {
+                    body_scope
+                        .locals
+                        .insert(param.name.clone(), param.ty.clone());
+                }
+                let body_type = self.check_expr(body, &body_scope, function)?;
+                let param_types: Vec<TypeRef> =
+                    params.iter().map(|param| param.ty.clone()).collect();
+                Some(function_type(&param_types, &body_type))
+            }
         };
 
         if let Some(ty) = &inferred {
@@ -7773,6 +7795,73 @@ mod tests {
         assert!(
             diagnostics.iter().any(|d| d.code == "L0307"),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn closure_literal_types_as_a_function_value() {
+        // A closure `fn x i64 -> x + n` has value type `fn(i64) -> i64`, so it can
+        // initialize a function-typed `let` and be called through it.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let n i64 = 10\n",
+            "    let f fn(i64) -> i64 = fn x i64 -> x + n\n",
+            "    f(5)\n",
+        );
+        let checked = validate_source(source).expect("closure type-checks");
+        let main = checked
+            .program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main");
+        let Stmt::Let { value, .. } = &main.body[1] else {
+            panic!("expected `let f` binding");
+        };
+        let ty = checked
+            .info
+            .expression_types
+            .iter()
+            .find(|entry| entry.span == value.span)
+            .map(|entry| entry.ty.clone())
+            .expect("closure expression type recorded");
+        assert_eq!(
+            ty,
+            function_type(&[TypeRef::new("i64")], &TypeRef::new("i64"))
+        );
+    }
+
+    #[test]
+    fn closure_interoperates_with_apply_and_parallel_map() {
+        // A closure value flows into a user `apply` (a function-typed parameter)
+        // and into the `parallel_map` builtin, both of which require `fn(i64)->i64`.
+        let source = concat!(
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn main -> i64\n",
+            "    let k i64 = 3\n",
+            "    let bump fn(i64) -> i64 = fn x i64 -> x + k\n",
+            "    let xs list<i64> = list_new()\n",
+            "    xs = push(xs, 2)\n",
+            "    let mapped list<i64> = parallel_map(fn x i64 -> x * k, xs)\n",
+            "    apply(bump, 1) + get(mapped, 0)\n",
+        );
+        validate_source(source).expect("closure interoperates with apply and parallel_map");
+    }
+
+    #[test]
+    fn closure_body_reports_unknown_free_variable() {
+        // A closure body that references a name that is neither a parameter, an
+        // enclosing local, nor a top-level name is an unknown-identifier error.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let f fn(i64) -> i64 = fn x i64 -> x + missing\n",
+            "    f(0)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("unknown free variable rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0306"),
+            "expected L0306 for an unknown free variable: {diagnostics:?}"
         );
     }
 }

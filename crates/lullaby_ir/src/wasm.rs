@@ -1049,6 +1049,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &IrExpr, out: &mut Vec<u8>) -> Result<()
             Ok(())
         }
         IrExprKind::Await { .. } => Err("await is not supported by the WASM backend".to_string()),
+        // Closures are not compiled to WASM in this increment: a function that
+        // constructs or calls a closure is skipped (this `Err`) and falls back to
+        // the interpreters, exactly like other unsupported constructs.
+        IrExprKind::Closure { .. } => {
+            Err("closures are not supported by the WASM backend".to_string())
+        }
     }
 }
 

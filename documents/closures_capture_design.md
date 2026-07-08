@@ -120,6 +120,20 @@ function that the body references. In the example above, `x` is a parameter and
 `add_n`/`apply`/`n` are candidates; `n` is the only enclosing local read, so the
 captured set is `{ n }`.
 
+> **Capture strategy (implemented): frame-by-value.** The delivered
+> implementation captures the **whole visible frame by value** — at literal
+> evaluation it snapshots *every in-scope local* (`name -> value.clone()`), not
+> just the minimal free-variable set. This is a correct by-value snapshot (a
+> closure reads only what it references, and each capture clones by the value's
+> own rules, so value-semantic collections snapshot and reference-semantic
+> handles share) and it keeps the runtime free of a per-node free-variable walk.
+> Because the body is a single expression with no assignment statements, captured
+> names are inherently read-only, so no `L0441` write-back check is needed.
+> **Minimal free-variable capture is a deferred optimization**: it would shrink
+> each closure's captured `Vec` to only the names the body references, at the
+> cost of a capture-set analysis attached to the node. The observable semantics
+> are identical either way.
+
 **By value.** Each free variable is captured **by value**: at the moment the
 closure literal evaluates, the current value of each captured local is **cloned**
 into the closure's environment (a snapshot). This is the only choice consistent

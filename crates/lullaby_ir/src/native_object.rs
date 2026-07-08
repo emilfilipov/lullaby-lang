@@ -2155,7 +2155,10 @@ fn lower_native_expr(
         | BytecodeExprKind::Char(_)
         | BytecodeExprKind::String(_)
         | BytecodeExprKind::Array(_)
-        | BytecodeExprKind::Await { .. } => {
+        | BytecodeExprKind::Await { .. }
+        // Closures are not in the native scalar subset: a function that
+        // constructs or calls one is skipped and runs on the interpreters.
+        | BytecodeExprKind::Closure { .. } => {
             Err("expression is not in the native i64-scalar subset".to_string())
         }
     }
@@ -3346,6 +3349,7 @@ mod tests {
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
             export_functions: Vec::new(),
+            closures: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -3403,6 +3407,7 @@ mod tests {
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
             export_functions: Vec::new(),
+            closures: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -3465,6 +3470,7 @@ mod tests {
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
             export_functions: Vec::new(),
+            closures: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),

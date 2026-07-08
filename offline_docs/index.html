@@ -349,7 +349,7 @@ cargo run -p lullaby_cli -- run hello.lbc</code></pre>
     return</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_release_void.lby</code>.</p>
         <h3>First-class functions</h3>
-        <p>A function type is spelled <code>fn(T1, T2) -> R</code>. A bare top-level function name is a value of that type, so a function can be stored in a <code>let</code>, passed to another function, returned, and called through a local. Capturing closures (lambda literals) are not yet implemented. Calling a non-function local, or passing a function value with the wrong signature, reports <code>L0390</code>.</p>
+        <p>A function type is spelled <code>fn(T1, T2) -> R</code>. A bare top-level function name is a value of that type, so a function can be stored in a <code>let</code>, passed to another function, returned, and called through a local. Inline <a href="#closures">capturing closures</a> are also function values of the same type. Calling a non-function local, or passing a function value with the wrong signature, reports <code>L0390</code>.</p>
         <pre data-fixture="tests/fixtures/valid/run_first_class_fn.lby" data-mode="run"><code>fn inc x i64 -> i64
     x + 1
 
@@ -367,6 +367,17 @@ fn main -> i64
     let h fn(i64) -> i64 = picker()
     apply(inc, 10) + g(5) + h(20) + apply(dbl, 3)</code></pre>
         <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_first_class_fn.lby</code>. Returns <code>63</code>.</p>
+        <h3 id="closures">Closures</h3>
+        <p>An inline closure literal <code>fn PARAMS -> EXPR</code> is an anonymous function value that captures the enclosing scope's locals. It reuses the <code>fn</code> keyword and appears only in expression position (the right side of a <code>let</code>/assignment, a call argument, or a returned value). <code>PARAMS</code> is zero or more <code>name type</code> pairs (the top-level <code>fn</code> shape &mdash; explicit types, no parentheses), and the body is a single expression after <code>-&gt;</code>. Its value type is <code>fn(param types) -> typeof(EXPR)</code>, so a closure interoperates with everything that accepts a function value: a function-typed <code>let</code>, a function-typed parameter (like <code>apply</code>), <code>parallel_map</code>, and returning a function.</p>
+        <p><strong>Capture is by value</strong>, taken when the literal is evaluated: each captured local is cloned into the closure (an eager snapshot). Value-semantic collections snapshot independently; reference-semantic handles (<code>Chan</code>/<code>Mutex</code>/<code>rc</code>) share their underlying resource. Mutating an enclosing local after the closure is built does not change the captured copy, and captured names are read-only in the body. Closures run on the AST, IR, and bytecode interpreters at parity; the native and WASM backends skip a function that constructs or calls a closure and run it on the interpreters instead.</p>
+        <pre data-fixture="tests/fixtures/valid/run_closures.lby" data-mode="run"><code>fn apply f fn(i64) -> i64 v i64 -> i64
+    f(v)
+
+fn main -> i64
+    let n i64 = 10
+    let add_n fn(i64) -> i64 = fn x i64 -> x + n
+    apply(add_n, 5) + add_n(2)</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/run_closures.lby</code>. Returns <code>27</code>.</p>
         <h3>Generic functions</h3>
         <p>A function can declare type parameters in angle brackets after its name and use each name as an ordinary type in its parameters and return type, including inside built-in generics such as <code>list&lt;T&gt;</code> and <code>option&lt;T&gt;</code>. Call sites infer the type parameters from the argument types and substitute them into the return type &mdash; <code>identity(41)</code> yields <code>i64</code>, <code>identity(&quot;hi&quot;)</code> yields <code>string</code>, and <code>wrap(1)</code> yields <code>option&lt;i64&gt;</code>. Generics are erased at runtime, so they run identically on every backend. A bare <code>T</code> value supports only universal operations (binding, passing, returning, equality between two same-<code>T</code> values, and use as a payload to a built-in generic like <code>some(x)</code>); arithmetic and ordering on a bare <code>T</code> wait on trait bounds.</p>
         <pre data-fixture="tests/fixtures/valid/run_generics.lby" data-mode="run"><code>fn identity&lt;T&gt; x T -> T

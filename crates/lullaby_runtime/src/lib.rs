@@ -31,6 +31,9 @@ pub fn value_type_name(value: &Value) -> String {
         Value::Enum { enum_name, .. } => enum_name.clone(),
         Value::Map(_) => "map".to_string(),
         Value::Func(_) => "fn".to_string(),
+        // The runtime closure value carries no parameter/return types (they live
+        // in the type checker), so the runtime type name is the bare `fn` family.
+        Value::Closure(_) => "fn".to_string(),
         Value::Ptr(_) => "ptr".to_string(),
         Value::Socket(_) => "Socket".to_string(),
         Value::Process(_) => "process".to_string(),
@@ -386,6 +389,18 @@ pub fn overflow_arith(
     })
 }
 
+/// An environment-capturing closure value. It is deliberately **backend-neutral**:
+/// it stores no body node, only a parse-order `id` that keys each backend's own
+/// `id -> (param_names, body)` closure-body table, plus a by-value snapshot of the
+/// enclosing locals captured when the closure literal was evaluated. Cloning the
+/// closure clones `captured`, so value-semantic collections snapshot and
+/// reference-semantic handles (`Mutex`/`Chan`/`rc`) share by their own clone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closure {
+    pub id: usize,
+    pub captured: Vec<(String, Value)>,
+}
+
 // `Eq` is intentionally omitted: `Value::F64` holds an `f64`, which is not `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -426,6 +441,10 @@ pub enum Value {
     /// A first-class function value: a handle to a top-level function by name.
     /// No environment is captured in this increment.
     Func(String),
+    /// An environment-capturing closure value: a parse-order `id` keying the
+    /// runtime's closure-body table plus a by-value snapshot of captured locals.
+    /// Invoked through the same `Call` dispatch as [`Value::Func`].
+    Closure(Closure),
     /// A network socket handle: an index into the interpreter's per-runtime
     /// `sockets` table. The underlying OS resource (a `TcpListener`,
     /// `TcpStream`, or `UdpSocket`) is not `Clone`, so sockets are represented
@@ -511,6 +530,7 @@ impl fmt::Display for Value {
                 write!(formatter, "{{{rendered}}}")
             }
             Self::Func(name) => write!(formatter, "fn {name}"),
+            Self::Closure(_) => write!(formatter, "closure"),
             Self::Socket(handle) => write!(formatter, "socket({handle})"),
             Self::Process(handle) => write!(formatter, "process({handle})"),
             Self::Chan(_) => write!(formatter, "chan"),
@@ -1106,6 +1126,139 @@ pub fn run_named_function(program: &Program, name: &str) -> Result<Value, Runtim
     runtime.call_function(name, Vec::new())
 }
 
+/// Register every `ExprKind::Closure` reachable from a block of statements into
+/// `table`, keyed by the closure's parse-order `id`. The body borrows the program
+/// with the lifetime `'a`; the parameter names are cloned. Nested closures (a
+/// closure whose body is itself a closure) are collected recursively.
+fn collect_closures_in_block<'a>(
+    body: &'a [Stmt],
+    table: &mut HashMap<usize, (Vec<String>, &'a Expr)>,
+) {
+    for stmt in body {
+        collect_closures_in_stmt(stmt, table);
+    }
+}
+
+fn collect_closures_in_stmt<'a>(
+    stmt: &'a Stmt,
+    table: &mut HashMap<usize, (Vec<String>, &'a Expr)>,
+) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Throw { value, .. } => {
+            collect_closures_in_expr(value, table);
+        }
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_closures_in_expr(expr, table),
+        Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Asm { .. }
+        | Stmt::Region(_) => {}
+        Stmt::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            for branch in branches {
+                collect_closures_in_expr(&branch.condition, table);
+                collect_closures_in_block(&branch.body, table);
+            }
+            collect_closures_in_block(else_body, table);
+        }
+        Stmt::While {
+            condition, body, ..
+        } => {
+            collect_closures_in_expr(condition, table);
+            collect_closures_in_block(body, table);
+        }
+        Stmt::For {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            collect_closures_in_expr(start, table);
+            collect_closures_in_expr(end, table);
+            if let Some(step) = step {
+                collect_closures_in_expr(step, table);
+            }
+            collect_closures_in_block(body, table);
+        }
+        Stmt::Loop { body, .. } | Stmt::Unsafe { body, .. } => {
+            collect_closures_in_block(body, table);
+        }
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
+            collect_closures_in_block(body, table);
+            collect_closures_in_block(catch_body, table);
+        }
+    }
+}
+
+fn collect_closures_in_expr<'a>(
+    expr: &'a Expr,
+    table: &mut HashMap<usize, (Vec<String>, &'a Expr)>,
+) {
+    match &expr.kind {
+        ExprKind::Closure { id, params, body } => {
+            let names = params.iter().map(|param| param.name.clone()).collect();
+            table.insert(*id, (names, body.as_ref()));
+            // A closure body may itself contain further closures.
+            collect_closures_in_expr(body, table);
+        }
+        ExprKind::Integer(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::String(_)
+        | ExprKind::Char(_)
+        | ExprKind::Variable(_) => {}
+        ExprKind::Array(items) => {
+            for item in items {
+                collect_closures_in_expr(item, table);
+            }
+        }
+        ExprKind::Index { target, index } => {
+            collect_closures_in_expr(target, table);
+            collect_closures_in_expr(index, table);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::Await { expr } => {
+            collect_closures_in_expr(expr, table);
+        }
+        ExprKind::Binary { left, right, .. } => {
+            collect_closures_in_expr(left, table);
+            collect_closures_in_expr(right, table);
+        }
+        ExprKind::Call { args, .. } => {
+            for arg in args {
+                collect_closures_in_expr(arg, table);
+            }
+        }
+        ExprKind::StructLiteral { fields, .. } => {
+            for (_, value) in fields {
+                collect_closures_in_expr(value, table);
+            }
+        }
+        ExprKind::Field { target, .. } => collect_closures_in_expr(target, table),
+        ExprKind::Match { scrutinee, arms } => {
+            collect_closures_in_expr(scrutinee, table);
+            for arm in arms {
+                collect_closures_in_block(&arm.body, table);
+            }
+        }
+        ExprKind::Try(inner) => collect_closures_in_expr(inner, table),
+    }
+}
+
+/// The function value `parallel_map` runs on each worker thread: either a named
+/// top-level function or a self-contained capturing closure. Both are `Send`
+/// (`String` / `Closure`), so they cross the scoped-thread boundary safely.
+#[derive(Debug, Clone)]
+enum ParallelCallable {
+    Func(String),
+    Closure(Closure),
+}
+
 struct Runtime<'a> {
     /// The whole program, borrowed so a builtin can spawn sibling interpreters
     /// over the same shared `&Program` (used by `parallel_map`'s scoped threads).
@@ -1154,6 +1307,12 @@ struct Runtime<'a> {
     /// synchronous — nothing else runs between the raise and the catch — so a
     /// single slot is sufficient and never observed as stale.
     pending_try_return: Option<Value>,
+    /// The closure-body table: `closure id -> (parameter names, body expression)`.
+    /// Built once at construction by walking every function/impl-method body for
+    /// `ExprKind::Closure` nodes. A `Value::Closure` carries only its `id`, so an
+    /// invocation looks its body up here — the runtime value stays backend-neutral
+    /// and stores no AST node. Bodies borrow the program with lifetime `'a`.
+    closures: HashMap<usize, (Vec<String>, &'a Expr)>,
 }
 
 impl<'a> Runtime<'a> {
@@ -1225,6 +1384,20 @@ impl<'a> Runtime<'a> {
             .map(|function| function.name.as_str())
             .collect::<HashSet<_>>();
 
+        // Build the closure-body table by walking every function and impl-method
+        // body for `ExprKind::Closure` nodes. Each node's parse-order `id` keys a
+        // `(param names, body)` entry; the runtime `Value::Closure` carries only
+        // the id, so this is where the id is resolved back to a body to evaluate.
+        let mut closures = HashMap::new();
+        for function in &program.functions {
+            collect_closures_in_block(&function.body, &mut closures);
+        }
+        for decl in &program.impls {
+            for method in &decl.methods {
+                collect_closures_in_block(&method.body, &mut closures);
+            }
+        }
+
         Ok(Self {
             program,
             program_arc,
@@ -1242,6 +1415,7 @@ impl<'a> Runtime<'a> {
             async_functions,
             extern_functions,
             pending_try_return: None,
+            closures,
         })
     }
 
@@ -1531,8 +1705,14 @@ impl<'a> Runtime<'a> {
         let [callee, elements]: [Value; 2] = args
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("parallel_map", 2, args.len()))?;
-        let func_name = match callee {
-            Value::Func(name) => name,
+        // `parallel_map` accepts either a named function value or a capturing
+        // closure. A closure is self-contained (it carries its captured snapshot,
+        // all `Send`) and the worker's fresh interpreter rebuilds the same
+        // id-keyed body table from the shared program, so invoking it there is
+        // sound and stays order-deterministic.
+        let callable = match callee {
+            Value::Func(name) => ParallelCallable::Func(name),
+            Value::Closure(closure) => ParallelCallable::Closure(closure),
             other => {
                 return Err(RuntimeError::new(
                     "L0417",
@@ -1544,16 +1724,24 @@ impl<'a> Runtime<'a> {
 
         let program = self.program;
         let program_arc = &self.program_arc;
+        let callable = &callable;
         let results: Vec<Value> = std::thread::scope(|scope| {
             let handles: Vec<_> = arg_values
                 .iter()
                 .map(|value| {
-                    let name = func_name.clone();
+                    let callable = callable.clone();
                     let value = value.clone();
                     let arc = Arc::clone(program_arc);
                     scope.spawn(move || {
                         let mut runtime = Runtime::new(program, arc)?;
-                        runtime.call_function(&name, vec![value])
+                        match callable {
+                            ParallelCallable::Func(name) => {
+                                runtime.call_function(&name, vec![value])
+                            }
+                            ParallelCallable::Closure(closure) => {
+                                runtime.invoke_closure(&closure, vec![value])
+                            }
+                        }
                     })
                 })
                 .collect();
@@ -2305,6 +2493,50 @@ impl<'a> Runtime<'a> {
         }
     }
 
+    /// Invoke a closure value: look its body up in the id-keyed closure table,
+    /// push a fresh scope, bind the captured snapshot first and then the
+    /// parameters (so parameters shadow captured names of the same identifier),
+    /// evaluate the single-expression body, and return the produced value. The
+    /// closure is self-contained (its captured values travel with it), so it runs
+    /// against a fresh environment rather than the caller's.
+    fn invoke_closure(
+        &mut self,
+        closure: &Closure,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // Copy the body pointer and parameter names out of the table so the
+        // borrow of `self.closures` ends before the `&mut self` evaluation.
+        let (param_names, body) = match self.closures.get(&closure.id) {
+            Some((names, body)) => (names.clone(), *body),
+            None => {
+                return Err(RuntimeError::new(
+                    "L0402",
+                    format!("closure #{} has no registered body", closure.id),
+                ));
+            }
+        };
+        if param_names.len() != args.len() {
+            return Err(RuntimeError::new(
+                "L0402",
+                format!(
+                    "closure expects {} arguments but got {}",
+                    param_names.len(),
+                    args.len()
+                ),
+            ));
+        }
+
+        let mut env = Env::default();
+        // Captured bindings first, then parameters (parameters shadow captures).
+        for (name, value) in &closure.captured {
+            env.define(name.clone(), value.clone());
+        }
+        for (name, value) in param_names.iter().zip(args) {
+            env.define(name.clone(), value);
+        }
+        self.eval_expr(body, &env)
+    }
+
     fn eval_block(&mut self, statements: &[Stmt], env: &mut Env) -> Result<Control, RuntimeError> {
         let mut last = Value::Void;
 
@@ -2651,6 +2883,14 @@ impl<'a> Runtime<'a> {
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
                     .collect::<Result<Vec<_>, _>>()?;
+                // A call name bound to a closure value invokes that closure: bind
+                // its captured snapshot then the arguments, and evaluate the body
+                // from the id-keyed table. This is the same call site that
+                // dispatches a `Value::Func`, so a closure passed as an argument
+                // and called through a parameter name works with no extra path.
+                if let Ok(Value::Closure(closure)) = env.get(name) {
+                    return self.invoke_closure(&closure, values);
+                }
                 // A call name that is a local holding a function value dispatches
                 // through that value: invoke the referenced top-level function.
                 let target = match env.get(name) {
@@ -2756,6 +2996,15 @@ impl<'a> Runtime<'a> {
                     )),
                 }
             }
+            // Evaluating a closure literal snapshots the current environment's
+            // in-scope locals by value and yields a backend-neutral
+            // `Value::Closure` carrying the literal's parse-order `id` plus that
+            // snapshot. The body is not stored here — it lives in `self.closures`,
+            // keyed by `id`, and is looked up at invocation time.
+            ExprKind::Closure { id, .. } => Ok(Value::Closure(Closure {
+                id: *id,
+                captured: env.snapshot_locals(),
+            })),
         };
         result.map_err(|error| self.annotate_error(error, expr.span))
     }
@@ -4561,6 +4810,29 @@ impl Env {
             .cloned()
             .ok_or_else(|| RuntimeError::new("L0403", format!("unknown variable `{name}`")))
     }
+
+    /// Snapshot every in-scope local by value: one `(name, value.clone())` per
+    /// visible binding, with an inner scope's binding shadowing an outer one of
+    /// the same name. This is the frame-capture-by-value used when a closure
+    /// literal is evaluated. The order is deterministic (outer-to-inner insertion
+    /// with later scopes overwriting), which is all closure invocation needs.
+    fn snapshot_locals(&self) -> Vec<(String, Value)> {
+        let mut flattened: HashMap<&str, &Value> = HashMap::new();
+        // Iterate outermost-to-innermost so an inner scope overwrites an outer
+        // binding of the same name.
+        for scope in &self.scopes {
+            for (name, value) in scope {
+                flattened.insert(name.as_str(), value);
+            }
+        }
+        let mut captured: Vec<(String, Value)> = flattened
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        // Sort by name for a stable, reproducible capture order.
+        captured.sort_by(|(a, _), (b, _)| a.cmp(b));
+        captured
+    }
 }
 
 impl Value {
@@ -5741,5 +6013,52 @@ mod tests {
         )
         .expect("wrapping_add");
         assert_eq!(wrap, Value::int(0, IntKind::U32));
+    }
+
+    #[test]
+    fn closure_captures_enclosing_local_by_value() {
+        // `add_n` captures `n = 10` when the literal evaluates; `apply(add_n, 5)`
+        // is 15 and `add_n(2)` is 12, so the canonical example returns 27.
+        let source = concat!(
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn main -> i64\n",
+            "    let n i64 = 10\n",
+            "    let add_n fn(i64) -> i64 = fn x i64 -> x + n\n",
+            "    apply(add_n, 5) + add_n(2)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(27));
+    }
+
+    #[test]
+    fn closure_capture_is_a_snapshot_not_a_reference() {
+        // Capture is by value at literal-evaluation time: mutating the enclosing
+        // local after the closure is built does not change the captured value.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let seed i64 = 7\n",
+            "    let grab fn(i64) -> i64 = fn x i64 -> x + seed\n",
+            "    let early i64 = grab(1)\n",
+            "    seed = 1000\n",
+            "    let late i64 = grab(1)\n",
+            "    early + late\n",
+        );
+        // 8 + 8 = 16 (both reads see the snapshotted seed = 7).
+        assert_eq!(run_source(source).expect("run"), Value::I64(16));
+    }
+
+    #[test]
+    fn closure_returned_from_function_is_callable_later() {
+        // A closure returned from `make_adder` carries its captured `base`, so it
+        // stays callable at its call site: add10(5) = 15, add100(3) = 103 -> 118.
+        let source = concat!(
+            "fn make_adder base i64 -> fn(i64) -> i64\n",
+            "    fn x i64 -> x + base\n\n",
+            "fn main -> i64\n",
+            "    let add10 fn(i64) -> i64 = make_adder(10)\n",
+            "    let add100 fn(i64) -> i64 = make_adder(100)\n",
+            "    add10(5) + add100(3)\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(118));
     }
 }
