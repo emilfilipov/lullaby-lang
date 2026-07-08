@@ -4141,6 +4141,72 @@ fn native_enum_match_execution_parity_when_linkable() {
     }
 }
 
+/// Best-effort execution parity for the native growable `list<T>` (scalar element)
+/// subset: native-compile programs that build lists via `list_new`/`push` (with
+/// capacity-doubling growth), read them with `get`/`len`, and replace/pop
+/// value-semantically with `set`/`pop` — including lists crossing function
+/// boundaries and an aliasing value-semantics check (`let b = a` then mutating one
+/// must not affect the other). Assert each linked `.exe`'s exit code equals the
+/// interpreter's `main` result (mod 256). Sources MSVC's `LIB` when unset so the
+/// link+run actually executes; gated on `rust-lld` + `kernel32.lib`.
+#[test]
+fn native_list_execution_parity_when_linkable() {
+    ensure_msvc_env();
+    for name in ["native_list_build", "native_list_value_semantics"] {
+        let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
+        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "--verbose",
+                "-o",
+                out.to_str().expect("out path"),
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(emit.status.success(), "{name}: {}", stderr(&emit));
+        // `main` (and any list helper function) compiles natively — scalar-element
+        // growable lists are in the native subset now, so nothing is skipped.
+        assert!(
+            stdout(&emit).contains("compiled main"),
+            "{name}: expected `main` compiled: {}",
+            stdout(&emit)
+        );
+        assert!(
+            !stdout(&emit).contains("skipped"),
+            "{name}: no list function should be skipped: {}",
+            stdout(&emit)
+        );
+
+        // Interpreter ground truth for `main`.
+        let run = lullaby()
+            .args(["run", fixture.to_str().expect("fixture path")])
+            .output()
+            .expect("run cli");
+        assert!(run.status.success(), "{name}: {}", stderr(&run));
+        let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+
+        if rust_lld_path().is_none() || !kernel32_available() {
+            eprintln!(
+                "rust-lld and/or kernel32.lib (via the LIB env var) not available; \
+                 skipping native list link+run parity for {name}"
+            );
+            continue;
+        }
+
+        assert!(out.is_file(), "expected linked exe at {}", out.display());
+        let exe = Command::new(&out).output().expect("run native exe");
+        let exit = exe.status.code().expect("native exit code");
+        assert_eq!(
+            exit,
+            (interp.rem_euclid(256)) as i32,
+            "{name}: native list exit code must equal the interpreter result (mod 256)"
+        );
+    }
+}
+
 /// Best-effort execution parity for the native control-flow subset: native-compile
 /// a program whose functions use a `while` loop, `for` sum/product loops, and
 /// inter-function calls, then assert the linked `.exe`'s exit code equals the
