@@ -247,6 +247,17 @@ impl TypeRef {
         self.generic_arg("list")
     }
 
+    /// The `(K, V)` key/value type pair of a `map<K, V>` spelling, if any.
+    pub fn map_args(&self) -> Option<(TypeRef, TypeRef)> {
+        self.generic_args("map")
+            .filter(|args| args.len() == 2)
+            .map(|mut args| {
+                let value = args.remove(1);
+                let key = args.remove(0);
+                (key, value)
+            })
+    }
+
     /// The inner type of a `<ctor><T>` spelling, e.g. `generic_arg("rc")` on
     /// `rc<i64>` yields `i64`. For a multi-argument spelling this returns the
     /// full comma-separated argument text as one `TypeRef`; use `generic_args`

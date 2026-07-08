@@ -216,8 +216,8 @@ fixture exercises — agree bit-for-bit.
 (`list<string>`/`list<struct>`/`list<list<…>>`/`list<map<…>>`) — the element must
 be scalar this increment, so `supported_list_element` rejects a heap element and
 the enclosing function is skipped (still runs on the interpreters) rather than
-miscompiled — and the `map<K, V>` collection. `__alloc` still never frees, so a
-grown or copied list orphans its old block (a free-list allocator is future work).
+miscompiled. `__alloc` still never frees, so a grown or copied list orphans its
+old block (a free-list allocator is future work).
 
 Fixtures `wasm_list_build.lby` (build via `push` crossing the initial capacity to
 trigger a grow+copy, then `get`/`len`/`set`/`pop`, `main` = 5879) and
@@ -226,6 +226,82 @@ set-derived list, and a callee that pushes to its parameter, `main` = 334211) ru
 on all interpreters and, under node, their exported `main` matches the interpreter
 (`crates/lullaby_cli/tests/cli.rs::wasm_list_build_execution_parity_with_node` and
 `wasm_list_value_semantics_execution_parity_with_node`).
+
+### Growable `map<K, V>` — scalar keys and values (landed)
+
+The value-semantic `map<K, V>` collection compiles to linear memory for **scalar
+key and value types** (`i64`, the fixed-width ints `i8`…`usize`, `f32`/`f64`,
+`bool`, `char`, `byte`). A `map<K, V>` is an **`i32` pointer** to a header
+`[len: i32][cap: i32][(key, value) slot pairs...]`: the live entry count, the
+allocated capacity (in entries), then `cap` entry records. Each entry is two
+uniform 8-byte slots — the key slot then the value slot (`MAP_ENTRY_SIZE =
+2 * SLOT_SIZE`) — so entry `i` lives at `MAP_DATA_OFF + i * MAP_ENTRY_SIZE`, its
+key at offset `0` and its value at `MAP_VALUE_OFF`. Uniform 8-byte slots keep
+every scalar key/value naturally aligned. `len` shares offset 0 with the
+string/array/list length header.
+
+This mirrors the interpreters' `Value::Map` — an **insertion-ordered association
+list** scanned linearly with `Value` content equality — bit-for-bit:
+
+- **`map_new() -> map<K, V>`** `__alloc`s an empty header `[len=0][cap=4][entries]`
+  (a small initial capacity so the first few inserts do not each realloc) and
+  leaves its pointer on the stack.
+- **`map_set(m, k, v) -> map<K, V>`** is **value-semantic** (it returns a NEW map):
+  it deep-copies `m` into a fresh block, then linear-scans (front-to-back, so the
+  first matching key wins) for `k`. If `k` is present, it **overwrites that entry's
+  value slot in place** — preserving the entry's position and the map's insertion
+  order, exactly like the interpreters' `iter_mut().find(...)`. If `k` is absent,
+  it **grows** the copy when full (doubling the capacity, or seeding the initial
+  capacity from an empty map, copying the live entries and orphaning the old block)
+  and **appends** a new `(k, v)` entry at index `len`, bumping `len`. Because
+  `map_set` always copies before mutating, `m = map_set(m, k, v)` matches the
+  interpreters' clone-then-mutate and no aliased binding observes the change.
+- **`map_get(m, k) -> option<V>`** linear-scans for `k` and constructs `some(v)`
+  (loading the found entry's value slot) or `none`, **reusing the option/enum
+  linear-memory layout** (`[tag i32][payload slot]`) — so a matched `map_get`
+  unwraps to the stored value and a miss unwraps to the `none` arm, identically to
+  the interpreters.
+- **`map_has(m, k) -> bool`** linear-scans and yields `found != len` (1 if present,
+  0 if absent).
+- **`map_len(m) -> i64`** loads the leading `i32` `len` header and sign-extends to
+  `i64`.
+
+**Value semantics.** A scalar-key/value `map<K, V>` is classified as a **mutable
+aggregate**, so it is deep-copied when it crosses a call boundary — a callee
+inserting into its parameter cannot alter the caller's map. Combined with the
+copy-on-`map_set` discipline, `let b = a` (which shares the `i32` pointer) is safe:
+any later `map_set` on either binding produces a fresh block and reassigns that
+binding, so the other still points at the untouched original. `emit_map_deep_copy`
+duplicates the `[len][cap][entries]` block (both words of every live entry); map
+keys and values are always scalar, so a flat word copy is an exact deep copy.
+
+**Lookup/ordering fidelity.** The scan visits entries in insertion order and
+compares keys with the slot-typed equality opcode (`i64.eq` for `i64`/fixed-width
+keys, `i32.eq` for `bool`/`char`/`byte`, ordered `f*.eq` for floats), matching how
+the interpreters compare `Value` keys by content. In-bounds programs agree
+bit-for-bit; there is no out-of-bounds trap surface because every access is a
+header-bounded scan.
+
+**Out of scope (deferred):** maps with a **heap** key or value
+(`map<string, V>`, `map<K, string>`, `map<K, list<…>>`, `map<K, struct>`, …) — the
+key and value must both be scalar this increment, so `supported_map_kv` rejects a
+heap key/value and the enclosing function is skipped (still runs on the
+interpreters) rather than miscompiled. String keys are deferred specifically
+because the interpreters compare keys by decoded **content**, not the interned
+pointer; content comparison of two strings in linear memory is future work.
+`map_keys`/`map_values` (which the interpreters return as `Value::Array`) and
+`map_del` are also deferred to a later increment. `__alloc` still never frees, so a
+grown or copied map orphans its old block.
+
+Fixtures `wasm_map_build.lby` (build via `map_set` with an in-place key update,
+crossing the initial capacity to trigger a grow+copy, then `map_get` matched
+through its `option<V>`, `map_has`, and `map_len`, `main` = 5999509) and
+`wasm_map_value_semantics.lby` (an aliased binding, an insert-derived map, an
+update-derived map, and a callee that inserts into its parameter, `main` =
+2231100) run on all interpreters and, under node, their exported `main` matches
+the interpreter
+(`crates/lullaby_cli/tests/cli.rs::wasm_map_build_execution_parity_with_node` and
+`wasm_map_value_semantics_execution_parity_with_node`).
 
 ## First increment — the scalar subset
 
@@ -247,19 +323,21 @@ second phase. So the first increment compiles the **scalar subset** only:
 - Statements: `let`, assignment, `return`, `if`/`elif`/`else`, `while`, `loop`
   with `break`/`continue`, and range `for` (lowered to a loop). These map to
   WASM's structured `block`/`loop`/`br`/`br_if`/`if`.
-- A function that uses `map`, a `list` with a heap element, an enum with a heap
-  payload, a runtime string builder, or any type still outside the supported set
-  is **rejected for WASM** with a clear diagnostic (it still runs on the
-  interpreters). Note: later increments added enum values and `match` for
-  scalar-payload enums (`option`/`result`/user enums) and the growable `list<T>`
-  collection for scalar element types — see the linear-memory sections above. The
-  allowed builtins are `wasm_log(x i64) -> void` (the host log import above),
-  `console_log(s string) -> void` and `dom_set_text(id string, text string) ->
-  void` (the JS/DOM host imports above), `len(string|array|list) -> i64`, and the
-  scalar-element `list` builtins `list_new`/`push`/`get`/`set`/`pop`; every other
-  builtin is still rejected. Strings, structs, fixed arrays, and scalar-element
-  lists are now supported — see **Heap types (landed)** and **Growable `list<T>`
-  (landed)** above.
+- A function that uses a `list` or `map` with a heap element/key/value, an enum
+  with a heap payload, a runtime string builder, or any type still outside the
+  supported set is **rejected for WASM** with a clear diagnostic (it still runs on
+  the interpreters). Note: later increments added enum values and `match` for
+  scalar-payload enums (`option`/`result`/user enums), the growable `list<T>`
+  collection for scalar element types, and the `map<K, V>` collection for scalar
+  key/value types — see the linear-memory sections above. The allowed builtins are
+  `wasm_log(x i64) -> void` (the host log import above), `console_log(s string) ->
+  void` and `dom_set_text(id string, text string) -> void` (the JS/DOM host imports
+  above), `len(string|array|list) -> i64`, the scalar-element `list` builtins
+  `list_new`/`push`/`get`/`set`/`pop`, and the scalar-key/value `map` builtins
+  `map_new`/`map_set`/`map_get`/`map_has`/`map_len`; every other builtin is still
+  rejected. Strings, structs, fixed arrays, scalar-element lists, and
+  scalar-key/value maps are now supported — see **Heap types (landed)**, **Growable
+  `list<T>` (landed)**, and **Growable `map<K, V>` (landed)** above.
 
 ## From IR to WASM
 
@@ -343,11 +421,18 @@ fixture `tests/fixtures/valid/wasm_enum_match.lby`). Growable `list<T>` for
 **scalar element types** (`[len][cap][slots]` linear-memory blocks with
 value-semantic `list_new`/`push`/`get`/`set`/`len`/`pop` and capacity-doubling
 grow+copy) now compiles and is node-parity-tested — see **Growable `list<T>`
-(landed)** below (fixtures `wasm_list_build.lby`, `wasm_list_value_semantics.lby`).
-Deferred: enums with a heap payload (`string`/`list`/`array`/`map`, e.g.
-`result<i64, string>`), lists of heap elements and the `map` collection, runtime
-string construction, a free-list allocator, and a richer DOM interop surface
-(reading DOM values, events) that builds on these imports.
+(landed)** above (fixtures `wasm_list_build.lby`, `wasm_list_value_semantics.lby`).
+Growable `map<K, V>` for **scalar key/value types** (`[len][cap][(k,v) pairs]`
+linear-memory blocks — an insertion-ordered association list with value-semantic
+`map_new`/`map_set`/`map_get`/`map_has`/`map_len`, in-place key updates, and
+capacity-doubling grow+copy, mirroring the interpreters' `Value::Map`) now compiles
+and is node-parity-tested — see **Growable `map<K, V>` (landed)** above (fixtures
+`wasm_map_build.lby`, `wasm_map_value_semantics.lby`). Deferred: enums with a heap
+payload (`string`/`list`/`array`/`map`, e.g. `result<i64, string>`), lists of heap
+elements, maps with a heap key or value (including string keys), `map_keys`/
+`map_values`/`map_del`, runtime string construction, a free-list allocator, and a
+richer DOM interop surface (reading DOM values, events) that builds on these
+imports.
 
 ## Why these choices
 
