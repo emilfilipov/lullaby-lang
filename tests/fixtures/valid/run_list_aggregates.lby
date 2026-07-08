@@ -1,0 +1,23 @@
+fn unwrap_or o option<i64> fallback i64 -> i64
+    match o
+        some(v) -> v
+        none -> fallback
+
+fn main -> i64
+    let l list<i64> = list_new()
+    l = push(l, 3)
+    l = push(l, 9)
+    l = push(l, 1)
+    l = push(l, 7)
+    # Sum of [3, 9, 1, 7] = 20.
+    let total i64 = list_sum(l)
+    # min = 1, max = 9 on the populated list.
+    let lo i64 = unwrap_or(list_min(l), 0 - 1)
+    let hi i64 = unwrap_or(list_max(l), 0 - 1)
+    # Empty list: sum is 0, min/max are none (fallback 100).
+    let empty list<i64> = list_new()
+    let empty_sum i64 = list_sum(empty)
+    let empty_lo i64 = unwrap_or(list_min(empty), 100)
+    let empty_hi i64 = unwrap_or(list_max(empty), 100)
+    # 20 + 1 + 9 + 0 + 100 + 100 = 230
+    total + lo + hi + empty_sum + empty_lo + empty_hi

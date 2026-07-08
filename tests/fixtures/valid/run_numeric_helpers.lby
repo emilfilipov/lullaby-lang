@@ -1,0 +1,20 @@
+fn main -> i64
+    # sign of negative / zero / positive i64 (avoid negative literals).
+    let neg i64 = 0 - 4
+    let sign_neg i64 = sign(neg)
+    let sign_zero i64 = sign(0)
+    let sign_pos i64 = sign(9)
+    # sign on f64: negative, zero, positive.
+    let fneg f64 = 0.0 - 2.5
+    let sign_fneg i64 = sign(fneg)
+    let sign_fzero i64 = sign(0.0)
+    let sign_fpos i64 = sign(3.5)
+    # gcd of a couple of pairs (non-negative; gcd(0,n)=|n|).
+    let g1 i64 = gcd(12, 18)
+    let g2 i64 = gcd(0, 7)
+    let g3 i64 = gcd(21, 14)
+    # signs: -1 + 0 + 1 + -1 + 0 + 1 = 0
+    # gcds: 6 + 7 + 7 = 20
+    let signs i64 = sign_neg + sign_zero + sign_pos + sign_fneg + sign_fzero + sign_fpos
+    let gcds i64 = g1 + g2 + g3
+    signs + gcds

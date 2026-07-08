@@ -148,6 +148,9 @@ argument is a compile-time `L0389` type error.
 | `sort` | `sort(l list<i64>) -> list<i64>` | elements sorted ascending (returns a new list; `list<i64>` only) |
 | `list_index_of` | `list_index_of(l list<T>, x T) -> i64` | index of the first element equal to `x`, or `-1` if absent (`x` must match the element type `T`) |
 | `list_contains` | `list_contains(l list<T>, x T) -> bool` | whether any element equals `x` (`x` must match the element type `T`) |
+| `list_sum` | `list_sum(l list<T>) -> T` | sum of a numeric list (`T` is `i64` or `f64`); `i64` sums **wrap** (matching `+`), `f64` sums as `f64`; an empty list yields `0`/`0.0` |
+| `list_min` | `list_min(l list<T>) -> option<T>` | smallest element of a numeric list (`T` is `i64` or `f64`), or `none` on an empty list |
+| `list_max` | `list_max(l list<T>) -> option<T>` | largest element of a numeric list (`T` is `i64` or `f64`), or `none` on an empty list |
 | `map_new` | `map_new() -> map<K, V>` | key/value types inferred from context |
 | `map_set` | `map_set(m map<K, V>, k K, v V) -> map<K, V>` | insert/replace |
 | `map_get` | `map_get(m map<K, V>, k K) -> option<V>` | `some`/`none` |
@@ -210,9 +213,23 @@ type or arity reports the string-builtin family code `L0375`.
 
 ## Math
 
-`abs`, `min`, `max`, `pow` are type-directed over `i64` and `f64` (matching
-operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`. Integer
-`pow` requires a non-negative exponent.
+`abs`, `min`, `max`, `pow`, `clamp` are type-directed over `i64` and `f64`
+(matching operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`.
+Integer `pow` requires a non-negative exponent.
+
+Three further numeric helpers round out the scalar toolkit:
+
+| Function | Signature | Notes |
+|----------|-----------|-------|
+| `clamp` | `clamp(x T, lo T, hi T) -> T` | `x` limited to `[lo, hi]` (all three operands share the numeric type `T`, `i64` or `f64`); total — a degenerate `lo > hi` yields `lo`, and an `f64` `NaN` `x` is returned unchanged |
+| `sign` | `sign(x T) -> i64` | `-1`/`0`/`1` for negative/zero/positive; `x` is `i64` or `f64`, and for `f64` both `NaN` and `-0.0` map to `0`; always returns `i64` |
+| `gcd` | `gcd(a i64, b i64) -> i64` | non-negative greatest common divisor of the absolute values (`gcd(0, 0) == 0`, `gcd(0, n) == \|n\|`) via a total Euclidean algorithm |
+
+`gcd` is total even at `i64::MIN`: absolute values are taken in the wider
+`i128` domain, so the loop never traps. The single unrepresentable result —
+`gcd(i64::MIN, 0)`, whose true value `2^63` does not fit `i64` — is reported as
+`i64::MIN` (its own magnitude); every other input yields the exact
+mathematical GCD.
 
 The transcendental builtins take and return `f64`: `sin`, `cos`, `tan`, `atan`,
 `exp` (e^x), `ln` (natural log), and `log10` are unary; `atan2(y, x)` takes two

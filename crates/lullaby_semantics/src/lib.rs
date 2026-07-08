@@ -3285,6 +3285,111 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
+            "clamp" => {
+                // `clamp(x, lo, hi) -> T`: all three operands share the same
+                // numeric type (`i64` or `f64`); the result is that type.
+                self.expect_arg_count(name, args, 3, function)?;
+                let x = self.check_expr(&args[0], scope, function)?;
+                let lo = self.check_expr(&args[1], scope, function)?;
+                let hi = self.check_expr(&args[2], scope, function)?;
+                if x == lo && lo == hi && matches!(x.name.as_str(), "i64" | "f64") {
+                    Some(TypeRef::new(x.name))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0374",
+                        format!(
+                            "clamp expects three matching i64 or f64 values but got `{}`, `{}`, and `{}`",
+                            x.name, lo.name, hi.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
+            "sign" => {
+                // `sign(x) -> i64`: x is `i64` or `f64`; always returns `i64`.
+                self.expect_arg_count(name, args, 1, function)?;
+                let arg_type = self.check_expr(&args[0], scope, function)?;
+                if matches!(arg_type.name.as_str(), "i64" | "f64") {
+                    Some(TypeRef::new("i64"))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0374",
+                        format!(
+                            "sign expects an i64 or f64 value but got `{}`",
+                            arg_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
+            "gcd" => {
+                // `gcd(a, b) -> i64`: both operands are `i64`; the result is the
+                // non-negative greatest common divisor.
+                self.expect_arg_count(name, args, 2, function)?;
+                let a = self.check_expr(&args[0], scope, function)?;
+                let b = self.check_expr(&args[1], scope, function)?;
+                if a.name == "i64" && b.name == "i64" {
+                    Some(TypeRef::new("i64"))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0374",
+                        format!(
+                            "gcd expects two i64 values but got `{}` and `{}`",
+                            a.name, b.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
+            "list_sum" => {
+                // `list_sum(l) -> T`: sum of a `list<i64>` (wrapping) or
+                // `list<f64>`; the result type is the element type. Only numeric
+                // element types are accepted.
+                self.expect_arg_count(name, args, 1, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                if matches!(element.name.as_str(), "i64" | "f64") {
+                    Some(TypeRef::new(element.name))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`list_sum` expects a `list<i64>` or `list<f64>` but got `list<{}>`",
+                            element.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
+            "list_min" | "list_max" => {
+                // `list_min(l)` / `list_max(l)` -> `option<T>` over a numeric
+                // list; `none` on empty, else `some(extreme element)`.
+                self.expect_arg_count(name, args, 1, function)?;
+                let list_ty = self.check_expr(&args[0], scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                if matches!(element.name.as_str(), "i64" | "f64") {
+                    Some(option_type(&element))
+                } else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`{name}` expects a `list<i64>` or `list<f64>` but got `list<{}>`",
+                            element.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    None
+                }
+            }
             "sqrt" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan" | "atan" | "exp" | "ln"
             | "log10" => {
                 self.expect_arg_count(name, args, 1, function)?;
@@ -6153,6 +6258,136 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0374")
+        );
+    }
+
+    #[test]
+    fn accepts_clamp_sign_gcd_numeric_helpers() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a i64 = clamp(20, 5, 10)\n",
+            "    let b f64 = clamp(1.0, 3.0, 8.0)\n",
+            "    let s i64 = sign(a)\n",
+            "    let t i64 = sign(b)\n",
+            "    let g i64 = gcd(12, 18)\n",
+            "    if b > 0.0\n",
+            "        a + s + t + g\n",
+            "    else\n",
+            "        0\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_clamp_with_mismatched_operands() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    clamp(1, 2.0, 3)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0374"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_sign_on_non_numeric() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    sign(\"x\")\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0374"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_gcd_on_f64() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    gcd(1.0, 2.0)\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0374"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_list_aggregate_helpers() {
+        let source = concat!(
+            "fn pick o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> 0\n\n",
+            "fn main -> i64\n",
+            "    let l list<i64> = push(list_new(), 3)\n",
+            "    let total i64 = list_sum(l)\n",
+            "    let lo i64 = pick(list_min(l))\n",
+            "    let hi i64 = pick(list_max(l))\n",
+            "    total + lo + hi\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn accepts_list_sum_on_f64_list() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let l list<f64> = push(list_new(), 1.5)\n",
+            "    let total f64 = list_sum(l)\n",
+            "    if total > 0.0\n",
+            "        1\n",
+            "    else\n",
+            "        0\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_list_sum_on_string_list() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let l list<string> = push(list_new(), \"a\")\n",
+            "    let total i64 = list_sum(l)\n",
+            "    total\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_list_max_on_string_list() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let l list<string> = push(list_new(), \"a\")\n",
+            "    let hi option<string> = list_max(l)\n",
+            "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0387"),
+            "{diagnostics:?}"
         );
     }
 
