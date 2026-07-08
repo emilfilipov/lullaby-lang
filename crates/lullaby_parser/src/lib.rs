@@ -631,6 +631,14 @@ pub enum ExprKind {
     Await {
         expr: Box<Expr>,
     },
+    /// Postfix error-propagation `EXPR?`. On a `result<T, E>` operand it yields
+    /// `T` for `ok(t)` and immediately returns `err(e)` from the enclosing
+    /// function otherwise; on an `option<T>` operand it yields `T` for `some(t)`
+    /// and returns `none` otherwise. This node exists only in the parser AST: the
+    /// AST interpreter realizes it directly via a function-level early-return
+    /// signal, and the IR lowerer desugars it into `let`/`match`/`return` so no
+    /// IR node (and thus no native/WASM backend change) is needed.
+    Try(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2324,6 +2332,16 @@ impl<'a> ExprParser<'a> {
                         span,
                     };
                 }
+            } else if self.eat_symbol("?") {
+                // Postfix error-propagation `expr?`. It binds tighter than every
+                // binary operator (it lives in the postfix loop, above
+                // `parse_binary`), so `a + b?` parses as `a + (b?)` and `f()?`
+                // applies `?` to the call. Chaining `x??` reuses the same loop.
+                let span = expr.span;
+                expr = Expr {
+                    kind: ExprKind::Try(Box::new(expr)),
+                    span,
+                };
             } else {
                 break;
             }
@@ -2714,6 +2732,100 @@ mod tests {
             diagnostics.iter().any(|d| d.code == "L0201"),
             "expected L0201: {diagnostics:?}"
         );
+    }
+
+    /// The single expression statement of `main`'s body (a one-statement fn).
+    fn only_expr(source: &str) -> Expr {
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        match &program.functions[0].body[0] {
+            Stmt::Expr(expr) => expr.clone(),
+            other => panic!("expected an expression statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_postfix_try_on_call() {
+        // `f()?` applies `?` to the call result.
+        let expr = only_expr("fn main -> result<i64, string>\n    f()?\n");
+        match expr.kind {
+            ExprKind::Try(inner) => {
+                assert!(
+                    matches!(inner.kind, ExprKind::Call { .. }),
+                    "operand is a call"
+                );
+            }
+            other => panic!("expected Try, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_chained_try() {
+        // `x??` is a `Try` of a `Try` (left-to-right postfix application).
+        let expr = only_expr("fn main -> option<i64>\n    x??\n");
+        match expr.kind {
+            ExprKind::Try(outer) => match outer.kind {
+                ExprKind::Try(inner) => {
+                    assert!(
+                        matches!(inner.kind, ExprKind::Variable(_)),
+                        "innermost is a variable"
+                    );
+                }
+                other => panic!("expected nested Try, got {other:?}"),
+            },
+            other => panic!("expected Try, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_binds_tighter_than_binary() {
+        // `a + b?` parses as `a + (b?)`, so the `?` applies only to `b`.
+        let expr = only_expr("fn main -> result<i64, string>\n    a + b?\n");
+        match expr.kind {
+            ExprKind::Binary { right, op, .. } => {
+                assert_eq!(op, BinaryOp::Add);
+                assert!(
+                    matches!(right.kind, ExprKind::Try(_)),
+                    "right operand is `b?`"
+                );
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_try_inside_call_argument() {
+        // `f(g()?)` places a `Try` in the argument position; nested `?` works.
+        let expr = only_expr("fn main -> result<i64, string>\n    f(g()?)\n");
+        match expr.kind {
+            ExprKind::Call { name, args } => {
+                assert_eq!(name, "f");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0].kind, ExprKind::Try(_)), "arg is `g()?`");
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_try_operator_round_trip() {
+        // The formatter renders `expr?` and is idempotent: a compound operand is
+        // parenthesized, a call/variable operand is not, and `x??` stays `x??`.
+        let source = concat!(
+            "fn main -> result<i64, string>\n",
+            "    let a i64 = f()?\n",
+            "    let b i64 = g()??\n",
+            "    ok(a + b)\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let once = format_program(&program);
+        assert!(once.contains("f()?"), "renders call?: {once}");
+        assert!(once.contains("g()??"), "renders chained ??: {once}");
+        // Idempotent: re-parsing and re-formatting yields the same text.
+        let tokens2 = lex(&once).expect("re-lex");
+        let program2 = parse(&tokens2).expect("re-parse");
+        assert_eq!(once, format_program(&program2), "formatter is idempotent");
     }
 
     #[test]

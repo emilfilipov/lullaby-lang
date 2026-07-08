@@ -55,6 +55,7 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 - Equality requires matching operand types.
 - Ordering comparisons `<`, `<=`, `>`, and `>=` require two `i64`s or two `f64`s.
 - Logical operators are `and`, `or`, and `not`; `and` and `or` short-circuit.
+- Postfix error-propagation operator `EXPR?`: on a `result<T, E>` operand it evaluates to `T` for `ok(t)` and otherwise immediately returns `err(e)` from the enclosing function; on an `option<T>` operand it evaluates to `T` for `some(t)` and otherwise returns `none`. It binds tighter than every binary operator (so `a + b?` is `a + (b?)`, `f()?` applies to the call), and chains/nests (`x??`, `f(g()?)?`). The enclosing function's return type must be a compatible propagation target: a `result<T, E>` operand requires the function to return `result<U, E>` — the SAME error type `E` (a wrong `E` is `L0429`); an `option<T>` operand requires an `option<U>` return. A return type that is not a matching `result`/`option` is `L0427`, and `?` on a non-`option`/`result` value is `L0428`. `?` lives only in the parser AST: the AST interpreter realizes it via a function-level early-return signal, and the IR lowerer desugars it into `let`/`match`/`return`, so no new IR node exists and it runs identically on the AST, IR, and bytecode backends (including under optimization). Functions that use `?` (like any `match` over `option`/`result`) demote to the interpreters under the native/WASM backends.
 
 ## Control Flow
 

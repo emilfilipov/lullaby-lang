@@ -6135,6 +6135,17 @@ struct Lowerer<'a> {
     /// `return EXPR` and a function's final expression can supply the expected
     /// type that `none`/`ok`/`err` need. Set at the start of each function.
     current_return_type: std::cell::RefCell<TypeRef>,
+    /// Statements hoisted while desugaring postfix `?` operators in the statement
+    /// currently being lowered. Each `EXPR?` pushes a `let __q = <operand>`, a
+    /// typed `let __v`, and a `match __q` (writing `__v` on success, `return`ing
+    /// the failure value otherwise) here, then rewrites its position to reference
+    /// `__v`. The block lowerers drain this in order before the statement, so the
+    /// `?` node never reaches the IR — only `let`/`assign`/`match`/`return`, which
+    /// every backend already handles.
+    try_prelude: std::cell::RefCell<Vec<IrStmt>>,
+    /// Monotonic counter for fresh `?`-desugar temp names, unique per program so
+    /// hoisted temporaries never collide with user bindings or each other.
+    next_try_temp: std::cell::Cell<usize>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -6143,6 +6154,8 @@ impl<'a> Lowerer<'a> {
             program,
             signatures,
             current_return_type: std::cell::RefCell::new(TypeRef::new("void")),
+            try_prelude: std::cell::RefCell::new(Vec::new()),
+            next_try_temp: std::cell::Cell::new(0),
         }
     }
 
@@ -6316,10 +6329,22 @@ impl<'a> Lowerer<'a> {
                 Stmt::Unsafe { body, .. } => {
                     lowered.extend(self.lower_block(body, scope)?);
                 }
-                other => lowered.push(self.lower_statement(other, scope)?),
+                other => {
+                    let stmt = self.lower_statement(other, scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(stmt);
+                }
             }
         }
         Ok(lowered)
+    }
+
+    /// Move any `?`-desugar statements accumulated while lowering the current
+    /// statement (see [`Lowerer::try_prelude`]) to the front of the statement's
+    /// emitted output, preserving their left-to-right / inner-before-outer order.
+    fn drain_try_prelude_into(&self, out: &mut Vec<IrStmt>) {
+        let mut prelude = self.try_prelude.borrow_mut();
+        out.extend(prelude.drain(..));
     }
 
     /// Lower a function body. A trailing bare expression statement is lowered
@@ -6344,9 +6369,14 @@ impl<'a> Lowerer<'a> {
                         && !matches!(expr.kind, ExprKind::Match { .. }) =>
                 {
                     let lowered_expr = self.lower_expr_expected(expr, Some(&return_type), scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
                     lowered.push(IrStmt::Expr(lowered_expr));
                 }
-                other => lowered.push(self.lower_statement(other, scope)?),
+                other => {
+                    let stmt = self.lower_statement(other, scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(stmt);
+                }
             }
         }
         Ok(lowered)
@@ -6884,6 +6914,16 @@ impl<'a> Lowerer<'a> {
                     ty,
                 )
             }
+            // Postfix `EXPR?` is desugared here so no `Try` node ever reaches the
+            // IR (and the native/WASM backends never see it). We hoist the
+            // supporting `let`/`match`/`return` into the statement prelude and
+            // rewrite this position to a reference to the success temporary. The
+            // recursive `lower_expr` on the operand desugars any inner `?` first,
+            // so nested `?` hoist inner-before-outer.
+            ExprKind::Try(inner) => {
+                let (kind, ty) = self.desugar_try(inner, expr.span, scope)?;
+                (kind, ty)
+            }
         };
 
         Ok(IrExpr {
@@ -6891,6 +6931,168 @@ impl<'a> Lowerer<'a> {
             ty,
             span: expr.span,
         })
+    }
+
+    /// Desugar a postfix `EXPR?`. Lowers the operand, hoists the propagation
+    /// scaffolding into [`Lowerer::try_prelude`], and returns the `(kind, ty)` of
+    /// a reference to the freshly bound success temporary `__try_v_N: T`.
+    ///
+    /// For a `result<T, E>` operand it emits, in order:
+    ///
+    /// ```text
+    /// let __try_q_N = <operand>          # result<T, E>
+    /// let __try_v_N: T = __try_q_N       # placeholder; overwritten below
+    /// match __try_q_N
+    ///     ok(__try_ok_N) -> __try_v_N = __try_ok_N
+    ///     err(__try_err_N) -> return err(__try_err_N)
+    /// ```
+    ///
+    /// and for an `option<T>` operand the analogous `some`/`none` shape. The
+    /// placeholder init is immediately overwritten by the `ok`/`some` arm before
+    /// any read, and the failure arm `return`s first, so its value is never
+    /// observed; the interpreters are dynamically typed and the native/WASM
+    /// backends demote any function containing a `match` to the interpreter, so
+    /// the desugared IR runs identically on every backend.
+    fn desugar_try(
+        &self,
+        inner: &Expr,
+        span: Span,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Result<(IrExprKind, TypeRef), IrLoweringError> {
+        let operand = self.lower_expr(inner, scope)?;
+        let operand_ty = operand.ty.clone();
+        let return_type = self.current_return_type.borrow().clone();
+
+        // Fresh, collision-free temp names for this `?` site.
+        let id = self.next_try_temp.get();
+        self.next_try_temp.set(id + 1);
+        let q_name = format!("__try_q_{id}");
+        let v_name = format!("__try_v_{id}");
+        let bind_name = format!("__try_x_{id}");
+
+        // Resolve `(success variant, failure variant, payload type T)` from the
+        // operand type. Semantics guarantees the operand is an `option`/`result`
+        // and the return type is compatible, so anything else is a lowering bug.
+        let (success_variant, failure_variant, payload_ty) =
+            if let Some((ok_ty, _)) = operand_ty.result_args() {
+                ("ok", "err", ok_ty)
+            } else if let Some(payload) = operand_ty.option_element() {
+                ("some", "none", payload)
+            } else {
+                return Err(IrLoweringError::new(
+                    format!(
+                        "`?` operand has non-option/result type `{}`",
+                        operand_ty.name
+                    ),
+                    Some(span),
+                ));
+            };
+
+        // `let __try_q_N = <operand>`
+        let q_let = IrStmt::Let {
+            name: q_name.clone(),
+            ty: operand_ty.clone(),
+            value: operand,
+            span,
+        };
+
+        // `let __try_v_N: T = __try_q_N` (placeholder init, overwritten below).
+        let v_let = IrStmt::Let {
+            name: v_name.clone(),
+            ty: payload_ty.clone(),
+            value: IrExpr {
+                kind: IrExprKind::Variable(q_name.clone()),
+                ty: operand_ty.clone(),
+                span,
+            },
+            span,
+        };
+
+        // Success arm: `variant(__try_x_N) -> __try_v_N = __try_x_N`.
+        let success_arm = IrMatchArm {
+            pattern: IrMatchPattern::Variant {
+                name: success_variant.to_string(),
+                bindings: vec![bind_name.clone()],
+            },
+            body: vec![IrStmt::Assign {
+                name: v_name.clone(),
+                path: Vec::new(),
+                op: AssignOp::Replace,
+                value: IrExpr {
+                    kind: IrExprKind::Variable(bind_name.clone()),
+                    ty: payload_ty.clone(),
+                    span,
+                },
+                span,
+            }],
+        };
+
+        // Failure arm: `err(__try_x_N) -> return err(__try_x_N)` (or the `none`
+        // analogue), rebuilding the failure value at the function's return type.
+        let failure_arm = if failure_variant == "err" {
+            let err_bind = format!("__try_e_{id}");
+            let (_, err_ty) = operand_ty.result_args().ok_or_else(|| {
+                IrLoweringError::new(
+                    format!("`?` operand `{}` is not a result", operand_ty.name),
+                    Some(span),
+                )
+            })?;
+            IrMatchArm {
+                pattern: IrMatchPattern::Variant {
+                    name: "err".to_string(),
+                    bindings: vec![err_bind.clone()],
+                },
+                body: vec![IrStmt::Return(Some(IrExpr {
+                    kind: IrExprKind::Call {
+                        name: "err".to_string(),
+                        args: vec![IrExpr {
+                            kind: IrExprKind::Variable(err_bind),
+                            ty: err_ty,
+                            span,
+                        }],
+                    },
+                    ty: return_type.clone(),
+                    span,
+                }))],
+            }
+        } else {
+            // `none -> return none` (a unit variant lowered as a no-arg `Call`,
+            // matching how bare `none` construction lowers elsewhere).
+            IrMatchArm {
+                pattern: IrMatchPattern::Variant {
+                    name: "none".to_string(),
+                    bindings: Vec::new(),
+                },
+                body: vec![IrStmt::Return(Some(IrExpr {
+                    kind: IrExprKind::Call {
+                        name: "none".to_string(),
+                        args: Vec::new(),
+                    },
+                    ty: return_type.clone(),
+                    span,
+                }))],
+            }
+        };
+
+        let match_stmt = IrStmt::Match {
+            scrutinee: IrExpr {
+                kind: IrExprKind::Variable(q_name),
+                ty: operand_ty,
+                span,
+            },
+            arms: vec![success_arm, failure_arm],
+            span,
+        };
+
+        // Hoist the scaffolding, in order, ahead of the statement being lowered.
+        {
+            let mut prelude = self.try_prelude.borrow_mut();
+            prelude.push(q_let);
+            prelude.push(v_let);
+            prelude.push(match_stmt);
+        }
+
+        Ok((IrExprKind::Variable(v_name), payload_ty))
     }
 
     /// Lower a built-in `option`/`result` constructor to a variant `Call` IR
@@ -8382,6 +8584,9 @@ mod tests {
         assert!(covered.contains(&"run_store.lby".to_string()));
         assert!(covered.contains(&"run_for_step.lby".to_string()));
         assert!(covered.contains(&"run_option_result.lby".to_string()));
+        // The `?` error-propagation fixture exercises the AST early-return signal
+        // and the IR `?`-desugar at parity across all five backend variants.
+        assert!(covered.contains(&"run_error_propagation.lby".to_string()));
     }
 
     #[test]
@@ -8413,6 +8618,89 @@ mod tests {
 
         let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
             run_all_backend_variants(source);
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
+    fn try_operator_desugars_to_let_match_return_and_runs_at_parity() {
+        // The IR never contains a `?`/`Try` node (there is no such IrExprKind):
+        // `?` is desugared during lowering into a `let __try_q`, a typed
+        // `let __try_v`, and a `match` whose failure arm `return`s. The success
+        // temporary is what the original position references.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"neg\")\n",
+            "    ok(n)\n\n",
+            "fn use_it a i64 -> result<i64, string>\n",
+            "    let x i64 = checked(a)?\n",
+            "    ok(x + 1)\n\n",
+            "fn unwrap r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn main -> i64\n",
+            "    unwrap(use_it(4)) + unwrap(use_it(-1))\n",
+        );
+        let module = lower_source(source);
+        let use_it = module
+            .functions
+            .iter()
+            .find(|function| function.name == "use_it")
+            .expect("use_it function");
+
+        // The `?`-desugar scaffolding was hoisted ahead of the `let x` binding:
+        // `let __try_q_*`, then a typed `let __try_v_*`, then a `match` with a
+        // `return`ing failure arm.
+        assert!(
+            matches!(&use_it.body[0], IrStmt::Let { name, .. } if name.starts_with("__try_q_")),
+            "first hoisted statement binds the operand temp: {:?}",
+            use_it.body[0]
+        );
+        let IrStmt::Let {
+            name: v_name,
+            ty: v_ty,
+            ..
+        } = &use_it.body[1]
+        else {
+            panic!(
+                "expected the success temp binding, got {:?}",
+                use_it.body[1]
+            );
+        };
+        assert!(
+            v_name.starts_with("__try_v_"),
+            "success temp name: {v_name}"
+        );
+        assert_eq!(
+            *v_ty,
+            TypeRef::new("i64"),
+            "success temp is typed as the payload"
+        );
+        let IrStmt::Match { arms, .. } = &use_it.body[2] else {
+            panic!("expected the propagation match, got {:?}", use_it.body[2]);
+        };
+        // Two arms: `ok(..) -> __try_v = ..` and `err(..) -> return err(..)`.
+        assert_eq!(arms.len(), 2, "ok + err arms");
+        let has_returning_err_arm = arms.iter().any(|arm| {
+            matches!(&arm.pattern, IrMatchPattern::Variant { name, .. } if name == "err")
+                && matches!(arm.body.as_slice(), [IrStmt::Return(Some(_))])
+        });
+        assert!(has_returning_err_arm, "err arm returns the failure value");
+        // The original `let x` position now references the success temp.
+        let IrStmt::Let { value, .. } = &use_it.body[3] else {
+            panic!("expected the rewritten `let x`, got {:?}", use_it.body[3]);
+        };
+        assert_eq!(value.kind, IrExprKind::Variable(v_name.clone()));
+
+        // All five backend variants agree on the observable result.
+        // unwrap(use_it(4)) = 5; unwrap(use_it(-1)) = -len("neg") = -3.
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(2));
         assert_eq!(ir, ast);
         assert_eq!(bytecode, ast);
         assert_eq!(optimized_ir, ast);

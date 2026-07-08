@@ -784,6 +784,13 @@ struct Runtime<'a> {
     /// Names of `extern fn` (C-ABI) functions. The interpreter cannot execute C,
     /// so a call to one raises `L0423` before any builtin/user dispatch.
     extern_functions: HashSet<&'a str>,
+    /// The failure value carried by an in-flight postfix `?` early return. When
+    /// `EXPR?` hits `none`/`err` it stashes the whole enum value here and raises
+    /// the `L0430` sentinel; `invoke_function` (the call boundary) takes this
+    /// value and returns it as the enclosing function's result. The unwind is
+    /// synchronous — nothing else runs between the raise and the catch — so a
+    /// single slot is sufficient and never observed as stale.
+    pending_try_return: Option<Value>,
 }
 
 impl<'a> Runtime<'a> {
@@ -870,6 +877,7 @@ impl<'a> Runtime<'a> {
             trait_method_names,
             async_functions,
             extern_functions,
+            pending_try_return: None,
         })
     }
 
@@ -1598,6 +1606,24 @@ impl<'a> Runtime<'a> {
         let traceback = self.call_stack.clone();
         self.call_stack.pop();
 
+        // A postfix `?` on a `none`/`err` unwinds to here as the `L0430`
+        // sentinel, carrying the failure value in `pending_try_return`. Catch it
+        // at this call boundary and turn it into a normal function return of that
+        // value (this is the function-level early return `?` denotes). The slot
+        // is always taken, so it never leaks into a later call.
+        let result = match result {
+            Err(error) if error.code == "L0430" => {
+                let value = self.pending_try_return.take().ok_or_else(|| {
+                    RuntimeError::new(
+                        "L0430",
+                        "missing `?` propagation value at function boundary",
+                    )
+                })?;
+                return Ok(value);
+            }
+            other => other,
+        };
+
         match result.map_err(|error| error.with_traceback(traceback))? {
             Control::Return(value) | Control::Value(value) => Ok(value),
             Control::Break | Control::Continue => Err(RuntimeError::new(
@@ -1972,6 +1998,47 @@ impl<'a> Runtime<'a> {
                 let value = self.eval_expr(expr, env)?;
                 let future = expect_future("await", value)?;
                 await_future(&future)
+            }
+            // Postfix `EXPR?` error propagation. Evaluate the operand to an
+            // `option`/`result` enum value; on the success variant (`some`/`ok`)
+            // the expression is the payload, and on the failure variant
+            // (`none`/`err`) we raise a function-level early-return signal that
+            // carries the whole enum value. `invoke_function` (the call boundary)
+            // catches the `L0430` sentinel and returns the stashed value as the
+            // enclosing function's result — mirroring how `throw`'s `L0420`
+            // unwinds to the nearest `try`/`catch`, but unwinding to the function
+            // boundary instead. Semantics has already verified the operand is an
+            // `option`/`result` and the return type is compatible.
+            ExprKind::Try(inner) => {
+                let value = self.eval_expr(inner, env)?;
+                let Value::Enum {
+                    variant, payload, ..
+                } = &value
+                else {
+                    return Err(RuntimeError::new(
+                        "L0428",
+                        "`?` operand did not evaluate to an option/result value",
+                    )
+                    .with_span(expr.span));
+                };
+                match variant.as_str() {
+                    "ok" | "some" => payload.first().cloned().ok_or_else(|| {
+                        RuntimeError::new("L0428", format!("`{variant}` payload missing for `?`"))
+                    }),
+                    "err" | "none" => {
+                        // Stash the whole failure value and unwind to the nearest
+                        // function boundary via the `L0430` early-return sentinel.
+                        self.pending_try_return = Some(value.clone());
+                        Err(RuntimeError::new(
+                            "L0430",
+                            "`?` propagated a failure value to the enclosing function",
+                        ))
+                    }
+                    other => Err(RuntimeError::new(
+                        "L0428",
+                        format!("`?` operand has unexpected variant `{other}`"),
+                    )),
+                }
             }
             ExprKind::StructLiteral { name, fields } => {
                 // Evaluate in source order, then reorder to the declared field
@@ -4385,5 +4452,76 @@ mod tests {
         assert_eq!(first.len(), 32);
         assert_eq!(second.len(), 32);
         assert_ne!(first, second, "two OS-CSPRNG draws must not be identical");
+    }
+
+    #[test]
+    fn try_operator_propagates_ok_and_err_on_ast_backend() {
+        // `checked(a)? + checked(b)?` yields the sum when both succeed and
+        // short-circuits with the first `err` otherwise. The AST interpreter
+        // realizes `?` via a function-level early-return signal.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"neg\")\n",
+            "    ok(n)\n\n",
+            "fn add_checked a i64 b i64 -> result<i64, string>\n",
+            "    let x i64 = checked(a)?\n",
+            "    let y i64 = checked(b)?\n",
+            "    ok(x + y)\n\n",
+            "fn unwrap r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn main -> i64\n",
+            // success 3 + 4 = 7; failure err("neg") -> -3.
+            "    unwrap(add_checked(3, 4)) + unwrap(add_checked(-1, 4))\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(4));
+    }
+
+    #[test]
+    fn try_operator_propagates_none_on_ast_backend() {
+        // `?` on an `option` returns `none` from the enclosing option-returning
+        // function when the operand is `none`.
+        let source = concat!(
+            "fn lookup present bool -> option<i64>\n",
+            "    if present\n",
+            "        return some(9)\n",
+            "    none\n\n",
+            "fn twice present bool -> option<i64>\n",
+            "    let x i64 = lookup(present)?\n",
+            "    some(x + x)\n\n",
+            "fn unwrap o option<i64> -> i64\n",
+            "    match o\n",
+            "        some(v) -> v\n",
+            "        none -> -1\n\n",
+            "fn main -> i64\n",
+            // present -> 18; absent -> none -> -1.
+            "    unwrap(twice(true)) + unwrap(twice(false))\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(17));
+    }
+
+    #[test]
+    fn nested_try_operator_runs_on_ast_backend() {
+        // `checked(checked(n)? + n)?` nests two `?`s in one expression; both must
+        // succeed for the value to flow through.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"neg\")\n",
+            "    ok(n)\n\n",
+            "fn double_checked n i64 -> result<i64, string>\n",
+            "    let v i64 = checked(checked(n)? + n)?\n",
+            "    ok(v)\n\n",
+            "fn unwrap r result<i64, string> -> i64\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> 0 - len(m)\n\n",
+            "fn main -> i64\n",
+            // double_checked(5) = 10; double_checked(-2) = err("neg") -> -3.
+            "    unwrap(double_checked(5)) + unwrap(double_checked(-2))\n",
+        );
+        assert_eq!(run_source(source).expect("run"), Value::I64(7));
     }
 }

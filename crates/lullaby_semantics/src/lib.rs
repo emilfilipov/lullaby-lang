@@ -1736,6 +1736,7 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Field { target, .. } => self.check_freed_uses(target, freed, function),
             ExprKind::Await { expr } => self.check_freed_uses(expr, freed, function),
+            ExprKind::Try(inner) => self.check_freed_uses(inner, freed, function),
             ExprKind::Unary { expr, .. } => self.check_freed_uses(expr, freed, function),
             ExprKind::Binary { left, right, .. } => {
                 self.check_freed_uses(left, freed, function);
@@ -2080,6 +2081,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            ExprKind::Try(inner) => self.check_try(inner, expr.span, scope, function),
         };
 
         if let Some(ty) = &inferred {
@@ -2135,6 +2137,83 @@ impl<'a> Checker<'a> {
                 Some(self.check_map_new(args, expected, expr.span, function))
             }
             _ => None,
+        }
+    }
+
+    /// Type-check a postfix `EXPR?` error-propagation operator.
+    ///
+    /// The operand must be an `option<T>` or a `result<T, E>` (else `L0428`).
+    /// The enclosing function's return type must be a *compatible* propagation
+    /// target: for a `result<T, E>` operand the function must return
+    /// `result<U, E>` — the SAME error type `E` (a wrong `E` is `L0429`); for an
+    /// `option<T>` operand it must return `option<U>`. A return type that is not
+    /// a matching `result`/`option` at all is `L0427`. The expression's type is
+    /// the payload `T`.
+    fn check_try(
+        &mut self,
+        inner: &Expr,
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let operand_type = self.check_expr(inner, scope, function)?;
+        let return_type = &function.return_type;
+        if let Some((ok_ty, err_ty)) = operand_type.result_args() {
+            // A `result<T, E>` operand requires a `result<U, E>` return type.
+            match return_type.result_args() {
+                Some((_, return_err)) if return_err == err_ty => Some(ok_ty),
+                Some((_, return_err)) => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0429",
+                        format!(
+                            "`?` on a `{}` requires the enclosing function to return a `result` with the same error type `{}`, but `{}` returns error type `{}`",
+                            operand_type.name, err_ty.name, function.name, return_err.name
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                    None
+                }
+                None => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0427",
+                        format!(
+                            "`?` on a `{}` requires the enclosing function `{}` to return a `result<..., {}>`, but it returns `{}`",
+                            operand_type.name, function.name, err_ty.name, return_type.name
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                    None
+                }
+            }
+        } else if let Some(payload) = operand_type.option_element() {
+            // An `option<T>` operand requires an `option<U>` return type.
+            if return_type.option_element().is_some() {
+                Some(payload)
+            } else {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0427",
+                    format!(
+                        "`?` on a `{}` requires the enclosing function `{}` to return an `option<...>`, but it returns `{}`",
+                        operand_type.name, function.name, return_type.name
+                    ),
+                    Some(function.name.clone()),
+                    span,
+                ));
+                None
+            }
+        } else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0428",
+                format!(
+                    "`?` can only be applied to an `option` or `result` value, but the operand has type `{}`",
+                    operand_type.name
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+            None
         }
     }
 
@@ -6890,6 +6969,89 @@ mod tests {
         assert!(
             diagnostics.iter().any(|d| d.code == "L0342"),
             "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn try_operator_on_result_type_checks_and_types_as_payload() {
+        // `checked(a)?` is `i64` (the `ok` payload) inside a `result<i64, string>`
+        // function; the `?` desugars to a propagate-on-`err` early return.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    if n < 0\n",
+            "        return err(\"bad\")\n",
+            "    ok(n)\n\n",
+            "fn use_it a i64 -> result<i64, string>\n",
+            "    let x i64 = checked(a)?\n",
+            "    ok(x + 1)\n",
+        );
+        validate_source(source).expect("`?` on result in a result-returning fn");
+    }
+
+    #[test]
+    fn try_operator_on_option_type_checks() {
+        let source = concat!(
+            "fn maybe present bool -> option<i64>\n",
+            "    if present\n",
+            "        return some(7)\n",
+            "    none\n\n",
+            "fn use_it p bool -> option<i64>\n",
+            "    let x i64 = maybe(p)?\n",
+            "    some(x + 1)\n",
+        );
+        validate_source(source).expect("`?` on option in an option-returning fn");
+    }
+
+    #[test]
+    fn try_operator_in_incompatible_return_type_is_l0427() {
+        // `?` on a `result` inside a plain `i64`-returning function has no
+        // compatible propagation target, so it is `L0427`.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    ok(n)\n\n",
+            "fn bad a i64 -> i64\n",
+            "    let x i64 = checked(a)?\n",
+            "    x\n",
+        );
+        let diagnostics = validate_source(source).expect_err("`?` needs a compatible return type");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0427"),
+            "expected L0427: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn try_operator_with_mismatched_error_type_is_l0429() {
+        // A `result<i64, string>` operand requires the function to return a
+        // `result` with the SAME error type; returning `result<i64, i64>` is
+        // `L0429`.
+        let source = concat!(
+            "fn checked n i64 -> result<i64, string>\n",
+            "    ok(n)\n\n",
+            "fn bad a i64 -> result<i64, i64>\n",
+            "    let x i64 = checked(a)?\n",
+            "    ok(x)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("`?` error type must match");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0429"),
+            "expected L0429: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn try_operator_on_non_option_result_is_l0428() {
+        // `?` on a plain `i64` value is `L0428`.
+        let source = concat!(
+            "fn bad -> result<i64, string>\n",
+            "    let n i64 = 5\n",
+            "    let x i64 = n?\n",
+            "    ok(x)\n",
+        );
+        let diagnostics = validate_source(source).expect_err("`?` needs an option/result operand");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0428"),
+            "expected L0428: {diagnostics:?}"
         );
     }
 }

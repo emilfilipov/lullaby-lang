@@ -468,6 +468,13 @@ fn render_expr(expr: &Expr) -> String {
         ExprKind::Await { expr } => {
             format!("await {}", render_unary_operand(expr))
         }
+        // Postfix `?` binds tighter than binary/unary operators, so a compound
+        // operand is parenthesized (`(a + b)?`) while a call/field/index/variable
+        // operand renders directly (`f()?`, `x?`). Chained `x??` renders as-is
+        // because the inner `Try` is not one of the parenthesized forms.
+        ExprKind::Try(inner) => {
+            format!("{}?", render_postfix_target(inner))
+        }
     }
 }
 
@@ -503,7 +510,10 @@ fn render_postfix_target(target: &Expr) -> String {
     let rendered = render_expr(target);
     if matches!(
         target.kind,
-        ExprKind::Binary { .. } | ExprKind::Unary { .. } | ExprKind::Match { .. }
+        ExprKind::Binary { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Match { .. }
+            | ExprKind::Await { .. }
     ) {
         format!("({rendered})")
     } else {
