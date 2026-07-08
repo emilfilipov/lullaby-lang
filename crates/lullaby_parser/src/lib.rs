@@ -677,6 +677,51 @@ fn normalize_number_literal(value: &str) -> Option<String> {
     Some(value.chars().filter(|ch| *ch != '_').collect())
 }
 
+/// Parse a base-prefixed integer literal (`0x`/`0X`, `0b`/`0B`, `0o`/`0O`) into
+/// an `i64`. The prefix is matched case-insensitively; the remaining text must be
+/// non-empty radix digits with optional `_` separators strictly between two valid
+/// radix digits (a leading, trailing, doubled, or prefix-adjacent underscore is
+/// rejected). An out-of-radix digit, empty digits, a `.`, or an `i64` overflow all
+/// return `None`. A decimal literal (no recognized base prefix) also returns
+/// `None` so the caller falls through to the existing decimal/float path.
+fn parse_radix_literal(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'0' {
+        return None;
+    }
+    let radix = match bytes[1] {
+        b'x' | b'X' => 16,
+        b'b' | b'B' => 2,
+        b'o' | b'O' => 8,
+        _ => return None,
+    };
+    let digits = &value[2..];
+    if digits.is_empty() {
+        return None;
+    }
+    let digit_bytes = digits.as_bytes();
+    let mut cleaned = String::with_capacity(digits.len());
+    for (index, &byte) in digit_bytes.iter().enumerate() {
+        if byte == b'_' {
+            let prev_ok = index
+                .checked_sub(1)
+                .is_some_and(|prev| (digit_bytes[prev] as char).is_digit(radix));
+            let next_ok = digit_bytes
+                .get(index + 1)
+                .is_some_and(|next| (*next as char).is_digit(radix));
+            if !(prev_ok && next_ok) {
+                return None;
+            }
+            continue;
+        }
+        if !(byte as char).is_digit(radix) {
+            return None;
+        }
+        cleaned.push(byte as char);
+    }
+    i64::from_str_radix(&cleaned, radix).ok()
+}
+
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
@@ -2233,20 +2278,31 @@ impl<'a> ExprParser<'a> {
         self.cursor += 1;
         match token.kind {
             TokenKind::Number(value) => {
-                // Validate and strip `_` digit separators before parsing.
-                let normalized = normalize_number_literal(&value)
-                    .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
-                // A `.` in the literal marks a floating-point (`f64`) literal.
-                let kind = if normalized.contains('.') {
-                    let parsed = normalized
-                        .parse::<f64>()
-                        .map_err(|_| format!("invalid float literal `{value}`"))?;
-                    ExprKind::Float(parsed)
-                } else {
-                    let parsed = normalized
-                        .parse::<i64>()
-                        .map_err(|_| format!("invalid integer literal `{value}`"))?;
+                // A `0x`/`0b`/`0o` prefix marks a base-prefixed integer literal
+                // (integer-only, so a `.` or out-of-radix digit is malformed).
+                let kind = if value.len() >= 2
+                    && value.as_bytes()[0] == b'0'
+                    && matches!(value.as_bytes()[1], b'x' | b'X' | b'b' | b'B' | b'o' | b'O')
+                {
+                    let parsed = parse_radix_literal(&value)
+                        .ok_or_else(|| format!("invalid integer literal `{value}`"))?;
                     ExprKind::Integer(parsed)
+                } else {
+                    // Validate and strip `_` digit separators before parsing.
+                    let normalized = normalize_number_literal(&value)
+                        .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
+                    // A `.` in the literal marks a floating-point (`f64`) literal.
+                    if normalized.contains('.') {
+                        let parsed = normalized
+                            .parse::<f64>()
+                            .map_err(|_| format!("invalid float literal `{value}`"))?;
+                        ExprKind::Float(parsed)
+                    } else {
+                        let parsed = normalized
+                            .parse::<i64>()
+                            .map_err(|_| format!("invalid integer literal `{value}`"))?;
+                        ExprKind::Integer(parsed)
+                    }
                 };
                 Ok(Expr {
                     kind,
@@ -2691,6 +2747,55 @@ mod tests {
                 "expected `{bad}` to be rejected as a malformed literal"
             );
         }
+    }
+
+    #[test]
+    fn parses_base_prefixed_integer_literals() {
+        for (source, expected) in [
+            ("0xFF", 255i64),
+            ("0b1010", 10),
+            ("0o17", 15),
+            ("0xFF_FF", 65535),
+            ("0b1010_0101", 165),
+            ("0XdeadBEEF", 0xdead_beef),
+        ] {
+            let program = parse(&lex(&format!("fn main -> i64\n    {source}\n")).expect("lex"))
+                .expect("parse");
+            let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+                panic!("expected expression statement for `{source}`");
+            };
+            assert!(
+                matches!(expr.kind, ExprKind::Integer(value) if value == expected),
+                "expected `{source}` to parse as {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_base_prefixed_literals() {
+        for bad in ["0x", "0xG", "0b2", "0o8", "0x1.5", "0xF__F", "0x_F", "0xF_"] {
+            let source = format!("fn main -> i64\n    {bad}\n");
+            let tokens = lex(&source).expect("lex");
+            assert!(
+                parse(&tokens).is_err(),
+                "expected `{bad}` to be rejected as a malformed literal"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_radix_literal_helper() {
+        assert_eq!(parse_radix_literal("0xFF"), Some(255));
+        assert_eq!(parse_radix_literal("0b1010"), Some(10));
+        assert_eq!(parse_radix_literal("0o17"), Some(15));
+        assert_eq!(parse_radix_literal("0xFF_FF"), Some(65535));
+        assert_eq!(parse_radix_literal("0x"), None);
+        assert_eq!(parse_radix_literal("0xG"), None);
+        assert_eq!(parse_radix_literal("0b2"), None);
+        assert_eq!(parse_radix_literal("0o8"), None);
+        assert_eq!(parse_radix_literal("0xF__F"), None);
+        // A plain decimal literal is not a base-prefixed literal.
+        assert_eq!(parse_radix_literal("42"), None);
     }
 
     #[test]
