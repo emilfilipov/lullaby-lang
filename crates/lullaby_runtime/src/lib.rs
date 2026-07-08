@@ -203,6 +203,62 @@ impl IntKind {
             IntKind::U64 | IntKind::Usize | IntKind::Isize => value,
         }
     }
+
+    /// The inclusive `[min, max]` range of this kind as `i128`, wide enough to
+    /// hold every kind (up to `u64::MAX`). Used by checked/saturating arithmetic
+    /// to detect and clamp overflow exactly.
+    pub fn range_i128(self) -> (i128, i128) {
+        match self {
+            IntKind::I8 => (i128::from(i8::MIN), i128::from(i8::MAX)),
+            IntKind::I16 => (i128::from(i16::MIN), i128::from(i16::MAX)),
+            IntKind::I32 => (i128::from(i32::MIN), i128::from(i32::MAX)),
+            IntKind::Isize => (i128::from(i64::MIN), i128::from(i64::MAX)),
+            IntKind::U16 => (0, i128::from(u16::MAX)),
+            IntKind::U32 => (0, i128::from(u32::MAX)),
+            IntKind::U64 | IntKind::Usize => (0, i128::from(u64::MAX)),
+        }
+    }
+
+    /// The mathematical value of a normalized `i64` cell of this kind as `i128`
+    /// (unsigned kinds read the cell as `u64`, so a negative cell becomes its
+    /// large positive magnitude).
+    pub fn value_to_i128(self, cell: i64) -> i128 {
+        if self.is_unsigned() {
+            i128::from(cell as u64)
+        } else {
+            i128::from(cell)
+        }
+    }
+
+    /// Pack an in-range `i128` value back into this kind's `i64` cell (the
+    /// inverse of [`IntKind::value_to_i128`] for values within `range_i128`).
+    pub fn i128_to_cell(self, value: i128) -> i64 {
+        if self.is_unsigned() {
+            value as u64 as i64
+        } else {
+            value as i64
+        }
+    }
+}
+
+/// The three arithmetic operations that the overflow-aware builtins provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl ArithOp {
+    /// Apply the operation over the wide `i128` domain (never overflows for
+    /// operands drawn from any fixed-width kind, whose product fits `i128`).
+    pub fn apply_i128(self, left: i128, right: i128) -> i128 {
+        match self {
+            ArithOp::Add => left + right,
+            ArithOp::Sub => left - right,
+            ArithOp::Mul => left * right,
+        }
+    }
 }
 
 /// Signedness-aware quotient of two normalized `i64` cells tagged `ty`; the
@@ -225,6 +281,71 @@ pub fn int_cmp(left: i64, right: i64, ty: IntKind) -> std::cmp::Ordering {
     } else {
         left.cmp(&right)
     }
+}
+
+/// Overflow behaviour selector for the `checked_*`/`saturating_*`/`wrapping_*`
+/// arithmetic builtins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowMode {
+    /// `option<T>`: `none` when the true result is outside `T`.
+    Checked,
+    /// `T`: clamp to `T`'s bounds.
+    Saturating,
+    /// `T`: wrap modulo the type width (the default `+`/`-`/`*` behaviour).
+    Wrapping,
+}
+
+/// Unwrap a `Value::Int`, returning its normalized cell and kind, or an `L0407`
+/// runtime error otherwise.
+pub fn expect_fixed_int(name: &str, value: &Value) -> Result<(i64, IntKind), RuntimeError> {
+    match value {
+        Value::Int { value, ty } => Ok((*value, *ty)),
+        other => Err(RuntimeError::new(
+            "L0407",
+            format!("{name} expects a fixed-width integer but got `{other}`"),
+        )),
+    }
+}
+
+/// Shared implementation of the overflow-aware arithmetic builtins. Both operands
+/// must be the same fixed-width kind (enforced by the type checker); the true
+/// result is computed in `i128` — wide enough that no fixed-width add/sub/mul
+/// overflows it — then resolved per `mode`. Identical on every backend.
+pub fn overflow_arith(
+    name: &str,
+    args: Vec<Value>,
+    op: ArithOp,
+    mode: OverflowMode,
+) -> Result<Value, RuntimeError> {
+    let [a, b]: [Value; 2] = args.try_into().map_err(|args: Vec<Value>| {
+        RuntimeError::new(
+            "L0407",
+            format!("{name} expects 2 arguments but got {}", args.len()),
+        )
+    })?;
+    let (la, ta) = expect_fixed_int(name, &a)?;
+    let (lb, tb) = expect_fixed_int(name, &b)?;
+    if ta != tb {
+        return Err(RuntimeError::new(
+            "L0407",
+            format!("{name} operands must have the same integer type"),
+        ));
+    }
+    let wide = op.apply_i128(ta.value_to_i128(la), ta.value_to_i128(lb));
+    let (min, max) = ta.range_i128();
+    Ok(match mode {
+        // `wide as i64` keeps the low 64 bits (wrapping mod 2^64); `Value::int`
+        // then wraps to the kind's width.
+        OverflowMode::Wrapping => Value::int(wide as i64, ta),
+        OverflowMode::Saturating => Value::int(ta.i128_to_cell(wide.clamp(min, max)), ta),
+        OverflowMode::Checked => {
+            if wide < min || wide > max {
+                option_value(None)
+            } else {
+                option_value(Some(Value::int(ta.i128_to_cell(wide), ta)))
+            }
+        }
+    })
 }
 
 // `Eq` is intentionally omitted: `Value::F64` holds an `f64`, which is not `Eq`.
@@ -1192,6 +1313,15 @@ impl<'a> Runtime<'a> {
             "to_i64" => Self::builtin_to_i64(args),
             "to_f32" => Self::builtin_to_f32(args),
             "to_f64" => Self::builtin_to_f64(args),
+            "checked_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Checked),
+            "checked_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Checked),
+            "checked_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Checked),
+            "saturating_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Saturating),
+            "saturating_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Saturating),
+            "saturating_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Saturating),
+            "wrapping_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Wrapping),
+            "wrapping_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Wrapping),
+            "wrapping_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Wrapping),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
@@ -5520,5 +5650,51 @@ mod tests {
             run_source(source).expect("run"),
             Value::I64((u64::MAX / 2) as i64)
         );
+    }
+
+    #[test]
+    fn overflow_arith_checked_saturating_wrapping() {
+        // checked_add overflows i8 (127 + 1) -> none.
+        let none = overflow_arith(
+            "checked_add",
+            vec![Value::int(127, IntKind::I8), Value::int(1, IntKind::I8)],
+            ArithOp::Add,
+            OverflowMode::Checked,
+        )
+        .expect("checked_add");
+        assert_eq!(none, option_value(None));
+        // checked_add in range -> some(120).
+        let some = overflow_arith(
+            "checked_add",
+            vec![Value::int(100, IntKind::I8), Value::int(20, IntKind::I8)],
+            ArithOp::Add,
+            OverflowMode::Checked,
+        )
+        .expect("checked_add");
+        assert_eq!(some, option_value(Some(Value::int(120, IntKind::I8))));
+        // saturating_mul clamps to u32::MAX.
+        let sat = overflow_arith(
+            "saturating_mul",
+            vec![
+                Value::int(100_000, IntKind::U32),
+                Value::int(100_000, IntKind::U32),
+            ],
+            ArithOp::Mul,
+            OverflowMode::Saturating,
+        )
+        .expect("saturating_mul");
+        assert_eq!(sat, Value::int(4_294_967_295, IntKind::U32));
+        // wrapping_add wraps u32::MAX + 1 -> 0.
+        let wrap = overflow_arith(
+            "wrapping_add",
+            vec![
+                Value::int(4_294_967_295, IntKind::U32),
+                Value::int(1, IntKind::U32),
+            ],
+            ArithOp::Add,
+            OverflowMode::Wrapping,
+        )
+        .expect("wrapping_add");
+        assert_eq!(wrap, Value::int(0, IntKind::U32));
     }
 }

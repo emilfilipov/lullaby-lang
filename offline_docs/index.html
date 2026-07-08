@@ -468,6 +468,40 @@ fn main -> i64
           <li><code>to_i64(x)</code> widens any fixed-width integer back to <code>i64</code>; the bit pattern is reinterpreted, so a <code>u64</code> above <code>i64::MAX</code> reads as a negative <code>i64</code>.</li>
         </ul>
         <p>Arithmetic (<code>+ - * /</code>) on a fixed-width integer <strong>wraps</strong> modulo the type width — total and deterministic, never a trap — and division and comparison respect signedness. The same bit pattern reads as a large magnitude for an unsigned type but a negative value for a signed one: <code>to_u32(0 - 1)</code> is <code>4294967295</code>, while <code>to_i32(0 - 1)</code> is <code>-1</code>, and <code>to_u64(0 - 1) / to_u64(2)</code> divides on the unsigned magnitude. Every backend normalizes at the same points, so results agree bit-for-bit.</p>
+        <h3>Overflow-aware integer arithmetic</h3>
+        <p>The <code>+ - *</code> operators on a fixed-width integer wrap by default. When wrapping is wrong, these builtins give explicit control. Each takes two operands of the <strong>same</strong> fixed-width type <code>T</code> (not <code>i64</code>, whose default arithmetic already traps on overflow):</p>
+        <ul>
+          <li><code>checked_add</code>/<code>checked_sub</code>/<code>checked_mul</code> return <code>option&lt;T&gt;</code> — <code>none</code> on overflow.</li>
+          <li><code>saturating_add</code>/<code>saturating_sub</code>/<code>saturating_mul</code> return <code>T</code>, clamped to <code>T</code>'s bounds.</li>
+          <li><code>wrapping_add</code>/<code>wrapping_sub</code>/<code>wrapping_mul</code> return <code>T</code>, wrapping modulo the width (the explicit form of the default).</li>
+        </ul>
+        <pre data-fixture="tests/fixtures/valid/run_overflow_arith.lby" data-mode="run"><code># Overflow-aware fixed-width arithmetic: checked_* (option<T>, none on
+# overflow), saturating_* (clamp to bounds), and wrapping_* (wrap modulo width).
+# Deterministic i64 (4294967541) on the AST, IR, and bytecode backends.
+
+# checked_add on i8, unwrapping the option<i8> to i64 or a fallback.
+fn checked_i8_or m i8 n i8 fallback i64 -> i64
+    match checked_add(m, n)
+        some(v) -> to_i64(v)
+        none -> fallback
+
+fn main -> i64
+    # 127 + 1 overflows i8 -> none -> -1
+    let a i64 = checked_i8_or(to_i8(127), to_i8(1), 0 - 1)
+    # 100 + 20 stays in range -> some(120)
+    let b i64 = checked_i8_or(to_i8(100), to_i8(20), 0 - 1)
+
+    # saturating_add clamps to i8::MAX (127 + 100 -> 127)
+    let c i8 = saturating_add(to_i8(127), to_i8(100))
+
+    # saturating_mul clamps to u32::MAX (100000 * 100000 -> 4294967295)
+    let d u32 = saturating_mul(to_u32(100000), to_u32(100000))
+
+    # wrapping_add wraps u32 (u32::MAX + 1 -> 0)
+    let e u32 = wrapping_add(to_u32(4294967295), to_u32(1))
+
+    # -1 + 120 + 127 + 4294967295 + 0 = 4294967541
+    a + b + to_i64(c) + to_i64(d) + to_i64(e)</code></pre>
         <h3>32-bit floats</h3>
         <p>Alongside the default <code>f64</code>, Lullaby has the single-precision float <code>f32</code>. As with the integer widths, an <code>f32</code> never mixes with an <code>f64</code> in one arithmetic or comparison expression (mixing is an <code>L0307</code> type error): <code>to_f32(x f64)</code> rounds an <code>f64</code> to single precision and <code>to_f64(x f32)</code> widens back exactly. Every <code>f32</code> operation is rounded to <code>f32</code> precision, so it loses resolution an <code>f64</code> keeps — <code>2^24 + 1</code> rounds back to <code>2^24</code> in <code>f32</code> but is exact in <code>f64</code>.</p>
         <pre data-fixture="tests/fixtures/valid/run_f32.lby" data-mode="run"><code># 32-bit floats: f32 arithmetic rounds to single precision, so it loses

@@ -80,6 +80,23 @@ conversion (`L0307`): `to_f32(x f64)` rounds to single precision and
 precision, so it loses resolution an `f64` keeps — e.g. `2^24 + 1` rounds back
 to `2^24` in `f32` but is exact in `f64`.
 
+### Overflow-aware integer arithmetic
+
+The `+ - *` operators on a fixed-width integer wrap by default. When wrapping is
+the wrong behaviour, these builtins give explicit control over overflow. Each
+takes two operands of the **same** fixed-width integer type `T` (not `i64`,
+whose default arithmetic already traps on overflow):
+
+| Family | Signature | On overflow |
+|--------|-----------|-------------|
+| `checked_add` / `checked_sub` / `checked_mul` | `(T, T) -> option<T>` | `none` |
+| `saturating_add` / `saturating_sub` / `saturating_mul` | `(T, T) -> T` | clamps to `T`'s bounds |
+| `wrapping_add` / `wrapping_sub` / `wrapping_mul` | `(T, T) -> T` | wraps modulo the width (explicit form of the default) |
+
+For example, on `u32`: `checked_mul(to_u32(100000), to_u32(100000))` is `none`,
+`saturating_mul(...)` is `4294967295`, and `wrapping_add(to_u32(4294967295), to_u32(1))`
+is `0`. Every backend resolves overflow identically.
+
 ## Character classification
 
 Deterministic `char -> bool` predicates for classifying a single Unicode scalar.

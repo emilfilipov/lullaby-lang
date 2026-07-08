@@ -3445,6 +3445,30 @@ impl<'a> Checker<'a> {
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "f32", scope, function)?;
                 Some(TypeRef::new("f64"))
             }
+            // Overflow-aware arithmetic on a fixed-width integer `T`: both operands
+            // must be the same fixed-width type. `checked_*` yields `option<T>`
+            // (`none` on overflow); `saturating_*`/`wrapping_*` yield `T`. `i64`
+            // is excluded — its default arithmetic already traps on overflow.
+            "checked_add" | "checked_sub" | "checked_mul" | "saturating_add" | "saturating_sub"
+            | "saturating_mul" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let left = self.check_expr(&args[0], scope, function)?;
+                let right = self.check_expr(&args[1], scope, function)?;
+                if !is_fixed_width_int_name(&left.name) || left != right {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0307",
+                        format!("{name} operands must both be the same fixed-width integer type"),
+                        Some(function.name.clone()),
+                        call_span,
+                    ));
+                    return None;
+                }
+                if name.starts_with("checked_") {
+                    Some(option_type(&left))
+                } else {
+                    Some(left)
+                }
+            }
             "env" => {
                 self.expect_process_arg_count(name, args, 1, call_span, function)?;
                 self.expect_process_arg(name, 1, &args[0], "string", scope, function)?;
@@ -7568,6 +7592,28 @@ mod tests {
             "    to_i64(a + b)\n",
         );
         validate_source(source).expect("i32/u32 arithmetic and conversions type-check");
+    }
+
+    #[test]
+    fn overflow_arith_builtins_type_check_and_reject_i64() {
+        // checked/saturating/wrapping on a fixed-width integer type-check; the
+        // checked form yields option<T>, the others yield T.
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let s u32 = saturating_add(to_u32(1), to_u32(2))\n",
+            "    let w u32 = wrapping_mul(to_u32(3), to_u32(4))\n",
+            "    match checked_sub(to_u32(1), to_u32(2))\n",
+            "        some(v) -> to_i64(v)\n",
+            "        none -> to_i64(s) + to_i64(w)\n",
+        );
+        validate_source(ok).expect("overflow arithmetic on u32 type-checks");
+        // i64 is rejected: its default arithmetic already traps on overflow.
+        let bad = concat!("fn main -> i64\n", "    checked_add(5, 6)\n");
+        let diagnostics = validate_source(bad).expect_err("checked_add on i64 rejected");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0307"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

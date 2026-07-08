@@ -11,13 +11,14 @@ use lullaby_parser::{
     TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
-    Future, IntKind, ProcessResource, ResolvedPlace, RuntimeError, SharedAtomic, SharedMutex,
-    SocketResource, Task, Value, apply_compound, asm_interpreter_error, await_future, char_find,
-    expect_atomic, expect_chan, expect_future, expect_i64, expect_list, expect_map, expect_mutex,
-    expect_string, expect_task, extern_call_error, get_place, http_exchange, int_cmp, int_div,
-    join_task, monotonic_now_nanos, net_err, new_chan, option_value, os_random_bytes,
-    process_exit_code, result_value, scalar_order_keys, set_place, shift_left, shift_right,
-    sleep_millis, value_type_name, wall_now_millis,
+    ArithOp, Future, IntKind, OverflowMode, ProcessResource, ResolvedPlace, RuntimeError,
+    SharedAtomic, SharedMutex, SocketResource, Task, Value, apply_compound, asm_interpreter_error,
+    await_future, char_find, expect_atomic, expect_chan, expect_future, expect_i64, expect_list,
+    expect_map, expect_mutex, expect_string, expect_task, extern_call_error, get_place,
+    http_exchange, int_cmp, int_div, join_task, monotonic_now_nanos, net_err, new_chan,
+    option_value, os_random_bytes, overflow_arith, process_exit_code, result_value,
+    scalar_order_keys, set_place, shift_left, shift_right, sleep_millis, value_type_name,
+    wall_now_millis,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -3785,6 +3786,15 @@ impl<'a> IrRuntime<'a> {
             "to_i64" => Self::builtin_to_i64(args),
             "to_f32" => Self::builtin_to_f32(args),
             "to_f64" => Self::builtin_to_f64(args),
+            "checked_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Checked),
+            "checked_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Checked),
+            "checked_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Checked),
+            "saturating_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Saturating),
+            "saturating_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Saturating),
+            "saturating_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Saturating),
+            "wrapping_add" => overflow_arith(name, args, ArithOp::Add, OverflowMode::Wrapping),
+            "wrapping_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Wrapping),
+            "wrapping_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Wrapping),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
@@ -7977,6 +7987,24 @@ impl<'a> Lowerer<'a> {
             "to_isize" => TypeRef::new("isize"),
             "to_usize" => TypeRef::new("usize"),
             "to_f32" => TypeRef::new("f32"),
+            // saturating/wrapping arithmetic returns the operand width `T`.
+            "saturating_add" | "saturating_sub" | "saturating_mul" | "wrapping_add"
+            | "wrapping_sub" | "wrapping_mul" => args
+                .first()
+                .map(|operand| operand.ty.clone())
+                .ok_or_else(|| {
+                    IrLoweringError::new(format!("{name} call missing operand"), Some(span))
+                })?,
+            // checked arithmetic returns `option<T>`.
+            "checked_add" | "checked_sub" | "checked_mul" => {
+                let operand = args
+                    .first()
+                    .map(|operand| operand.ty.clone())
+                    .ok_or_else(|| {
+                        IrLoweringError::new(format!("{name} call missing operand"), Some(span))
+                    })?;
+                generic_type("option", std::slice::from_ref(&operand))
+            }
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
