@@ -61,9 +61,20 @@
 //! callee's own fresh record, so no extra copy is needed. Enum payloads are always
 //! scalar (see `enum_layout`), so an enum copy is a flat word copy.
 //!
-//! A function that uses a different builtin, `list`/`map`, an enum with a HEAP
-//! payload (`string`/`list`/`array`/`map` — notably `result<i64, string>`), or any
-//! type still outside this set is SKIPPED with a reason (it still runs on the
+//! - A growable `map<K, V>` with SCALAR `K` and `V` is a pointer to
+//!   `[len: i32][cap: i32][(key, value) slot pairs]`: an insertion-ordered
+//!   association list mirroring the interpreters' `Value::Map`. `map_new` allocates
+//!   an empty header; `map_set` deep-copies then updates an existing key's value in
+//!   place or appends a new `(k, v)` entry (growing with capacity doubling like a
+//!   list); `map_get` linear-scans and yields `some(v)`/`none` (reusing the
+//!   option/enum layout); `map_has` scans to a `bool`; `map_len` reads the header.
+//!   Ordering and lookup match the interpreters bit-for-bit. A map with a heap key
+//!   or value (`map<string, V>`, `map<K, list<…>>`, …) is DEFERRED.
+//!
+//! A function that uses a different builtin, a `list`/`map` with a heap element
+//! (e.g. `list<string>`, `map<string, i64>`), an enum with a HEAP payload
+//! (`string`/`list`/`array`/`map` — notably `result<i64, string>`), or any type
+//! still outside this set is SKIPPED with a reason (it still runs on the
 //! interpreters).
 //!
 //! Linear-memory infrastructure: the module exports a `"memory"` (min 1 page),
@@ -78,7 +89,7 @@
 //! internally-defined function's index is shifted by the import count; call
 //! targets and exports are fixed up accordingly. The string host imports take a
 //! `(ptr, len)` pair per string decoded out of `memory`. Enums with heap payloads
-//! and `list`/`map` remain deferred.
+//! and heap-element `list`/`map` remain deferred.
 
 use std::collections::HashMap;
 
@@ -238,6 +249,58 @@ const LIST_PUSH_BUILTIN: &str = "push";
 const LIST_GET_BUILTIN: &str = "get";
 const LIST_SET_BUILTIN: &str = "set";
 const LIST_POP_BUILTIN: &str = "pop";
+
+// -- Growable map layout -----------------------------------------------------
+//
+// A growable `map<K, V>` (scalar `K`/`V`) is an `i32` pointer to a header
+// `[len: i32][cap: i32][(key, value) slot pairs...]`: the current entry count,
+// the allocated capacity (in entries), then `cap` entry records. Each entry is
+// two uniform 8-byte slots — the key slot then the value slot — so the offset of
+// entry `i` is `MAP_DATA_OFF + i * MAP_ENTRY_SIZE`, its key at `+0` and its value
+// at `+SLOT_SIZE`. Uniform 8-byte slots keep every scalar key/value naturally
+// aligned for `i64`/`f64` loads and stores. `len` shares the leading `i32` offset
+// with strings/arrays/lists.
+//
+// This mirrors the interpreters' `Value::Map` — an INSERTION-ORDERED association
+// list scanned linearly with `Value` equality: `map_set` overwrites the value of
+// an existing key in place (preserving its slot/order) or appends a new entry at
+// the end, growing with capacity doubling like a list; `map_get`/`map_has` scan
+// entries front-to-back; `map_len` reads the header. Ordering and lookup match
+// the interpreters bit-for-bit.
+//
+// Value semantics: like lists, maps are value-semantic. Every mutating op
+// (`map_set`) deep-copies the source map first and mutates the fresh copy, and a
+// map crossing a call boundary is deep-copied like any other mutable aggregate,
+// so mutating one binding is never observable through another. The bump allocator
+// never reclaims, so a grown/copied map orphans its old block.
+
+/// Byte offset of a map's `len` header (entry count). Shares offset 0 with the
+/// string/array/list length header.
+const MAP_LEN_OFF: i32 = 0;
+
+/// Byte offset of a map's `cap` header (allocated capacity, in entries).
+const MAP_CAP_OFF: i32 = 4;
+
+/// Byte offset of a map's first entry record: past the two `i32` headers.
+const MAP_DATA_OFF: i32 = 8;
+
+/// Bytes per map entry: a key slot followed by a value slot, each `SLOT_SIZE`.
+const MAP_ENTRY_SIZE: i32 = SLOT_SIZE * 2;
+
+/// Byte offset of the value slot within a map entry (the key is at offset 0).
+const MAP_VALUE_OFF: i32 = SLOT_SIZE;
+
+/// Initial capacity a `map_new()` header (and the first growth of an empty map)
+/// allocates, so a handful of inserts do not each trigger a realloc.
+const MAP_INITIAL_CAP: i32 = 4;
+
+/// Builtins that construct or read growable maps, matched by name in call
+/// lowering (arity/key/value types are validated there against the IR types).
+const MAP_NEW_BUILTIN: &str = "map_new";
+const MAP_SET_BUILTIN: &str = "map_set";
+const MAP_GET_BUILTIN: &str = "map_get";
+const MAP_HAS_BUILTIN: &str = "map_has";
+const MAP_LEN_BUILTIN: &str = "map_len";
 
 /// Byte offset of an enum's first payload slot. The leading discriminant tag is
 /// an `i32` at offset 0; the first payload slot starts at `SLOT_SIZE` so every
@@ -431,7 +494,25 @@ fn is_pointer_type(
     if supported_list_element(ty).is_some() {
         return true;
     }
+    if supported_map_kv(ty).is_some() {
+        return true;
+    }
     false
+}
+
+/// The scalar `(K, V)` key/value types of a supported growable `map<K, V>`, or
+/// `None` if `ty` is not a map or its key/value are not both scalars. Maps with a
+/// heap key or value (`map<string, V>`, `map<K, string>`, `map<K, list<…>>`, …)
+/// are DEFERRED this increment — the WASM backend only lays out scalar-key,
+/// scalar-value maps — so such a map is unsupported and its enclosing function is
+/// skipped (still runs on the interpreters). String keys are deferred here
+/// because the interpreters compare keys by `Value` content equality, which for
+/// a `string` means comparing decoded bytes rather than the interned pointer.
+fn supported_map_kv(ty: &TypeRef) -> Option<(TypeRef, TypeRef)> {
+    let (key, value) = ty.map_args()?;
+    scalar_val_type(&key)?;
+    scalar_val_type(&value)?;
+    Some((key, value))
 }
 
 /// The scalar element type of a supported growable `list<T>`, or `None` if `ty` is
@@ -475,6 +556,12 @@ fn is_mutable_aggregate(
     // when it crosses a call boundary so a callee mutating its parameter cannot
     // alter the caller's list, exactly like the interpreters' `Value::clone`.
     if supported_list_element(ty).is_some() {
+        return true;
+    }
+    // A scalar-key, scalar-value growable `map<K, V>` is a mutable aggregate: it is
+    // deep-copied when it crosses a call boundary so a callee mutating its parameter
+    // cannot alter the caller's map, exactly like the interpreters' `Value::clone`.
+    if supported_map_kv(ty).is_some() {
         return true;
     }
     false
@@ -1665,6 +1752,30 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &IrExpr, out: &mut Vec<u8>) -> Result<()
             if name == LIST_POP_BUILTIN && args.len() == 1 && args[0].ty.list_element().is_some() {
                 return lower_list_pop(ctx, &args[0], out);
             }
+            // Growable `map<K, V>` (scalar `K`/`V`) builtins. `map_new()` allocates
+            // an empty `[len][cap][entries]` header; `map_set`/`map_get`/`map_has`/
+            // `map_len` operate on a `map`-typed first argument. These names are not
+            // shared with any array/list op, so they dispatch on name directly (the
+            // arity/key/value types are validated in each lowering). A map op whose
+            // key or value is a heap type is deferred: `supported_map_kv` returns
+            // `None`, so lowering errors and the function is demoted to the
+            // interpreters. `map_len(m)` shares offset 0 with the length header, but
+            // (unlike lists) it is spelled `map_len`, so it routes here explicitly.
+            if name == MAP_NEW_BUILTIN {
+                return lower_map_new(ctx, args, out);
+            }
+            if name == MAP_SET_BUILTIN && args.len() == 3 && args[0].ty.map_args().is_some() {
+                return lower_map_set(ctx, &args[0], &args[1], &args[2], out);
+            }
+            if name == MAP_GET_BUILTIN && args.len() == 2 && args[0].ty.map_args().is_some() {
+                return lower_map_get(ctx, &expr.ty, &args[0], &args[1], out);
+            }
+            if name == MAP_HAS_BUILTIN && args.len() == 2 && args[0].ty.map_args().is_some() {
+                return lower_map_has(ctx, &args[0], &args[1], out);
+            }
+            if name == MAP_LEN_BUILTIN && args.len() == 1 && args[0].ty.map_args().is_some() {
+                return lower_map_len(ctx, &args[0], out);
+            }
             // `len(s)`/`len(a)`/`len(l)` reads the leading i32 length header.
             if name == LEN_BUILTIN {
                 return lower_len(ctx, args, out);
@@ -2178,6 +2289,9 @@ fn emit_deep_copy(ctx: &mut LowerCtx, ty: &TypeRef, out: &mut Vec<u8>) -> Result
     if supported_list_element(ty).is_some() {
         return emit_list_deep_copy(ctx, out);
     }
+    if supported_map_kv(ty).is_some() {
+        return emit_map_deep_copy(ctx, out);
+    }
     Err(format!(
         "cannot deep-copy non-aggregate type `{}` (wasm backend)",
         ty.name
@@ -2663,6 +2777,473 @@ fn emit_list_elem_offset(
     write_sleb(out, LIST_DATA_OFF as i64);
     out.push(0x6a); // i32.add -> LIST_DATA_OFF + index * SLOT_SIZE
     out.push(0x6a); // i32.add base + that offset
+    Ok(())
+}
+
+// -- Growable map codegen ----------------------------------------------------
+
+/// Push `MAP_DATA_OFF + cap * MAP_ENTRY_SIZE` (the byte size of a map backing
+/// block with `cap` entry records) onto the stack, given an `i32` local holding
+/// `cap`.
+fn emit_map_block_size(cap_local: u32, out: &mut Vec<u8>) {
+    get_local(out, cap_local);
+    out.push(0x41); // i32.const MAP_ENTRY_SIZE
+    write_sleb(out, MAP_ENTRY_SIZE as i64);
+    out.push(0x6c); // i32.mul  -> cap * MAP_ENTRY_SIZE
+    out.push(0x41); // i32.const MAP_DATA_OFF
+    write_sleb(out, MAP_DATA_OFF as i64);
+    out.push(0x6a); // i32.add  -> MAP_DATA_OFF + cap * MAP_ENTRY_SIZE
+}
+
+/// Push `base + MAP_DATA_OFF + entry * MAP_ENTRY_SIZE` (the address of entry
+/// record `entry`) onto the stack. `base` and `entry` are `i32` locals.
+fn emit_map_entry_addr(base: u32, entry: u32, out: &mut Vec<u8>) {
+    get_local(out, base);
+    get_local(out, entry);
+    out.push(0x41); // i32.const MAP_ENTRY_SIZE
+    write_sleb(out, MAP_ENTRY_SIZE as i64);
+    out.push(0x6c); // i32.mul -> entry * MAP_ENTRY_SIZE
+    out.push(0x41); // i32.const MAP_DATA_OFF
+    write_sleb(out, MAP_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    out.push(0x6a); // i32.add -> base + MAP_DATA_OFF + entry * MAP_ENTRY_SIZE
+}
+
+/// Copy the first `count` entry records (each `MAP_ENTRY_SIZE` = two `SLOT_SIZE`
+/// words) from `src` to `dst` map backing blocks in a runtime loop. `count`,
+/// `src`, and `dst` are `i32` locals. Map keys and values are always scalar (see
+/// [`supported_map_kv`]), so a flat word copy of both slots is an exact deep copy
+/// and needs no per-entry type dispatch.
+fn emit_map_copy_entries(ctx: &mut LowerCtx, src: u32, dst: u32, count: u32, out: &mut Vec<u8>) {
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= count
+    get_local(out, i);
+    get_local(out, count);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // off = MAP_DATA_OFF + i * MAP_ENTRY_SIZE
+    let off = ctx.add_local(WasmValType::I32);
+    get_local(out, i);
+    out.push(0x41); // i32.const MAP_ENTRY_SIZE
+    write_sleb(out, MAP_ENTRY_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const MAP_DATA_OFF
+    write_sleb(out, MAP_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    set_local(out, off);
+    // Copy the two 8-byte words (key slot then value slot) of the entry.
+    for word in 0..2 {
+        let word_off = word * SLOT_SIZE;
+        // dst addr = dst + off; value = load [src + off]; store.
+        get_local(out, dst);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> dst addr
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> src addr
+        emit_load_at(WasmValType::I64, word_off, out);
+        emit_store_at(WasmValType::I64, word_off, out);
+    }
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+}
+
+/// Deep-copy the growable `map<K, V>` whose pointer is on the stack, leaving a
+/// fresh independent `[len][cap][entries]` block's pointer on the stack. The copy
+/// keeps the source's `len` and `cap` and duplicates its `len` live entry records
+/// (each two words). This is the WASM realization of the interpreters' clone on a
+/// map: mutating the copy (or the original) is never observable through the other.
+fn emit_map_deep_copy(ctx: &mut LowerCtx, out: &mut Vec<u8>) -> Result<(), String> {
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    // len = load [src + MAP_LEN_OFF], cap = load [src + MAP_CAP_OFF]
+    let len = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, MAP_LEN_OFF, out);
+    set_local(out, len);
+    let cap = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, MAP_CAP_OFF, out);
+    set_local(out, cap);
+    // dst = __alloc(MAP_DATA_OFF + cap * MAP_ENTRY_SIZE)
+    emit_map_block_size(cap, out);
+    let dst = alloc_runtime(ctx, out);
+    // dst.len = len; dst.cap = cap
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, cap);
+    emit_store_at(WasmValType::I32, MAP_CAP_OFF, out);
+    // copy the `len` live entry records
+    emit_map_copy_entries(ctx, src, dst, len, out);
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Lower `map_new() -> map<K, V>`: `__alloc` an empty
+/// `[len=0][cap=MAP_INITIAL_CAP][entries...]` block and leave its pointer on the
+/// stack. A small initial capacity means the first few `map_set`s do not realloc.
+fn lower_map_new(ctx: &mut LowerCtx, args: &[IrExpr], out: &mut Vec<u8>) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!("map_new expects 0 arguments, got {}", args.len()));
+    }
+    let ptr = alloc_bytes(ctx, MAP_DATA_OFF + MAP_INITIAL_CAP * MAP_ENTRY_SIZE, out);
+    get_local(out, ptr);
+    out.push(0x41); // i32.const 0 (len)
+    write_sleb(out, 0);
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    get_local(out, ptr);
+    out.push(0x41); // i32.const MAP_INITIAL_CAP (cap)
+    write_sleb(out, MAP_INITIAL_CAP as i64);
+    emit_store_at(WasmValType::I32, MAP_CAP_OFF, out);
+    get_local(out, ptr);
+    Ok(())
+}
+
+/// Emit the equality opcode comparing two key values (already pushed) of WASM slot
+/// type `key_ty`. Keys are scalar (`i64`/fixed-width use `i64.eq`; `bool`/`char`/
+/// `byte` use `i32.eq`; floats use the ordered `f*.eq`), matching how the
+/// interpreters compare `Value` keys by content.
+fn emit_key_eq(key_ty: WasmValType, out: &mut Vec<u8>) {
+    match key_ty {
+        WasmValType::I32 => out.push(0x46), // i32.eq
+        WasmValType::I64 => out.push(0x51), // i64.eq
+        WasmValType::F32 => out.push(0x5b), // f32.eq
+        WasmValType::F64 => out.push(0x61), // f64.eq
+    }
+}
+
+/// Linear-scan the map in `map_local` for the entry whose key equals the value in
+/// `key_local` (slot type `key_ty`), returning a fresh `i32` local holding the
+/// matching entry index, or the map's `len` if no key matched (the "found index
+/// else len" convention: `map_set` appends at `len`, `map_get`/`map_has` treat
+/// `index == len` as absent). The scan visits entries front-to-back so the FIRST
+/// matching key wins, mirroring the interpreters' insertion-ordered association
+/// list. `len` is loaded into a caller-visible local so callers can reuse it.
+fn emit_map_find(
+    ctx: &mut LowerCtx,
+    map_local: u32,
+    key_local: u32,
+    key_ty: WasmValType,
+    len_local: u32,
+    out: &mut Vec<u8>,
+) -> u32 {
+    // len = load [map + MAP_LEN_OFF]
+    get_local(out, map_local);
+    emit_load_at(WasmValType::I32, MAP_LEN_OFF, out);
+    set_local(out, len_local);
+    // found = len (sentinel: "not found")
+    let found = ctx.add_local(WasmValType::I32);
+    get_local(out, len_local);
+    set_local(out, found);
+    // i = 0
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= len
+    get_local(out, i);
+    get_local(out, len_local);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // if key(entry i) == key_local { found = i; break }
+    emit_map_entry_addr(map_local, i, out); // entry addr
+    emit_load(key_ty, out); // load key slot (offset 0 within the entry)
+    get_local(out, key_local);
+    emit_key_eq(key_ty, out);
+    out.push(0x04); // if
+    out.push(0x40); // void
+    get_local(out, i);
+    set_local(out, found);
+    out.push(0x0c); // br 2 (out of the block, skipping the increment)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    found
+}
+
+/// Lower `map_set(m, k, v) -> map<K, V>` (value-semantic insert/update): deep-copy
+/// `m`, scan the copy for `k`; if found, overwrite that entry's value slot in
+/// place (preserving the entry's position/order); otherwise grow when full (double
+/// the capacity, or seed `MAP_INITIAL_CAP` from an empty map) and append a new
+/// `(k, v)` entry, bumping `len`. Leaves the fresh map pointer on the stack.
+/// Because `map_set` always returns a NEW map, `m = map_set(m, k, v)` matches the
+/// interpreters' clone-then-mutate on the insertion-ordered association list.
+fn lower_map_set(
+    ctx: &mut LowerCtx,
+    map: &IrExpr,
+    key: &IrExpr,
+    value: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (key_ty, value_ty) = supported_map_kv(&map.ty).ok_or_else(|| {
+        format!(
+            "map_set expects a scalar-key, scalar-value map but got `{}`",
+            map.ty.name
+        )
+    })?;
+    let key_slot = scalar_val_type(&key_ty)
+        .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let value_slot = scalar_val_type(&value_ty)
+        .ok_or_else(|| format!("map value type `{}` is unsupported", value_ty.name))?;
+
+    // Deep-copy the source map into a fresh, independent block (value semantics).
+    lower_expr(ctx, map, out)?;
+    emit_map_deep_copy(ctx, out)?;
+    let mp = ctx.add_local(WasmValType::I32);
+    set_local(out, mp);
+    // Evaluate the key once into a local for the scan and (on append) the store.
+    lower_expr(ctx, key, out)?;
+    let key_local = ctx.add_local(key_slot);
+    set_local(out, key_local);
+
+    // Scan for the key; `found == len` means "not present".
+    let len = ctx.add_local(WasmValType::I32);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, len, out);
+
+    // if found == len { append } else { overwrite value in place }
+    get_local(out, found);
+    get_local(out, len);
+    out.push(0x46); // i32.eq
+    out.push(0x04); // if
+    out.push(0x40); // void
+    // --- append branch ---
+    // Grow if len == cap.
+    let cap = ctx.add_local(WasmValType::I32);
+    get_local(out, mp);
+    emit_load_at(WasmValType::I32, MAP_CAP_OFF, out);
+    set_local(out, cap);
+    get_local(out, len);
+    get_local(out, cap);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x04); // if
+    out.push(0x40); // void
+    emit_map_grow(ctx, mp, len, cap, out);
+    out.push(0x0b); // end if (grow)
+    // entry addr of index `len`
+    emit_map_entry_addr(mp, len, out);
+    let entry_addr = ctx.add_local(WasmValType::I32);
+    set_local(out, entry_addr);
+    // store key at entry + 0
+    get_local(out, entry_addr);
+    get_local(out, key_local);
+    emit_store_at(key_slot, 0, out);
+    // store value at entry + MAP_VALUE_OFF
+    get_local(out, entry_addr);
+    lower_expr(ctx, value, out)?;
+    emit_store_at(value_slot, MAP_VALUE_OFF, out);
+    // len += 1
+    get_local(out, mp);
+    get_local(out, len);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    out.push(0x05); // else
+    // --- overwrite branch: store value into entry `found`'s value slot ---
+    emit_map_entry_addr(mp, found, out);
+    lower_expr(ctx, value, out)?;
+    emit_store_at(value_slot, MAP_VALUE_OFF, out);
+    out.push(0x0b); // end if (append/overwrite)
+
+    get_local(out, mp);
+    Ok(())
+}
+
+/// Grow the map in `mp` (an `i32` local) so it has room past `len` (== `cap`):
+/// compute `new_cap = if cap == 0 { MAP_INITIAL_CAP } else { cap * 2 }`, `__alloc`
+/// a fresh block, copy the `len` live entries, write the new `cap` and preserved
+/// `len`, and update `mp` to the new pointer. `len` and `cap` locals are refreshed
+/// so the caller sees the post-grow capacity; the old block is orphaned.
+fn emit_map_grow(ctx: &mut LowerCtx, mp: u32, len: u32, cap: u32, out: &mut Vec<u8>) {
+    // new_cap = cap == 0 ? MAP_INITIAL_CAP : cap * 2
+    let new_cap = ctx.add_local(WasmValType::I32);
+    get_local(out, cap);
+    out.push(0x45); // i32.eqz
+    out.push(0x04); // if -> i32
+    out.push(0x7f); // result i32
+    out.push(0x41); // i32.const MAP_INITIAL_CAP
+    write_sleb(out, MAP_INITIAL_CAP as i64);
+    out.push(0x05); // else
+    get_local(out, cap);
+    out.push(0x41); // i32.const 2
+    write_sleb(out, 2);
+    out.push(0x6c); // i32.mul
+    out.push(0x0b); // end if
+    set_local(out, new_cap);
+    // dst = __alloc(MAP_DATA_OFF + new_cap * MAP_ENTRY_SIZE)
+    emit_map_block_size(new_cap, out);
+    let dst = alloc_runtime(ctx, out);
+    // dst.len = len; dst.cap = new_cap
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, new_cap);
+    emit_store_at(WasmValType::I32, MAP_CAP_OFF, out);
+    // copy the `len` live entries from the old block (mp) to dst
+    emit_map_copy_entries(ctx, mp, dst, len, out);
+    // mp = dst; cap = new_cap (len unchanged)
+    get_local(out, dst);
+    set_local(out, mp);
+    get_local(out, new_cap);
+    set_local(out, cap);
+}
+
+/// Lower `map_get(m, k) -> option<V>`: deep-copy `m` is NOT needed (read-only),
+/// scan for `k`, and construct `some(v)` (loading the found entry's value slot)
+/// or `none`, reusing the enum/option linear-memory layout. `result_ty` is the
+/// call's `option<V>` type, from which the `some`/`none` [`EnumLayout`] is built.
+fn lower_map_get(
+    ctx: &mut LowerCtx,
+    result_ty: &TypeRef,
+    map: &IrExpr,
+    key: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (key_ty, value_ty) = supported_map_kv(&map.ty).ok_or_else(|| {
+        format!(
+            "map_get expects a scalar-key, scalar-value map but got `{}`",
+            map.ty.name
+        )
+    })?;
+    let key_slot = scalar_val_type(&key_ty)
+        .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let value_slot = scalar_val_type(&value_ty)
+        .ok_or_else(|| format!("map value type `{}` is unsupported", value_ty.name))?;
+    // The result `option<V>` enum layout: variant `some(V)` is tag 0, `none` tag 1.
+    let layout = enum_layout(result_ty, ctx.enums).ok_or_else(|| {
+        format!(
+            "map_get result type `{}` is not a supported option enum",
+            result_ty.name
+        )
+    })?;
+
+    // Evaluate the map to a pointer local and the key to a slot local.
+    lower_expr(ctx, map, out)?;
+    let mp = ctx.add_local(WasmValType::I32);
+    set_local(out, mp);
+    lower_expr(ctx, key, out)?;
+    let key_local = ctx.add_local(key_slot);
+    set_local(out, key_local);
+
+    let len = ctx.add_local(WasmValType::I32);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, len, out);
+
+    // Allocate the option record once; fill it in either branch. Result pointer is
+    // stashed so both branches leave the same pointer on the stack at the `end`.
+    let opt = alloc_bytes(ctx, layout.size_bytes(), out);
+    // if found == len { none } else { some(value) }
+    get_local(out, found);
+    get_local(out, len);
+    out.push(0x46); // i32.eq
+    out.push(0x04); // if
+    out.push(0x40); // void
+    // --- none branch: tag = 1 ---
+    let none_tag = layout
+        .tag_of("none")
+        .ok_or_else(|| "option layout missing `none` variant".to_string())?;
+    get_local(out, opt);
+    out.push(0x41); // i32.const none_tag
+    write_sleb(out, none_tag as i64);
+    emit_store_at(WasmValType::I32, 0, out);
+    out.push(0x05); // else
+    // --- some branch: tag = 0, payload = entry(found).value ---
+    let some_tag = layout
+        .tag_of("some")
+        .ok_or_else(|| "option layout missing `some` variant".to_string())?;
+    get_local(out, opt);
+    out.push(0x41); // i32.const some_tag
+    write_sleb(out, some_tag as i64);
+    emit_store_at(WasmValType::I32, 0, out);
+    // opt payload slot = load entry(found).value
+    get_local(out, opt);
+    emit_map_entry_addr(mp, found, out);
+    emit_load_at(value_slot, MAP_VALUE_OFF, out);
+    emit_store_at(value_slot, ENUM_PAYLOAD_BASE, out);
+    out.push(0x0b); // end if
+
+    get_local(out, opt);
+    Ok(())
+}
+
+/// Lower `map_has(m, k) -> bool`: scan for `k`, leaving `found != len` (an `i32`
+/// boolean: 1 if present, 0 if absent) on the stack.
+fn lower_map_has(
+    ctx: &mut LowerCtx,
+    map: &IrExpr,
+    key: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (key_ty, _value_ty) = supported_map_kv(&map.ty).ok_or_else(|| {
+        format!(
+            "map_has expects a scalar-key, scalar-value map but got `{}`",
+            map.ty.name
+        )
+    })?;
+    let key_slot = scalar_val_type(&key_ty)
+        .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+
+    lower_expr(ctx, map, out)?;
+    let mp = ctx.add_local(WasmValType::I32);
+    set_local(out, mp);
+    lower_expr(ctx, key, out)?;
+    let key_local = ctx.add_local(key_slot);
+    set_local(out, key_local);
+
+    let len = ctx.add_local(WasmValType::I32);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, len, out);
+    // result = found != len
+    get_local(out, found);
+    get_local(out, len);
+    out.push(0x47); // i32.ne
+    Ok(())
+}
+
+/// Lower `map_len(m) -> i64`: load the leading `i32` `len` header and extend to
+/// `i64` (the builtin's interpreter result type). Reads offset 0, shared with the
+/// string/array/list length header.
+fn lower_map_len(ctx: &mut LowerCtx, map: &IrExpr, out: &mut Vec<u8>) -> Result<(), String> {
+    supported_map_kv(&map.ty).ok_or_else(|| {
+        format!(
+            "map_len expects a scalar-key, scalar-value map but got `{}`",
+            map.ty.name
+        )
+    })?;
+    lower_expr(ctx, map, out)?; // map pointer
+    emit_load_at(WasmValType::I32, MAP_LEN_OFF, out);
+    out.push(0xac); // i64.extend_i32_s
     Ok(())
 }
 
@@ -3535,12 +4116,13 @@ mod tests {
 
     #[test]
     fn scalar_and_nonscalar_split() {
-        // `add` is scalar; `tally` returns `map<i64, i64>`, still outside the WASM
-        // value set (strings/structs/arrays/enums and scalar-element `list`s are
-        // supported; `map` is not), so it is skipped.
+        // `add` is scalar; `tally` returns `map<i64, string>` (a HEAP-value map),
+        // still outside the WASM value set (strings/structs/arrays/enums,
+        // scalar-element `list`s, and scalar-key/value `map`s are supported; a map
+        // with a heap value is not), so it is skipped.
         let source = concat!(
             "fn add a i64 b i64 -> i64\n    a + b\n\n",
-            "fn tally n i64 -> map<i64, i64>\n    map_set(map_new(), n, n)\n",
+            "fn tally n i64 -> map<i64, string>\n    map_set(map_new(), n, \"x\")\n",
         );
         let artifact = emit_wasm_module(&module_for(source)).expect("emit");
         assert_eq!(artifact.compiled, vec!["add".to_string()]);
@@ -3668,6 +4250,117 @@ mod tests {
         assert_eq!(artifact.skipped[0].name, "names");
     }
 
+    // -- Growable `map<K, V>` (scalar key/value) -------------------------------
+
+    #[test]
+    fn scalar_map_function_compiles_with_insert_and_lookup_codegen() {
+        // A function that builds a scalar-key, scalar-value `map<i64, i64>` via
+        // `map_new`/`map_set` (insert plus in-place update), reads it with
+        // `map_get`/`map_has`/`map_len`, must COMPILE to WASM (not skip). The map is
+        // an `i32` pointer to a `[len][cap][(k,v) pairs]` block in linear memory, so
+        // both the signature (returning `map<i64, i64>`) and body are eligible.
+        let source = concat!(
+            "fn build n i64 -> map<i64, i64>\n",
+            "    let m map<i64, i64> = map_new()\n",
+            "    m = map_set(m, 1, n)\n",
+            "    m = map_set(m, 2, n + 1)\n",
+            "    m = map_set(m, 1, n + 2)\n",
+            "    m\n\n",
+            "fn probe n i64 -> i64\n",
+            "    let m map<i64, i64> = build(n)\n",
+            "    let seen i64 = 0\n",
+            "    if map_has(m, 2)\n",
+            "        seen = 1\n",
+            "    map_len(m) + seen\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(
+            artifact.compiled.contains(&"build".to_string())
+                && artifact.compiled.contains(&"probe".to_string()),
+            "map build/probe functions should compile, skipped: {:?}",
+            artifact.skipped
+        );
+        assert!(artifact.skipped.is_empty());
+
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        // The `map_set` grow decision `new_cap = cap == 0 ? MAP_INITIAL_CAP : cap*2`
+        // lowers to `i32.eqz` (0x45) then `if` producing an `i32` (0x04 0x7f).
+        assert!(
+            find_subslice(&code, &[0x45, 0x04, 0x7f]).is_some(),
+            "map `map_set` emits the capacity-doubling grow decision"
+        );
+        // The linear-scan lookup compares each entry's key with `i64.eq` (0x51):
+        // the key-equality opcode of `emit_map_find` for an `i64` key.
+        assert!(
+            find_subslice(&code, &[0x51]).is_some(),
+            "map lookup emits an `i64.eq` key comparison in the scan"
+        );
+    }
+
+    #[test]
+    fn map_new_allocates_len_cap_header() {
+        // `map_new()` allocates a `[len=0][cap=MAP_INITIAL_CAP][entries]` header:
+        // the body stores 0 at the len offset and MAP_INITIAL_CAP at the cap offset.
+        let source = "fn empty -> map<i64, i64>\n    map_new()\n";
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert_eq!(artifact.compiled, vec!["empty".to_string()]);
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        // i32.const 4 (MAP_INITIAL_CAP) then i32.store at the cap offset (4).
+        assert!(
+            find_subslice(&code, &[0x41, MAP_INITIAL_CAP as u8, 0x36, 0x02, 0x04]).is_some(),
+            "map_new stores the initial capacity into the cap header slot"
+        );
+    }
+
+    #[test]
+    fn map_get_lowers_to_option_construction() {
+        // `map_get(m, k)` returns `option<V>`, constructed with the enum/option
+        // linear-memory layout: `none` stores tag 1, `some(v)` stores tag 0 and the
+        // looked-up value into the payload slot. The `i64.extend_i32_s` (0xac) of
+        // `map_len` and the option tag stores must both appear.
+        let source = concat!(
+            "fn get_or m map<i64, i64> k i64 -> i64\n",
+            "    match map_get(m, k)\n",
+            "        some(v) -> v\n",
+            "        none -> 0 - 1\n\n",
+            "fn size m map<i64, i64> -> i64\n",
+            "    map_len(m)\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(
+            artifact.compiled.contains(&"get_or".to_string())
+                && artifact.compiled.contains(&"size".to_string()),
+            "map get/size functions should compile, skipped: {:?}",
+            artifact.skipped
+        );
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        // `map_len` extends the i32 len header to i64 with `i64.extend_i32_s` (0xac).
+        assert!(
+            find_subslice(&code, &[0xac]).is_some(),
+            "map_len emits `i64.extend_i32_s` on the length header"
+        );
+    }
+
+    #[test]
+    fn map_with_heap_key_or_value_is_skipped() {
+        // A `map<string, i64>` (heap key) and a `map<i64, string>` (heap value) are
+        // DEFERRED: `supported_map_kv` rejects a non-scalar key or value, so the
+        // signature is ineligible and the function is skipped (still runs on the
+        // interpreters), never miscompiled.
+        let source = concat!(
+            "fn by_name -> map<string, i64>\n",
+            "    map_new()\n\n",
+            "fn to_name -> map<i64, string>\n",
+            "    map_new()\n\n",
+            "fn ok n i64 -> i64\n    n + 1\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert_eq!(artifact.compiled, vec!["ok".to_string()]);
+        let skipped: Vec<&str> = artifact.skipped.iter().map(|s| s.name.as_str()).collect();
+        assert!(skipped.contains(&"by_name"));
+        assert!(skipped.contains(&"to_name"));
+    }
+
     // -- Aggregates across call boundaries (params/returns) --------------------
 
     #[test]
@@ -3782,10 +4475,11 @@ mod tests {
 
     #[test]
     fn no_eligible_functions_errors() {
-        // `map<i64, i64>` is not in the supported WASM value set, so nothing is
-        // eligible and the backend reports L0338. (A scalar-element `list<i64>` IS
-        // supported now — see the growable-list tests below.)
-        let source = "fn tally n i64 -> map<i64, i64>\n    map_set(map_new(), n, n)\n";
+        // `result<i64, string>` is an enum with a HEAP payload, still outside the
+        // supported WASM value set, so nothing is eligible and the backend reports
+        // L0338. (Scalar-element `list<i64>` and scalar-key/value `map<i64, i64>`
+        // ARE supported now — see the growable-list/map tests above.)
+        let source = "fn tally n i64 -> result<i64, string>\n    ok(n)\n";
         let err = emit_wasm_module(&module_for(source)).expect_err("no eligible");
         assert_eq!(err.code, "L0338");
         assert_eq!(err.skipped.len(), 1);
