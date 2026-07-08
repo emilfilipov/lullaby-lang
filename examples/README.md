@@ -49,6 +49,8 @@ From the portable package root:
 - `valid/error_propagation.lby`: uses the postfix `?` operator to short-circuit
   on the first `err` from a `result`-returning helper, keeping the success path
   flat.
+- `valid/parse_numbers.lby`: parses strings into numbers with `parse_i64` /
+  `parse_f64`, matching on the `result` so invalid input is handled gracefully.
 - `invalid/int_float_mismatch.lby`: mixes `i64` and `f64` in one expression
   (`let x i64 = 1 + 2.0`); `lullaby check` reports diagnostic `L0307` (operands
   of `+` must share a type) and exits non-zero.
