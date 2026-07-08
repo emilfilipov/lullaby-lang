@@ -639,6 +639,18 @@ pub enum ExprKind {
     /// signal, and the IR lowerer desugars it into `let`/`match`/`return` so no
     /// IR node (and thus no native/WASM backend change) is needed.
     Try(Box<Expr>),
+    /// An inline closure literal `fn PARAMS -> EXPR`: an anonymous function value
+    /// that captures the enclosing scope's locals by value at evaluation time.
+    /// `params` are `name type` pairs (explicit types, no parens, like a
+    /// top-level `fn`), and `body` is a single expression. `id` is a parse-order
+    /// identifier assigned by the parser; each backend keys its own
+    /// `id -> (param_names, body)` closure-body table on it, so the runtime value
+    /// carries only the id plus its captured snapshot and stores no body node.
+    Closure {
+        id: usize,
+        params: Vec<Param>,
+        body: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -904,6 +916,11 @@ struct Parser<'a> {
     /// the cursor, so nested generics close correctly even though `<<`/`>>` are
     /// single tokens for the bitwise shift operators.
     pending_generic_close: usize,
+    /// Monotonic parse-order counter that assigns each closure literal a stable
+    /// `id`. Threaded through every `ExprParser` so ids are unique and stable
+    /// across the whole program; each backend's closure-body table is keyed on
+    /// this id.
+    closure_counter: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -913,7 +930,22 @@ impl<'a> Parser<'a> {
             cursor: 0,
             diagnostics: Vec::new(),
             pending_generic_close: 0,
+            closure_counter: 0,
         }
+    }
+
+    /// Build an `ExprParser` over `tokens` seeded with the current closure
+    /// counter, run `f`, then fold the counter back so closure ids stay
+    /// monotonic across every expression in the program.
+    fn run_expr_parser<T>(
+        &mut self,
+        tokens: &'a [Token],
+        f: impl FnOnce(&mut ExprParser<'a>) -> T,
+    ) -> T {
+        let mut expr_parser = ExprParser::new(tokens, self.closure_counter);
+        let result = f(&mut expr_parser);
+        self.closure_counter = expr_parser.closure_counter;
+        result
     }
 
     /// Consume a single `>` that closes a generic type-argument list. A `>>`
@@ -1614,7 +1646,8 @@ impl<'a> Parser<'a> {
         // plus `.field` / `[index]` accessors. Parse it as an expression, then
         // convert that expression into a place path.
         let op_pos = self.assignment_op_position()?;
-        let mut target_parser = ExprParser::new(&self.tokens[self.cursor..op_pos]);
+        let mut target_parser =
+            ExprParser::new(&self.tokens[self.cursor..op_pos], self.closure_counter);
         let target = match target_parser.parse() {
             Ok(expr) => expr,
             Err(_) => {
@@ -1990,8 +2023,8 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
-        let mut expr_parser = ExprParser::new(&self.tokens[start..self.cursor]);
-        match expr_parser.parse() {
+        let tokens = &self.tokens[start..self.cursor];
+        match self.run_expr_parser(tokens, ExprParser::parse) {
             Ok(expr) => Some(expr),
             Err(message) => {
                 self.error("L0207", message, fallback_span);
@@ -2323,11 +2356,23 @@ fn planned_syntax_name(kind: &TokenKind) -> Option<&'static str> {
 struct ExprParser<'a> {
     tokens: &'a [Token],
     cursor: usize,
+    /// Next closure `id` to assign, seeded from the owning [`Parser`] so ids are
+    /// unique and monotonic across every expression in the program.
+    closure_counter: usize,
+    /// `>` closers still owed from a split `>>` token, mirroring the field on the
+    /// declaration [`Parser`] so nested generics in closure parameter types
+    /// (`fn xs list<array<i64>> -> ...`) close correctly.
+    pending_generic_close: usize,
 }
 
 impl<'a> ExprParser<'a> {
-    fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, cursor: 0 }
+    fn new(tokens: &'a [Token], closure_counter: usize) -> Self {
+        Self {
+            tokens,
+            cursor: 0,
+            closure_counter,
+            pending_generic_close: 0,
+        }
     }
 
     fn parse(&mut self) -> Result<Expr, String> {
@@ -2512,6 +2557,33 @@ impl<'a> ExprParser<'a> {
                 kind: ExprKind::Char(value),
                 span: token.span,
             }),
+            // Inline closure literal `fn PARAMS -> EXPR`. `PARAMS` are zero or
+            // more `name type` pairs (the top-level `fn` parameter shape); the
+            // body is a single expression parsed after `->`. Only valid in
+            // expression position — a top-level `fn` declaration is parsed by the
+            // declaration parser, never here.
+            TokenKind::Keyword(Keyword::Fn) => {
+                let id = self.closure_counter;
+                self.closure_counter += 1;
+                let mut params = Vec::new();
+                while !self.at_arrow() {
+                    let name = self.expect_closure_identifier()?;
+                    let ty = self.parse_type()?;
+                    params.push(Param { name, ty });
+                }
+                if !self.eat_arrow() {
+                    return Err("expected `->` in closure literal".to_string());
+                }
+                let body = self.parse_binary(0)?;
+                Ok(Expr {
+                    kind: ExprKind::Closure {
+                        id,
+                        params,
+                        body: Box::new(body),
+                    },
+                    span: token.span,
+                })
+            }
             TokenKind::Keyword(Keyword::True) => Ok(Expr {
                 kind: ExprKind::Bool(true),
                 span: token.span,
@@ -2665,6 +2737,117 @@ impl<'a> ExprParser<'a> {
                 Ok(name)
             }
             _ => Err("expected field name in named construction".to_string()),
+        }
+    }
+
+    /// True when the cursor is at a `->` arrow (the closure body separator).
+    fn at_arrow(&self) -> bool {
+        matches!(self.peek().map(|token| &token.kind), Some(TokenKind::Arrow))
+    }
+
+    /// Consume a `->` arrow, returning whether one was present.
+    fn eat_arrow(&mut self) -> bool {
+        if self.at_arrow() {
+            self.cursor += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// True when the cursor is at the given `symbol` token.
+    fn at_symbol(&self, symbol: &str) -> bool {
+        matches!(self.peek().map(|token| &token.kind), Some(TokenKind::Symbol(actual)) if actual == symbol)
+    }
+
+    /// Consume the closure-parameter name identifier, or fail with a diagnostic
+    /// message routed through the parser's `L0207` malformed-expression code.
+    fn expect_closure_identifier(&mut self) -> Result<String, String> {
+        match self.peek().map(|token| &token.kind) {
+            Some(TokenKind::Identifier(name)) => {
+                let name = name.clone();
+                self.cursor += 1;
+                Ok(name)
+            }
+            _ => Err("expected closure parameter name".to_string()),
+        }
+    }
+
+    /// Consume a `>` that closes a generic type-argument list, splitting a `>>`
+    /// shift token into two closers exactly like the declaration parser.
+    fn eat_generic_close_expr(&mut self) -> bool {
+        if self.pending_generic_close > 0 {
+            self.pending_generic_close -= 1;
+            return true;
+        }
+        match self.peek().map(|token| &token.kind) {
+            Some(TokenKind::Symbol(symbol)) if symbol == ">" => {
+                self.cursor += 1;
+                true
+            }
+            Some(TokenKind::Symbol(symbol)) if symbol == ">>" => {
+                self.cursor += 1;
+                self.pending_generic_close += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Parse a closure-parameter type, mirroring `Parser::expect_type`: primitive
+    /// and aliased names, single/multi-argument generics, `void`, and the
+    /// function type `fn(T, ...) -> R`. Emits the shared canonical spelling so a
+    /// closure parameter type string-compares equal to a declared one.
+    fn parse_type(&mut self) -> Result<TypeRef, String> {
+        match self.peek().map(|token| token.kind.clone()) {
+            Some(TokenKind::Identifier(name)) => {
+                self.cursor += 1;
+                let is_single = matches!(
+                    name.as_str(),
+                    "array" | "ptr" | "ref" | "rc" | "option" | "list" | "Future"
+                );
+                let is_multi = matches!(name.as_str(), "result" | "map");
+                if (is_single || is_multi) && self.eat_symbol("<") {
+                    let mut args = vec![self.parse_type()?];
+                    if is_multi {
+                        while self.eat_symbol(",") {
+                            args.push(self.parse_type()?);
+                        }
+                    }
+                    if !self.eat_generic_close_expr() {
+                        return Err("expected `>` after generic type argument".to_string());
+                    }
+                    Ok(generic_type(&name, &args))
+                } else {
+                    Ok(TypeRef::new(name))
+                }
+            }
+            Some(TokenKind::Keyword(Keyword::Void)) => {
+                self.cursor += 1;
+                Ok(TypeRef::new("void"))
+            }
+            Some(TokenKind::Keyword(Keyword::Fn)) => {
+                self.cursor += 1;
+                if !self.eat_symbol("(") {
+                    return Err("expected `(` after `fn` in a function type".to_string());
+                }
+                let mut params = Vec::new();
+                if !self.at_symbol(")") {
+                    params.push(self.parse_type()?);
+                    while self.eat_symbol(",") {
+                        params.push(self.parse_type()?);
+                    }
+                }
+                if !self.eat_symbol(")") {
+                    return Err("expected `)` after function-type parameters".to_string());
+                }
+                if !self.eat_arrow() {
+                    return Err("expected `->` in a function type".to_string());
+                }
+                let return_type = self.parse_type()?;
+                Ok(function_type(&params, &return_type))
+            }
+            _ => Err("expected closure parameter type".to_string()),
         }
     }
 }
@@ -3569,5 +3752,74 @@ mod tests {
         assert_eq!(program.structs[0].name, "Point");
         assert_eq!(program.structs[0].fields.len(), 2);
         assert_eq!(program.structs[0].fields[0].name, "x");
+    }
+
+    #[test]
+    fn parses_closure_literal_in_let_value() {
+        // `fn x i64 -> x + n` parses to a `Closure` node with one typed param and
+        // an expression body; the top-level `fn main` declaration is unaffected.
+        let source = "fn main -> i64\n    let n i64 = 10\n    let f fn(i64) -> i64 = fn x i64 -> x + n\n    f(5)\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Let { value, .. } = &program.functions[0].body[1] else {
+            panic!("expected the `let f` binding");
+        };
+        let ExprKind::Closure { id, params, body } = &value.kind else {
+            panic!("expected a closure literal, got {:?}", value.kind);
+        };
+        assert_eq!(*id, 0, "the first closure literal gets id 0");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "x");
+        assert_eq!(params[0].ty.name, "i64");
+        assert!(matches!(body.kind, ExprKind::Binary { .. }));
+    }
+
+    #[test]
+    fn parses_closure_literal_as_call_argument() {
+        // A closure body stops at the argument-separating `,`, so
+        // `apply(fn x i64 -> x + 1, 5)` parses as a two-argument call whose first
+        // argument is a closure.
+        let source = "fn apply f fn(i64) -> i64 v i64 -> i64\n    f(v)\n\nfn main -> i64\n    apply(fn x i64 -> x + 1, 5)\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[1].body[0] else {
+            panic!("expected the `apply(...)` expression");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a call, got {:?}", expr.kind);
+        };
+        assert_eq!(name, "apply");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(args[0].kind, ExprKind::Closure { .. }));
+        assert!(matches!(args[1].kind, ExprKind::Integer(5)));
+    }
+
+    #[test]
+    fn closure_literals_get_distinct_monotonic_ids() {
+        // Two closure literals in the same program get distinct, monotonic ids,
+        // which key each backend's closure-body table.
+        let source = "fn main -> i64\n    let f fn(i64) -> i64 = fn x i64 -> x + 1\n    let g fn(i64) -> i64 = fn y i64 -> y + 2\n    f(0) + g(0)\n";
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let mut ids = Vec::new();
+        for stmt in &program.functions[0].body {
+            if let Stmt::Let { value, .. } = stmt
+                && let ExprKind::Closure { id, .. } = &value.kind
+            {
+                ids.push(*id);
+            }
+        }
+        assert_eq!(ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn malformed_closure_missing_arrow_is_rejected() {
+        // A closure literal without `->` is a parser diagnostic, not a panic.
+        let source = "fn main -> i64\n    let f fn(i64) -> i64 = fn x i64 x + 1\n    f(0)\n";
+        let tokens = lex(source).expect("lex");
+        assert!(
+            parse(&tokens).is_err(),
+            "a closure missing `->` must be rejected"
+        );
     }
 }

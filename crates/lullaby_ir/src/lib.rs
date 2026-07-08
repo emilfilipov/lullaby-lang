@@ -11,7 +11,7 @@ use lullaby_parser::{
     TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
-    ArithOp, Future, IntKind, OverflowMode, ProcessResource, ResolvedPlace, RuntimeError,
+    ArithOp, Closure, Future, IntKind, OverflowMode, ProcessResource, ResolvedPlace, RuntimeError,
     SharedAtomic, SharedMutex, SocketResource, Task, Value, apply_compound, asm_interpreter_error,
     await_future, char_find, expect_atomic, expect_chan, expect_future, expect_i64, expect_list,
     expect_map, expect_mutex, expect_string, expect_task, extern_call_error, get_place,
@@ -73,6 +73,27 @@ pub struct IrModule {
     /// Serde-defaulted so existing artifacts and snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub export_functions: Vec<String>,
+    /// Lowered closure bodies, keyed by the parse-order `id` an
+    /// [`IrExprKind::Closure`] node carries. Each entry pairs the closure's
+    /// parameter names with its lowered single-expression body, so the
+    /// interpreter/VM can invoke a closure value (which stores only its id plus
+    /// captured snapshot) by looking its body up here. Serialized in the `.lbc`
+    /// artifact like every other lowered code fragment; the runtime `Value` is
+    /// never serialized. Serde-defaulted so existing artifacts stay valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closures: Vec<IrClosureDef>,
+}
+
+/// A lowered closure body in the IR module, keyed by the parse-order `id` the
+/// [`IrExprKind::Closure`] node carries. `params` are the closure's parameter
+/// names (types are erased at runtime, exactly like a function's), and `body` is
+/// the lowered single expression evaluated on invocation with the captured
+/// snapshot and parameters bound.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IrClosureDef {
+    pub id: usize,
+    pub params: Vec<String>,
+    pub body: IrExpr,
 }
 
 /// One trait impl method in the IR: the implementing type name, the method name,
@@ -260,6 +281,12 @@ pub enum IrExprKind {
     /// this node's `ty` is `T`.
     Await {
         expr: Box<IrExpr>,
+    },
+    /// An inline closure literal, carrying only its parse-order `id`. The body and
+    /// parameter names live in [`IrModule::closures`], keyed by this id; the node
+    /// itself stores no body. Its `ty` is the closure's `fn(...) -> R` type.
+    Closure {
+        id: usize,
     },
 }
 
@@ -631,7 +658,11 @@ fn collect_memory_operations_from_expr(
                 });
             }
         }
-        IrExprKind::Integer(_)
+        // A closure literal node carries no body here (the body lives in the
+        // module's closure table). Its own construction performs no direct memory
+        // operation, so nothing is recorded at this node.
+        IrExprKind::Closure { .. }
+        | IrExprKind::Integer(_)
         | IrExprKind::Float(_)
         | IrExprKind::Bool(_)
         | IrExprKind::String(_)
@@ -835,6 +866,23 @@ pub struct BytecodeModule {
     /// Serde-defaulted for compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub export_functions: Vec<String>,
+    /// Lowered closure bodies, keyed by the parse-order id a
+    /// [`BytecodeExprKind::Closure`] node carries. Round-tripped through the IR so
+    /// the VM (which runs on the IR interpreter) can invoke a closure value.
+    /// Serde-defaulted for compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closures: Vec<BytecodeClosureDef>,
+}
+
+/// A lowered closure body in the bytecode module: the closure's parse-order id,
+/// its parameter names, and its instruction-body expression. Mirrors
+/// [`IrClosureDef`], round-tripped when the bytecode module is built from / lowered
+/// back to the IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BytecodeClosureDef {
+    pub id: usize,
+    pub params: Vec<String>,
+    pub body: BytecodeExpr,
 }
 
 /// One trait impl method in the bytecode module: the implementing type name, the
@@ -992,6 +1040,11 @@ pub enum BytecodeExprKind {
     /// `T`. Mirrors `IrExprKind::Await`.
     Await {
         expr: Box<BytecodeExpr>,
+    },
+    /// An inline closure literal, carrying only its parse-order `id`. Mirrors
+    /// `IrExprKind::Closure`; the body lives in `BytecodeModule::closures`.
+    Closure {
+        id: usize,
     },
 }
 
@@ -1209,7 +1262,9 @@ fn collect_bytecode_memory_operations_from_expr(
                 });
             }
         }
-        BytecodeExprKind::Integer(_)
+        // A closure literal node performs no direct memory operation.
+        BytecodeExprKind::Closure { .. }
+        | BytecodeExprKind::Integer(_)
         | BytecodeExprKind::Float(_)
         | BytecodeExprKind::Bool(_)
         | BytecodeExprKind::String(_)
@@ -1528,6 +1583,15 @@ pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
         async_functions: module.async_functions.clone(),
         extern_functions: module.extern_functions.clone(),
         export_functions: module.export_functions.clone(),
+        closures: module
+            .closures
+            .iter()
+            .map(|def| BytecodeClosureDef {
+                id: def.id,
+                params: def.params.clone(),
+                body: lower_bytecode_expr(&def.body),
+            })
+            .collect(),
     }
 }
 
@@ -1563,6 +1627,15 @@ pub fn run_bytecode_main_with_args(
         async_functions: module.async_functions.clone(),
         extern_functions: module.extern_functions.clone(),
         export_functions: module.export_functions.clone(),
+        closures: module
+            .closures
+            .iter()
+            .map(|def| IrClosureDef {
+                id: def.id,
+                params: def.params.clone(),
+                body: bytecode_expr_to_ir(&def.body),
+            })
+            .collect(),
     };
     run_main_with_args(&ir, args)
 }
@@ -1733,6 +1806,7 @@ fn lower_bytecode_expr(expr: &IrExpr) -> BytecodeExpr {
         IrExprKind::Await { expr } => BytecodeExprKind::Await {
             expr: Box::new(lower_bytecode_expr(expr)),
         },
+        IrExprKind::Closure { id } => BytecodeExprKind::Closure { id: *id },
     };
 
     BytecodeExpr {
@@ -1921,6 +1995,7 @@ fn bytecode_expr_to_ir(expr: &BytecodeExpr) -> IrExpr {
         BytecodeExprKind::Await { expr } => IrExprKind::Await {
             expr: Box::new(bytecode_expr_to_ir(expr)),
         },
+        BytecodeExprKind::Closure { id } => IrExprKind::Closure { id: *id },
     };
 
     IrExpr {
@@ -1945,6 +2020,10 @@ impl ConstantFolder {
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
             export_functions: module.export_functions.clone(),
+            // Closure bodies are carried through unchanged; this pass only
+            // rewrites top-level function bodies. (Closures run on the
+            // interpreters, so optimizing their bodies is a separate concern.)
+            closures: module.closures.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2155,7 +2234,11 @@ impl ConstantFolder {
                 ty: expr.ty.clone(),
                 span: expr.span,
             },
-            IrExprKind::Integer(_)
+            // A closure literal node carries only an id (its body lives in the
+            // module's closure table, untouched by this pass), so it is copied
+            // through unchanged like any other leaf.
+            IrExprKind::Closure { .. }
+            | IrExprKind::Integer(_)
             | IrExprKind::Float(_)
             | IrExprKind::Bool(_)
             | IrExprKind::String(_)
@@ -2292,6 +2375,10 @@ impl CommonSubexpressionEliminator {
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
             export_functions: module.export_functions.clone(),
+            // Closure bodies are carried through unchanged; this pass only
+            // rewrites top-level function bodies. (Closures run on the
+            // interpreters, so optimizing their bodies is a separate concern.)
+            closures: module.closures.clone(),
             functions: module
                 .functions
                 .iter()
@@ -2584,7 +2671,11 @@ impl CommonSubexpressionEliminator {
                 ty: expr.ty.clone(),
                 span: expr.span,
             },
-            IrExprKind::Integer(_)
+            // A closure literal node carries only an id (its body lives in the
+            // module's closure table, untouched by this pass), so it is copied
+            // through unchanged like any other leaf.
+            IrExprKind::Closure { .. }
+            | IrExprKind::Integer(_)
             | IrExprKind::Float(_)
             | IrExprKind::Bool(_)
             | IrExprKind::String(_)
@@ -2639,8 +2730,12 @@ fn pure_expr_signature(expr: &IrExpr) -> Option<ExprSignature> {
             combine_signatures(&format!("binary:{op:?}"), &expr.ty.name, vec![left, right])
         }
         // Calls and `await`s are not pure: they may have side effects (an
-        // `await` spawns/joins a thread), so they are never CSE candidates.
-        IrExprKind::Call { .. } | IrExprKind::Await { .. } => return None,
+        // `await` spawns/joins a thread), so they are never CSE candidates. A
+        // closure literal captures the live environment at evaluation time, so
+        // two evaluations at different points may differ; it is not CSE-eligible.
+        IrExprKind::Call { .. } | IrExprKind::Await { .. } | IrExprKind::Closure { .. } => {
+            return None;
+        }
     };
 
     Some(ExprSignature { key, dependencies })
@@ -2677,6 +2772,10 @@ impl LoopInvariantMover {
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
             export_functions: module.export_functions.clone(),
+            // Closure bodies are carried through unchanged; this pass only
+            // rewrites top-level function bodies. (Closures run on the
+            // interpreters, so optimizing their bodies is a separate concern.)
+            closures: module.closures.clone(),
             functions: module
                 .functions
                 .iter()
@@ -3037,7 +3136,10 @@ fn loop_invariant_expr_signature(expr: &IrExpr) -> Option<ExprSignature> {
         | IrExprKind::Index { .. }
         | IrExprKind::Field { .. }
         | IrExprKind::Call { .. }
-        | IrExprKind::Await { .. } => return None,
+        | IrExprKind::Await { .. }
+        // A closure captures the live environment at evaluation time, so it is
+        // never loop-invariant (its captured values may change per iteration).
+        | IrExprKind::Closure { .. } => return None,
     };
 
     Some(ExprSignature { key, dependencies })
@@ -3081,6 +3183,10 @@ impl CopyPropagator {
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
             export_functions: module.export_functions.clone(),
+            // Closure bodies are carried through unchanged; this pass only
+            // rewrites top-level function bodies. (Closures run on the
+            // interpreters, so optimizing their bodies is a separate concern.)
+            closures: module.closures.clone(),
             functions: module
                 .functions
                 .iter()
@@ -3366,7 +3472,11 @@ impl CopyPropagator {
                 ty: expr.ty.clone(),
                 span: expr.span,
             },
-            IrExprKind::Integer(_)
+            // A closure literal node carries only an id; its captured values are
+            // materialized at runtime and its body lives in the module table, so
+            // copy propagation has nothing to rewrite here.
+            IrExprKind::Closure { .. }
+            | IrExprKind::Integer(_)
             | IrExprKind::Float(_)
             | IrExprKind::Bool(_)
             | IrExprKind::String(_)
@@ -3411,7 +3521,10 @@ fn expr_requires_optimizer_barrier(expr: &IrExpr) -> bool {
         IrExprKind::Binary { left, right, .. } => {
             expr_requires_optimizer_barrier(left) || expr_requires_optimizer_barrier(right)
         }
-        IrExprKind::Integer(_)
+        // Constructing a closure value only snapshots locals (no side effect), so
+        // it is not an optimizer barrier — an unused closure binding is removable.
+        IrExprKind::Closure { .. }
+        | IrExprKind::Integer(_)
         | IrExprKind::Float(_)
         | IrExprKind::Bool(_)
         | IrExprKind::String(_)
@@ -3435,6 +3548,10 @@ impl DeadCodeEliminator {
             async_functions: module.async_functions.clone(),
             extern_functions: module.extern_functions.clone(),
             export_functions: module.export_functions.clone(),
+            // Closure bodies are carried through unchanged; this pass only
+            // rewrites top-level function bodies. (Closures run on the
+            // interpreters, so optimizing their bodies is a separate concern.)
+            closures: module.closures.clone(),
             functions: module
                 .functions
                 .iter()
@@ -3569,6 +3686,15 @@ fn is_unconditional_terminator(statement: &IrStmt) -> bool {
     )
 }
 
+/// The function value an IR `parallel_map` runs on each worker thread: either a
+/// named top-level function or a self-contained capturing closure. Both are
+/// `Send`, so they cross the scoped-thread boundary safely.
+#[derive(Debug, Clone)]
+enum IrParallelCallable {
+    Func(String),
+    Closure(Closure),
+}
+
 struct IrRuntime<'a> {
     /// The whole IR module, borrowed so a builtin can spawn sibling interpreters
     /// over the same shared `&IrModule` (used by `parallel_map`'s scoped threads).
@@ -3603,6 +3729,10 @@ struct IrRuntime<'a> {
     /// Names of `extern fn` (C-ABI) functions. The interpreter cannot execute C,
     /// so a call to one raises `L0423` rather than dispatching a body.
     extern_functions: std::collections::HashSet<String>,
+    /// Closure-body table: `closure id -> lowered closure def`. Built once from
+    /// `module.closures`. A `Value::Closure` carries only its id, so an invocation
+    /// looks its body up here. Bodies borrow the module with lifetime `'a`.
+    closures: HashMap<usize, &'a IrClosureDef>,
 }
 
 impl<'a> IrRuntime<'a> {
@@ -3664,6 +3794,12 @@ impl<'a> IrRuntime<'a> {
         let async_functions = module.async_functions.iter().cloned().collect();
         let extern_functions = module.extern_functions.iter().cloned().collect();
 
+        let closures = module
+            .closures
+            .iter()
+            .map(|def| (def.id, def))
+            .collect::<HashMap<_, _>>();
+
         Ok(Self {
             module,
             module_arc,
@@ -3680,6 +3816,7 @@ impl<'a> IrRuntime<'a> {
             trait_method_names,
             async_functions,
             extern_functions,
+            closures,
         })
     }
 
@@ -3955,6 +4092,41 @@ impl<'a> IrRuntime<'a> {
                 "loop control escaped function body",
             )),
         }
+    }
+
+    /// Invoke a closure value: look its body up in the id-keyed closure table,
+    /// bind the captured snapshot first and then the parameters (parameters shadow
+    /// captures), evaluate the single-expression body, and return the value.
+    /// Mirrors the AST runtime's `invoke_closure` one-to-one for backend parity.
+    fn invoke_closure(
+        &mut self,
+        closure: &Closure,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let def = *self.closures.get(&closure.id).ok_or_else(|| {
+            RuntimeError::new(
+                "L0402",
+                format!("closure #{} has no registered body", closure.id),
+            )
+        })?;
+        if def.params.len() != args.len() {
+            return Err(RuntimeError::new(
+                "L0402",
+                format!(
+                    "closure expects {} arguments but got {}",
+                    def.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut env = Env::default();
+        for (name, value) in &closure.captured {
+            env.define(name.clone(), value.clone());
+        }
+        for (name, value) in def.params.iter().zip(args) {
+            env.define(name.clone(), value);
+        }
+        self.eval_expr(&def.body, &env)
     }
 
     fn eval_block(
@@ -4292,6 +4464,14 @@ impl<'a> IrRuntime<'a> {
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
                     .collect::<Result<Vec<_>, _>>()?;
+                // A call name bound to a closure value invokes that closure: bind
+                // its captured snapshot then the arguments and evaluate the body
+                // from the id-keyed table. This is the same call site that
+                // dispatches a `Value::Func`, so a closure passed as an argument
+                // and called through a parameter name works with no extra path.
+                if let Ok(Value::Closure(closure)) = env.get(name) {
+                    return self.invoke_closure(&closure, values);
+                }
                 // A call name that is a local holding a function value dispatches
                 // through that value: invoke the referenced top-level function.
                 let target = match env.get(name) {
@@ -4316,6 +4496,15 @@ impl<'a> IrRuntime<'a> {
                 let future = expect_future("await", value)?;
                 await_future(&future)
             }
+            // Evaluating a closure literal snapshots the current environment's
+            // in-scope locals by value and yields a `Value::Closure` carrying the
+            // literal's id plus that snapshot. The body lives in `self.closures`
+            // (keyed by id) and is looked up at invocation time, mirroring the AST
+            // runtime exactly for backend parity.
+            IrExprKind::Closure { id } => Ok(Value::Closure(Closure {
+                id: *id,
+                captured: env.snapshot_locals(),
+            })),
         };
         result.map_err(|error| self.annotate_error(error, expr.span))
     }
@@ -5163,8 +5352,14 @@ impl<'a> IrRuntime<'a> {
         let [callee, elements]: [Value; 2] = args
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("parallel_map", 2, args.len()))?;
-        let func_name = match callee {
-            Value::Func(name) => name,
+        // `parallel_map` accepts either a named function value or a capturing
+        // closure. A closure is self-contained (it carries its captured snapshot,
+        // all `Send`) and the worker's fresh interpreter rebuilds the same
+        // id-keyed body table from the shared module, so invoking it there is
+        // sound and stays order-deterministic.
+        let callable = match callee {
+            Value::Func(name) => IrParallelCallable::Func(name),
+            Value::Closure(closure) => IrParallelCallable::Closure(closure),
             other => {
                 return Err(RuntimeError::new(
                     "L0417",
@@ -5176,16 +5371,24 @@ impl<'a> IrRuntime<'a> {
 
         let module = self.module;
         let module_arc = &self.module_arc;
+        let callable = &callable;
         let results: Vec<Value> = std::thread::scope(|scope| {
             let handles: Vec<_> = arg_values
                 .iter()
                 .map(|value| {
-                    let name = func_name.clone();
+                    let callable = callable.clone();
                     let value = value.clone();
                     let arc = Arc::clone(module_arc);
                     scope.spawn(move || {
                         let mut runtime = IrRuntime::new(module, arc)?;
-                        runtime.call_function(&name, vec![value])
+                        match callable {
+                            IrParallelCallable::Func(name) => {
+                                runtime.call_function(&name, vec![value])
+                            }
+                            IrParallelCallable::Closure(closure) => {
+                                runtime.invoke_closure(&closure, vec![value])
+                            }
+                        }
                     })
                 })
                 .collect();
@@ -6724,6 +6927,24 @@ impl Env {
             .cloned()
             .ok_or_else(|| RuntimeError::new("L0403", format!("unknown variable `{name}`")))
     }
+
+    /// Snapshot every in-scope local by value for closure frame capture, mirroring
+    /// the AST runtime: one `(name, value.clone())` per visible binding, inner
+    /// scopes shadowing outer ones, sorted by name for a deterministic order.
+    fn snapshot_locals(&self) -> Vec<(String, Value)> {
+        let mut flattened: HashMap<&str, &Value> = HashMap::new();
+        for scope in &self.scopes {
+            for (name, value) in scope {
+                flattened.insert(name.as_str(), value);
+            }
+        }
+        let mut captured: Vec<(String, Value)> = flattened
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        captured.sort_by(|(a, _), (b, _)| a.cmp(b));
+        captured
+    }
 }
 
 struct Lowerer<'a> {
@@ -6744,6 +6965,11 @@ struct Lowerer<'a> {
     /// Monotonic counter for fresh `?`-desugar temp names, unique per program so
     /// hoisted temporaries never collide with user bindings or each other.
     next_try_temp: std::cell::Cell<usize>,
+    /// Lowered closure bodies collected while lowering, keyed by parse-order id.
+    /// Each `ExprKind::Closure` lowering registers an entry here and emits an
+    /// `IrExprKind::Closure { id }` node; the accumulated table is attached to
+    /// the `IrModule` at the end of lowering.
+    closures: std::cell::RefCell<Vec<IrClosureDef>>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -6754,6 +6980,7 @@ impl<'a> Lowerer<'a> {
             current_return_type: std::cell::RefCell::new(TypeRef::new("void")),
             try_prelude: std::cell::RefCell::new(Vec::new()),
             next_try_temp: std::cell::Cell::new(0),
+            closures: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -6843,6 +7070,10 @@ impl<'a> Lowerer<'a> {
             .filter(|function| function.is_export)
             .map(|function| function.name.clone())
             .collect();
+        // Every closure body lowered above (across functions and impl methods) was
+        // collected into the accumulator; sort by id for a deterministic module.
+        let mut closures = self.closures.borrow().clone();
+        closures.sort_by_key(|def| def.id);
         Ok(IrModule {
             functions,
             structs,
@@ -6852,6 +7083,7 @@ impl<'a> Lowerer<'a> {
             async_functions,
             extern_functions,
             export_functions,
+            closures,
         })
     }
 
@@ -7527,6 +7759,28 @@ impl<'a> Lowerer<'a> {
             ExprKind::Try(inner) => {
                 let (kind, ty) = self.desugar_try(inner, expr.span, scope)?;
                 (kind, ty)
+            }
+            // Lower a closure literal: lower its body in a child scope that layers
+            // the closure parameters over the enclosing scope, register the lowered
+            // `(param names, body)` in the module's closure table keyed by the
+            // parse-order id, and emit a body-less `Closure { id }` node whose type
+            // is `fn(param types) -> typeof(body)`. This mirrors the semantics
+            // typing so IR types agree with the checker.
+            ExprKind::Closure { id, params, body } => {
+                let mut body_scope = scope.clone();
+                for param in params {
+                    body_scope.insert(param.name.clone(), param.ty.clone());
+                }
+                let lowered_body = self.lower_expr(body, &body_scope)?;
+                let param_types: Vec<TypeRef> =
+                    params.iter().map(|param| param.ty.clone()).collect();
+                let ty = function_type(&param_types, &lowered_body.ty);
+                self.closures.borrow_mut().push(IrClosureDef {
+                    id: *id,
+                    params: params.iter().map(|param| param.name.clone()).collect(),
+                    body: lowered_body,
+                });
+                (IrExprKind::Closure { id: *id }, ty)
             }
         };
 
@@ -8976,6 +9230,7 @@ mod tests {
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
             export_functions: Vec::new(),
+            closures: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: vec![IrParam {
@@ -9012,6 +9267,7 @@ mod tests {
             async_functions: Vec::new(),
             extern_functions: Vec::new(),
             export_functions: Vec::new(),
+            closures: Vec::new(),
             functions: vec![BytecodeFunction {
                 name: "main".to_string(),
                 params: Vec::new(),
@@ -9373,6 +9629,63 @@ mod tests {
         let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
             run_all_backend_variants(source);
         assert_eq!(ast, Value::I64(2));
+        assert_eq!(ir, ast);
+        assert_eq!(bytecode, ast);
+        assert_eq!(optimized_ir, ast);
+        assert_eq!(optimized_bytecode, ast);
+    }
+
+    #[test]
+    fn closure_lowers_to_id_node_and_registers_body_table() {
+        // A closure literal lowers to a body-less `IrExprKind::Closure { id }` node
+        // typed `fn(i64) -> i64`, and its body is registered in the module's
+        // closure table keyed by that id.
+        let source = concat!(
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn main -> i64\n",
+            "    let n i64 = 10\n",
+            "    let add_n fn(i64) -> i64 = fn x i64 -> x + n\n",
+            "    apply(add_n, 5) + add_n(2)\n",
+        );
+        let module = lower_source(source);
+        assert_eq!(module.closures.len(), 1, "one closure body registered");
+        let def = &module.closures[0];
+        assert_eq!(def.params, vec!["x".to_string()]);
+
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main");
+        let IrStmt::Let { value, .. } = &main.body[1] else {
+            panic!("expected the `let add_n` binding");
+        };
+        let IrExprKind::Closure { id } = &value.kind else {
+            panic!("expected a closure node, got {:?}", value.kind);
+        };
+        assert_eq!(*id, def.id, "the node id keys the closure table");
+        assert_eq!(
+            value.ty,
+            function_type(&[TypeRef::new("i64")], &TypeRef::new("i64"))
+        );
+    }
+
+    #[test]
+    fn closure_runs_at_parity_across_all_backend_variants() {
+        // The canonical capture example returns 27 identically on the AST, IR, and
+        // bytecode interpreters plus their optimized variants.
+        let source = concat!(
+            "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+            "    f(v)\n\n",
+            "fn main -> i64\n",
+            "    let n i64 = 10\n",
+            "    let add_n fn(i64) -> i64 = fn x i64 -> x + n\n",
+            "    apply(add_n, 5) + add_n(2)\n",
+        );
+        let (ast, ir, bytecode, optimized_ir, optimized_bytecode) =
+            run_all_backend_variants(source);
+        assert_eq!(ast, Value::I64(27));
         assert_eq!(ir, ast);
         assert_eq!(bytecode, ast);
         assert_eq!(optimized_ir, ast);

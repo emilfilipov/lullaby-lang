@@ -1,0 +1,17 @@
+fn make_adder base i64 -> fn(i64) -> i64
+    fn x i64 -> x + base
+
+fn apply f fn(i64) -> i64 v i64 -> i64
+    f(v)
+
+fn main -> i64
+    let add10 fn(i64) -> i64 = make_adder(10)
+    let add100 fn(i64) -> i64 = make_adder(100)
+    let a i64 = add10(5)
+    let b i64 = apply(add100, 3)
+    let seed i64 = 7
+    let grab fn(i64) -> i64 = fn x i64 -> x + seed
+    let early i64 = grab(1)
+    seed = 1000
+    let late i64 = grab(1)
+    a + b + early + late

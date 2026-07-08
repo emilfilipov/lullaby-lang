@@ -475,6 +475,18 @@ fn render_expr(expr: &Expr) -> String {
         ExprKind::Try(inner) => {
             format!("{}?", render_postfix_target(inner))
         }
+        // Inline closure literal `fn <name type ...> -> <body>`. Parameters render
+        // as `name type` pairs (the top-level `fn` shape); the single-expression
+        // body renders inline after `->`. The body re-parses correctly because a
+        // closure body is `parse_binary(0)`, which stops at a `,`/`)`/newline.
+        ExprKind::Closure { params, body, .. } => {
+            let mut out = String::from("fn");
+            for param in params {
+                out.push_str(&format!(" {} {}", param.name, param.ty.name));
+            }
+            out.push_str(&format!(" -> {}", render_expr(body)));
+            out
+        }
     }
 }
 
