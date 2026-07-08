@@ -25,6 +25,13 @@ From the portable package root:
   (defines `rem` and `is_prime` helpers, a `while` loop, and early `return`).
 - `valid/collatz.lby`: prints Collatz stopping times for a few integers, using
   only integer arithmetic and an even/odd `rem` check.
+- `valid/traffic_light.lby`: a small state machine over an `enum` of lights,
+  with a `match`-based `next` transition and `name` renderer stepped through
+  several cycles.
+- `valid/word_count.lby`: splits a sentence with `split`, counts the words, and
+  derives letter and longest-word stats with a loop.
+- `valid/inventory.lby`: a `map<string, i64>` stock ledger that adjusts a count
+  and looks items up via `match` on the `option` returned by `map_get`.
 - `invalid/int_float_mismatch.lby`: mixes `i64` and `f64` in one expression
   (`let x i64 = 1 + 2.0`); `lullaby check` reports diagnostic `L0307` (operands
   of `+` must share a type) and exits non-zero.
