@@ -22,19 +22,28 @@ valid while unifying byte handling with the integer lattice.
 
 ## Runtime representation (parity strategy)
 
-The dynamic backends (AST runtime, IR interpreter, bytecode VM) **erase integer width at run
-time**, exactly as generics are erased: every integer value is stored in a single
-`Value::Int(i64)` (the existing `Value::I64`, kept as the storage cell) and every float in
-`Value::F64`, with `f32` values stored as an `f64` that is *rounded to `f32` precision* after
-each `f32`-producing operation. The **static type checker** is the source of truth for widths;
-the interpreters apply **width normalization** (masking/truncation for ints, `f32` rounding for
-floats) after each operation so that observable results match a real fixed-width machine.
+The dynamic backends (AST runtime, IR interpreter, bytecode VM) carry a **width/signedness tag on
+each integer value** rather than a separate `Value` variant per width. Concretely, the integer
+cell becomes `Value::Int { value: i64, ty: IntKind }` where `IntKind` encodes width (8/16/32/64)
+and signedness (and `usize`/`isize` map to the 64-bit kinds on the current targets); floats stay
+`Value::F64`, with `f32` tracked by a `FloatKind` tag so its result is *rounded to `f32`
+precision* after each `f32`-producing operation. This is a **runtime-carried type tag**, not full
+static-type threading — it is required because the AST runtime evaluates the parser AST directly
+and has **no per-expression static types** to consult, so the three interpreters must normalize
+from the operands' own tags to stay at parity. (The type checker remains the source of truth for
+*legality*; the runtime tag is the source of truth for *width normalization*.)
 
-This choice keeps the three interpreters light and identical, avoids a combinatorial explosion of
-`Value` variants, and matches the existing erasure philosophy. The **native backend** uses real
-machine widths (a 1-byte `u8`, a 4-byte `i32`, etc.); the **WASM backend** uses `i32`/`i64` with
-the same normalization the interpreters apply. All four must agree bit-for-bit — enforced by the
-parity harness.
+After any operation that can leave the mathematical result outside the operand type's range, the
+result is normalized per the tag (mask + sign/zero-extend for ints; `(x as f32) as f64` for
+`f32`) and re-tagged. Literals, conversions, and annotated bindings set the tag; binary operators
+require matching tags (no implicit width mixing) and propagate that tag to the result.
+
+This keeps the three interpreters identical without a combinatorial explosion of `Value` variants
+(one tagged cell, not twelve). The **native backend** uses real machine widths (a 1-byte `u8`, a
+4-byte `i32`, …); the **WASM backend** uses `i32`/`i64` storage with the same normalization the
+interpreters apply. All four must agree bit-for-bit — enforced by the parity harness. Migration
+note: the existing `Value::I64` becomes `Value::Int { value, ty: i64 }` (a mechanical change with
+a helper constructor), and `byte` values become `IntKind::U8`.
 
 ### Normalization rules
 
