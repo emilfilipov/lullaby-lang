@@ -14,10 +14,10 @@ use lullaby_runtime::{
     Future, IntKind, ProcessResource, ResolvedPlace, RuntimeError, SharedAtomic, SharedMutex,
     SocketResource, Task, Value, apply_compound, asm_interpreter_error, await_future, char_find,
     expect_atomic, expect_chan, expect_future, expect_i64, expect_list, expect_map, expect_mutex,
-    expect_string, expect_task, extern_call_error, get_place, http_exchange, join_task,
-    monotonic_now_nanos, net_err, new_chan, option_value, os_random_bytes, process_exit_code,
-    result_value, scalar_order_keys, set_place, shift_left, shift_right, sleep_millis,
-    value_type_name, wall_now_millis,
+    expect_string, expect_task, extern_call_error, get_place, http_exchange, int_cmp, int_div,
+    join_task, monotonic_now_nanos, net_err, new_chan, option_value, os_random_bytes,
+    process_exit_code, result_value, scalar_order_keys, set_place, shift_left, shift_right,
+    sleep_millis, value_type_name, wall_now_millis,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -3774,8 +3774,14 @@ impl<'a> IrRuntime<'a> {
             "is_lower" => Self::builtin_is_lower(args),
             "byte" => Self::builtin_byte(args),
             "byte_val" => Self::builtin_byte_val(args),
-            "to_i32" => Self::builtin_to_i32(args),
-            "to_u32" => Self::builtin_to_u32(args),
+            "to_i8" => Self::builtin_to_int("to_i8", args, IntKind::I8),
+            "to_i16" => Self::builtin_to_int("to_i16", args, IntKind::I16),
+            "to_i32" => Self::builtin_to_int("to_i32", args, IntKind::I32),
+            "to_u16" => Self::builtin_to_int("to_u16", args, IntKind::U16),
+            "to_u32" => Self::builtin_to_int("to_u32", args, IntKind::U32),
+            "to_u64" => Self::builtin_to_int("to_u64", args, IntKind::U64),
+            "to_isize" => Self::builtin_to_int("to_isize", args, IntKind::Isize),
+            "to_usize" => Self::builtin_to_int("to_usize", args, IntKind::Usize),
             "to_i64" => Self::builtin_to_i64(args),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
@@ -4347,15 +4353,15 @@ impl<'a> IrRuntime<'a> {
                     if r == 0 {
                         Err(RuntimeError::new("L0404", "division by zero"))
                     } else {
-                        Ok(Value::int(l.wrapping_div(r), ty))
+                        Ok(Value::int(int_div(l, r, ty), ty))
                     }
                 }
                 BinaryOp::Equal => Ok(Value::Bool(l == r)),
                 BinaryOp::NotEqual => Ok(Value::Bool(l != r)),
-                BinaryOp::Less => Ok(Value::Bool(l < r)),
-                BinaryOp::LessEqual => Ok(Value::Bool(l <= r)),
-                BinaryOp::Greater => Ok(Value::Bool(l > r)),
-                BinaryOp::GreaterEqual => Ok(Value::Bool(l >= r)),
+                BinaryOp::Less => Ok(Value::Bool(int_cmp(l, r, ty).is_lt())),
+                BinaryOp::LessEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_le())),
+                BinaryOp::Greater => Ok(Value::Bool(int_cmp(l, r, ty).is_gt())),
+                BinaryOp::GreaterEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_ge())),
                 BinaryOp::And | BinaryOp::Or => {
                     unreachable!("logical ops short-circuit in eval_expr")
                 }
@@ -4364,7 +4370,7 @@ impl<'a> IrRuntime<'a> {
                 | BinaryOp::BitXor
                 | BinaryOp::Shl
                 | BinaryOp::Shr => {
-                    unreachable!("bitwise ops on i32/u32 are rejected by semantics")
+                    unreachable!("bitwise ops on fixed-width integers are rejected by semantics")
                 }
             };
         }
@@ -4986,24 +4992,21 @@ impl<'a> IrRuntime<'a> {
         }
     }
 
-    /// `to_i32(x i64) -> i32`: wrapping reinterpret of an `i64` into `i32`.
-    fn builtin_to_i32(args: Vec<Value>) -> Result<Value, RuntimeError> {
+    /// `to_<T>(x i64) -> T`: wrapping reinterpret of an `i64` into fixed-width
+    /// integer `T`; shared by every `to_i8`/`to_i16`/…/`to_usize` conversion.
+    fn builtin_to_int(
+        name: &'static str,
+        args: Vec<Value>,
+        ty: IntKind,
+    ) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
-            .map_err(|args: Vec<Value>| Self::wrong_arity("to_i32", 1, args.len()))?;
-        Ok(Value::int(expect_i64("to_i32", value)?, IntKind::I32))
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        Ok(Value::int(expect_i64(name, value)?, ty))
     }
 
-    /// `to_u32(x i64) -> u32`: wrapping reinterpret of an `i64` into `u32`.
-    fn builtin_to_u32(args: Vec<Value>) -> Result<Value, RuntimeError> {
-        let [value]: [Value; 1] = args
-            .try_into()
-            .map_err(|args: Vec<Value>| Self::wrong_arity("to_u32", 1, args.len()))?;
-        Ok(Value::int(expect_i64("to_u32", value)?, IntKind::U32))
-    }
-
-    /// `to_i64(x) -> i64`: widen an `i32`/`u32` into `i64` (identity on the
-    /// already-normalized cell).
+    /// `to_i64(x) -> i64`: widen a fixed-width integer into `i64` (identity on
+    /// the already-normalized cell).
     fn builtin_to_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -7914,8 +7917,14 @@ impl<'a> Lowerer<'a> {
             | "byte_len" | "mono_now" | "wall_now" | "list_index_of" | "to_i64" => {
                 TypeRef::new("i64")
             }
+            "to_i8" => TypeRef::new("i8"),
+            "to_i16" => TypeRef::new("i16"),
             "to_i32" => TypeRef::new("i32"),
+            "to_u16" => TypeRef::new("u16"),
             "to_u32" => TypeRef::new("u32"),
+            "to_u64" => TypeRef::new("u64"),
+            "to_isize" => TypeRef::new("isize"),
+            "to_usize" => TypeRef::new("usize"),
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`

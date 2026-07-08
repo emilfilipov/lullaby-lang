@@ -16,8 +16,9 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | Type | Meaning |
 |------|---------|
 | `i64` | 64-bit signed integer (the default for integer literals) |
-| `i32` | 32-bit signed integer (wrapping arithmetic; from `to_i32`) |
-| `u32` | 32-bit unsigned integer (wrapping arithmetic; from `to_u32`) |
+| `i8` / `i16` / `i32` | signed fixed-width integers (wrapping; from `to_i8`/`to_i16`/`to_i32`) |
+| `u16` / `u32` / `u64` | unsigned fixed-width integers (wrapping; from `to_u16`/`to_u32`/`to_u64`) |
+| `isize` / `usize` | pointer-sized integers (64-bit on current targets; from `to_isize`/`to_usize`) |
 | `f64` | 64-bit IEEE-754 float (literals contain a `.`) |
 | `bool` | `true` / `false` |
 | `string` | UTF-8 text |
@@ -43,22 +44,29 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `char_from` | `char_from(i i64) -> char` | runtime error on an invalid scalar |
 | `byte` | `byte(i i64) -> byte` | runtime error outside 0–255 |
 | `byte_val` | `byte_val(b byte) -> i64` | |
-| `to_i32` | `to_i32(x i64) -> i32` | wrapping reinterpret into 32-bit signed |
-| `to_u32` | `to_u32(x i64) -> u32` | wrapping reinterpret into 32-bit unsigned |
-| `to_i64` | `to_i64(x) -> i64` | widen an `i32`/`u32` back to `i64` |
+| `to_i8` / `to_i16` / `to_i32` | `to_i<N>(x i64) -> i<N>` | wrapping reinterpret into signed width |
+| `to_u16` / `to_u32` / `to_u64` | `to_u<N>(x i64) -> u<N>` | wrapping reinterpret into unsigned width |
+| `to_isize` / `to_usize` | `to_isize/to_usize(x i64) -> isize/usize` | pointer-sized (64-bit) reinterpret |
+| `to_i64` | `to_i64(x) -> i64` | widen any fixed-width integer back to `i64` |
 
 ### Fixed-width integers
 
-`i32` and `u32` are fixed-width integer types alongside the default `i64`. There
-is **no implicit numeric coercion**: an `i32` never mixes with an `i64` or a
-`u32` in an arithmetic or comparison expression (mixing widths is an `L0307`
-type error). Move between widths explicitly with `to_i32`/`to_u32` (wrapping,
-`i64 → i32`/`u32`) and `to_i64` (widening, `i32`/`u32 → i64`).
+Alongside the default `i64`, Lullaby has the fixed-width integer types `i8`,
+`i16`, `i32`, `u16`, `u32`, `u64`, and the pointer-sized `isize`/`usize`
+(64-bit on the current targets). There is **no implicit numeric coercion**: a
+fixed-width integer never mixes with an `i64` or a different width in one
+arithmetic or comparison expression (mixing widths is an `L0307` type error).
+Move between widths explicitly with the `to_<T>` conversions (wrapping,
+`i64 → T`) and `to_i64` (widening any width back to `i64`; the bit pattern is
+reinterpreted, so a `u64` above `i64::MAX` reads as a negative `i64`).
 
 Arithmetic (`+ - * /`) on a fixed-width integer **wraps** modulo the type width —
-total and deterministic, never a trap. Comparisons respect signedness: the same
-bit pattern reads as a large magnitude for `u32` but as a negative value for
-`i32`. `to_u32(0 - 1)` is `4294967295`; `to_i32(0 - 1)` is `-1`.
+total and deterministic, never a trap. Division and comparison respect
+signedness: the same bit pattern reads as a large magnitude for an unsigned type
+but a negative value for a signed one — `to_u32(0 - 1)` is `4294967295` while
+`to_i32(0 - 1)` is `-1`, and `to_u64(0 - 1) / to_u64(2)` divides on the unsigned
+magnitude. Every backend normalizes at identical points, so results agree
+bit-for-bit.
 
 ## Character classification
 

@@ -135,38 +135,94 @@ impl PartialEq for SharedAtomic {
 
 /// Width/signedness tag for the fixed-width integer lattice carried by
 /// [`Value::Int`]. The stored `i64` cell is always kept normalized to the kind's
-/// range (truncate to width, then sign- or zero-extend), so equality and
-/// ordering of two same-kind values reduce to plain `i64` comparison of the
-/// cells: an `i32` cell sits in `[i32::MIN, i32::MAX]` (signed-correct) and a
-/// `u32` cell in `[0, u32::MAX]` (unsigned-correct). Every dynamic backend
-/// (AST runtime, IR interpreter, bytecode VM) normalizes at the same points so
-/// results agree bit-for-bit.
+/// range (truncate to width, then sign- or zero-extend). Signed kinds sit in
+/// their signed range so plain `i64` ordering is correct; unsigned kinds are
+/// zero-extended, so the ≤32-bit ones also order as `i64`. The 64-bit unsigned
+/// kinds (`u64`/`usize`) can hold values above `i64::MAX`, stored bit-for-bit as
+/// a negative `i64`, so division and ordering consult [`IntKind::is_unsigned`]
+/// and operate on the `u64` reinterpretation. Every dynamic backend (AST
+/// runtime, IR interpreter, bytecode VM) normalizes at the same points so
+/// results agree bit-for-bit; `usize`/`isize` are 64-bit on the current targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntKind {
+    /// Signed 8-bit.
+    I8,
+    /// Signed 16-bit.
+    I16,
     /// Signed 32-bit.
     I32,
+    /// Unsigned 16-bit.
+    U16,
     /// Unsigned 32-bit.
     U32,
+    /// Unsigned 64-bit.
+    U64,
+    /// Pointer-sized signed (64-bit on the current targets).
+    Isize,
+    /// Pointer-sized unsigned (64-bit on the current targets).
+    Usize,
 }
 
 impl IntKind {
     /// The canonical Lullaby type name for this integer kind.
     pub fn type_name(self) -> &'static str {
         match self {
+            IntKind::I8 => "i8",
+            IntKind::I16 => "i16",
             IntKind::I32 => "i32",
+            IntKind::U16 => "u16",
             IntKind::U32 => "u32",
+            IntKind::U64 => "u64",
+            IntKind::Isize => "isize",
+            IntKind::Usize => "usize",
         }
+    }
+
+    /// Whether this kind is unsigned. Division and ordering of unsigned kinds use
+    /// the `u64` reinterpretation of the normalized cell.
+    pub fn is_unsigned(self) -> bool {
+        matches!(
+            self,
+            IntKind::U16 | IntKind::U32 | IntKind::U64 | IntKind::Usize
+        )
     }
 
     /// Normalize a mathematical `i64` result into this kind's range: truncate to
     /// the kind's width, then sign-extend (signed kinds) or zero-extend
     /// (unsigned kinds) back into the `i64` cell. Total and deterministic — this
-    /// is the wrapping default shared by every backend.
+    /// is the wrapping default shared by every backend. The 64-bit kinds occupy
+    /// the whole cell, so normalization is the identity on the bits.
     pub fn normalize(self, value: i64) -> i64 {
         match self {
-            IntKind::I32 => value as i32 as i64,
+            IntKind::I8 => i64::from(value as i8),
+            IntKind::I16 => i64::from(value as i16),
+            IntKind::I32 => i64::from(value as i32),
+            IntKind::U16 => i64::from(value as u16),
             IntKind::U32 => i64::from(value as u32),
+            IntKind::U64 | IntKind::Usize | IntKind::Isize => value,
         }
+    }
+}
+
+/// Signedness-aware quotient of two normalized `i64` cells tagged `ty`; the
+/// caller guarantees a non-zero divisor. Unsigned kinds divide on the `u64`
+/// reinterpretation so 64-bit unsigned values above `i64::MAX` divide correctly.
+pub fn int_div(left: i64, right: i64, ty: IntKind) -> i64 {
+    if ty.is_unsigned() {
+        (left as u64).wrapping_div(right as u64) as i64
+    } else {
+        left.wrapping_div(right)
+    }
+}
+
+/// Signedness-aware ordering of two normalized `i64` cells tagged `ty`. Unsigned
+/// kinds compare on the `u64` reinterpretation (correct for the 64-bit unsigned
+/// kinds whose cells may be negative `i64`s); signed kinds compare as `i64`.
+pub fn int_cmp(left: i64, right: i64, ty: IntKind) -> std::cmp::Ordering {
+    if ty.is_unsigned() {
+        (left as u64).cmp(&(right as u64))
+    } else {
+        left.cmp(&right)
     }
 }
 
@@ -236,11 +292,15 @@ impl fmt::Display for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::I64(value) => write!(formatter, "{value}"),
-            // The cell is normalized, so an unsigned kind prints its magnitude.
-            Self::Int { value, ty } => match ty {
-                IntKind::I32 => write!(formatter, "{value}"),
-                IntKind::U32 => write!(formatter, "{}", *value as u32),
-            },
+            // The cell is normalized, so an unsigned kind prints the unsigned
+            // reinterpretation and a signed kind prints its sign-extended value.
+            Self::Int { value, ty } => {
+                if ty.is_unsigned() {
+                    write!(formatter, "{}", *value as u64)
+                } else {
+                    write!(formatter, "{value}")
+                }
+            }
             Self::F64(value) => write!(formatter, "{value}"),
             Self::Bool(value) => write!(formatter, "{value}"),
             Self::String(value) => write!(formatter, "{value}"),
@@ -1115,8 +1175,14 @@ impl<'a> Runtime<'a> {
             "is_lower" => Self::builtin_is_lower(args),
             "byte" => Self::builtin_byte(args),
             "byte_val" => Self::builtin_byte_val(args),
-            "to_i32" => Self::builtin_to_i32(args),
-            "to_u32" => Self::builtin_to_u32(args),
+            "to_i8" => Self::builtin_to_int("to_i8", args, IntKind::I8),
+            "to_i16" => Self::builtin_to_int("to_i16", args, IntKind::I16),
+            "to_i32" => Self::builtin_to_int("to_i32", args, IntKind::I32),
+            "to_u16" => Self::builtin_to_int("to_u16", args, IntKind::U16),
+            "to_u32" => Self::builtin_to_int("to_u32", args, IntKind::U32),
+            "to_u64" => Self::builtin_to_int("to_u64", args, IntKind::U64),
+            "to_isize" => Self::builtin_to_int("to_isize", args, IntKind::Isize),
+            "to_usize" => Self::builtin_to_int("to_usize", args, IntKind::Usize),
             "to_i64" => Self::builtin_to_i64(args),
             "len" => Self::builtin_len(args),
             "list_new" => Self::builtin_list_new(args),
@@ -2567,15 +2633,15 @@ impl<'a> Runtime<'a> {
                     if r == 0 {
                         Err(RuntimeError::new("L0404", "division by zero"))
                     } else {
-                        Ok(Value::int(l.wrapping_div(r), ty))
+                        Ok(Value::int(int_div(l, r, ty), ty))
                     }
                 }
                 BinaryOp::Equal => Ok(Value::Bool(l == r)),
                 BinaryOp::NotEqual => Ok(Value::Bool(l != r)),
-                BinaryOp::Less => Ok(Value::Bool(l < r)),
-                BinaryOp::LessEqual => Ok(Value::Bool(l <= r)),
-                BinaryOp::Greater => Ok(Value::Bool(l > r)),
-                BinaryOp::GreaterEqual => Ok(Value::Bool(l >= r)),
+                BinaryOp::Less => Ok(Value::Bool(int_cmp(l, r, ty).is_lt())),
+                BinaryOp::LessEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_le())),
+                BinaryOp::Greater => Ok(Value::Bool(int_cmp(l, r, ty).is_gt())),
+                BinaryOp::GreaterEqual => Ok(Value::Bool(int_cmp(l, r, ty).is_ge())),
                 BinaryOp::And | BinaryOp::Or => {
                     unreachable!("logical ops short-circuit in eval_expr")
                 }
@@ -2584,7 +2650,7 @@ impl<'a> Runtime<'a> {
                 | BinaryOp::BitXor
                 | BinaryOp::Shl
                 | BinaryOp::Shr => {
-                    unreachable!("bitwise ops on i32/u32 are rejected by semantics")
+                    unreachable!("bitwise ops on fixed-width integers are rejected by semantics")
                 }
             };
         }
@@ -3196,27 +3262,23 @@ impl<'a> Runtime<'a> {
         })
     }
 
-    /// `to_i32(x i64) -> i32`: reinterpret an `i64` into `i32`, truncating to
-    /// the low 32 bits and sign-extending (the wrapping conversion).
-    fn builtin_to_i32(args: Vec<Value>) -> Result<Value, RuntimeError> {
+    /// `to_<T>(x i64) -> T`: reinterpret an `i64` into fixed-width integer `T`,
+    /// truncating to `T`'s width (the wrapping conversion). Shared by every
+    /// `to_i8`/`to_i16`/`to_i32`/`to_u16`/`to_u32`/`to_u64`/`to_isize`/`to_usize`.
+    fn builtin_to_int(
+        name: &'static str,
+        args: Vec<Value>,
+        ty: IntKind,
+    ) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
-            .map_err(|args: Vec<Value>| Self::wrong_arity("to_i32", 1, args.len()))?;
-        Ok(Value::int(expect_i64("to_i32", value)?, IntKind::I32))
+            .map_err(|args: Vec<Value>| Self::wrong_arity(name, 1, args.len()))?;
+        Ok(Value::int(expect_i64(name, value)?, ty))
     }
 
-    /// `to_u32(x i64) -> u32`: reinterpret an `i64` into `u32`, truncating to
-    /// the low 32 bits (the wrapping conversion).
-    fn builtin_to_u32(args: Vec<Value>) -> Result<Value, RuntimeError> {
-        let [value]: [Value; 1] = args
-            .try_into()
-            .map_err(|args: Vec<Value>| Self::wrong_arity("to_u32", 1, args.len()))?;
-        Ok(Value::int(expect_i64("to_u32", value)?, IntKind::U32))
-    }
-
-    /// `to_i64(x) -> i64`: widen an `i32`/`u32` into `i64`. The cell is already
-    /// normalized (`i32` sign-extended, `u32` zero-extended), so widening is the
-    /// identity on the stored value.
+    /// `to_i64(x) -> i64`: widen a fixed-width integer into `i64`. The cell is
+    /// already normalized (signed kinds sign-extended, unsigned zero-extended),
+    /// so widening is the identity on the stored value.
     fn builtin_to_i64(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [value]: [Value; 1] = args
             .try_into()
@@ -5359,5 +5421,47 @@ mod tests {
             "    unwrap(double_checked(5)) + unwrap(double_checked(-2))\n",
         );
         assert_eq!(run_source(source).expect("run"), Value::I64(7));
+    }
+
+    #[test]
+    fn int_kind_normalize_wraps_each_width() {
+        assert_eq!(IntKind::I8.normalize(128), -128);
+        assert_eq!(IntKind::I16.normalize(32_768), -32_768);
+        assert_eq!(IntKind::I32.normalize(2_147_483_648), -2_147_483_648);
+        assert_eq!(IntKind::U16.normalize(-1), 65_535);
+        assert_eq!(IntKind::U32.normalize(-1), 4_294_967_295);
+        // The 64-bit unsigned kinds fill the cell; normalization keeps the bits.
+        assert_eq!(IntKind::U64.normalize(-1), -1);
+        assert_eq!(IntKind::Usize.normalize(-1), -1);
+    }
+
+    #[test]
+    fn int_div_and_cmp_respect_signedness_at_64_bit() {
+        // `to_u64(0 - 1)` is stored as the bit pattern of -1, i.e. u64::MAX.
+        let umax = IntKind::U64.normalize(-1);
+        // Unsigned division divides on the magnitude, not the signed -1.
+        assert_eq!(int_div(umax, 2, IntKind::U64), (u64::MAX / 2) as i64);
+        // Signed i64-style division of the same bits would be 0 (-1 / 2).
+        assert_eq!(int_div(-1, 2, IntKind::Isize), 0);
+        // Unsigned ordering treats the cell as u64::MAX (greater than 1).
+        assert!(int_cmp(umax, 1, IntKind::U64).is_gt());
+        // Signed ordering of the same bits (-1) is less than 1.
+        assert!(int_cmp(-1, 1, IntKind::Isize).is_lt());
+    }
+
+    #[test]
+    fn runs_unsigned_64_bit_wraparound_end_to_end() {
+        // `to_u64(0 - 1)` is u64::MAX; dividing by 2 uses unsigned semantics, and
+        // `to_i64` reinterprets the resulting bits back into an i64.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let big u64 = to_u64(0 - 1)\n",
+            "    let half u64 = big / to_u64(2)\n",
+            "    to_i64(half)\n",
+        );
+        assert_eq!(
+            run_source(source).expect("run"),
+            Value::I64((u64::MAX / 2) as i64)
+        );
     }
 }

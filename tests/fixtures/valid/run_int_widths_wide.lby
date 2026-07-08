@@ -1,0 +1,34 @@
+# Extended fixed-width integer lattice: i8/i16/u16/u64/isize/usize, including
+# the 64-bit unsigned edge where the normalized cell holds a value above
+# i64::MAX and must divide and compare on its unsigned magnitude. Every backend
+# normalizes identically, so this returns a deterministic i64 (7).
+fn main -> i64
+    let total i64 = 0
+
+    # i8 wraps at its max: 127 + 1 => -128
+    if to_i8(127) + to_i8(1) < to_i8(0)
+        total = total + 1
+
+    # i16 wraps at its max: 32767 + 1 => -32768
+    if to_i16(32767) + to_i16(1) < to_i16(0)
+        total = total + 1
+
+    # u16 subtraction wraps: 0 - 1 => 65535
+    if to_u16(0 - 1) > to_u16(1000)
+        total = total + 1
+
+    # u64 holds values above i64::MAX and compares on the unsigned magnitude
+    if to_u64(0 - 1) > to_u64(1)
+        total = total + 1
+
+    # unsigned 64-bit division divides on the magnitude: 10 / 3 => 3
+    if to_u64(10) / to_u64(3) == to_u64(3)
+        total = total + 1
+
+    # isize/usize are pointer-sized (64-bit); isize is signed, usize unsigned
+    if to_isize(0 - 5) < to_isize(0)
+        total = total + 1
+    if to_usize(0 - 1) > to_usize(0)
+        total = total + 1
+
+    total
