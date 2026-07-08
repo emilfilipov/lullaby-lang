@@ -118,8 +118,9 @@ Invoke the CLI during development with `cargo run -p lullaby_cli -- <command>`
 `lullaby native` require executable source with a zero-argument `main`; invalid
 entry points report `L0329`.
 
-`lullaby native` compiles the i64-scalar subset (plus stack-allocated scalar
-aggregates and a first string-heap step) to an x86-64 Windows COFF object and,
+`lullaby native` compiles the i64-scalar subset (plus the fixed-width integer
+operations within those functions, stack-allocated scalar aggregates, and a
+first string-heap step) to an x86-64 Windows COFF object and,
 best-effort, links it into a runnable `.exe`. `--freestanding` (alias
 `--no-std`) builds a no-C-runtime executable that links `kernel32.lib` only and
 exits through `kernel32!ExitProcess`; it is still a Windows PE, not a bare-metal
