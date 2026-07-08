@@ -1,0 +1,16 @@
+fn is_small x i64 -> bool
+    x < 4
+
+fn main -> i64
+    let base list<i64> = list_new()
+    base = push(base, 1)
+    base = push(base, 2)
+    base = push(base, 3)
+    base = push(base, 4)
+    base = push(base, 5)
+    base = push(base, 6)
+    let smalls list<i64> = list_filter(base, is_small)
+    let bigs list<i64> = list_filter(base, fn x i64 -> x > 3)
+    let sum_small i64 = list_reduce(smalls, 0, fn acc i64 x i64 -> acc + x)
+    let sum_big i64 = list_reduce(bigs, 0, fn acc i64 x i64 -> acc + x)
+    sum_small + sum_big

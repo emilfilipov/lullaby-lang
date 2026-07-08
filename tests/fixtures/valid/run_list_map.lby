@@ -1,0 +1,14 @@
+fn sq x i64 -> i64
+    x * x
+
+fn main -> i64
+    let base list<i64> = list_new()
+    base = push(base, 1)
+    base = push(base, 2)
+    base = push(base, 3)
+    base = push(base, 4)
+    let squared list<i64> = list_map(base, sq)
+    let doubled list<i64> = list_map(base, fn x i64 -> x + x)
+    let sum_sq i64 = list_reduce(squared, 0, fn acc i64 x i64 -> acc + x)
+    let sum_dbl i64 = list_reduce(doubled, 0, fn acc i64 x i64 -> acc + x)
+    sum_sq + sum_dbl
