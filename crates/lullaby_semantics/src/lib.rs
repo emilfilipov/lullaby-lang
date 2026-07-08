@@ -2876,6 +2876,24 @@ impl<'a> Checker<'a> {
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
                 Some(list_type(&element))
             }
+            "sort" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                if element.name != "i64" {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`sort` expects a `list<i64>` but got `list<{}>`",
+                            element.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                }
+                Some(list_type(&element))
+            }
             "concat" => {
                 self.expect_arg_count(name, args, 2, function)?;
                 // `concat` returns `list<T>`, so the outer expected `list<T>`
@@ -6514,6 +6532,29 @@ mod tests {
             "    len(c)\n",
         );
         let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_sort_on_i64_list_and_rejects_other_element_types() {
+        let ok = concat!(
+            "fn main -> i64\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 3)\n",
+            "    len(sort(l))\n",
+        );
+        assert!(validate_source(ok).is_ok(), "{:?}", validate_source(ok));
+
+        let bad = concat!(
+            "fn main -> i64\n",
+            "    let l list<bool> = list_new()\n",
+            "    l = push(l, true)\n",
+            "    len(sort(l))\n",
+        );
+        let diagnostics = validate_source(bad).expect_err("semantic");
         assert!(
             diagnostics.iter().any(|d| d.code == "L0387"),
             "{diagnostics:?}"

@@ -1,0 +1,9 @@
+fn main -> i64
+    let l list<i64> = list_new()
+    l = push(l, 30)
+    l = push(l, 10)
+    l = push(l, 20)
+    l = push(l, 5)
+    let s list<i64> = sort(l)
+    # sorted ascending: [5, 10, 20, 30]
+    get(s, 0) + get(s, 3) + get(s, 1)

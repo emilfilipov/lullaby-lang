@@ -3769,6 +3769,7 @@ impl<'a> IrRuntime<'a> {
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
             "reverse" => Self::builtin_reverse(args),
+            "sort" => Self::builtin_sort(args),
             "concat" => Self::builtin_concat(args),
             "slice" => Self::builtin_slice(args),
             "map_new" => Self::builtin_map_new(args),
@@ -5452,6 +5453,28 @@ impl<'a> IrRuntime<'a> {
         let mut values = expect_list("reverse", list)?;
         values.reverse();
         Ok(Value::Array(values))
+    }
+
+    /// `sort(l list<i64>) -> list<i64>`: a new list sorted ascending.
+    fn builtin_sort(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sort", 1, args.len()))?;
+        let values = expect_list("sort", list)?;
+        let mut nums: Vec<i64> = Vec::with_capacity(values.len());
+        for value in values {
+            match value {
+                Value::I64(n) => nums.push(n),
+                other => {
+                    return Err(RuntimeError::new(
+                        "L0417",
+                        format!("sort expects a list<i64> but found `{other}`"),
+                    ));
+                }
+            }
+        }
+        nums.sort();
+        Ok(Value::Array(nums.into_iter().map(Value::I64).collect()))
     }
 
     /// `concat(a, b) -> list<T>`: a new list with `b`'s elements appended to `a`.
@@ -7401,7 +7424,7 @@ impl<'a> Lowerer<'a> {
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
             // of the same type as their (first) list argument (spelled `list<T>`).
-            "push" | "set" | "pop" | "reverse" | "concat" | "slice" => {
+            "push" | "set" | "pop" | "reverse" | "sort" | "concat" | "slice" => {
                 args.first().map(|list| list.ty.clone()).ok_or_else(|| {
                     IrLoweringError::new(format!("{name} call missing list argument"), Some(span))
                 })?

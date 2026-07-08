@@ -55,6 +55,7 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `reverse` | `reverse(l list<T>) -> list<T>` | elements reversed (returns a new list) |
 | `concat` | `concat(a list<T>, b list<T>) -> list<T>` | `b`'s elements appended to `a` (both lists must have the same element type; returns a new list) |
 | `slice` | `slice(l list<T>, start i64, end i64) -> list<T>` | half-open range `[start, end)`; `start`/`end` are clamped into `[0, len]` and `start >= end` yields an empty list (returns a new list) |
+| `sort` | `sort(l list<i64>) -> list<i64>` | elements sorted ascending (returns a new list; `list<i64>` only) |
 | `map_new` | `map_new() -> map<K, V>` | key/value types inferred from context |
 | `map_set` | `map_set(m map<K, V>, k K, v V) -> map<K, V>` | insert/replace |
 | `map_get` | `map_get(m map<K, V>, k K) -> option<V>` | `some`/`none` |
