@@ -2289,7 +2289,10 @@ fn fold_binary(left: &IrExpr, op: BinaryOp, right: &IrExpr) -> Option<IrExprKind
             IrExprKind::Integer(0),
         ) => None,
         (IrExprKind::Integer(left), BinaryOp::Divide, IrExprKind::Integer(right)) => {
-            Some(IrExprKind::Integer(left / right))
+            // Fold with wrapping semantics so the one signed-overflow case
+            // (`i64::MIN / -1`) yields `i64::MIN` at compile time instead of
+            // panicking, matching the runtime interpreters and native backend.
+            Some(IrExprKind::Integer(left.wrapping_div(*right)))
         }
         (IrExprKind::Integer(left), BinaryOp::Equal, IrExprKind::Integer(right)) => {
             Some(IrExprKind::Bool(left == right))
@@ -4618,7 +4621,9 @@ impl<'a> IrRuntime<'a> {
                 if divisor == 0 {
                     Err(RuntimeError::new("L0404", "division by zero"))
                 } else {
-                    Ok(Value::I64(left.as_i64()? / divisor))
+                    // Wrap `i64::MIN / -1` to `i64::MIN` (rather than panicking),
+                    // matching the AST runtime and the native backend.
+                    Ok(Value::I64(left.as_i64()?.wrapping_div(divisor)))
                 }
             }
             BinaryOp::Equal => Ok(Value::Bool(left == right)),

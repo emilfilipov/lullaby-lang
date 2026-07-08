@@ -2789,8 +2789,7 @@ fn emit_fixed_binop_from_stack(
                 code.extend_from_slice(&[0x48, 0x31, 0xD2]); // xor rdx, rdx
                 code.extend_from_slice(&[0x49, 0xF7, 0xF0]); // div r8
             } else {
-                code.extend_from_slice(&[0x48, 0x99]); // cqo (sign-extend into rdx)
-                code.extend_from_slice(&[0x49, 0xF7, 0xF8]); // idiv r8
+                emit_signed_idiv_r8(code); // guarded against i64::MIN / -1 overflow
             }
             emit_normalize_rax(code, kind);
         }
@@ -2905,8 +2904,7 @@ fn emit_i64_binop_from_stack(code: &mut Vec<u8>, op: BinaryOp) -> Result<(), Str
             code.push(0x59); // pop rcx (left = dividend)
             code.extend_from_slice(&[0x49, 0x89, 0xC0]); // mov r8, rax (divisor)
             code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx (dividend)
-            code.extend_from_slice(&[0x48, 0x99]); // cqo (sign-extend into rdx)
-            code.extend_from_slice(&[0x49, 0xF7, 0xF8]); // idiv r8
+            emit_signed_idiv_r8(code); // guarded against i64::MIN / -1 overflow
         }
         BinaryOp::Equal
         | BinaryOp::NotEqual
@@ -2938,6 +2936,30 @@ fn emit_i64_binop_from_stack(code: &mut Vec<u8>, op: BinaryOp) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// Emit a signed 64-bit division of `rax` (dividend) by `r8` (divisor), leaving
+/// the quotient in `rax`. The plain `idiv` instruction raises a hardware #DE on
+/// the single overflow case `i64::MIN / -1`, whereas the interpreters use
+/// `wrapping_div`, which yields `i64::MIN` for that input (see `int_div` in
+/// `lullaby_runtime`). To match the interpreters bit-for-bit and avoid the trap,
+/// special-case a divisor of `-1`: for any `x`, `x / -1 == -x` under wrapping
+/// (including `i64::MIN / -1 == i64::MIN`, since `neg` of `i64::MIN` wraps to
+/// itself). The caller must guarantee a non-zero divisor (division by zero is
+/// rejected earlier as `L0404`).
+fn emit_signed_idiv_r8(code: &mut Vec<u8>) {
+    // cmp r8, -1
+    code.extend_from_slice(&[0x49, 0x83, 0xF8, 0xFF]);
+    // jne +5  (skip the neg/jmp pair, fall through to cqo/idiv)
+    code.extend_from_slice(&[0x75, 0x05]);
+    // neg rax  (rax = -rax, wrapping; this is x / -1 for the whole i64 range)
+    code.extend_from_slice(&[0x48, 0xF7, 0xD8]);
+    // jmp +5  (skip cqo/idiv)
+    code.extend_from_slice(&[0xEB, 0x05]);
+    // cqo  (sign-extend rax into rdx:rax)
+    code.extend_from_slice(&[0x48, 0x99]);
+    // idiv r8
+    code.extend_from_slice(&[0x49, 0xF7, 0xF8]);
 }
 
 // -- Small instruction helpers -----------------------------------------------
@@ -4504,6 +4526,47 @@ mod native_program_tests {
         assert!(
             text.windows(3).any(|w| w == [0x48, 0xF7, 0xD0]),
             "expected a `not rax` for `~`"
+        );
+    }
+
+    #[test]
+    fn signed_division_guards_min_over_neg_one_overflow() {
+        // `idiv` raises a hardware #DE on `i64::MIN / -1`, but the interpreters
+        // wrap it to `i64::MIN` (`wrapping_div`). Both the plain-`i64` and the
+        // fixed-width signed division paths must emit the wrapping guard —
+        // `cmp r8, -1` (49 83 F8 FF) followed by `neg rax` (48 F7 D8) — so the
+        // native backend matches the interpreters instead of trapping.
+        //
+        // `a / b` is plain i64; `to_isize(a) / to_isize(b)` is the fixed-width
+        // signed (isize) path. Both go through `emit_signed_idiv_r8`.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let a i64 = 0 - 9223372036854775807 - 1\n",
+            "    let b i64 = 0 - 1\n",
+            "    let q64 i64 = a / b\n",
+            "    let qsz isize = to_isize(a) / to_isize(b)\n",
+            "    to_i64(qsz) - q64\n",
+        )))
+        .expect("emit native program");
+        assert_eq!(program.compiled, vec!["main".to_string()]);
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        // Two signed divisions -> two guards. Count `cmp r8, -1` occurrences.
+        let guards = text
+            .windows(4)
+            .filter(|w| *w == [0x49, 0x83, 0xF8, 0xFF])
+            .count();
+        assert_eq!(
+            guards, 2,
+            "expected a `cmp r8, -1` guard before each of the two signed divisions"
+        );
+        assert!(
+            text.windows(3).any(|w| w == [0x48, 0xF7, 0xD8]),
+            "expected a `neg rax` implementing the wrapping `x / -1`"
         );
     }
 
