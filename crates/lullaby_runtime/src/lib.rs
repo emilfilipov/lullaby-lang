@@ -323,6 +323,40 @@ pub fn expect_string(name: &str, value: Value) -> Result<String, RuntimeError> {
 }
 
 /// Unwrap a runtime `Value` expected to be an `i64`, reporting `L0417` otherwise.
+/// The process-global monotonic baseline for `mono_now`. It is initialized on
+/// the first call to [`monotonic_now_nanos`] and never re-initialized, so the
+/// clock is non-decreasing for the whole process. Both interpreters and the
+/// bytecode VM route through this single function, so they observe one shared
+/// baseline regardless of which backend is active.
+static MONOTONIC_BASELINE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Nanoseconds elapsed since the process-global monotonic baseline. The first
+/// call establishes the baseline (returning `0` or a tiny value); every later
+/// call returns a value `>=` all previous ones. Backs the `mono_now` builtin on
+/// every interpreter backend.
+pub fn monotonic_now_nanos() -> i64 {
+    let baseline = MONOTONIC_BASELINE.get_or_init(std::time::Instant::now);
+    baseline.elapsed().as_nanos() as i64
+}
+
+/// Milliseconds since the Unix epoch (wall-clock time). Backs the `wall_now`
+/// builtin. A pre-epoch system clock (rare, misconfigured host) yields the
+/// negated pre-epoch offset so the value stays total and never panics.
+pub fn wall_now_millis() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(delta) => delta.as_millis() as i64,
+        Err(err) => -(err.duration().as_millis() as i64),
+    }
+}
+
+/// Sleep the current thread for `ms` milliseconds. A negative `ms` is treated as
+/// `0` (no sleep, no error), keeping the builtin total. Backs `sleep_millis`.
+pub fn sleep_millis(ms: i64) {
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
+
 pub fn expect_i64(name: &str, value: Value) -> Result<i64, RuntimeError> {
     match value {
         Value::I64(number) => Ok(number),
@@ -891,6 +925,9 @@ impl<'a> Runtime<'a> {
             "console_log" => self.builtin_console_log(args),
             "dom_set_text" => self.builtin_dom_set_text(args),
             "flush" => self.builtin_flush(args),
+            "mono_now" => Self::builtin_mono_now(args),
+            "wall_now" => Self::builtin_wall_now(args),
+            "sleep_millis" => Self::builtin_sleep_millis(args),
             "assert" => Self::builtin_assert(args),
             "to_string" => Self::builtin_to_string(args),
             "char_code" => Self::builtin_char_code(args),
@@ -2353,6 +2390,35 @@ impl<'a> Runtime<'a> {
         std::io::stdout().flush().map_err(|error| {
             RuntimeError::resource("L0419", format!("failed to flush stdout: {error}"))
         })?;
+        Ok(Value::Void)
+    }
+
+    /// `mono_now() -> i64`: nanoseconds since a fixed per-process monotonic
+    /// baseline. Non-decreasing within a run. Shares the baseline with every
+    /// other backend through [`monotonic_now_nanos`].
+    fn builtin_mono_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mono_now", 0, args.len()))?;
+        Ok(Value::I64(monotonic_now_nanos()))
+    }
+
+    /// `wall_now() -> i64`: milliseconds since the Unix epoch (wall-clock time).
+    fn builtin_wall_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("wall_now", 0, args.len()))?;
+        Ok(Value::I64(wall_now_millis()))
+    }
+
+    /// `sleep_millis(ms i64) -> void`: sleep the current thread for `ms`
+    /// milliseconds; a negative `ms` sleeps for zero (no error).
+    fn builtin_sleep_millis(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ms]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sleep_millis", 1, args.len()))?;
+        let ms = expect_i64("sleep_millis", ms)?;
+        sleep_millis(ms);
         Ok(Value::Void)
     }
 

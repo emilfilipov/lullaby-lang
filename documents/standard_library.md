@@ -143,6 +143,20 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   reports `L0415`.
 - System commands: `sys_status(program, args array<string>) -> i64`,
   `sys_output(program, args array<string>) -> string` (no shell).
+- Time and clocks:
+  - `mono_now() -> i64` — a **monotonic** clock reading in **nanoseconds** since a
+    fixed per-process baseline (established on first use). It is guaranteed
+    non-decreasing within a run and is unaffected by wall-clock adjustments, so it
+    is the correct choice for measuring elapsed durations. The absolute value is
+    meaningless; only differences between two readings are.
+  - `wall_now() -> i64` — **wall-clock** time as **milliseconds since the Unix
+    epoch** (1970-01-01 UTC). Use it for timestamps and calendar-facing values;
+    do not use it to measure elapsed time, since the system clock can jump.
+  - `sleep_millis(ms i64) -> void` — sleep the current thread for `ms`
+    milliseconds. A negative `ms` is treated as `0` (no sleep, no error).
+  - These are interpreter/runtime builtins; the native and WebAssembly backends
+    are subsets that do not provide them. Wrong argument types or arities are
+    compile-time semantic diagnostics (`L0312`/`L0313`).
 
 ## Process and environment
 

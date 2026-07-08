@@ -2658,6 +2658,25 @@ impl<'a> Checker<'a> {
                 self.expect_arg_count(name, args, 0, function)?;
                 Some(TypeRef::new("void"))
             }
+            "mono_now" => {
+                // `mono_now() -> i64`: a monotonic clock in nanoseconds since a
+                // fixed per-process baseline. Non-decreasing within a run.
+                self.expect_arg_count(name, args, 0, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "wall_now" => {
+                // `wall_now() -> i64`: wall-clock time as milliseconds since the
+                // Unix epoch.
+                self.expect_arg_count(name, args, 0, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            "sleep_millis" => {
+                // `sleep_millis(ms i64) -> void`: sleep the current thread for
+                // `ms` milliseconds; a negative `ms` sleeps for zero.
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
+                Some(TypeRef::new("void"))
+            }
             "assert" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 let arg_type = self.check_expr(&args[0], scope, function)?;
@@ -5751,6 +5770,28 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0312")
+        );
+    }
+
+    #[test]
+    fn validates_time_builtins() {
+        let source = concat!(
+            "fn main -> void\n",
+            "    let a i64 = mono_now()\n",
+            "    let b i64 = wall_now()\n",
+            "    sleep_millis(0)\n",
+        );
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn catches_sleep_millis_argument_type_mismatch() {
+        let diagnostics =
+            validate_source("fn bad -> void\n    sleep_millis(\"x\")\n").expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0313")
         );
     }
 

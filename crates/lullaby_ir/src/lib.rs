@@ -13,8 +13,9 @@ use lullaby_runtime::{
     Future, ResolvedPlace, RuntimeError, SharedMutex, SocketResource, Task, Value, apply_compound,
     asm_interpreter_error, await_future, char_find, expect_chan, expect_future, expect_i64,
     expect_list, expect_map, expect_mutex, expect_string, expect_task, extern_call_error,
-    get_place, http_exchange, join_task, net_err, new_chan, option_value, result_value,
-    scalar_order_keys, set_place, shift_left, shift_right, value_type_name,
+    get_place, http_exchange, join_task, monotonic_now_nanos, net_err, new_chan, option_value,
+    result_value, scalar_order_keys, set_place, shift_left, shift_right, sleep_millis,
+    value_type_name, wall_now_millis,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -3752,6 +3753,9 @@ impl<'a> IrRuntime<'a> {
             "console_log" => self.builtin_console_log(args),
             "dom_set_text" => self.builtin_dom_set_text(args),
             "flush" => self.builtin_flush(args),
+            "mono_now" => Self::builtin_mono_now(args),
+            "wall_now" => Self::builtin_wall_now(args),
+            "sleep_millis" => Self::builtin_sleep_millis(args),
             "assert" => Self::builtin_assert(args),
             "to_string" => Self::builtin_to_string(args),
             "char_code" => Self::builtin_char_code(args),
@@ -4668,6 +4672,36 @@ impl<'a> IrRuntime<'a> {
         std::io::stdout().flush().map_err(|error| {
             RuntimeError::resource("L0419", format!("failed to flush stdout: {error}"))
         })?;
+        Ok(Value::Void)
+    }
+
+    /// `mono_now() -> i64`: nanoseconds since a fixed per-process monotonic
+    /// baseline. Non-decreasing within a run. Routes through the shared
+    /// `monotonic_now_nanos` baseline so the IR interpreter, the bytecode VM
+    /// (which runs on this interpreter), and the AST runtime agree.
+    fn builtin_mono_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("mono_now", 0, args.len()))?;
+        Ok(Value::I64(monotonic_now_nanos()))
+    }
+
+    /// `wall_now() -> i64`: milliseconds since the Unix epoch (wall-clock time).
+    fn builtin_wall_now(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let []: [Value; 0] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("wall_now", 0, args.len()))?;
+        Ok(Value::I64(wall_now_millis()))
+    }
+
+    /// `sleep_millis(ms i64) -> void`: sleep the current thread for `ms`
+    /// milliseconds; a negative `ms` sleeps for zero (no error).
+    fn builtin_sleep_millis(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ms]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sleep_millis", 1, args.len()))?;
+        let ms = expect_i64("sleep_millis", ms)?;
+        sleep_millis(ms);
         Ok(Value::Void)
     }
 
@@ -6998,8 +7032,10 @@ impl<'a> Lowerer<'a> {
             }
             "store" | "dealloc" | "write_file" | "append_file" | "write_bytes" | "make_dir"
             | "remove_file" | "remove_dir" | "print" | "println" | "warn" | "wasm_log"
-            | "console_log" | "dom_set_text" | "flush" | "assert" | "rc_release" | "ptr_write"
-            | "region_create" | "tcp_close" | "tcp_shutdown" => TypeRef::new("void"),
+            | "console_log" | "dom_set_text" | "flush" | "sleep_millis" | "assert"
+            | "rc_release" | "ptr_write" | "region_create" | "tcp_close" | "tcp_shutdown" => {
+                TypeRef::new("void")
+            }
             // Network builtins report failures as runtime `result` values.
             "tcp_connect" | "tcp_listen" | "tcp_accept" | "udp_bind" => {
                 generic_type("result", &[TypeRef::new("Socket"), TypeRef::new("string")])
@@ -7021,7 +7057,7 @@ impl<'a> Lowerer<'a> {
             "file_exists" | "is_file" | "is_dir" | "contains" | "starts_with" | "ends_with"
             | "map_has" => TypeRef::new("bool"),
             "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
-            | "byte_len" => TypeRef::new("i64"),
+            | "byte_len" | "mono_now" | "wall_now" => TypeRef::new("i64"),
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
             // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
