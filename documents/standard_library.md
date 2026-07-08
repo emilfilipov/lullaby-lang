@@ -80,6 +80,17 @@ conversion (`L0307`): `to_f32(x f64)` rounds to single precision and
 precision, so it loses resolution an `f64` keeps — e.g. `2^24 + 1` rounds back
 to `2^24` in `f32` but is exact in `f64`.
 
+### Typed numeric-literal suffixes
+
+A numeric literal can pin its type directly with a suffix instead of calling a
+conversion: `100i32`, `4000000000u32`, `0xFFu16`, `120i8`, `2.5f32`. The `i64`
+and `f64` suffixes are the defaults (a plain literal is already `i64`/`f64`).
+The literal is **range-checked at parse time** — `256i8` and `100000u16` are
+rejected — and a decimal point with an integer suffix (`1.5i32`) is an error. A
+`u64`/`usize` literal is writable up to `i64::MAX`; larger (still valid) values
+are built with `to_u64`. A suffix never applies to a base-prefixed float form:
+`0xABF32` is the hex integer `0xABF32`, not `0xAB` with an `f32` suffix.
+
 ### Overflow-aware integer arithmetic
 
 The `+ - *` operators on a fixed-width integer wrap by default. When wrapping is

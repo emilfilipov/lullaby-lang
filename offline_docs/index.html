@@ -468,6 +468,33 @@ fn main -> i64
           <li><code>to_i64(x)</code> widens any fixed-width integer back to <code>i64</code>; the bit pattern is reinterpreted, so a <code>u64</code> above <code>i64::MAX</code> reads as a negative <code>i64</code>.</li>
         </ul>
         <p>Arithmetic (<code>+ - * /</code>) on a fixed-width integer <strong>wraps</strong> modulo the type width — total and deterministic, never a trap — and division and comparison respect signedness. The same bit pattern reads as a large magnitude for an unsigned type but a negative value for a signed one: <code>to_u32(0 - 1)</code> is <code>4294967295</code>, while <code>to_i32(0 - 1)</code> is <code>-1</code>, and <code>to_u64(0 - 1) / to_u64(2)</code> divides on the unsigned magnitude. Every backend normalizes at the same points, so results agree bit-for-bit.</p>
+        <h3>Typed numeric-literal suffixes</h3>
+        <p>A numeric literal can pin its type directly with a suffix instead of calling a conversion: <code>100i32</code>, <code>4000000000u32</code>, <code>0xFFu16</code>, <code>120i8</code>, <code>2.5f32</code>. The <code>i64</code>/<code>f64</code> suffixes are the defaults. The literal is <strong>range-checked at parse time</strong> — <code>256i8</code> and <code>100000u16</code> are rejected, and a decimal point with an integer suffix (<code>1.5i32</code>) is an error. A <code>u64</code>/<code>usize</code> literal is writable up to <code>i64::MAX</code>; larger (still valid) values are built with <code>to_u64</code>. A suffix never applies to a base-prefixed float form: <code>0xABF32</code> is the hex integer <code>0xABF32</code>, not <code>0xAB</code> with an <code>f32</code> suffix.</p>
+        <pre data-fixture="tests/fixtures/valid/run_typed_literals.lby" data-mode="run"><code># Typed numeric-literal suffixes: a suffix pins a literal to a fixed-width type
+# directly (range-checked at parse time), desugaring to the matching to_<T>
+# conversion. Deterministic i64 (4000000519) on the AST, IR, and bytecode
+# backends.
+fn main -> i64
+    let a i32 = 100i32
+    let b u32 = 4000000000u32
+    let c i8 = 120i8
+    let d u16 = 0xFFu16
+    let f i64 = 42i64
+
+    # A large u64 literal (writable up to i64::MAX).
+    let g u64 = 9000000000000000000u64
+    let g_flag i64 = 0
+    if g &gt; to_u64(0)
+        g_flag = 1
+
+    # f32 suffix on a decimal literal.
+    let e f32 = 2.5f32
+    let e_flag i64 = 0
+    if e &gt; to_f32(2.0)
+        e_flag = 1
+
+    # 100 + 4000000000 + 120 + 255 + 42 + 1 + 1 = 4000000519
+    to_i64(a) + to_i64(b) + to_i64(c) + to_i64(d) + f + g_flag + e_flag</code></pre>
         <h3>Overflow-aware integer arithmetic</h3>
         <p>The <code>+ - *</code> operators on a fixed-width integer wrap by default. When wrapping is wrong, these builtins give explicit control. Each takes two operands of the <strong>same</strong> fixed-width type <code>T</code> (not <code>i64</code>, whose default arithmetic already traps on overflow):</p>
         <ul>

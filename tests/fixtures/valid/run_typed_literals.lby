@@ -1,0 +1,25 @@
+# Typed numeric-literal suffixes: a suffix pins a literal to a fixed-width type
+# directly (range-checked at parse time), desugaring to the matching to_<T>
+# conversion. Deterministic i64 (4000000519) on the AST, IR, and bytecode
+# backends.
+fn main -> i64
+    let a i32 = 100i32
+    let b u32 = 4000000000u32
+    let c i8 = 120i8
+    let d u16 = 0xFFu16
+    let f i64 = 42i64
+
+    # A large u64 literal (writable up to i64::MAX).
+    let g u64 = 9000000000000000000u64
+    let g_flag i64 = 0
+    if g > to_u64(0)
+        g_flag = 1
+
+    # f32 suffix on a decimal literal.
+    let e f32 = 2.5f32
+    let e_flag i64 = 0
+    if e > to_f32(2.0)
+        e_flag = 1
+
+    # 100 + 4000000000 + 120 + 255 + 42 + 1 + 1 = 4000000519
+    to_i64(a) + to_i64(b) + to_i64(c) + to_i64(d) + f + g_flag + e_flag

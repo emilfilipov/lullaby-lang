@@ -743,6 +743,146 @@ fn parse_radix_literal(value: &str) -> Option<i64> {
     i64::from_str_radix(&cleaned, radix).ok()
 }
 
+/// Recognized typed numeric-literal suffixes, longest first so `usize`/`isize`
+/// are matched before any shorter candidate. `i64`/`f64` are the defaults; the
+/// rest desugar to the corresponding `to_<T>` conversion builtin.
+const NUMBER_SUFFIXES: &[&str] = &[
+    "usize", "isize", "i16", "i32", "i64", "u16", "u32", "u64", "f32", "f64", "i8",
+];
+
+/// True when `s` carries a `0x`/`0b`/`0o` base prefix.
+fn is_radix_prefixed(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 2
+        && bytes[0] == b'0'
+        && matches!(bytes[1], b'x' | b'X' | b'b' | b'B' | b'o' | b'O')
+}
+
+/// The inclusive `[min, max]` range of an integer suffix as `i128`. Returns
+/// `None` for the float suffixes. (The `u64`/`usize` range is the full type
+/// range; a separate writable-literal cap at `i64::MAX` applies when packing the
+/// desugared cell.)
+fn int_suffix_range(suffix: &str) -> Option<(i128, i128)> {
+    Some(match suffix {
+        "i8" => (i128::from(i8::MIN), i128::from(i8::MAX)),
+        "i16" => (i128::from(i16::MIN), i128::from(i16::MAX)),
+        "i32" => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        "i64" | "isize" => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        "u16" => (0, i128::from(u16::MAX)),
+        "u32" => (0, i128::from(u32::MAX)),
+        "u64" | "usize" => (0, i128::from(u64::MAX)),
+        _ => return None,
+    })
+}
+
+/// Parse a (possibly base-prefixed) integer literal body into `i128`. Radix
+/// bodies reuse [`parse_radix_literal`] (values up to `i64::MAX`); decimal bodies
+/// parse the full `i128` range so large `u64`/`usize` literals validate exactly.
+fn literal_base_to_i128(base: &str) -> Option<i128> {
+    if is_radix_prefixed(base) {
+        parse_radix_literal(base).map(i128::from)
+    } else {
+        normalize_number_literal(base)?.parse::<i128>().ok()
+    }
+}
+
+/// Build a `to_<name>(literal)` call expression, the desugaring of a typed
+/// numeric-literal suffix; the synthetic literal argument carries the same span.
+fn conversion_call(name: &str, argument: ExprKind, span: Span) -> ExprKind {
+    ExprKind::Call {
+        name: name.to_string(),
+        args: vec![Expr {
+            kind: argument,
+            span,
+        }],
+    }
+}
+
+/// Turn a `Number` token's text into an expression. A recognized type suffix
+/// (`0u8`… → err, `1i32`, `2.0f32`, `0xFFu16`, …) is range-checked and desugared
+/// to the matching `to_<T>` conversion; `i64`/`f64` suffixes and unsuffixed
+/// literals produce a plain `Integer`/`Float`. Unsigned 64-bit literals above
+/// `i64::MAX` are supported (their `i64` bit pattern is passed to `to_u64`).
+fn parse_number_literal(value: &str, span: Span) -> Result<ExprKind, String> {
+    for &suffix in NUMBER_SUFFIXES {
+        let Some(base) = value.strip_suffix(suffix) else {
+            continue;
+        };
+        if base.is_empty() {
+            continue;
+        }
+        let is_float_suffix = suffix.starts_with('f');
+        // A float suffix never applies to a base-prefixed literal — `0xABF32` is
+        // the hex number 0xABF32, not `0xAB` with an `f32` suffix.
+        if is_float_suffix && is_radix_prefixed(base) {
+            continue;
+        }
+        if is_float_suffix {
+            let normalized = normalize_number_literal(base)
+                .ok_or_else(|| format!("invalid float literal `{value}`"))?;
+            let parsed = normalized
+                .parse::<f64>()
+                .map_err(|_| format!("invalid float literal `{value}`"))?;
+            if suffix == "f64" {
+                return Ok(ExprKind::Float(parsed));
+            }
+            return Ok(conversion_call("to_f32", ExprKind::Float(parsed), span));
+        }
+        // Integer suffix.
+        if base.contains('.') {
+            return Err(format!("integer literal `{value}` must not contain `.`"));
+        }
+        let (min, max) = int_suffix_range(suffix).expect("integer suffix has a range");
+        let magnitude = literal_base_to_i128(base)
+            .ok_or_else(|| format!("invalid integer literal `{value}`"))?;
+        if magnitude < min || magnitude > max {
+            return Err(format!(
+                "integer literal `{value}` is out of range for `{suffix}`"
+            ));
+        }
+        if suffix == "i64" {
+            return Ok(ExprKind::Integer(magnitude as i64));
+        }
+        // The literal is desugared to `to_<T>(<i64>)`, so its magnitude must be
+        // expressible as a non-negative `i64` literal. Every fixed-width value is
+        // — except a `u64`/`usize` above `i64::MAX`, whose cell would be a
+        // negative `i64` that has no round-trippable literal form. Reject those
+        // with a precise pointer to the conversion builtin (the value is valid
+        // for the type, just not writable as a literal).
+        if magnitude > i128::from(i64::MAX) {
+            return Err(format!(
+                "`{suffix}` literal `{value}` exceeds the writable maximum {}; \
+                 build larger `{suffix}` values with `to_{suffix}`",
+                i64::MAX
+            ));
+        }
+        return Ok(conversion_call(
+            &format!("to_{suffix}"),
+            ExprKind::Integer(magnitude as i64),
+            span,
+        ));
+    }
+    // No recognized suffix: base-prefixed integer, else decimal integer or float.
+    if is_radix_prefixed(value) {
+        let parsed = parse_radix_literal(value)
+            .ok_or_else(|| format!("invalid integer literal `{value}`"))?;
+        return Ok(ExprKind::Integer(parsed));
+    }
+    let normalized = normalize_number_literal(value)
+        .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
+    if normalized.contains('.') {
+        let parsed = normalized
+            .parse::<f64>()
+            .map_err(|_| format!("invalid float literal `{value}`"))?;
+        Ok(ExprKind::Float(parsed))
+    } else {
+        let parsed = normalized
+            .parse::<i64>()
+            .map_err(|_| format!("invalid integer literal `{value}`"))?;
+        Ok(ExprKind::Integer(parsed))
+    }
+}
+
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
@@ -2354,32 +2494,10 @@ impl<'a> ExprParser<'a> {
         self.cursor += 1;
         match token.kind {
             TokenKind::Number(value) => {
-                // A `0x`/`0b`/`0o` prefix marks a base-prefixed integer literal
-                // (integer-only, so a `.` or out-of-radix digit is malformed).
-                let kind = if value.len() >= 2
-                    && value.as_bytes()[0] == b'0'
-                    && matches!(value.as_bytes()[1], b'x' | b'X' | b'b' | b'B' | b'o' | b'O')
-                {
-                    let parsed = parse_radix_literal(&value)
-                        .ok_or_else(|| format!("invalid integer literal `{value}`"))?;
-                    ExprKind::Integer(parsed)
-                } else {
-                    // Validate and strip `_` digit separators before parsing.
-                    let normalized = normalize_number_literal(&value)
-                        .ok_or_else(|| format!("invalid numeric literal `{value}`"))?;
-                    // A `.` in the literal marks a floating-point (`f64`) literal.
-                    if normalized.contains('.') {
-                        let parsed = normalized
-                            .parse::<f64>()
-                            .map_err(|_| format!("invalid float literal `{value}`"))?;
-                        ExprKind::Float(parsed)
-                    } else {
-                        let parsed = normalized
-                            .parse::<i64>()
-                            .map_err(|_| format!("invalid integer literal `{value}`"))?;
-                        ExprKind::Integer(parsed)
-                    }
-                };
+                // A recognized type suffix (`1i32`, `2.0f32`, `0xFFu16`, …) is
+                // range-checked and desugared to the matching `to_<T>` conversion;
+                // `i64`/`f64` and unsuffixed literals stay plain `Integer`/`Float`.
+                let kind = parse_number_literal(&value, token.span)?;
                 Ok(Expr {
                     kind,
                     span: token.span,
@@ -3012,6 +3130,84 @@ mod tests {
             panic!("expected expression statement");
         };
         assert!(matches!(expr.kind, ExprKind::Float(value) if (value - 2.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn typed_integer_suffix_desugars_to_conversion_call() {
+        // `100i32` becomes `to_i32(100)`; the plain `i64`/`f64` suffixes stay
+        // literals.
+        let tokens = lex("fn main -> i32\n    100i32\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a conversion call, got {:?}", expr.kind);
+        };
+        assert_eq!(name, "to_i32");
+        assert!(matches!(args[0].kind, ExprKind::Integer(100)));
+
+        // A hex body with an unsigned suffix: `0xFFu16` -> `to_u16(255)`.
+        let tokens = lex("fn main -> u16\n    0xFFu16\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a conversion call");
+        };
+        assert_eq!(name, "to_u16");
+        assert!(matches!(args[0].kind, ExprKind::Integer(255)));
+
+        // `42i64` stays a plain integer (i64 is the default width).
+        let tokens = lex("fn main -> i64\n    42i64\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(matches!(expr.kind, ExprKind::Integer(42)));
+    }
+
+    #[test]
+    fn typed_float_suffix_desugars_and_defaults_stay_literals() {
+        // `2.5f32` -> `to_f32(2.5)`.
+        let tokens = lex("fn main -> f32\n    2.5f32\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        let ExprKind::Call { name, args } = &expr.kind else {
+            panic!("expected a conversion call");
+        };
+        assert_eq!(name, "to_f32");
+        assert!(matches!(args[0].kind, ExprKind::Float(value) if (value - 2.5).abs() < 1e-9));
+
+        // A hex body is never read as an `f32` suffix: `0xABF32` is a hex number.
+        let tokens = lex("fn main -> i64\n    0xABF32\n").expect("lex");
+        let program = parse(&tokens).expect("parse");
+        let Stmt::Expr(expr) = &program.functions[0].body[0] else {
+            panic!("expected expression statement");
+        };
+        assert!(matches!(expr.kind, ExprKind::Integer(0xABF32)));
+    }
+
+    #[test]
+    fn out_of_range_typed_literal_is_rejected() {
+        // 256 does not fit i8; the parser rejects the literal.
+        let tokens = lex("fn main -> i8\n    256i8\n").expect("lex");
+        assert!(parse(&tokens).is_err(), "256i8 must be rejected");
+        // A decimal point is invalid with an integer suffix.
+        let tokens = lex("fn main -> i32\n    1.5i32\n").expect("lex");
+        assert!(parse(&tokens).is_err(), "1.5i32 must be rejected");
+        // A `u64` literal is writable up to i64::MAX; larger values must use
+        // `to_u64` (their i64 cell would be negative, with no literal form).
+        let tokens = lex("fn main -> u64\n    9223372036854775807u64\n").expect("lex");
+        assert!(parse(&tokens).is_ok(), "i64::MAX as u64 must be accepted");
+        let tokens = lex("fn main -> u64\n    9223372036854775808u64\n").expect("lex");
+        assert!(
+            parse(&tokens).is_err(),
+            "a u64 literal above i64::MAX must be rejected"
+        );
     }
 
     #[test]
