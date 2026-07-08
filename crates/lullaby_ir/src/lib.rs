@@ -14,11 +14,11 @@ use lullaby_runtime::{
     ArithOp, Closure, Future, IntKind, OverflowMode, ProcessResource, ResolvedPlace, RuntimeError,
     SharedAtomic, SharedMutex, SocketResource, Task, Value, apply_compound, asm_interpreter_error,
     await_future, char_find, expect_atomic, expect_chan, expect_future, expect_i64, expect_list,
-    expect_map, expect_mutex, expect_string, expect_task, extern_call_error, get_place,
-    http_exchange, int_cmp, int_div, int_shl, int_shr, join_task, monotonic_now_nanos, net_err,
-    new_chan, option_value, os_random_bytes, overflow_arith, process_exit_code, result_value,
-    scalar_order_keys, set_place, shift_left, shift_right, sleep_millis, value_type_name,
-    wall_now_millis,
+    expect_map, expect_mutex, expect_string, expect_task, extern_call_error, gcd_i64, get_place,
+    http_exchange, int_cmp, int_div, int_shl, int_shr, join_task, list_extreme, list_sum_values,
+    monotonic_now_nanos, net_err, new_chan, option_value, os_random_bytes, overflow_arith,
+    process_exit_code, result_value, scalar_order_keys, set_place, shift_left, shift_right,
+    sleep_millis, value_type_name, wall_now_millis,
 };
 use lullaby_semantics::{CheckedProgram, Signature};
 use serde::{Deserialize, Serialize};
@@ -4011,6 +4011,12 @@ impl<'a> IrRuntime<'a> {
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
+            "clamp" => Self::builtin_clamp(args),
+            "sign" => Self::builtin_sign(args),
+            "gcd" => Self::builtin_gcd(args),
+            "list_sum" => Self::builtin_list_sum(args),
+            "list_min" => Self::builtin_list_min(args),
+            "list_max" => Self::builtin_list_max(args),
             "pow" => Self::builtin_pow(args),
             "sqrt" => Self::builtin_sqrt(args),
             "sin" => Self::builtin_unary_f64("sin", args, f64::sin),
@@ -6580,6 +6586,99 @@ impl<'a> IrRuntime<'a> {
         }
     }
 
+    /// `clamp(x, lo, hi) -> T`: `x` limited to `[lo, hi]`; total (for `lo > hi`
+    /// yields `lo`, for f64 NaN `x` returns `x`). Mirrors the AST interpreter.
+    fn builtin_clamp(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [x, lo, hi]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("clamp", 3, args.len()))?;
+        match (x, lo, hi) {
+            (Value::I64(x), Value::I64(lo), Value::I64(hi)) => Ok(Value::I64(if x < lo {
+                lo
+            } else if x > hi {
+                hi
+            } else {
+                x
+            })),
+            (Value::F64(x), Value::F64(lo), Value::F64(hi)) => Ok(Value::F64(if x < lo {
+                lo
+            } else if x > hi {
+                hi
+            } else {
+                x
+            })),
+            (x, lo, hi) => Err(RuntimeError::new(
+                "L0417",
+                format!(
+                    "clamp expects three matching i64 or f64 values but got `{x}`, `{lo}`, and `{hi}`"
+                ),
+            )),
+        }
+    }
+
+    /// `sign(x) -> i64`: `-1`/`0`/`1`; f64 `NaN`/`-0.0` map to `0`.
+    fn builtin_sign(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sign", 1, args.len()))?;
+        match value {
+            Value::I64(n) => Ok(Value::I64(n.signum())),
+            Value::F64(n) => Ok(Value::I64(if n > 0.0 {
+                1
+            } else if n < 0.0 {
+                -1
+            } else {
+                0
+            })),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("sign expects an i64 or f64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `gcd(a, b) -> i64`: non-negative greatest common divisor (total at
+    /// `i64::MIN`; see `gcd_i64`).
+    fn builtin_gcd(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [a, b]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("gcd", 2, args.len()))?;
+        match (a, b) {
+            (Value::I64(a), Value::I64(b)) => Ok(Value::I64(gcd_i64(a, b))),
+            (a, b) => Err(RuntimeError::new(
+                "L0417",
+                format!("gcd expects two i64 values but got `{a}` and `{b}`"),
+            )),
+        }
+    }
+
+    /// `list_sum(l) -> T`: wrapping i64 / f64 sum; empty -> `0`/`0.0`.
+    fn builtin_list_sum(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_sum", 1, args.len()))?;
+        let values = expect_list("list_sum", list)?;
+        list_sum_values("list_sum", values)
+    }
+
+    /// `list_min(l) -> option<T>`: `none` on empty, else `some(minimum)`.
+    fn builtin_list_min(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_min", 1, args.len()))?;
+        let values = expect_list("list_min", list)?;
+        Ok(option_value(list_extreme("list_min", values, false)?))
+    }
+
+    /// `list_max(l) -> option<T>`: `none` on empty, else `some(maximum)`.
+    fn builtin_list_max(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_max", 1, args.len()))?;
+        let values = expect_list("list_max", list)?;
+        Ok(option_value(list_extreme("list_max", values, true)?))
+    }
+
     fn builtin_min(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [left, right]: [Value; 2] = args
             .try_into()
@@ -8301,9 +8400,8 @@ impl<'a> Lowerer<'a> {
             | "map_has" | "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper"
             | "is_lower" | "list_contains" => TypeRef::new("bool"),
             "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
-            | "byte_len" | "mono_now" | "wall_now" | "list_index_of" | "to_i64" => {
-                TypeRef::new("i64")
-            }
+            | "byte_len" | "mono_now" | "wall_now" | "list_index_of" | "to_i64" | "sign"
+            | "gcd" => TypeRef::new("i64"),
             "to_i8" => TypeRef::new("i8"),
             "to_u8" => TypeRef::new("u8"),
             "to_i16" => TypeRef::new("i16"),
@@ -8433,11 +8531,42 @@ impl<'a> Lowerer<'a> {
             // counts, and byte swap all return i64.
             "rotate_left" | "rotate_right" | "count_ones" | "leading_zeros" | "trailing_zeros"
             | "reverse_bytes" => TypeRef::new("i64"),
-            "abs" | "min" | "max" | "pow" => {
+            "abs" | "min" | "max" | "pow" | "clamp" => {
                 let value = args.first().ok_or_else(|| {
                     IrLoweringError::new(format!("{name} call missing argument"), Some(span))
                 })?;
                 TypeRef::new(value.ty.name.clone())
+            }
+            // `list_sum(l)` returns the numeric element type `T` of its `list<T>`.
+            "list_sum" => {
+                let list = args.first().ok_or_else(|| {
+                    IrLoweringError::new("list_sum call missing list argument", Some(span))
+                })?;
+                list.ty
+                    .generic_args("list")
+                    .filter(|args| args.len() == 1)
+                    .map(|mut args| args.remove(0))
+                    .ok_or_else(|| {
+                        IrLoweringError::new("list_sum call argument is not a list", Some(span))
+                    })?
+            }
+            // `list_min(l)` / `list_max(l)` return `option<T>` over a `list<T>`.
+            "list_min" | "list_max" => {
+                let list = args.first().ok_or_else(|| {
+                    IrLoweringError::new(format!("{name} call missing list argument"), Some(span))
+                })?;
+                let element = list
+                    .ty
+                    .generic_args("list")
+                    .filter(|args| args.len() == 1)
+                    .map(|mut args| args.remove(0))
+                    .ok_or_else(|| {
+                        IrLoweringError::new(
+                            format!("{name} call argument is not a list"),
+                            Some(span),
+                        )
+                    })?;
+                generic_type("option", std::slice::from_ref(&element))
             }
             "rc_new" => {
                 let value = args.first().ok_or_else(|| {

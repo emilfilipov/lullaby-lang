@@ -1,0 +1,17 @@
+fn main -> i64
+    # i64 clamp: below range, in range, above range.
+    let below i64 = clamp(2, 5, 10)
+    let inside i64 = clamp(7, 5, 10)
+    let above i64 = clamp(20, 5, 10)
+    # Degenerate range (lo > hi) yields lo.
+    let degenerate i64 = clamp(7, 10, 5)
+    # f64 clamp: verify the branches against known f64 bounds.
+    let f_below f64 = clamp(1.0, 3.0, 8.0)
+    let f_above f64 = clamp(9.0, 3.0, 8.0)
+    let f_ok i64 = 0
+    if f_below == 3.0
+        f_ok = f_ok + 1
+    if f_above == 8.0
+        f_ok = f_ok + 1
+    # 5 + 7 + 10 + 10 + 2 = 34
+    below + inside + above + degenerate + f_ok

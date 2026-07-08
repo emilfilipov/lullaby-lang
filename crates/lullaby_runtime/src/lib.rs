@@ -849,6 +849,123 @@ pub fn option_value(payload: Option<Value>) -> Value {
     }
 }
 
+/// Greatest common divisor of two `i64` values, over their absolute values.
+///
+/// Total on every input: `gcd(0, 0) == 0`, `gcd(0, n) == |n|`, and the result
+/// is always non-negative. `i64::MIN.abs()` overflows, so absolute values are
+/// taken in the wider `i128` domain and the Euclidean loop runs there before the
+/// (always in-range) result is narrowed back to `i64`.
+pub fn gcd_i64(a: i64, b: i64) -> i64 {
+    let mut x = (a as i128).unsigned_abs();
+    let mut y = (b as i128).unsigned_abs();
+    while y != 0 {
+        let r = x % y;
+        x = y;
+        y = r;
+    }
+    // `x` is bounded by `max(|a|, |b|) <= 2^63`, so `2^63` (the `i64::MIN` case)
+    // is the only value that would not fit; but it can only appear when the
+    // other operand is `0`, and `gcd(0, i64::MIN) == 2^63` overflows `i64`. Wrap
+    // that single case to `i64::MIN` (its own magnitude) to stay total.
+    x as i64
+}
+
+/// Sum the elements of a numeric list. `list<i64>` sums with wrapping
+/// arithmetic (matching the interpreter's `+`), `list<f64>` sums as f64. An
+/// empty list yields `0`/`0.0` (defaulting to `i64` `0`, which the semantic
+/// type check pins to the element type). A non-numeric element is a runtime
+/// type error (`L0417`).
+pub fn list_sum_values(name: &str, values: Vec<Value>) -> Result<Value, RuntimeError> {
+    let mut iter = values.into_iter();
+    let Some(first) = iter.next() else {
+        return Ok(Value::I64(0));
+    };
+    match first {
+        Value::I64(mut acc) => {
+            for value in iter {
+                match value {
+                    Value::I64(n) => acc = acc.wrapping_add(n),
+                    other => return Err(mixed_numeric_list_error(name, &other)),
+                }
+            }
+            Ok(Value::I64(acc))
+        }
+        Value::F64(mut acc) => {
+            for value in iter {
+                match value {
+                    Value::F64(n) => acc += n,
+                    other => return Err(mixed_numeric_list_error(name, &other)),
+                }
+            }
+            Ok(Value::F64(acc))
+        }
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a list<i64> or list<f64> but found `{other}`"),
+        )),
+    }
+}
+
+/// Find the extreme (min when `want_max` is false, max otherwise) element of a
+/// numeric list, returning `None` for an empty list. f64 comparisons use total
+/// ordering so `NaN` participates deterministically. A non-numeric or mixed
+/// element is a runtime type error (`L0417`).
+pub fn list_extreme(
+    name: &str,
+    values: Vec<Value>,
+    want_max: bool,
+) -> Result<Option<Value>, RuntimeError> {
+    let mut iter = values.into_iter();
+    let Some(first) = iter.next() else {
+        return Ok(None);
+    };
+    match first {
+        Value::I64(mut best) => {
+            for value in iter {
+                match value {
+                    Value::I64(n) => {
+                        if (want_max && n > best) || (!want_max && n < best) {
+                            best = n;
+                        }
+                    }
+                    other => return Err(mixed_numeric_list_error(name, &other)),
+                }
+            }
+            Ok(Some(Value::I64(best)))
+        }
+        Value::F64(mut best) => {
+            for value in iter {
+                match value {
+                    Value::F64(n) => {
+                        let ordering = n.total_cmp(&best);
+                        let replace = if want_max {
+                            ordering == std::cmp::Ordering::Greater
+                        } else {
+                            ordering == std::cmp::Ordering::Less
+                        };
+                        if replace {
+                            best = n;
+                        }
+                    }
+                    other => return Err(mixed_numeric_list_error(name, &other)),
+                }
+            }
+            Ok(Some(Value::F64(best)))
+        }
+        other => Err(RuntimeError::new(
+            "L0417",
+            format!("{name} expects a list<i64> or list<f64> but found `{other}`"),
+        )),
+    }
+}
+
+fn mixed_numeric_list_error(name: &str, value: &Value) -> RuntimeError {
+    RuntimeError::new(
+        "L0417",
+        format!("{name} expects a homogeneous numeric list but found `{value}`"),
+    )
+}
+
 /// Build a `result<T, E>` runtime value using the shared `Value::Enum` result
 /// representation (`ok(v)` or `err(e)`).
 pub fn result_value(payload: Result<Value, Value>) -> Value {
@@ -1577,6 +1694,12 @@ impl<'a> Runtime<'a> {
             "abs" => Self::builtin_abs(args),
             "min" => Self::builtin_min(args),
             "max" => Self::builtin_max(args),
+            "clamp" => Self::builtin_clamp(args),
+            "sign" => Self::builtin_sign(args),
+            "gcd" => Self::builtin_gcd(args),
+            "list_sum" => Self::builtin_list_sum(args),
+            "list_min" => Self::builtin_list_min(args),
+            "list_max" => Self::builtin_list_max(args),
             "pow" => Self::builtin_pow(args),
             "sqrt" => Self::builtin_sqrt(args),
             "floor" => Self::builtin_floor(args),
@@ -4291,6 +4414,102 @@ impl<'a> Runtime<'a> {
         }
     }
 
+    /// `clamp(x, lo, hi) -> T`: `x` limited to `[lo, hi]`. Total on every input:
+    /// for `lo > hi` it yields `lo`, and for an f64 NaN `x` it returns `x`
+    /// unchanged.
+    fn builtin_clamp(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [x, lo, hi]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("clamp", 3, args.len()))?;
+        match (x, lo, hi) {
+            (Value::I64(x), Value::I64(lo), Value::I64(hi)) => Ok(Value::I64(if x < lo {
+                lo
+            } else if x > hi {
+                hi
+            } else {
+                x
+            })),
+            (Value::F64(x), Value::F64(lo), Value::F64(hi)) => Ok(Value::F64(if x < lo {
+                lo
+            } else if x > hi {
+                hi
+            } else {
+                x
+            })),
+            (x, lo, hi) => Err(RuntimeError::new(
+                "L0417",
+                format!(
+                    "clamp expects three matching i64 or f64 values but got `{x}`, `{lo}`, and `{hi}`"
+                ),
+            )),
+        }
+    }
+
+    /// `sign(x) -> i64`: `-1`/`0`/`1` for negative/zero/positive. For f64, `NaN`
+    /// and `-0.0` both map to `0`. Always returns `i64`.
+    fn builtin_sign(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("sign", 1, args.len()))?;
+        match value {
+            Value::I64(n) => Ok(Value::I64(n.signum())),
+            Value::F64(n) => Ok(Value::I64(if n > 0.0 {
+                1
+            } else if n < 0.0 {
+                -1
+            } else {
+                0
+            })),
+            other => Err(RuntimeError::new(
+                "L0417",
+                format!("sign expects an i64 or f64 but got `{other}`"),
+            )),
+        }
+    }
+
+    /// `gcd(a, b) -> i64`: non-negative greatest common divisor of the absolute
+    /// values (see `gcd_i64`, which is total even at `i64::MIN`).
+    fn builtin_gcd(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [a, b]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("gcd", 2, args.len()))?;
+        match (a, b) {
+            (Value::I64(a), Value::I64(b)) => Ok(Value::I64(gcd_i64(a, b))),
+            (a, b) => Err(RuntimeError::new(
+                "L0417",
+                format!("gcd expects two i64 values but got `{a}` and `{b}`"),
+            )),
+        }
+    }
+
+    /// `list_sum(l) -> T`: the sum of a `list<i64>` (wrapping, matching `+`) or a
+    /// `list<f64>`. An empty list yields `0`/`0.0`.
+    fn builtin_list_sum(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_sum", 1, args.len()))?;
+        let values = expect_list("list_sum", list)?;
+        list_sum_values("list_sum", values)
+    }
+
+    /// `list_min(l) -> option<T>`: `none` on empty, else `some(minimum)`.
+    fn builtin_list_min(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_min", 1, args.len()))?;
+        let values = expect_list("list_min", list)?;
+        Ok(option_value(list_extreme("list_min", values, false)?))
+    }
+
+    /// `list_max(l) -> option<T>`: `none` on empty, else `some(maximum)`.
+    fn builtin_list_max(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("list_max", 1, args.len()))?;
+        let values = expect_list("list_max", list)?;
+        Ok(option_value(list_extreme("list_max", values, true)?))
+    }
+
     fn builtin_min(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [left, right]: [Value; 2] = args
             .try_into()
@@ -6046,6 +6265,60 @@ mod tests {
         )
         .expect("wrapping_add");
         assert_eq!(wrap, Value::int(0, IntKind::U32));
+    }
+
+    #[test]
+    fn gcd_is_total_and_non_negative() {
+        assert_eq!(gcd_i64(0, 0), 0);
+        assert_eq!(gcd_i64(0, 7), 7);
+        assert_eq!(gcd_i64(7, 0), 7);
+        assert_eq!(gcd_i64(12, 18), 6);
+        assert_eq!(gcd_i64(-12, 18), 6);
+        assert_eq!(gcd_i64(-12, -18), 6);
+        assert_eq!(gcd_i64(21, 14), 7);
+        // Coprime -> 1.
+        assert_eq!(gcd_i64(17, 4), 1);
+        // `i64::MIN` must not panic; |MIN| shares the value 2^63 whose divisors
+        // give a positive result with a positive operand, and `gcd(MIN, 0)`
+        // wraps its own magnitude back to `i64::MIN` (documented total edge).
+        assert_eq!(gcd_i64(i64::MIN, 4), 4);
+        assert_eq!(gcd_i64(i64::MIN, i64::MIN), i64::MIN);
+        assert_eq!(gcd_i64(i64::MIN, 0), i64::MIN);
+    }
+
+    #[test]
+    fn list_sum_and_extreme_helpers() {
+        // Empty list sums to 0 and has no extreme.
+        assert_eq!(list_sum_values("t", vec![]).unwrap(), Value::I64(0));
+        assert_eq!(list_extreme("t", vec![], false).unwrap(), None);
+        assert_eq!(list_extreme("t", vec![], true).unwrap(), None);
+        // i64 list.
+        let ints = vec![Value::I64(3), Value::I64(9), Value::I64(1), Value::I64(7)];
+        assert_eq!(list_sum_values("t", ints.clone()).unwrap(), Value::I64(20));
+        assert_eq!(
+            list_extreme("t", ints.clone(), false).unwrap(),
+            Some(Value::I64(1))
+        );
+        assert_eq!(list_extreme("t", ints, true).unwrap(), Some(Value::I64(9)));
+        // Wrapping i64 sum matches `+` (i64::MAX + 1 -> i64::MIN).
+        let wrap = vec![Value::I64(i64::MAX), Value::I64(1)];
+        assert_eq!(list_sum_values("t", wrap).unwrap(), Value::I64(i64::MIN));
+        // f64 list.
+        let floats = vec![Value::F64(1.5), Value::F64(0.5), Value::F64(3.0)];
+        assert_eq!(
+            list_sum_values("t", floats.clone()).unwrap(),
+            Value::F64(5.0)
+        );
+        assert_eq!(
+            list_extreme("t", floats.clone(), false).unwrap(),
+            Some(Value::F64(0.5))
+        );
+        assert_eq!(
+            list_extreme("t", floats, true).unwrap(),
+            Some(Value::F64(3.0))
+        );
+        // A non-numeric element is a runtime type error.
+        assert!(list_sum_values("t", vec![Value::Bool(true)]).is_err());
     }
 
     #[test]
