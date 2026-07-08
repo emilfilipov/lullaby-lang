@@ -3743,6 +3743,9 @@ impl<'a> IrRuntime<'a> {
             "get" => Self::builtin_get(args),
             "set" => Self::builtin_set(args),
             "pop" => Self::builtin_pop(args),
+            "reverse" => Self::builtin_reverse(args),
+            "concat" => Self::builtin_concat(args),
+            "slice" => Self::builtin_slice(args),
             "map_new" => Self::builtin_map_new(args),
             "map_set" => Self::builtin_map_set(args),
             "map_get" => Self::builtin_map_get(args),
@@ -5339,6 +5342,45 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::Array(values))
     }
 
+    /// `reverse(l) -> list<T>`: a new list with the elements reversed.
+    fn builtin_reverse(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("reverse", 1, args.len()))?;
+        let mut values = expect_list("reverse", list)?;
+        values.reverse();
+        Ok(Value::Array(values))
+    }
+
+    /// `concat(a, b) -> list<T>`: a new list with `b`'s elements appended to `a`.
+    fn builtin_concat(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [a, b]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("concat", 2, args.len()))?;
+        let mut values = expect_list("concat", a)?;
+        let mut rest = expect_list("concat", b)?;
+        values.append(&mut rest);
+        Ok(Value::Array(values))
+    }
+
+    /// `slice(l, start, end) -> list<T>`: the half-open range `[start, end)`,
+    /// with `start`/`end` clamped into `[0, len]` (so it is always total).
+    fn builtin_slice(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [list, start, end]: [Value; 3] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("slice", 3, args.len()))?;
+        let values = expect_list("slice", list)?;
+        let start = expect_i64("slice", start)?;
+        let end = expect_i64("slice", end)?;
+        let len = values.len() as i64;
+        let start = start.clamp(0, len) as usize;
+        let end = end.clamp(0, len) as usize;
+        if start >= end {
+            return Ok(Value::Array(Vec::new()));
+        }
+        Ok(Value::Array(values[start..end].to_vec()))
+    }
+
     /// `map_new() -> map<K, V>`: a fresh empty map.
     fn builtin_map_new(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let []: [Value; 0] = args
@@ -6895,9 +6937,9 @@ impl<'a> Lowerer<'a> {
             }
             "char_from" => TypeRef::new("char"),
             "byte" => TypeRef::new("byte"),
-            // `push`/`set`/`pop` return a new `list<T>` of the same type as their
-            // list argument (already spelled `list<T>`).
-            "push" | "set" | "pop" => {
+            // `push`/`set`/`pop`/`reverse`/`concat`/`slice` return a new `list<T>`
+            // of the same type as their (first) list argument (spelled `list<T>`).
+            "push" | "set" | "pop" | "reverse" | "concat" | "slice" => {
                 args.first().map(|list| list.ty.clone()).ok_or_else(|| {
                     IrLoweringError::new(format!("{name} call missing list argument"), Some(span))
                 })?

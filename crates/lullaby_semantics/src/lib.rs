@@ -2736,6 +2736,48 @@ impl<'a> Checker<'a> {
                 let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
                 Some(list_type(&element))
             }
+            "reverse" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                Some(list_type(&element))
+            }
+            "concat" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                // `concat` returns `list<T>`, so the outer expected `list<T>`
+                // flows into the first list argument (inferring a nested
+                // `list_new()`); the resolved element type then flows into `b`.
+                let a_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &a_ty, args[0].span, function)?;
+                let b_ty = self.check_expr_expected(
+                    &args[1],
+                    Some(&list_type(&element)),
+                    scope,
+                    function,
+                )?;
+                let b_element = self.expect_list_arg(name, &b_ty, args[1].span, function)?;
+                if b_element != element {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0387",
+                        format!(
+                            "`concat` requires both lists to have the same element type, but got `{}` and `{}`",
+                            element.name, b_element.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(list_type(&element))
+            }
+            "slice" => {
+                self.expect_arg_count(name, args, 3, function)?;
+                let list_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
+                let element = self.expect_list_arg(name, &list_ty, args[0].span, function)?;
+                self.expect_arg_type(name, 2, &args[1], "i64", scope, function)?;
+                self.expect_arg_type(name, 3, &args[2], "i64", scope, function)?;
+                Some(list_type(&element))
+            }
             "map_set" => {
                 self.expect_arg_count(name, args, 3, function)?;
                 // `map_set` returns `map<K, V>`, so the outer expected `map<K, V>`
@@ -6043,6 +6085,43 @@ mod tests {
             "    let l list<i64> = list_new()\n",
             "    l = push(l, true)\n",
             "    0\n",
+        );
+        let diagnostics = validate_source(source).expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0387"),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_list_ext_builtins() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let l list<i64> = list_new()\n",
+            "    l = push(l, 10)\n",
+            "    l = push(l, 20)\n",
+            "    let r list<i64> = reverse(l)\n",
+            "    let both list<i64> = concat(l, r)\n",
+            "    let mid list<i64> = slice(both, 1, 3)\n",
+            "    len(both) + len(mid)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_concat_element_type_mismatch() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a list<i64> = list_new()\n",
+            "    a = push(a, 1)\n",
+            "    let b list<bool> = list_new()\n",
+            "    b = push(b, true)\n",
+            "    let c list<i64> = concat(a, b)\n",
+            "    len(c)\n",
         );
         let diagnostics = validate_source(source).expect_err("semantic");
         assert!(
