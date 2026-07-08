@@ -48,6 +48,19 @@
 //!   `option<T>`/`result<T, E>` when `T`/`E` are scalar, and user enums whose every
 //!   variant payload is scalar.
 //!
+//! Aggregates cross function boundaries as values. A `struct`, fixed `array`, or
+//! supported `enum` may be a parameter, a return value, or a call argument: at the
+//! WASM level the `i32` pointer is passed/returned directly. To preserve Lullaby
+//! value semantics (an aggregate passed by value is an independent snapshot — a
+//! callee mutating its parameter must not change the caller's copy), a MUTABLE
+//! aggregate argument is **deep-copied at the call site** before the call: a fresh
+//! record is `__alloc`'d and every word is copied, recursing into nested mutable
+//! aggregate fields/elements, exactly mirroring the interpreters' recursive
+//! `Value::clone`. A `string` argument is NOT copied — strings are immutable, so
+//! sharing the pointer is already value-equivalent. A returned aggregate is the
+//! callee's own fresh record, so no extra copy is needed. Enum payloads are always
+//! scalar (see `enum_layout`), so an enum copy is a flat word copy.
+//!
 //! A function that uses a different builtin, `list`/`map`, an enum with a HEAP
 //! payload (`string`/`list`/`array`/`map` — notably `result<i64, string>`), or any
 //! type still outside this set is SKIPPED with a reason (it still runs on the
@@ -366,6 +379,34 @@ fn is_pointer_type(
 ) -> bool {
     if ty.name == "string" {
         return true;
+    }
+    if structs.contains_key(&ty.name) {
+        return true;
+    }
+    if enum_layout(ty, enums).is_some() {
+        return true;
+    }
+    if let Some(elem) = ty.array_element() {
+        return slot_val_type(&elem, structs, enums).is_some();
+    }
+    false
+}
+
+/// Whether `ty` is a MUTABLE aggregate whose value semantics require a
+/// snapshotting deep copy when it crosses a call boundary: a named `struct`, a
+/// fixed `array`, or a supported `enum` (`option`/`result`/user enum with scalar
+/// payloads). A `string` is a pointer too but is immutable in Lullaby, so sharing
+/// its pointer is semantically identical to the interpreters' `Value::String`
+/// clone (no callee can mutate it); scalars need no copy at all. This is the set
+/// of argument types the call lowering deep-copies (see [`emit_deep_copy`]) so a
+/// callee mutating its parameter cannot alter the caller's copy.
+fn is_mutable_aggregate(
+    ty: &TypeRef,
+    structs: &HashMap<String, Vec<(String, TypeRef)>>,
+    enums: &HashMap<String, IrEnumDef>,
+) -> bool {
+    if ty.name == "string" {
+        return false;
     }
     if structs.contains_key(&ty.name) {
         return true;
@@ -1565,6 +1606,17 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &IrExpr, out: &mut Vec<u8>) -> Result<()
             })?;
             for arg in args {
                 lower_expr(ctx, arg, out)?;
+                // Preserve Lullaby value semantics across the call boundary: an
+                // aggregate is an `i32` pointer, so passing it raw would let the
+                // callee mutate the caller's record through a shared pointer. A
+                // mutable aggregate argument (struct/array/enum — never an
+                // immutable `string`) is deep-copied into a fresh record here, so
+                // the callee receives an independent snapshot exactly like the
+                // interpreters clone the argument value. A returned aggregate is
+                // the callee's own fresh record, so no copy is needed there.
+                if is_mutable_aggregate(&arg.ty, ctx.structs, ctx.enums) {
+                    emit_deep_copy(ctx, &arg.ty, out)?;
+                }
             }
             out.push(0x10); // call
             write_uleb(out, index as u64);
@@ -2011,6 +2063,240 @@ fn alloc_bytes(ctx: &mut LowerCtx, size: i32, out: &mut Vec<u8>) -> u32 {
     let ptr = ctx.add_local(WasmValType::I32);
     set_local(out, ptr);
     ptr
+}
+
+/// Deep-copy the aggregate whose pointer is on top of the stack, leaving a fresh,
+/// independent record's pointer on the stack. This is the WASM realization of the
+/// interpreters' recursive `Value::clone` on a struct/array/enum: a snapshot whose
+/// mutation cannot be observed through the original pointer.
+///
+/// - A `struct` copies each field slot; a scalar/string slot is copied word-for-
+///   word, and a nested MUTABLE aggregate slot (struct/array/enum) is itself
+///   deep-copied so nested mutation stays isolated too.
+/// - A fixed `array` reads its `[len]` header, allocates a fresh `[len][slots]`
+///   block, and copies each element in a runtime loop (deep-copying nested
+///   aggregate elements).
+/// - An `enum` copies its `[tag][payload slots]` record word-for-word: enum
+///   payloads are always scalar (see [`enum_layout`]), so no nested aggregate can
+///   hide inside, and a flat copy of the whole record is an exact deep copy.
+///
+/// `ty` must be a mutable aggregate ([`is_mutable_aggregate`]); the caller checks
+/// this before invoking. An `i32`-pointer source, an `i32`-pointer result.
+fn emit_deep_copy(ctx: &mut LowerCtx, ty: &TypeRef, out: &mut Vec<u8>) -> Result<(), String> {
+    if ctx.structs.contains_key(&ty.name) {
+        return emit_deep_copy_struct(ctx, ty, out);
+    }
+    if let Some(layout) = ctx.enum_layout(ty) {
+        return emit_deep_copy_enum(ctx, &layout, out);
+    }
+    if ty.array_element().is_some() {
+        return emit_deep_copy_array(ctx, ty, out);
+    }
+    Err(format!(
+        "cannot deep-copy non-aggregate type `{}` (wasm backend)",
+        ty.name
+    ))
+}
+
+/// Deep-copy a struct: the source pointer is on the stack. Allocate a fresh run of
+/// one 8-byte slot per field, copy each field (deep-copying nested mutable
+/// aggregate fields), and leave the fresh pointer on the stack.
+fn emit_deep_copy_struct(
+    ctx: &mut LowerCtx,
+    ty: &TypeRef,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let fields = ctx
+        .structs
+        .get(&ty.name)
+        .ok_or_else(|| format!("`{}` is not a struct", ty.name))?
+        .clone();
+    // Stash the source pointer; allocate the destination.
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    let dst = alloc_bytes(ctx, fields.len() as i32 * SLOT_SIZE, out);
+    for (slot, (_, field_ty)) in fields.iter().enumerate() {
+        let offset = slot as i32 * SLOT_SIZE;
+        emit_copy_slot(ctx, field_ty, src, dst, offset, out)?;
+    }
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Deep-copy an enum: the source pointer is on the stack. Enum payloads are always
+/// scalar (see [`enum_layout`]), so the `[tag][payload slots]` record contains no
+/// nested aggregate pointer; copying every 8-byte word of `size_bytes()` (the tag,
+/// padded to a slot, plus each payload slot) is an exact deep copy. Leaves the
+/// fresh pointer on the stack.
+fn emit_deep_copy_enum(
+    ctx: &mut LowerCtx,
+    layout: &EnumLayout,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    let dst = alloc_bytes(ctx, layout.size_bytes(), out);
+    // The record is `size_bytes()` bytes = one padded tag slot + slot_count payload
+    // slots, every one 8-byte aligned. Copy word by word with i64 loads/stores.
+    let words = layout.size_bytes() / SLOT_SIZE;
+    for word in 0..words {
+        let offset = word * SLOT_SIZE;
+        get_local(out, dst);
+        get_local(out, src);
+        emit_load_at(WasmValType::I64, offset, out);
+        emit_store_at(WasmValType::I64, offset, out);
+    }
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Deep-copy a fixed array: the source pointer is on the stack. Read the `[len]`
+/// header, allocate a fresh `[len][slots]` block, store the header, and copy each
+/// element in a runtime loop (deep-copying nested mutable aggregate elements).
+/// Leaves the fresh pointer on the stack.
+fn emit_deep_copy_array(ctx: &mut LowerCtx, ty: &TypeRef, out: &mut Vec<u8>) -> Result<(), String> {
+    let elem_ty = ty
+        .array_element()
+        .ok_or_else(|| format!("`{}` is not an array", ty.name))?;
+    // Validate the element is a supported slot type up front (the caller already
+    // classified this array as a mutable aggregate, but re-check for the copy loop).
+    slot_val_type(&elem_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("array element type `{}` is unsupported", elem_ty.name))?;
+
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    // len = i32.load [src + 0]
+    let len = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, 0, out);
+    set_local(out, len);
+    // Allocate LEN_HEADER + len * SLOT_SIZE bytes: push the runtime size, call
+    // __alloc directly (alloc_bytes only takes a constant size), stash the dst.
+    let alloc_index = *ctx
+        .func_index
+        .get(ALLOC_HELPER_NAME)
+        .expect("__alloc index recorded");
+    get_local(out, len);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul  -> len * SLOT_SIZE
+    out.push(0x41); // i32.const LEN_HEADER
+    write_sleb(out, LEN_HEADER as i64);
+    out.push(0x6a); // i32.add  -> LEN_HEADER + len * SLOT_SIZE
+    out.push(0x10); // call __alloc
+    write_uleb(out, alloc_index as u64);
+    let dst = ctx.add_local(WasmValType::I32);
+    set_local(out, dst);
+    // Store the length header at dst + 0.
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, 0, out);
+
+    // Runtime loop: for i in 0..len { copy element i }.
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= len
+    get_local(out, i);
+    get_local(out, len);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // Element slot offset from the base: LEN_HEADER + i * SLOT_SIZE, in a local.
+    let off = ctx.add_local(WasmValType::I32);
+    get_local(out, i);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const LEN_HEADER
+    write_sleb(out, LEN_HEADER as i64);
+    out.push(0x6a); // i32.add
+    set_local(out, off);
+    // Copy element: dst_addr = dst + off, src_addr = src + off.
+    emit_copy_element_at(ctx, &elem_ty, src, dst, off, out)?;
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Copy one struct field slot from `src + offset` to `dst + offset` (both are
+/// `i32` local indices holding base pointers; `offset` is a constant byte offset).
+/// A scalar/string slot is copied word-for-word (by its own WASM slot type); a
+/// nested MUTABLE aggregate slot is deep-copied so nested mutation stays isolated.
+fn emit_copy_slot(
+    ctx: &mut LowerCtx,
+    slot_ir_ty: &TypeRef,
+    src: u32,
+    dst: u32,
+    offset: i32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let slot_ty = slot_val_type(slot_ir_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("slot type `{}` is unsupported", slot_ir_ty.name))?;
+    get_local(out, dst); // base for the store
+    if is_mutable_aggregate(slot_ir_ty, ctx.structs, ctx.enums) {
+        // Load the nested pointer, deep-copy it, store the fresh pointer.
+        get_local(out, src);
+        emit_load_at(WasmValType::I32, offset, out);
+        emit_deep_copy(ctx, slot_ir_ty, out)?;
+    } else {
+        // Scalar or immutable string: copy the slot word by its own type.
+        get_local(out, src);
+        emit_load_at(slot_ty, offset, out);
+    }
+    emit_store_at(slot_ty, offset, out);
+    Ok(())
+}
+
+/// Copy one array element from `src + off` to `dst + off`, where `off` is an `i32`
+/// local holding the runtime byte offset (`LEN_HEADER + i * SLOT_SIZE`). A
+/// scalar/string element is copied word-for-word; a nested MUTABLE aggregate
+/// element is deep-copied. Mirrors [`emit_copy_slot`] but with a runtime offset.
+fn emit_copy_element_at(
+    ctx: &mut LowerCtx,
+    elem_ir_ty: &TypeRef,
+    src: u32,
+    dst: u32,
+    off: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let slot_ty = slot_val_type(elem_ir_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("array element type `{}` is unsupported", elem_ir_ty.name))?;
+    // dst_addr = dst + off
+    get_local(out, dst);
+    get_local(out, off);
+    out.push(0x6a); // i32.add
+    if is_mutable_aggregate(elem_ir_ty, ctx.structs, ctx.enums) {
+        // src_addr = src + off; load the nested pointer; deep-copy; store fresh.
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add
+        emit_load(WasmValType::I32, out);
+        emit_deep_copy(ctx, elem_ir_ty, out)?;
+    } else {
+        // src_addr = src + off; load the element word by its own type.
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add
+        emit_load(slot_ty, out);
+    }
+    emit_store(slot_ty, out);
+    Ok(())
 }
 
 /// The `(byte offset, slot WASM type)` of a struct field, given the struct's
@@ -2867,6 +3153,111 @@ mod tests {
         let source = "fn fib n i64 -> i64\n    if n < 2\n        return n\n    return fib(n - 1) + fib(n - 2)\n";
         let artifact = emit_wasm_module(&module_for(source)).expect("emit");
         assert_eq!(artifact.compiled, vec!["fib".to_string()]);
+    }
+
+    // -- Aggregates across call boundaries (params/returns) --------------------
+
+    #[test]
+    fn struct_param_and_return_functions_compile() {
+        // A function TAKING a struct (reading its fields) and one RETURNING a
+        // struct are both eligible — an aggregate is an `i32` pointer, so it is a
+        // first-class WASM value at the boundary. Neither is skipped.
+        let source = concat!(
+            "struct Point\n    x i64\n    y i64\n\n",
+            "fn sum_point p Point -> i64\n    p.x + p.y\n\n",
+            "fn make_point a i64 b i64 -> Point\n    Point(a, b)\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(
+            artifact.compiled.contains(&"sum_point".to_string())
+                && artifact.compiled.contains(&"make_point".to_string()),
+            "struct param/return functions should compile, skipped: {:?}",
+            artifact.skipped
+        );
+        assert!(artifact.skipped.is_empty());
+    }
+
+    #[test]
+    fn array_param_and_return_functions_compile() {
+        // A function taking AND returning a fixed `array<i64>` compiles: it reads
+        // an element and returns the (copied) array pointer.
+        let source = concat!(
+            "fn first_of xs array<i64> -> i64\n    xs[0]\n\n",
+            "fn identity xs array<i64> -> array<i64>\n    xs\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(
+            artifact.compiled.contains(&"first_of".to_string())
+                && artifact.compiled.contains(&"identity".to_string()),
+            "array param/return functions should compile, skipped: {:?}",
+            artifact.skipped
+        );
+        assert!(artifact.skipped.is_empty());
+    }
+
+    #[test]
+    fn passing_a_struct_argument_deep_copies_it() {
+        // Value semantics: an aggregate argument is deep-copied at the call site so
+        // the callee cannot mutate the caller's record through the shared pointer.
+        // The caller `use_it` constructs nothing itself; it only forwards its own
+        // struct PARAMETER to `sum_point`. So the ONLY `__alloc` call in `use_it`'s
+        // body is the copy-on-pass — its presence proves the snapshot is emitted.
+        let source = concat!(
+            "struct Point\n    x i64\n    y i64\n\n",
+            "fn sum_point p Point -> i64\n    p.x + p.y\n\n",
+            "fn use_it p Point -> i64\n    sum_point(p)\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(artifact.compiled.contains(&"use_it".to_string()));
+        // `__alloc` is the LAST internal function, so its WASM index is
+        // IMPORT_FUNC_COUNT + (number of user functions). Here: sum_point(0),
+        // use_it(1) => __alloc index = IMPORT_FUNC_COUNT + 2.
+        let alloc_index = IMPORT_FUNC_COUNT as u8 + 2;
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        assert!(
+            find_subslice(&code, &[0x10, alloc_index]).is_some(),
+            "passing a struct argument emits a `call __alloc` copy-on-pass"
+        );
+    }
+
+    #[test]
+    fn passing_an_array_argument_deep_copies_it() {
+        // The array copy-on-pass reads the `[len]` header (`i32.load` at offset 0),
+        // allocates a fresh block (`call __alloc`), and copies elements in a loop.
+        // `use_it` constructs no array of its own, so the `__alloc` call in its body
+        // is the copy, and the header read appears before it.
+        let source = concat!(
+            "fn first_of xs array<i64> -> i64\n    xs[0]\n\n",
+            "fn use_it xs array<i64> -> i64\n    first_of(xs)\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(artifact.compiled.contains(&"use_it".to_string()));
+        let alloc_index = IMPORT_FUNC_COUNT as u8 + 2; // first_of(0), use_it(1), __alloc(2)
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        assert!(
+            find_subslice(&code, &[0x10, alloc_index]).is_some(),
+            "passing an array argument emits a `call __alloc` copy-on-pass"
+        );
+    }
+
+    #[test]
+    fn passing_a_string_argument_is_not_copied() {
+        // A `string` is an immutable pointer, so it is shared (never deep-copied):
+        // the callee cannot mutate it, exactly matching the interpreters. A caller
+        // that only forwards its string parameter allocates nothing, so its body
+        // contains no `call __alloc`.
+        let source = concat!(
+            "fn take s string -> i64\n    len(s)\n\n",
+            "fn use_it s string -> i64\n    take(s)\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(artifact.compiled.contains(&"use_it".to_string()));
+        let alloc_index = IMPORT_FUNC_COUNT as u8 + 2; // take(0), use_it(1), __alloc(2)
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        assert!(
+            find_subslice(&code, &[0x10, alloc_index]).is_none(),
+            "an immutable string argument must NOT be deep-copied"
+        );
     }
 
     #[test]

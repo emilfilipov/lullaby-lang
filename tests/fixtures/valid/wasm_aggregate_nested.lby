@@ -1,0 +1,40 @@
+struct Inner
+    a i64
+    b i64
+
+struct Outer
+    tag i64
+    inner Inner
+
+fn outer_total o Outer -> i64
+    o.tag + o.inner.a + o.inner.b
+
+fn wreck o Outer -> i64
+    o.inner.a = 777
+    o.inner.b = 777
+    o.tag = 777
+    o.tag + o.inner.a + o.inner.b
+
+fn rows_sum rows array<array<i64>> -> i64
+    let total i64 = 0
+    for i from 0 to len(rows) - 1
+        let row array<i64> = rows[i]
+        for j from 0 to len(row) - 1
+            total += row[j]
+    total
+
+fn wreck_rows rows array<array<i64>> -> i64
+    rows[0][0] = 500
+    rows[1][1] = 500
+    rows_sum(rows)
+
+fn main -> i64
+    let o Outer = Outer(1, Inner(2, 3))
+    let read i64 = outer_total(o)
+    let wrecked i64 = wreck(o)
+    let outer_unchanged i64 = outer_total(o)
+    let rows array<array<i64>> = [[1, 2], [3, 4]]
+    let rows_read i64 = rows_sum(rows)
+    let wrecked_rows i64 = wreck_rows(rows)
+    let rows_unchanged i64 = rows_sum(rows)
+    read + outer_unchanged + rows_read + rows_unchanged
