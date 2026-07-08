@@ -984,6 +984,8 @@ impl<'a> Runtime<'a> {
             "map_get" => Self::builtin_map_get(args),
             "map_has" => Self::builtin_map_has(args),
             "map_len" => Self::builtin_map_len(args),
+            "map_keys" => Self::builtin_map_keys(args),
+            "map_values" => Self::builtin_map_values(args),
             "map_del" => Self::builtin_map_del(args),
             "substring" => Self::builtin_substring(args),
             "find" => Self::builtin_find(args),
@@ -2857,6 +2859,24 @@ impl<'a> Runtime<'a> {
             .map_err(|args: Vec<Value>| Self::wrong_arity("map_len", 1, args.len()))?;
         let entries = expect_map("map_len", map)?;
         Ok(Value::I64(entries.len() as i64))
+    }
+
+    /// `map_keys(m) -> list<K>`: the keys in insertion order.
+    fn builtin_map_keys(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_keys", 1, args.len()))?;
+        let entries = expect_map("map_keys", map)?;
+        Ok(Value::Array(entries.into_iter().map(|(k, _)| k).collect()))
+    }
+
+    /// `map_values(m) -> list<V>`: the values in insertion order.
+    fn builtin_map_values(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [map]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("map_values", 1, args.len()))?;
+        let entries = expect_map("map_values", map)?;
+        Ok(Value::Array(entries.into_iter().map(|(_, v)| v).collect()))
     }
 
     /// `map_del(m, k) -> map<K, V>`: a new map without key `k`.

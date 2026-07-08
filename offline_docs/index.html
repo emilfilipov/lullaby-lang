@@ -613,7 +613,7 @@ fn main -&gt; i64
         <ul>
           <li><code>map&lt;K, V&gt;</code> is an insertion-ordered, value-semantic hash map with keys restricted to <code>i64</code> or <code>string</code>. Its "mutating" builtins are functional and return a new map, so the idiom is <code>m = map_set(m, k, v)</code>.</li>
           <li><code>map_new()</code> builds an empty map and takes its key/value types from the expected <code>map&lt;...&gt;</code> type (a <code>let</code> annotation, a function return type, or a call argument's parameter type — so <code>map_set(map_new(), "x", 7)</code> inside a <code>let map&lt;string, i64&gt;</code> infers <code>map&lt;string, i64&gt;</code>); missing that context, an unsupported key type, or a wrong argument reports <code>L0388</code>.</li>
-          <li><code>map_get(m, k)</code> returns <code>option&lt;V&gt;</code> (<code>some(v)</code> or <code>none</code>), <code>map_has(m, k)</code> returns a <code>bool</code>, <code>map_len(m)</code> returns the <code>i64</code> entry count, and <code>map_del(m, k)</code> removes a key. Reads are unwrapped with <code>match</code>.</li>
+          <li><code>map_get(m, k)</code> returns <code>option&lt;V&gt;</code> (<code>some(v)</code> or <code>none</code>), <code>map_has(m, k)</code> returns a <code>bool</code>, <code>map_len(m)</code> returns the <code>i64</code> entry count, and <code>map_del(m, k)</code> removes a key. <code>map_keys(m)</code> and <code>map_values(m)</code> return the keys and values as a <code>list&lt;K&gt;</code> / <code>list&lt;V&gt;</code> in insertion order (so a map can be iterated). Reads are unwrapped with <code>match</code>.</li>
         </ul>
       </section>
 

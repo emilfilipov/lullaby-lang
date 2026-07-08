@@ -2992,6 +2992,18 @@ impl<'a> Checker<'a> {
                 self.expect_map_arg(name, &map_ty, args[0].span, function)?;
                 Some(TypeRef::new("i64"))
             }
+            "map_keys" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (key, _value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                Some(list_type(&key))
+            }
+            "map_values" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let map_ty = self.check_expr(&args[0], scope, function)?;
+                let (_key, value) = self.expect_map_arg(name, &map_ty, args[0].span, function)?;
+                Some(list_type(&value))
+            }
             "map_del" => {
                 self.expect_arg_count(name, args, 2, function)?;
                 let map_ty = self.check_expr_expected(&args[0], expected, scope, function)?;
@@ -6557,6 +6569,33 @@ mod tests {
             validate_source(source).is_ok(),
             "{:?}",
             validate_source(source)
+        );
+    }
+
+    #[test]
+    fn accepts_map_keys_and_values() {
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let m map<string, i64> = map_new()\n",
+            "    m = map_set(m, \"a\", 5)\n",
+            "    let ks list<string> = map_keys(m)\n",
+            "    let vs list<i64> = map_values(m)\n",
+            "    len(ks) + get(vs, 0)\n",
+        );
+        assert!(
+            validate_source(source).is_ok(),
+            "{:?}",
+            validate_source(source)
+        );
+    }
+
+    #[test]
+    fn rejects_map_keys_on_non_map() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    len(map_keys(3))\n").expect_err("semantic");
+        assert!(
+            diagnostics.iter().any(|d| d.code == "L0388"),
+            "{diagnostics:?}"
         );
     }
 

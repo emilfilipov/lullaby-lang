@@ -61,6 +61,8 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `map_has` | `map_has(m map<K, V>, k K) -> bool` | |
 | `map_len` | `map_len(m map<K, V>) -> i64` | |
 | `map_del` | `map_del(m map<K, V>, k K) -> map<K, V>` | remove key |
+| `map_keys` | `map_keys(m map<K, V>) -> list<K>` | keys in insertion order |
+| `map_values` | `map_values(m map<K, V>) -> list<V>` | values in insertion order |
 
 ## Strings
 
