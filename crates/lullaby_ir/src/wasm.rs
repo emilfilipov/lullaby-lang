@@ -1137,6 +1137,9 @@ fn lower_function(
         Ok(result) => result,
         Err(()) => return Err("return type is not a supported WASM value type".to_string()),
     };
+    // invariant: only functions that passed `eligibility` reach here, and it
+    // rejects any parameter whose type has no `value_val_type` (see the loop over
+    // `function.params` in `eligibility`), so every param maps to a value type.
     let params = function
         .params
         .iter()
