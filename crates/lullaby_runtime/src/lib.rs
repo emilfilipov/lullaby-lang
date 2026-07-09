@@ -2194,6 +2194,21 @@ impl<'a> Runtime<'a> {
         Ok(Some(self.eval_binary(l, op, r)?))
     }
 
+    /// Dispatch a call to an already-resolved top-level function name: reject an
+    /// `extern fn` (C-ABI, native-only) with `L0423`, spawn an `async fn` on its
+    /// own OS thread yielding a `Future`, or invoke the function / builtin /
+    /// constructor synchronously through [`Self::call_function`].
+    fn dispatch_named_call(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        if self.extern_functions.contains(name) {
+            return Err(extern_call_error(name));
+        }
+        if self.async_functions.contains(name) {
+            Ok(self.spawn_async(name, args))
+        } else {
+            self.call_function(name, args)
+        }
+    }
+
     fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         // Trait-method dispatch: when `name` is a trait method, select the impl
         // by the receiver `args[0]`'s runtime type and invoke it. Because
@@ -3834,32 +3849,27 @@ impl<'a> Runtime<'a> {
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
                     .collect::<Result<Vec<_>, _>>()?;
-                // A call name bound to a closure value invokes that closure: bind
-                // its captured snapshot then the arguments, and evaluate the body
-                // from the id-keyed table. This is the same call site that
-                // dispatches a `Value::Func`, so a closure passed as an argument
-                // and called through a parameter name works with no extra path.
-                if let Ok(Value::Closure(closure)) = env.get(name) {
-                    return self.invoke_closure(&closure, values);
-                }
-                // A call name that is a local holding a function value dispatches
-                // through that value: invoke the referenced top-level function.
-                let target = match env.get(name) {
-                    Ok(Value::Func(target)) => target,
-                    _ => name.clone(),
+                // Resolve the call target with a single borrowing lookup. A call
+                // name bound to a closure value invokes that closure (binding its
+                // captured snapshot then the arguments); a name bound to a
+                // function value dispatches through it; otherwise `name` is a plain
+                // top-level function / builtin / constructor and dispatches by
+                // name. Using `get_ref` keeps the common case — an ordinary
+                // top-level call, where `name` is not a local at all — free of the
+                // clone and the discarded "unknown variable" error a bare
+                // `env.get` allocates on every such call.
+                let target: &str = match env.get_ref(name) {
+                    Some(Value::Closure(closure)) => {
+                        let closure = closure.clone();
+                        return self.invoke_closure(&closure, values);
+                    }
+                    Some(Value::Func(func)) => {
+                        let func = func.clone();
+                        return self.dispatch_named_call(&func, values);
+                    }
+                    _ => name,
                 };
-                // An `extern fn` (C-ABI) cannot run on the interpreter; it only
-                // has meaning after native codegen + linking.
-                if self.extern_functions.contains(target.as_str()) {
-                    return Err(extern_call_error(&target));
-                }
-                // Calling an `async fn` spawns its body on a new OS thread and
-                // yields a `Future` handle; a synchronous call runs inline.
-                if self.async_functions.contains(target.as_str()) {
-                    Ok(self.spawn_async(&target, values))
-                } else {
-                    self.call_function(&target, values)
-                }
+                self.dispatch_named_call(target, values)
             }
             ExprKind::Await { expr } => {
                 let value = self.eval_expr(expr, env)?;
