@@ -3383,16 +3383,22 @@ impl<'a> Runtime<'a> {
             span: Some(function.span),
         });
         let result = self.eval_block(&function.body, &mut env);
-        let traceback = self.call_stack.clone();
-        self.call_stack.pop();
 
+        // Attach the traceback lazily. `with_traceback` records only the first
+        // (innermost) stack — every later frame's attach is a no-op — so eagerly
+        // cloning `call_stack` on every successful call, and on every frame an
+        // error merely passes through, is pure waste. Clone it only when this
+        // frame is the one first recording a traceback, while the frame is still
+        // on the stack so it is included.
+        //
         // A postfix `?` on a `none`/`err` unwinds to here as the `L0430`
         // sentinel, carrying the failure value in `pending_try_return`. Catch it
         // at this call boundary and turn it into a normal function return of that
         // value (this is the function-level early return `?` denotes). The slot
         // is always taken, so it never leaks into a later call.
-        let result = match result {
+        let control = match result {
             Err(error) if error.code == "L0430" => {
+                self.call_stack.pop();
                 let value = self.pending_try_return.take().ok_or_else(|| {
                     RuntimeError::new(
                         "L0430",
@@ -3401,10 +3407,22 @@ impl<'a> Runtime<'a> {
                 })?;
                 return Ok(value);
             }
-            other => other,
+            Err(error) => {
+                let error = if error.traceback.is_empty() {
+                    error.with_traceback(self.call_stack.clone())
+                } else {
+                    error
+                };
+                self.call_stack.pop();
+                return Err(error);
+            }
+            Ok(control) => {
+                self.call_stack.pop();
+                control
+            }
         };
 
-        match result.map_err(|error| error.with_traceback(traceback))? {
+        match control {
             Control::Return(value) | Control::Value(value) => Ok(value),
             Control::Break | Control::Continue => Err(RuntimeError::new(
                 "L0410",

@@ -4334,10 +4334,30 @@ impl<'a> IrRuntime<'a> {
             span: Some(function.span),
         });
         let result = self.eval_block(&function.body, &mut env);
-        let traceback = self.call_stack.clone();
-        self.call_stack.pop();
 
-        match result.map_err(|error| error.with_traceback(traceback))? {
+        // Attach the traceback lazily. `with_traceback` records only the first
+        // (innermost) stack, so eagerly cloning `call_stack` on every successful
+        // call — and on every frame an error merely passes through — is pure
+        // waste that grows with recursion depth. Clone it only when this frame is
+        // the one first recording a traceback, while the frame is still on the
+        // stack so it is included.
+        let control = match result {
+            Err(error) => {
+                let error = if error.traceback.is_empty() {
+                    error.with_traceback(self.call_stack.clone())
+                } else {
+                    error
+                };
+                self.call_stack.pop();
+                return Err(error);
+            }
+            Ok(control) => {
+                self.call_stack.pop();
+                control
+            }
+        };
+
+        match control {
             Control::Return(value) | Control::Value(value) => Ok(value),
             Control::Break | Control::Continue => Err(RuntimeError::new(
                 "L0410",
