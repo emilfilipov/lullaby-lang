@@ -1,0 +1,24 @@
+fn build n i64 -> map<i64, string>
+    let m map<i64, string> = map_new()
+    m = map_set(m, 1, "ab")
+    m = map_set(m, 2, to_string(n))
+    m = map_set(m, 3, "hi, " + to_string(n))
+    m = map_set(m, 1, "wxyz")
+    m
+
+fn value_len m map<i64, string> k i64 -> i64
+    match map_get(m, k)
+        some(s) -> len(s)
+        none -> 0
+
+fn main -> i64
+    let m map<i64, string> = build(7)
+    let a i64 = value_len(m, 1)
+    let b i64 = value_len(m, 2)
+    let c i64 = value_len(m, 3)
+    let missing i64 = value_len(m, 9)
+    let present i64 = 0
+    if map_has(m, 2)
+        present = 10
+    let count i64 = map_len(m)
+    a + b + c + missing + present + count

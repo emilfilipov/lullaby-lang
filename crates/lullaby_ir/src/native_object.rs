@@ -818,18 +818,35 @@ const LIST_GET_BUILTIN: &str = "get";
 const LIST_SET_BUILTIN: &str = "set";
 const LIST_POP_BUILTIN: &str = "pop";
 
+/// Whether a growable-collection element/value/payload type occupies a single
+/// 8-byte native slot copied by a flat word — a native scalar (`i64`/fixed-width/
+/// `bool`/`char`/`byte`/`f64`/`f32`) or a `string` (an immutable heap pointer). A
+/// `string` occupies one word exactly like a scalar and, because strings are
+/// immutable, is copied by SHARING its pointer on a value-semantic deep copy
+/// (never deep-recursed into the string record) — so the flat word copy the list/
+/// map/enum copy paths already emit is an exact deep copy and needs no per-slot
+/// type dispatch. This mirrors the WASM backend's `scalar_or_string_slot_type`.
+/// Other (mutable) heap types (`struct`/`array`/`list`/`map`) are NOT single-slot
+/// copyable — they would need a recursive per-element deep copy — so they return
+/// `false` and the enclosing function skips gracefully.
+fn is_scalar_or_string_slot(ty: &TypeRef) -> bool {
+    ty.name == "i64"
+        || fixed_int_kind(&ty.name).is_some()
+        || matches!(ty.name.as_str(), "bool" | "char" | "byte" | "f64" | "f32")
+        || ty.name == "string"
+}
+
 /// The element type of a supported growable `list<T>`, or `None` if `ty` is not a
-/// list or its element is not a native scalar. Lists of heap elements
-/// (`list<string>`/`list<struct>`/`list<list<…>>`/`list<map<…>>`) are DEFERRED —
-/// the native backend lays out scalar-element lists only this increment — so such
-/// a list is unsupported and its enclosing function skips (still runs on the
-/// interpreters).
+/// list or its element is neither a native scalar nor a `string`. A `string`
+/// element is an immutable heap pointer stored in one slot and shared (not
+/// deep-recursed) on the value-semantic deep copy, so `list<string>` is supported.
+/// Lists of MUTABLE heap elements (`list<struct>`/`list<list<…>>`/`list<map<…>>`)
+/// are DEFERRED — the native backend does not yet recursively deep-copy mutable
+/// heap elements — so such a list is unsupported and its enclosing function skips
+/// (still runs on the interpreters).
 fn supported_list_element(ty: &TypeRef) -> Option<TypeRef> {
     let elem = ty.list_element()?;
-    if elem.name == "i64"
-        || fixed_int_kind(&elem.name).is_some()
-        || matches!(elem.name.as_str(), "bool" | "char" | "byte" | "f64" | "f32")
-    {
+    if is_scalar_or_string_slot(&elem) {
         Some(elem)
     } else {
         None
@@ -915,14 +932,19 @@ const MAP_HAS_BUILTIN: &str = "map_has";
 const MAP_LEN_BUILTIN: &str = "map_len";
 
 /// The `(key, value)` element types of a supported growable `map<K, V>`, or
-/// `None` if `ty` is not a map, or its key/value are not both supported native
-/// scalars. Keys are restricted to the integer-cell scalar types (`i64`,
-/// fixed-width integers, `bool`/`char`/`byte`) so that key equality is an exact
-/// 8-byte word compare. Values may be any native scalar including a float
-/// (`f64`/`f32`, stored bit-for-bit, never compared). Heap keys/values
-/// (`map<string, V>`, `map<K, list<…>>`, …) and float keys are DEFERRED — such a
-/// map is unsupported and its enclosing function skips (still runs on the
-/// interpreters), matching the WASM map's first increment.
+/// `None` if `ty` is not a map, its key is not a supported native scalar, or its
+/// value is neither a native scalar nor a `string`. Keys are restricted to the
+/// integer-cell scalar types (`i64`, fixed-width integers, `bool`/`char`/`byte`)
+/// so that key equality is an exact 8-byte word compare. Values may be any native
+/// scalar including a float (`f64`/`f32`, stored bit-for-bit, never compared) or a
+/// `string` (an immutable heap pointer stored in one slot, shared on the flat
+/// two-word entry copy since strings are immutable — `map<K, string>` is
+/// supported). Heap KEYS (`map<string, V>`, …), MUTABLE heap values
+/// (`map<K, list<…>>`, `map<K, struct>`), and float keys are DEFERRED — such a map
+/// is unsupported and its enclosing function skips (still runs on the
+/// interpreters), matching the WASM map's increment. A string key stays deferred
+/// because the interpreters compare keys by content equality (decoded bytes), not
+/// by the interned pointer — separate work.
 fn supported_map_kv(ty: &TypeRef) -> Option<(TypeRef, TypeRef)> {
     let (key, value) = ty.map_args()?;
     // Key must be an integer-cell scalar (word-compare equality).
@@ -932,14 +954,8 @@ fn supported_map_kv(ty: &TypeRef) -> Option<(TypeRef, TypeRef)> {
     {
         return None;
     }
-    // Value may be any native scalar, including a float.
-    if !(value.name == "i64"
-        || fixed_int_kind(&value.name).is_some()
-        || matches!(
-            value.name.as_str(),
-            "bool" | "char" | "byte" | "f64" | "f32"
-        ))
-    {
+    // Value may be any native scalar (including a float) or a `string` pointer.
+    if !is_scalar_or_string_slot(&value) {
         return None;
     }
     Some((key, value))
@@ -2074,15 +2090,21 @@ fn resolve_enum_type(
                     payload_ty.name
                 )
             })?;
-            // Only scalar payloads are supported: an `i64`/fixed-width/bool/char/
-            // byte cell (`NativeType::I64`) or a float (`F64`/`F32`). A nested
-            // struct/array/enum payload is out of scope and skips gracefully.
+            // A scalar or `string` payload is supported: an `i64`/fixed-width/bool/
+            // char/byte cell (`NativeType::I64`), a float (`F64`/`F32`), or a
+            // `string` (`NativeType::String`, an immutable heap pointer in one
+            // slot, shared on the flat word-copy deep copy since strings are
+            // immutable — so `option<string>`, `result<i64, string>`, and user
+            // enums with a string payload are supported). A MUTABLE heap payload
+            // (nested struct/array/list/map) is out of scope and skips gracefully.
             match native {
-                NativeType::I64 | NativeType::F64 | NativeType::F32 => payload.push(native),
+                NativeType::I64 | NativeType::F64 | NativeType::F32 | NativeType::String => {
+                    payload.push(native)
+                }
                 _ => {
                     return Err(format!(
                         "enum `{ctor}` variant `{name}` has a non-scalar payload; \
-                         only scalar enum payloads are in the native subset"
+                         only scalar and `string` enum payloads are in the native subset"
                     ));
                 }
             }
@@ -3454,7 +3476,11 @@ fn lower_enum_construction(
     let mut word = base_slot + 8;
     for (arg, field_ty) in args.iter().zip(variant.payload.iter()) {
         match field_ty {
-            NativeType::I64 => {
+            // An integer-cell scalar OR a `string` payload is a single flat word:
+            // `lower_native_expr` leaves the value (or the immutable string pointer)
+            // in `rax`, stored into the payload word. A string is shared, never
+            // deep-copied, so this is its exact value-semantic copy.
+            NativeType::I64 | NativeType::String => {
                 lower_native_expr(ctx, arg, code)?;
                 store_local(code, word);
             }
@@ -3462,7 +3488,7 @@ fn lower_enum_construction(
                 let width = lower_native_float_expr(ctx, arg, code)?;
                 store_float_local(code, word, width);
             }
-            _ => return Err("enum payload must be a native scalar".to_string()),
+            _ => return Err("enum payload must be a native scalar or `string`".to_string()),
         }
         word += field_ty.words() as i32 * 8;
     }
@@ -3826,7 +3852,11 @@ fn lower_native_match(
                 for (binding, field_ty) in bindings.iter().zip(variant.payload.iter()) {
                     let dst = ctx.local_slot(binding)?;
                     match field_ty {
-                        NativeType::I64 => {
+                        // An integer-cell scalar OR a `string` payload binds as a
+                        // single flat word: load the payload word into `rax` (the
+                        // value, or the immutable string pointer) and store it into
+                        // the arm-scoped local. The bound string shares its pointer.
+                        NativeType::I64 | NativeType::String => {
                             load_local(code, payload_word);
                             store_local(code, dst);
                         }
@@ -3839,7 +3869,10 @@ fn lower_native_match(
                             load_float_local(code, payload_word, width);
                             store_float_local(code, dst, width);
                         }
-                        _ => return Err("enum payload binding is not a native scalar".to_string()),
+                        _ => {
+                            return Err("enum payload binding is not a native scalar or `string`"
+                                .to_string());
+                        }
                     }
                     payload_word += field_ty.words() as i32 * 8;
                 }
@@ -10336,10 +10369,11 @@ mod native_program_tests {
     }
 
     #[test]
-    fn defers_result_with_string_payload_gracefully() {
-        // A `result<i64, string>` carries a heap payload in `err`; matching it is
-        // out of the native scalar subset, so the function skips gracefully rather
-        // than miscompiling the string.
+    fn compiles_result_with_string_payload_natively() {
+        // A `result<i64, string>` now COMPILES: the `err` payload is an immutable
+        // string pointer stored in one payload word, matched and bound as a flat
+        // word (shared, never deep-recursed). Both arms are exercised; the tag
+        // dispatch is the same as any other native match.
         let program = emit_alpha1_native_program(&module_for(concat!(
             "fn classify n i64 -> i64\n",
             "    let r result<i64, string> = ok(n)\n",
@@ -10348,22 +10382,82 @@ mod native_program_tests {
             "        err(m) -> len(m)\n\n",
             "fn main -> i64\n",
             "    classify(3)\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"classify".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "string-payload result must compile: {:?} / skipped {:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+        assert!(
+            has_tag_dispatch(text_bytes(&program)),
+            "expected tag load + conditional branch for the string-payload result match"
+        );
+    }
+
+    #[test]
+    fn compiles_option_string_and_user_string_enum_natively() {
+        // `option<string>` (the shape `map_get` on a `map<K, string>` returns) and a
+        // user enum with a `string` payload both compile: the `some`/`Named` payload
+        // slot is the immutable string pointer, bound as a flat word.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "enum Tag\n",
+            "    Named string\n",
+            "    Anon\n\n",
+            "fn opt_len o option<string> -> i64\n",
+            "    match o\n",
+            "        some(s) -> len(s)\n",
+            "        none -> 0\n\n",
+            "fn tag_len t Tag -> i64\n",
+            "    match t\n",
+            "        Named(name) -> len(name)\n",
+            "        Anon -> 0\n\n",
+            "fn main -> i64\n",
+            "    opt_len(some(\"ab\")) + tag_len(Named(\"cde\"))\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"opt_len".to_string())
+                && program.compiled.contains(&"tag_len".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "option<string>/user string-payload enum must compile: {:?} / skipped {:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+    }
+
+    #[test]
+    fn defers_result_with_mutable_heap_payload_gracefully() {
+        // A `result<i64, list<i64>>` carries a MUTABLE heap payload in `err`; it
+        // would need a recursive per-payload deep copy, so it is still out of the
+        // native subset and the function skips gracefully rather than miscompiling.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn classify n i64 -> i64\n",
+            "    let r result<i64, list<i64>> = ok(n)\n",
+            "    match r\n",
+            "        ok(v) -> v\n",
+            "        err(m) -> len(m)\n\n",
+            "fn main -> i64\n",
+            "    classify(3)\n",
         )));
-        // Either the whole program is ineligible (error) or `classify` is skipped
-        // while a trivial `main` might still compile; in this shape `main` calls
-        // the skipped `classify`, so nothing is eligible.
+        // In this shape `main` calls the skipped `classify`, so nothing is eligible
+        // (error) — either way `classify` must appear as skipped.
         match program {
             Err(err) => {
                 assert!(
                     err.skipped.iter().any(|s| s.name == "classify"),
-                    "expected `classify` skipped for its string payload: {:?}",
+                    "expected `classify` skipped for its mutable-heap payload: {:?}",
                     err.skipped
                 );
             }
             Ok(program) => {
                 assert!(
                     program.skipped.iter().any(|s| s.name == "classify"),
-                    "expected `classify` skipped for its string payload: {:?}",
+                    "expected `classify` skipped for its mutable-heap payload: {:?}",
                     program.skipped
                 );
             }
@@ -10654,25 +10748,59 @@ mod native_program_tests {
     }
 
     #[test]
-    fn defers_heap_element_list_gracefully() {
-        // A `list<string>` (heap element) is DEFERRED: the enclosing function skips
+    fn compiles_string_element_list_natively() {
+        // A `list<string>` now COMPILES: a `string` element is an immutable heap
+        // pointer stored in one slot exactly like a scalar, appended by `push`,
+        // loaded back by `get`, and shared (not deep-recursed) on the flat word-copy
+        // deep copy. The list header and grow/copy helpers are the same as a scalar
+        // list.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn names n i64 -> list<string>\n",
+            "    let xs list<string> = list_new()\n",
+            "    xs = push(xs, \"a\")\n",
+            "    xs = push(xs, to_string(n))\n",
+            "    xs\n\n",
+            "fn head l list<string> -> i64\n",
+            "    len(get(l, 0))\n\n",
+            "fn main -> i64\n",
+            "    head(names(3)) + len(names(3))\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"names".to_string())
+                && program.compiled.contains(&"head".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "list<string> functions must compile: {:?} / skipped {:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+        assert!(
+            coff_symbol(&program.bytes, LIST_COPY_SYMBOL).is_some()
+                && coff_symbol(&program.bytes, LIST_GROW_SYMBOL).is_some(),
+            "list<string> value-semantics still reference the list copy/grow helpers"
+        );
+    }
+
+    #[test]
+    fn defers_mutable_heap_element_list_gracefully() {
+        // A `list<array<i64>>` (MUTABLE heap element) is still DEFERRED: it would
+        // need a recursive per-element deep copy, so the enclosing function skips
         // with a clear reason and still runs on the interpreters — never
         // miscompiled.
         let program = emit_alpha1_native_program(&module_for(concat!(
-            "fn names -> list<string>\n",
-            "    push(list_new(), \"a\")\n\n",
+            "fn grid -> list<array<i64>>\n",
+            "    list_new()\n\n",
             "fn main -> i64\n",
-            "    len(names())\n",
+            "    len(grid())\n",
         )));
-        // `main` calls `names` (which is skipped), so `main` demotes too; the whole
+        // `main` calls `grid` (which is skipped), so `main` demotes too; the whole
         // program has no eligible function -> the L0339 "nothing eligible" error.
-        let err = program.expect_err("heap-element list must not compile");
+        let err = program.expect_err("mutable-heap-element list must not compile");
         assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
         assert!(
-            err.skipped
-                .iter()
-                .any(|s| s.name == "names" && s.reason.contains("heap-element")),
-            "the skip reason must cite the deferred heap-element list: {:?}",
+            err.skipped.iter().any(|s| s.name == "grid"),
+            "the mutable-heap-element list function must be recorded as skipped: {:?}",
             err.skipped
         );
     }
@@ -10832,6 +10960,70 @@ mod native_program_tests {
             "    map_len(build())\n",
         )));
         let err = program.expect_err("string-key map must not compile");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(
+            err.skipped
+                .iter()
+                .any(|s| s.name == "build" && s.reason.contains("map")),
+            "the skip reason must cite the deferred map key/value: {:?}",
+            err.skipped
+        );
+    }
+
+    #[test]
+    fn compiles_string_value_map_natively() {
+        // A `map<i64, string>` (scalar key, `string` value) now COMPILES: the value
+        // slot holds an immutable string pointer, shared on the flat two-word entry
+        // copy. `map_set` inserts/updates the pointer, `map_get` returns
+        // `option<string>` (the `some` payload slot is the string pointer), and
+        // `map_has`/`map_len` work unchanged.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn build n i64 -> map<i64, string>\n",
+            "    let m map<i64, string> = map_new()\n",
+            "    m = map_set(m, 1, \"a\")\n",
+            "    m = map_set(m, 2, to_string(n))\n",
+            "    m = map_set(m, 1, \"zz\")\n",
+            "    m\n\n",
+            "fn probe n i64 -> i64\n",
+            "    let m map<i64, string> = build(n)\n",
+            "    let seen i64 = 0\n",
+            "    if map_has(m, 2)\n",
+            "        seen = 1\n",
+            "    match map_get(m, 1)\n",
+            "        some(s) -> len(s) + seen + map_len(m)\n",
+            "        none -> 0\n\n",
+            "fn main -> i64\n",
+            "    probe(3)\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"build".to_string())
+                && program.compiled.contains(&"probe".to_string())
+                && program.compiled.contains(&"main".to_string()),
+            "map<i64, string> functions must compile: {:?} / skipped {:?}",
+            program.compiled,
+            program.skipped
+        );
+        assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+        assert!(
+            coff_symbol(&program.bytes, MAP_COPY_SYMBOL).is_some()
+                && coff_symbol(&program.bytes, MAP_FIND_SYMBOL).is_some(),
+            "map<i64, string> value-semantics still reference the map copy/find helpers"
+        );
+    }
+
+    #[test]
+    fn defers_mutable_heap_value_map_gracefully() {
+        // A `map<i64, array<i64>>` (MUTABLE heap value) is still DEFERRED: it would
+        // need a recursive per-value deep copy, so the enclosing function skips with
+        // a clear reason and still runs on the interpreters — never miscompiled.
+        let program = emit_alpha1_native_program(&module_for(concat!(
+            "fn build -> map<i64, array<i64>>\n",
+            "    map_new()\n\n",
+            "fn main -> i64\n",
+            "    map_len(build())\n",
+        )));
+        let err = program.expect_err("mutable-heap-value map must not compile");
         assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
         assert!(
             err.skipped

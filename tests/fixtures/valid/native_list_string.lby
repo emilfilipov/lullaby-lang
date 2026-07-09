@@ -1,0 +1,23 @@
+fn build n i64 -> list<string>
+    let xs list<string> = list_new()
+    xs = push(xs, "ab")
+    xs = push(xs, "cde")
+    xs = push(xs, to_string(n))
+    xs = push(xs, "hi, " + to_string(n))
+    xs
+
+fn total_len xs list<string> -> i64
+    let n i64 = len(xs)
+    let sum i64 = 0
+    for i from 0 to n - 1
+        sum += len(get(xs, i))
+    sum
+
+fn main -> i64
+    let xs list<string> = build(7)
+    let n i64 = len(xs)
+    let replaced list<string> = set(xs, 0, "wxyz")
+    let sum_original i64 = total_len(xs)
+    let sum_replaced i64 = total_len(replaced)
+    let shorter list<string> = pop(replaced)
+    sum_original + sum_replaced + n + len(shorter)
