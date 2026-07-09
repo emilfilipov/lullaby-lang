@@ -4832,6 +4832,82 @@ fn native_enum_match_execution_parity_when_linkable() {
     }
 }
 
+/// Best-effort execution parity for the native `string`-carrying growable
+/// collections and enums: native-compile a `list<string>` (literal/concat/
+/// `to_string` elements, `get`/`len`/`set`/`pop`, a value-semantics probe across a
+/// call boundary), a `map<i64, string>` (scalar key, `string` value — `map_set`
+/// insert/update-in-place, `map_get` -> `option<string>`, `map_has`, `map_len`),
+/// and a `result<i64, string>` matched over both arms plus `option<string>` and a
+/// user string-payload enum. A `string` element/value/payload is a single
+/// immutable pointer word stored and copied exactly like a scalar (shared, never
+/// deep-recursed), so this proves native parity with the WASM string-collection
+/// increment. Assert each linked `.exe`'s exit code equals the interpreter's `main`
+/// result (mod 256). Sources MSVC's `LIB` when unset; gated on `rust-lld` +
+/// `kernel32.lib` like the other native parity tests.
+#[test]
+fn native_string_collections_execution_parity_when_linkable() {
+    ensure_msvc_env();
+    for (name, expected) in [
+        ("native_list_string", 31i64),
+        ("native_map_string", 23),
+        ("native_result_string", 52),
+    ] {
+        let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
+        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "--verbose",
+                "-o",
+                out.to_str().expect("out path"),
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(emit.status.success(), "{name}: {}", stderr(&emit));
+        // `main` and every helper compile natively — `list<string>`, `map<K,
+        // string>`, and string-payload enums are in the native subset now, so
+        // nothing is skipped.
+        assert!(
+            stdout(&emit).contains("compiled main"),
+            "{name}: expected `main` compiled: {}",
+            stdout(&emit)
+        );
+        assert!(
+            !stdout(&emit).contains("skipped"),
+            "{name}: no string-collection function should be skipped: {}",
+            stdout(&emit)
+        );
+
+        // Interpreter ground truth for `main` (identical on AST/IR/bytecode).
+        let run = lullaby()
+            .args(["run", fixture.to_str().expect("fixture path")])
+            .output()
+            .expect("run cli");
+        assert!(run.status.success(), "{name}: {}", stderr(&run));
+        let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+        assert_eq!(interp, expected, "{name}: interpreter result");
+
+        if rust_lld_path().is_none() || !kernel32_available() {
+            eprintln!(
+                "rust-lld and/or kernel32.lib (via the LIB env var) not available; \
+                 skipping native string-collection link+run parity for {name}"
+            );
+            continue;
+        }
+
+        assert!(out.is_file(), "expected linked exe at {}", out.display());
+        let exe = Command::new(&out).output().expect("run native exe");
+        let exit = exe.status.code().expect("native exit code");
+        assert_eq!(
+            exit,
+            (interp.rem_euclid(256)) as i32,
+            "{name}: native string-collection exit code must equal the interpreter result (mod 256)"
+        );
+    }
+}
+
 /// Best-effort execution parity for the native growable `list<T>` (scalar element)
 /// subset: native-compile programs that build lists via `list_new`/`push` (with
 /// capacity-doubling growth), read them with `get`/`len`, and replace/pop

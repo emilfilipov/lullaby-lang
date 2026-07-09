@@ -1,0 +1,35 @@
+enum Tag
+    Named string
+    Anon
+
+fn describe r result<i64, string> -> i64
+    match r
+        ok(v) -> v
+        err(m) -> len(m)
+
+fn ok_path -> i64
+    let r result<i64, string> = ok(40)
+    describe(r)
+
+fn err_path n i64 -> i64
+    let r result<i64, string> = err("hi, " + to_string(n))
+    describe(r)
+
+fn opt_len o option<string> -> i64
+    match o
+        some(s) -> len(s)
+        none -> 0
+
+fn tag_len t Tag -> i64
+    match t
+        Named(name) -> len(name)
+        Anon -> 0
+
+fn main -> i64
+    let a i64 = ok_path()
+    let b i64 = err_path(7)
+    let c i64 = opt_len(some("abcd"))
+    let d i64 = opt_len(none)
+    let e i64 = tag_len(Named("xyz"))
+    let f i64 = tag_len(Anon)
+    a + b + c + d + e + f
