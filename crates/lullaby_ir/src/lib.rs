@@ -3908,14 +3908,17 @@ impl<'a> IrRuntime<'a> {
             && !self.functions.contains_key(name)
     }
 
-    /// The move-on-functional-update fast path for the `x = f(x, …)` accumulation
-    /// idiom (IR twin of the AST runtime's method). When `rhs` is a builtin call
-    /// in which the assignment target `name` appears exactly once as a bare
-    /// argument and nowhere else, and `name` is a local in the innermost scope,
-    /// this evaluates the call with that argument **moved** out of the environment
-    /// instead of cloned and returns `Some(result)`. `None` means the caller must
-    /// fall back to the ordinary clone path. See the AST runtime for the full
-    /// safety argument; the two implementations are kept in lockstep.
+    /// The move-on-functional-update fast path for the `x = f(x, …)` (CALL) and
+    /// `x = x <binop> e` / `x = e <binop> x` (BINARY) accumulation idioms (IR twin
+    /// of the AST runtime's method). When the target `name` appears exactly once —
+    /// as a bare call argument, or as exactly one bare operand of a binary op —
+    /// and nowhere else in the RHS, and `name` is a local, this evaluates the RHS
+    /// with that occurrence **moved** out of the environment instead of cloned and
+    /// returns `Some(result)`. `None` means the caller must fall back to the
+    /// ordinary clone path. The binary form makes `s = s + piece` loops O(n) by
+    /// letting `eval_binary` reuse the moved left operand's buffer. See the AST
+    /// runtime for the full safety argument; the two implementations are kept in
+    /// lockstep.
     fn try_move_functional_update(
         &mut self,
         name: &str,
@@ -3923,9 +3926,26 @@ impl<'a> IrRuntime<'a> {
         env: &mut Env,
         require_innermost: bool,
     ) -> Result<Option<Value>, RuntimeError> {
-        let IrExprKind::Call { name: callee, args } = &rhs.kind else {
-            return Ok(None);
-        };
+        match &rhs.kind {
+            IrExprKind::Call { name: callee, args } => {
+                self.try_move_call_update(name, callee, args, env, require_innermost)
+            }
+            IrExprKind::Binary { op, left, right } => {
+                self.try_move_binary_update(name, *op, left, right, env, require_innermost)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `x = f(x, …)` arm of [`Self::try_move_functional_update`].
+    fn try_move_call_update(
+        &mut self,
+        name: &str,
+        callee: &str,
+        args: &[IrExpr],
+        env: &mut Env,
+        require_innermost: bool,
+    ) -> Result<Option<Value>, RuntimeError> {
         if callee == name {
             return Ok(None);
         }
@@ -3981,6 +4001,57 @@ impl<'a> IrRuntime<'a> {
             })
             .collect();
         Ok(Some(self.call_function(callee, values)?))
+    }
+
+    /// `x = x <binop> e` / `x = e <binop> x` arm of
+    /// [`Self::try_move_functional_update`]. Fires when exactly one operand is the
+    /// bare variable `name` and `name` appears nowhere else in either operand.
+    /// Short-circuit `and`/`or` are excluded (they do not route through
+    /// `eval_binary` and their right operand is conditional).
+    fn try_move_binary_update(
+        &mut self,
+        name: &str,
+        op: BinaryOp,
+        left: &IrExpr,
+        right: &IrExpr,
+        env: &mut Env,
+        require_innermost: bool,
+    ) -> Result<Option<Value>, RuntimeError> {
+        if matches!(op, BinaryOp::And | BinaryOp::Or) {
+            return Ok(None);
+        }
+        let bound = if require_innermost {
+            env.innermost_has(name)
+        } else {
+            env.is_bound(name)
+        };
+        if !bound {
+            return Ok(None);
+        }
+        let left_bare = matches!(&left.kind, IrExprKind::Variable(v) if v == name);
+        let right_bare = matches!(&right.kind, IrExprKind::Variable(v) if v == name);
+        let target_is_left = if left_bare && !expr_mentions_var(right, name) {
+            true
+        } else if right_bare && !expr_mentions_var(left, name) {
+            false
+        } else {
+            return Ok(None);
+        };
+        // Evaluate the non-target operand *before* moving the target.
+        let other = if target_is_left {
+            self.eval_expr(right, env)?
+        } else {
+            self.eval_expr(left, env)?
+        };
+        let moved = env
+            .move_out_nearest(name)
+            .expect("target verified bound as a local");
+        let (l, r) = if target_is_left {
+            (moved, other)
+        } else {
+            (other, moved)
+        };
+        Ok(Some(self.eval_binary(l, op, r)?))
     }
 
     fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -4802,7 +4873,10 @@ impl<'a> IrRuntime<'a> {
         }
         match op {
             BinaryOp::Add if matches!((&left, &right), (Value::String(_), Value::String(_))) => {
-                Ok(Value::String(left.as_string()? + &right.as_string()?))
+                // Reuse the left operand's heap buffer (see the AST runtime): the
+                // `String + &str` is a `push_str`, keeping `s = s + piece` loops
+                // O(n) overall rather than reallocating on every concat.
+                Ok(Value::String(left.into_string()? + &right.as_string()?))
             }
             BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
             BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
@@ -10383,6 +10457,142 @@ mod tests {
         );
         // "aaa" -> "bbb" -> "cccccc": length 6.
         assert_all_variants_eq(source, 6);
+    }
+
+    // ---- move-on-functional-update: the `+` OPERATOR string-building form ----
+    //
+    // `s = s + piece` in a loop now moves the accumulator out of the environment
+    // to serve as the left operand, so `eval_binary`'s string concat reuses its
+    // heap buffer (`push_str`) instead of cloning-then-reallocating. That makes
+    // building O(n) rather than O(n^2). These fixtures prove the move changes no
+    // observable result across all five interpreter variants.
+
+    #[test]
+    fn move_update_string_plus_builds_fifty_chars_across_backends() {
+        // `s = s + "x"` fifty times: the buffer-reusing move must yield exactly
+        // fifty characters, identical to the clone path.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let s string = \"\"\n",
+            "    for i from 1 to 50\n",
+            "        s = s + \"x\"\n",
+            "    len(s)\n",
+        );
+        assert_all_variants_eq(source, 50);
+    }
+
+    #[test]
+    fn move_update_string_plus_to_string_across_backends() {
+        // `s = s + to_string(i)` for i in 0..=9 builds "0123456789"; the other
+        // operand is a call evaluated before the move. Length 10.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let s string = \"\"\n",
+            "    for i from 0 to 9\n",
+            "        s = s + to_string(i)\n",
+            "    len(s)\n",
+        );
+        assert_all_variants_eq(source, 10);
+    }
+
+    #[test]
+    fn move_update_string_plus_does_not_corrupt_aliased_binding_across_backends() {
+        // Aliasing safety for the `+` form: `let b = a` clones `a`; a later
+        // `a = a + "c"` moves `a`'s slot but must leave `b` untouched.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let a string = \"ab\"\n",
+            "    let b string = a\n",
+            "    a = a + \"c\"\n",
+            "    len(a) * 10 + len(b)\n",
+        );
+        // a = "abc" (len 3), b = "ab" (len 2) => 32. A corrupted b would read len 3.
+        assert_all_variants_eq(source, 32);
+    }
+
+    #[test]
+    fn multi_occurrence_string_plus_is_not_optimized_but_correct_across_backends() {
+        // `s = s + s` has the target as BOTH operands, so the move must NOT fire;
+        // the doubling must still be correct.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let s string = \"ab\"\n",
+            "    s = s + s\n",
+            "    s = s + s\n",
+            "    len(s)\n",
+        );
+        // "ab" -> "abab" -> "abababab": length 8.
+        assert_all_variants_eq(source, 8);
+    }
+
+    #[test]
+    fn target_nested_with_others_in_string_plus_is_not_optimized_but_correct_across_backends() {
+        // `s = pre + s + suf` parses as `(pre + s) + suf`: the target appears
+        // alongside other operands (never as the single bare operand of the top
+        // op), so the move must NOT fire; wrapping must still be correct.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let s string = \"X\"\n",
+            "    let pre string = \"[\"\n",
+            "    let suf string = \"]\"\n",
+            "    s = pre + s + suf\n",
+            "    s = pre + s + suf\n",
+            "    len(s)\n",
+        );
+        // "X" -> "[X]" -> "[[X]]": length 5.
+        assert_all_variants_eq(source, 5);
+    }
+
+    #[test]
+    fn move_update_string_plus_right_operand_target_across_backends() {
+        // Right-operand-is-target: `s = p + s` has `s` as the single bare RIGHT
+        // operand, so the move fires on that operand (prepending). Three
+        // iterations: "!" -> "ab!" -> "abab!" -> "ababab!", length 7.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let s string = \"!\"\n",
+            "    let p string = \"ab\"\n",
+            "    for i from 1 to 3\n",
+            "        s = p + s\n",
+            "    len(s)\n",
+        );
+        assert_all_variants_eq(source, 7);
+    }
+
+    #[test]
+    fn move_update_string_plus_error_in_other_operand_leaves_target_intact_across_backends() {
+        // Error-path safety for the `+` form: in `s = s + boom()` the non-target
+        // operand (`boom()`) is evaluated BEFORE the target `s` is moved out, so a
+        // throw there leaves `s` intact and a surrounding `catch` observes the
+        // original string — never a moved-out placeholder.
+        let source = concat!(
+            "fn boom -> string\n",
+            "    throw \"boom\"\n\n",
+            "fn main -> i64\n",
+            "    let s string = \"ab\"\n",
+            "    let caught i64 = 0\n",
+            "    try\n",
+            "        s = s + boom()\n",
+            "    catch m\n",
+            "        caught = 1\n",
+            "    caught * 100 + len(s)\n",
+        );
+        // boom() throws before the move: s stays "ab" (len 2); caught=1 => 102.
+        assert_all_variants_eq(source, 102);
+    }
+
+    #[test]
+    fn move_update_numeric_plus_one_is_correct_across_backends() {
+        // `n = n + 1` (numeric, `Copy`-cheap operand) exercises the same binary
+        // move path and must stay exactly correct.
+        let source = concat!(
+            "fn main -> i64\n",
+            "    let n i64 = 0\n",
+            "    for i from 1 to 10\n",
+            "        n = n + 1\n",
+            "    n\n",
+        );
+        assert_all_variants_eq(source, 10);
     }
 
     #[test]

@@ -2020,20 +2020,30 @@ impl<'a> Runtime<'a> {
     }
 
     /// The move-on-functional-update fast path for the pervasive `x = f(x, …)`
-    /// accumulation idiom. When `rhs` is a builtin call in which the assignment
-    /// target `name` appears **exactly once, as a bare argument**, and nowhere
-    /// else in the argument list, and `name` is a local in the innermost scope,
-    /// this evaluates the call with that one argument **moved** out of the
-    /// environment instead of cloned, and returns `Some(result)`. Returning
-    /// `None` means the pattern did not apply and the caller must fall back to the
-    /// ordinary clone path.
+    /// (CALL) and `x = x <binop> e` / `x = e <binop> x` (BINARY) accumulation
+    /// idioms. When the assignment target `name` appears **exactly once** — as a
+    /// bare call argument, or as exactly one bare operand of a binary op — and
+    /// nowhere else in the RHS, and `name` is a local, this evaluates the RHS
+    /// with that one occurrence **moved** out of the environment instead of
+    /// cloned, and returns `Some(result)`. Returning `None` means the pattern did
+    /// not apply and the caller must fall back to the ordinary clone path.
+    ///
+    /// The binary form is what makes `s = s + piece` in a loop O(n): the moved
+    /// left operand's heap buffer is reused by `eval_binary`'s string concat
+    /// (see [`Value::into_string`]) instead of being cloned on read.
     ///
     /// Safety: moving is observably identical to cloning here because `name` is
     /// (a) consumed exactly once, (b) not read anywhere else in the statement, and
-    /// (c) immediately overwritten with the result. Other arguments are evaluated
-    /// *before* the move, so a failure while evaluating them leaves `name` intact;
-    /// and the call is gated to builtins that cannot raise a catchable error, so a
-    /// mid-call failure halts the program with `name` never observed again.
+    /// (c) immediately overwritten with the result. The *other* operand/arguments
+    /// are evaluated *before* the move, so a failure while evaluating them leaves
+    /// `name` intact. The consuming op cannot raise a *catchable* error: builtins
+    /// on the call path are gated to those that never raise `L0420`, and
+    /// `eval_binary` only ever raises non-catchable errors (e.g. `L0404`
+    /// div-by-zero, `L0417` type) — only user-thrown `L0420` is recoverable by a
+    /// `catch` — so a mid-op failure halts the program with the moved-out
+    /// placeholder never observed. Short-circuit `and`/`or` are excluded: they do
+    /// not route through `eval_binary` and evaluating the non-target operand early
+    /// would change their conditional-evaluation semantics.
     fn try_move_functional_update(
         &mut self,
         name: &str,
@@ -2041,9 +2051,26 @@ impl<'a> Runtime<'a> {
         env: &mut Env,
         require_innermost: bool,
     ) -> Result<Option<Value>, RuntimeError> {
-        let ExprKind::Call { name: callee, args } = &rhs.kind else {
-            return Ok(None);
-        };
+        match &rhs.kind {
+            ExprKind::Call { name: callee, args } => {
+                self.try_move_call_update(name, callee, args, env, require_innermost)
+            }
+            ExprKind::Binary { op, left, right } => {
+                self.try_move_binary_update(name, *op, left, right, env, require_innermost)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `x = f(x, …)` arm of [`Self::try_move_functional_update`].
+    fn try_move_call_update(
+        &mut self,
+        name: &str,
+        callee: &str,
+        args: &[Expr],
+        env: &mut Env,
+        require_innermost: bool,
+    ) -> Result<Option<Value>, RuntimeError> {
         // Never optimize when the call target is the variable itself (`x = x(x)`):
         // moving `x` out would change how the call name resolves.
         if callee == name {
@@ -2109,6 +2136,62 @@ impl<'a> Runtime<'a> {
         // `callee` is a plain builtin/constructor here (closures/func values/
         // extern/async/user functions were excluded), so dispatch it directly.
         Ok(Some(self.call_function(callee, values)?))
+    }
+
+    /// `x = x <binop> e` / `x = e <binop> x` arm of
+    /// [`Self::try_move_functional_update`]. Fires when exactly one operand is the
+    /// bare variable `name` and `name` appears nowhere else in either operand.
+    fn try_move_binary_update(
+        &mut self,
+        name: &str,
+        op: BinaryOp,
+        left: &Expr,
+        right: &Expr,
+        env: &mut Env,
+        require_innermost: bool,
+    ) -> Result<Option<Value>, RuntimeError> {
+        // Short-circuit operators are evaluated in `eval_expr`, not `eval_binary`,
+        // and their right operand is conditional; reordering evaluation would
+        // change semantics, so never optimize them.
+        if matches!(op, BinaryOp::And | BinaryOp::Or) {
+            return Ok(None);
+        }
+        let bound = if require_innermost {
+            env.innermost_has(name)
+        } else {
+            env.is_bound(name)
+        };
+        if !bound {
+            return Ok(None);
+        }
+        // Exactly one operand must be the bare `Variable(name)`, and `name` must
+        // not appear anywhere in the *other* operand. `s = s + s`, `s = pre + s +
+        // suf`, `n = a - n + n`, etc. therefore fall back to the clone path.
+        let left_bare = matches!(&left.kind, ExprKind::Variable(v) if v == name);
+        let right_bare = matches!(&right.kind, ExprKind::Variable(v) if v == name);
+        let target_is_left = if left_bare && !expr_mentions_var(right, name) {
+            true
+        } else if right_bare && !expr_mentions_var(left, name) {
+            false
+        } else {
+            return Ok(None);
+        };
+        // Evaluate the non-target operand *before* moving the target, so a failure
+        // there leaves `name` intact and the env consistent.
+        let other = if target_is_left {
+            self.eval_expr(right, env)?
+        } else {
+            self.eval_expr(left, env)?
+        };
+        let moved = env
+            .move_out_nearest(name)
+            .expect("target verified bound as a local");
+        let (l, r) = if target_is_left {
+            (moved, other)
+        } else {
+            (other, moved)
+        };
+        Ok(Some(self.eval_binary(l, op, r)?))
     }
 
     fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -3964,7 +4047,11 @@ impl<'a> Runtime<'a> {
         match op {
             // `+` concatenates when both operands are strings; otherwise it adds i64s.
             BinaryOp::Add if matches!((&left, &right), (Value::String(_), Value::String(_))) => {
-                Ok(Value::String(left.as_string()? + &right.as_string()?))
+                // Reuse the left operand's heap buffer: `String + &str` is a
+                // `push_str`, amortized O(1) when capacity allows, so building a
+                // string with `s = s + piece` in a loop stays O(n) overall
+                // instead of reallocating a fresh buffer on every concat.
+                Ok(Value::String(left.into_string()? + &right.as_string()?))
             }
             BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
             BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
@@ -6218,6 +6305,17 @@ impl Value {
     pub fn as_string(&self) -> Result<String, RuntimeError> {
         match self {
             Self::String(value) => Ok(value.clone()),
+            _ => Err(RuntimeError::new("L0417", "expected string value")),
+        }
+    }
+
+    /// Move the owned `String` out of a [`Value::String`] without cloning its
+    /// heap buffer. Used for the left operand of string `+` so the concatenation
+    /// reuses (and grows in place) that buffer instead of allocating a fresh one;
+    /// the result is byte-identical to `as_string`, only cheaper.
+    pub fn into_string(self) -> Result<String, RuntimeError> {
+        match self {
+            Self::String(value) => Ok(value),
             _ => Err(RuntimeError::new("L0417", "expected string value")),
         }
     }
