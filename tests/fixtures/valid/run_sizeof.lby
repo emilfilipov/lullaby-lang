@@ -1,0 +1,16 @@
+struct Mixed
+    a byte
+    b i32
+    c i16
+    d i64
+
+fn main -> i64
+    let arr array<i64> = [1, 2, 3]
+    let m Mixed = Mixed(byte(1), to_i32(2), to_i16(3), 4)
+    let s1 i64 = size_of(0) + size_of(to_i32(0)) + size_of(byte(0)) + size_of('a')
+    let s2 i64 = size_of(true) + size_of(0.0) + size_of(to_f32(0.0))
+    let a1 i64 = align_of(0) + align_of(to_i16(0))
+    let arrsz i64 = size_of(arr)
+    let msz i64 = size_of(m) + align_of(m)
+    let offs i64 = offset_of(m, "b") + offset_of(m, "d")
+    s1 + s2 + a1 + arrsz + msz + offs

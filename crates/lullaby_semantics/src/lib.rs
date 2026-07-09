@@ -3602,6 +3602,133 @@ impl<'a> Checker<'a> {
                 }
                 Some(TypeRef::new("void"))
             }
+            // Raw-memory layout queries. `size_of`/`align_of` accept any type
+            // with a defined C-natural layout (scalar, pointer/reference handle,
+            // struct, or fixed `array<T>`) and fold to an `i64` constant. They
+            // are safe (compile-time) queries, so they need no `unsafe` block.
+            "size_of" | "align_of" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                if !self.type_has_layout(&ty) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0431",
+                        format!(
+                            "`{name}` requires a type with a defined memory layout but got `{}`",
+                            ty.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new("i64"))
+            }
+            // `offset_of(x, "field")`: `x` must be a struct value and `field` a
+            // string literal naming one of its fields. Folds to an `i64`
+            // constant.
+            "offset_of" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                let ExprKind::String(field) = &args[1].kind else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0431",
+                        "offset_of expects a string-literal field name as its second argument"
+                            .to_string(),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                };
+                let Some(fields) = self.structs.get(&ty.name) else {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0431",
+                        format!("offset_of expects a struct value but got `{}`", ty.name),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                };
+                if !fields.iter().any(|declared| &declared.name == field) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0431",
+                        format!("struct `{}` has no field `{field}`", ty.name),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                // Reject a struct whose layout is undefined (a non-sized field),
+                // so the runtime never fails to fold the constant.
+                if !self.type_has_layout(&ty) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0431",
+                        format!(
+                            "offset_of requires a struct with a fully sized layout but `{}` has a field with no defined layout",
+                            ty.name
+                        ),
+                        Some(function.name.clone()),
+                        args[0].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new("i64"))
+            }
+            // `ptr_to_int(p) -> i64`: the integer handle/address of a raw
+            // pointer. Reinterpreting a pointer as an integer is `unsafe`.
+            "ptr_to_int" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                self.expect_raw_pointer("ptr_to_int", &ty, args[0].span, function)?;
+                self.require_unsafe("ptr_to_int", call_span, function)?;
+                Some(TypeRef::new("i64"))
+            }
+            // `int_to_ptr(n) -> ptr<T>`: reconstruct a raw pointer from an
+            // integer handle. Fabricating a pointer from an integer is `unsafe`.
+            // The concrete pointee comes from the caller's expected annotation
+            // when it is a raw pointer; otherwise it defaults to `ptr<i64>`.
+            "int_to_ptr" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
+                self.require_unsafe("int_to_ptr", call_span, function)?;
+                let result = expected
+                    .filter(|ty| ty.is_raw_pointer())
+                    .cloned()
+                    .unwrap_or_else(|| TypeRef::new("ptr<i64>"));
+                Some(result)
+            }
+            // `volatile_load(p) -> T` / `volatile_store(p, v)`: raw pointer
+            // element read/write with volatile semantics (no elision or
+            // reordering). Type-check exactly like `ptr_read`/`ptr_write`; the
+            // volatility guarantee is realized by native codegen.
+            "volatile_load" => {
+                self.expect_arg_count(name, args, 1, function)?;
+                let ty = self.check_expr(&args[0], scope, function)?;
+                let inner =
+                    self.expect_raw_pointer("volatile_load", &ty, args[0].span, function)?;
+                self.require_unsafe("volatile_load", call_span, function)?;
+                Some(inner)
+            }
+            "volatile_store" => {
+                self.expect_arg_count(name, args, 2, function)?;
+                let ptr_type = self.check_expr(&args[0], scope, function)?;
+                let value_type = self.check_expr(&args[1], scope, function)?;
+                let inner =
+                    self.expect_raw_pointer("volatile_store", &ptr_type, args[0].span, function)?;
+                self.require_unsafe("volatile_store", call_span, function)?;
+                if value_type != inner {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0331",
+                        format!(
+                            "volatile_store expects value `{}` for pointer `{}` but got `{}`",
+                            inner.name, ptr_type.name, value_type.name
+                        ),
+                        Some(function.name.clone()),
+                        args[1].span,
+                    ));
+                    return None;
+                }
+                Some(TypeRef::new("void"))
+            }
             "char_code" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 self.expect_scalar_builtin_arg(name, 1, &args[0], "char", scope, function)?;
@@ -4848,6 +4975,48 @@ impl<'a> Checker<'a> {
     }
 
     /// Verify `ty` is a raw pointer and return its pointee type.
+    /// Whether `ty` has a defined C-natural raw-memory layout: a scalar, a
+    /// pointer/reference handle (`ptr<T>`/`rc<T>`/`ref<T>`, all 8 bytes), a
+    /// fixed `array<T>` whose element is itself sized, or a declared struct
+    /// whose every field is sized (recursively, rejecting a by-value cycle).
+    /// Drives `size_of`/`align_of`/`offset_of`. See
+    /// `documents/lullaby_memory_management.md`.
+    fn type_has_layout(&self, ty: &TypeRef) -> bool {
+        self.type_layout_ok(ty, &mut Vec::new())
+    }
+
+    fn type_layout_ok(&self, ty: &TypeRef, stack: &mut Vec<String>) -> bool {
+        const SCALARS: &[&str] = &[
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64",
+            "bool", "byte", "char",
+        ];
+        if SCALARS.contains(&ty.name.as_str()) {
+            return true;
+        }
+        // Pointer and reference handles are opaque 8-byte cells; their pointee
+        // layout is irrelevant, so they never recurse.
+        if ty.is_raw_pointer() || ty.is_safe_reference() {
+            return true;
+        }
+        if let Some(element) = ty.array_element() {
+            return self.type_layout_ok(&element, stack);
+        }
+        if let Some(fields) = self.structs.get(&ty.name) {
+            // A struct that (transitively) contains itself by value has no finite
+            // size, so its layout is undefined.
+            if stack.iter().any(|name| name == &ty.name) {
+                return false;
+            }
+            stack.push(ty.name.clone());
+            let ok = fields
+                .iter()
+                .all(|field| self.type_layout_ok(&field.ty, stack));
+            stack.pop();
+            return ok;
+        }
+        false
+    }
+
     fn expect_raw_pointer(
         &mut self,
         name: &str,
@@ -6150,6 +6319,74 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "L0330")
+        );
+    }
+
+    #[test]
+    fn validates_raw_memory_layout_builtins() {
+        // `size_of`/`align_of` on scalars, a fixed array, and a struct, plus
+        // `offset_of` with a string-literal field, all type-check (no `unsafe`
+        // needed since they are compile-time layout queries).
+        let source = "struct Pair\n    a i32\n    b i64\n\nfn main -> i64\n    let arr array<i64> = [1, 2]\n    let p Pair = Pair(to_i32(1), 2)\n    size_of(0) + align_of(byte(0)) + size_of(arr) + size_of(p) + offset_of(p, \"b\")\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn validates_pointer_int_cast_and_volatile_inside_unsafe() {
+        let source = "fn main -> i64\n    let p ptr_i64 = alloc(1)\n    let n i64 = 0\n    let v i64 = 0\n    unsafe\n        n = ptr_to_int(p)\n        let back ptr_i64 = int_to_ptr(n)\n        volatile_store(back, 7)\n        v = volatile_load(back)\n    dealloc(p)\n    v\n";
+        assert!(validate_source(source).is_ok());
+    }
+
+    #[test]
+    fn rejects_offset_of_on_non_struct() {
+        let diagnostics =
+            validate_source("fn main -> i64\n    let x i64 = 1\n    offset_of(x, \"a\")\n")
+                .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0431"),
+            "offset_of on a non-struct must be L0431"
+        );
+    }
+
+    #[test]
+    fn rejects_offset_of_unknown_field() {
+        let diagnostics = validate_source(
+            "struct Pair\n    a i64\n    b i64\n\nfn main -> i64\n    let p Pair = Pair(1, 2)\n    offset_of(p, \"missing\")\n",
+        )
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0431"),
+            "offset_of of an unknown field must be L0431"
+        );
+    }
+
+    #[test]
+    fn rejects_size_of_on_non_sized_type() {
+        let diagnostics = validate_source("fn main -> i64\n    size_of(\"text\")\n    0\n")
+            .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0431"),
+            "size_of on a string must be L0431"
+        );
+    }
+
+    #[test]
+    fn rejects_ptr_to_int_outside_unsafe() {
+        let diagnostics = validate_source(
+            "fn main -> i64\n    let p ptr_i64 = alloc(1)\n    let n i64 = ptr_to_int(p)\n    dealloc(p)\n    n\n",
+        )
+        .expect_err("semantic");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "L0330"),
+            "ptr_to_int outside unsafe must be L0330"
         );
     }
 
