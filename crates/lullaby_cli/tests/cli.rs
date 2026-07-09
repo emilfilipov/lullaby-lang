@@ -3769,6 +3769,99 @@ fn wasm_map_value_semantics_execution_parity_with_node() {
 }
 
 #[test]
+fn wasm_map_string_key_execution_parity_with_node() {
+    // The `map<string, V>` step: a `string`-KEYED map compiles now. The lookup
+    // compares keys by CONTENT (equal `byte_len` and identical UTF-8 bytes), not
+    // pointer identity, exactly like the interpreters' `Value` equality — so a key
+    // built by concatenation (`"a" + "b"`, a fresh string object) is the SAME key
+    // as a separately-built literal `"ab"`. The fixture builds a `map<string, i64>`
+    // and a `map<string, string>`, sets keys via concatenated/`to_string` strings,
+    // updates an existing key (proving content equality overwrites, not appends),
+    // and reads with `map_get`/`map_has`/`map_len`. The exported `main` must equal
+    // the interpreters' ground truth bit-for-bit.
+    let fixture = workspace_root().join("tests/fixtures/valid/wasm_map_string_key.lby");
+    let out = std::env::temp_dir().join("lullaby_wasm_map_string_key.wasm");
+    let emit = lullaby()
+        .args([
+            "wasm",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    // Every function must COMPILE to WASM (the string-keyed map ops lower to linear
+    // memory with a content-equality scan), not skip to the interpreters.
+    let verbose = stdout(&emit);
+    for func in ["build_scores", "score", "build_labels", "label_len", "main"] {
+        assert!(
+            verbose.contains(&format!("compiled {func}")),
+            "`{func}` should compile to WASM (not skip), got: {verbose}"
+        );
+    }
+
+    // Interpreter ground truth for `main`, cross-checked across all three backends
+    // (AST/IR/bytecode) so the WASM result is compared to a value every interpreter
+    // agrees on.
+    let mut interp_main = String::new();
+    for backend in ["ast", "ir", "bytecode"] {
+        let run = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(run.status.success(), "{}", stderr(&run));
+        let got = stdout(&run).trim().to_string();
+        if interp_main.is_empty() {
+            interp_main = got;
+        } else {
+            assert_eq!(
+                got, interp_main,
+                "`{backend}` interpreter disagreed on map<string, _> ground truth"
+            );
+        }
+    }
+    assert_eq!(interp_main, "325634");
+
+    if !node_available() {
+        eprintln!("node not found on PATH; skipping WASM map string-key execution parity");
+        return;
+    }
+
+    let runner = std::env::temp_dir().join("lullaby_wasm_map_string_key_runner.js");
+    let js = format!(
+        "const fs=require('fs');\
+         const bytes=fs.readFileSync({wasm:?});\
+         const imports={{env:{{log_i64:()=>{{}},console_log:()=>{{}},dom_set_text:()=>{{}}}}}};\
+         WebAssembly.instantiate(bytes,imports).then(r=>{{\
+           process.stdout.write('main='+r.instance.exports.main().toString());\
+         }}).catch(err=>{{console.error('FAIL:'+err.message);process.exit(1)}});",
+        wasm = out.to_str().expect("out path")
+    );
+    std::fs::write(&runner, js).expect("write runner");
+    let node = Command::new("node")
+        .arg(runner.to_str().expect("runner path"))
+        .output()
+        .expect("run node");
+    assert!(
+        node.status.success(),
+        "node failed: {}",
+        String::from_utf8_lossy(&node.stderr)
+    );
+    let out_text = String::from_utf8_lossy(&node.stdout);
+    assert!(
+        out_text.contains(&format!("main={interp_main}")),
+        "WASM map string-key `main` must equal the interpreter ({interp_main}), got: {out_text}"
+    );
+}
+
+#[test]
 fn wasm_list_string_and_map_string_execution_parity_with_node() {
     // The `string`-element/value step: a `list<string>` (built with `push` of
     // literal, concatenated, and `to_string` strings, read with `get`/`len`, and

@@ -1,0 +1,54 @@
+fn build_scores n i64 -> map<string, i64>
+    let m map<string, i64> = map_new()
+    m = map_set(m, "a" + "b", n)
+    m = map_set(m, "c", n + 1)
+    m = map_set(m, "d" + to_string(n), n + 2)
+    m = map_set(m, "ab", n + 10)
+    m
+
+fn score m map<string, i64> k string -> i64
+    match map_get(m, k)
+        some(v) -> v
+        none -> 0 - 1
+
+fn build_labels -> map<string, string>
+    let m map<string, string> = map_new()
+    m = map_set(m, "x" + "y", "hello")
+    m = map_set(m, "z", "wo" + "rld")
+    m = map_set(m, "xy", "HI")
+    m
+
+fn label_len m map<string, string> k string -> i64
+    match map_get(m, k)
+        some(s) -> len(s)
+        none -> 0 - 1
+
+fn main -> i64
+    let m map<string, i64> = build_scores(5)
+
+    let map_n i64 = map_len(m)
+
+    let got_ab i64 = score(m, "ab")
+
+    let got_c i64 = score(m, "c")
+
+    let got_d i64 = score(m, "d5")
+
+    let missing i64 = score(m, "zz")
+
+    let has_ab i64 = 0
+    if map_has(m, "a" + "b")
+        has_ab = 1
+    let has_missing i64 = 0
+    if map_has(m, "nope")
+        has_missing = 1
+
+    let labels map<string, string> = build_labels()
+    let labels_n i64 = map_len(labels)
+    let len_xy i64 = label_len(labels, "xy")
+    let len_z i64 = label_len(labels, "z")
+    let has_z i64 = 0
+    if map_has(labels, "z")
+        has_z = 1
+
+    map_n * 100000 + got_ab * 1000 + got_c * 100 + got_d + missing + has_ab * 10000 + has_missing + labels_n * 10 + len_xy + len_z + has_z
