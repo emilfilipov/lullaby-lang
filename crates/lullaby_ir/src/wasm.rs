@@ -69,21 +69,28 @@
 //! callee's own fresh record, so no extra copy is needed. Enum payloads are always
 //! scalar (see `enum_layout`), so an enum copy is a flat word copy.
 //!
-//! - A growable `map<K, V>` with SCALAR `K` and `V` is a pointer to
-//!   `[len: i32][cap: i32][(key, value) slot pairs]`: an insertion-ordered
-//!   association list mirroring the interpreters' `Value::Map`. `map_new` allocates
-//!   an empty header; `map_set` deep-copies then updates an existing key's value in
-//!   place or appends a new `(k, v)` entry (growing with capacity doubling like a
-//!   list); `map_get` linear-scans and yields `some(v)`/`none` (reusing the
-//!   option/enum layout); `map_has` scans to a `bool`; `map_len` reads the header.
-//!   Ordering and lookup match the interpreters bit-for-bit. A map with a heap key
-//!   or value (`map<string, V>`, `map<K, list<…>>`, …) is DEFERRED.
+//! - A growable `map<K, V>` with a SCALAR or `string` `K` and a scalar or `string`
+//!   `V` is a pointer to `[len: i32][cap: i32][(key, value) slot pairs]`: an
+//!   insertion-ordered association list mirroring the interpreters' `Value::Map`.
+//!   `map_new` allocates an empty header; `map_set` deep-copies then updates an
+//!   existing key's value in place or appends a new `(k, v)` entry (growing with
+//!   capacity doubling like a list); `map_get` linear-scans and yields
+//!   `some(v)`/`none` (reusing the option/enum layout); `map_has` scans to a `bool`;
+//!   `map_len` reads the header. A `string` key/value occupies its slot as an `i32`
+//!   pointer to the immutable `[char_len][byte_len][utf8]` record (shared on deep
+//!   copy since strings are immutable). A scalar key is compared with an integer
+//!   `i32.eq`/`i64.eq`; a `string` key is compared by CONTENT (equal `byte_len` and
+//!   identical UTF-8 bytes), so two DISTINCT string objects with the same bytes are
+//!   the SAME key — matching the interpreters' `Value` content equality, not
+//!   pointer identity. Ordering and lookup match the interpreters bit-for-bit. A map
+//!   with a non-string heap key or value (`map<list<…>, V>`, `map<K, list<…>>`, …)
+//!   is DEFERRED.
 //!
-//! A function that uses a different builtin, a `list`/`map` with a heap element
-//! (e.g. `list<string>`, `map<string, i64>`), an enum with a HEAP payload
-//! (`string`/`list`/`array`/`map` — notably `result<i64, string>`), or any type
-//! still outside this set is SKIPPED with a reason (it still runs on the
-//! interpreters).
+//! A function that uses a different builtin, a `list`/`map` with an unsupported
+//! heap element (e.g. `list<struct>`, `map<K, list<…>>`, `map<list<…>, V>`), an
+//! enum with a HEAP payload (`list`/`array`/`map` — notably a `result` carrying a
+//! collection), or any type still outside this set is SKIPPED with a reason (it
+//! still runs on the interpreters).
 //!
 //! Linear-memory infrastructure: the module exports a `"memory"` (min 1 page),
 //! imports the host functions `env.log_i64 (func (param i64))` (surfaced as
@@ -578,18 +585,20 @@ fn scalar_or_string_slot_type(ty: &TypeRef) -> Option<WasmValType> {
 }
 
 /// The `(K, V)` key/value types of a supported growable `map<K, V>`, or `None` if
-/// `ty` is not a map, its key is not a scalar, or its value is neither a scalar
-/// nor a `string`. The value may be a `string` (an `i32` pointer stored in one
-/// slot, shared on deep copy since strings are immutable). Maps with a heap KEY
-/// (`map<string, V>`, `map<list<…>, V>`) or a non-string heap value
-/// (`map<K, list<…>>`, `map<K, struct>`) are DEFERRED this increment — such a map
-/// is unsupported and its enclosing function is skipped (still runs on the
-/// interpreters). String keys are deferred here because the interpreters compare
-/// keys by `Value` content equality, which for a `string` means comparing decoded
-/// bytes rather than the interned pointer.
+/// `ty` is not a map, its key is neither a scalar nor a `string`, or its value is
+/// neither a scalar nor a `string`. A `string` KEY is an `i32` pointer stored in
+/// the key slot; unlike a scalar key it is compared by CONTENT (the decoded UTF-8
+/// bytes) — see [`emit_string_eq`] and [`emit_map_find`] — matching the
+/// interpreters' `Value` content equality, so two distinct string objects with the
+/// same bytes are the SAME key. The value may likewise be a `string` (an `i32`
+/// pointer stored in one slot). Both string keys and string values are shared on
+/// deep copy since strings are immutable. Maps with a non-string heap KEY
+/// (`map<list<…>, V>`, `map<struct, V>`) or a non-string heap value
+/// (`map<K, list<…>>`, `map<K, struct>`) are DEFERRED — such a map is unsupported
+/// and its enclosing function is skipped (still runs on the interpreters).
 fn supported_map_kv(ty: &TypeRef) -> Option<(TypeRef, TypeRef)> {
     let (key, value) = ty.map_args()?;
-    scalar_val_type(&key)?;
+    scalar_or_string_slot_type(&key)?;
     scalar_or_string_slot_type(&value)?;
     Some((key, value))
 }
@@ -4219,10 +4228,11 @@ fn lower_map_new(ctx: &mut LowerCtx, args: &[IrExpr], out: &mut Vec<u8>) -> Resu
     Ok(())
 }
 
-/// Emit the equality opcode comparing two key values (already pushed) of WASM slot
-/// type `key_ty`. Keys are scalar (`i64`/fixed-width use `i64.eq`; `bool`/`char`/
-/// `byte` use `i32.eq`; floats use the ordered `f*.eq`), matching how the
-/// interpreters compare `Value` keys by content.
+/// Emit the equality opcode comparing two SCALAR key values (already pushed) of
+/// WASM slot type `key_ty`. Scalar keys use `i64.eq` (`i64`/fixed-width), `i32.eq`
+/// (`bool`/`char`/`byte`), or the ordered `f*.eq` (floats), matching how the
+/// interpreters compare `Value` keys by content. A `string` key is NOT a scalar
+/// and is compared by content via [`emit_string_eq`], never this opcode.
 fn emit_key_eq(key_ty: WasmValType, out: &mut Vec<u8>) {
     match key_ty {
         WasmValType::I32 => out.push(0x46), // i32.eq
@@ -4232,18 +4242,115 @@ fn emit_key_eq(key_ty: WasmValType, out: &mut Vec<u8>) {
     }
 }
 
+/// Emit a CONTENT equality test for two `string` pointers `a` and `b` (both `i32`
+/// locals pointing at `[char_len: i32][byte_len: i32][utf8 bytes]` records),
+/// leaving an `i32` boolean (1 if the strings hold identical bytes, else 0) on the
+/// stack. This matches the interpreters' `Value::String` equality: two DISTINCT
+/// string objects with the same bytes compare equal (content, not pointer
+/// identity). The test first compares the `byte_len` headers; if they differ the
+/// result is 0 without touching the bytes. If they match, it walks the UTF-8 bytes
+/// front-to-back, returning 0 on the first differing byte and 1 once every byte
+/// matched (a zero-length string trivially matches). A pointer-identity fast path
+/// (`a == b`) short-circuits when the same record is passed for both sides.
+fn emit_string_eq(ctx: &mut LowerCtx, a: u32, b: u32, out: &mut Vec<u8>) -> u32 {
+    let result = ctx.add_local(WasmValType::I32);
+    // Fast path: identical pointers are the same string, so equal.
+    get_local(out, a);
+    get_local(out, b);
+    out.push(0x46); // i32.eq
+    out.push(0x04); // if -> void
+    out.push(0x40);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    set_local(out, result);
+    out.push(0x05); // else
+    // Compare byte-length headers.
+    let byte_len = ctx.add_local(WasmValType::I32);
+    get_local(out, a);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    set_local(out, byte_len);
+    get_local(out, byte_len);
+    get_local(out, b);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    out.push(0x47); // i32.ne
+    out.push(0x04); // if -> void  (byte lengths differ => not equal)
+    out.push(0x40);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, result);
+    out.push(0x05); // else  (equal lengths: walk the bytes)
+    // Assume equal until a byte mismatches; scan i in [0, byte_len).
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    set_local(out, result);
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= byte_len
+    get_local(out, i);
+    get_local(out, byte_len);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // if load8_u(a + STR_DATA_OFF + i) != load8_u(b + STR_DATA_OFF + i) { result = 0; break }
+    get_local(out, a);
+    get_local(out, i);
+    out.push(0x6a); // i32.add
+    out.push(0x2d); // i32.load8_u
+    write_uleb(out, 0); // align 0
+    write_uleb(out, STR_DATA_OFF as u64);
+    get_local(out, b);
+    get_local(out, i);
+    out.push(0x6a); // i32.add
+    out.push(0x2d); // i32.load8_u
+    write_uleb(out, 0); // align 0
+    write_uleb(out, STR_DATA_OFF as u64);
+    out.push(0x47); // i32.ne
+    out.push(0x04); // if -> void
+    out.push(0x40);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, result);
+    out.push(0x0c); // br 2 (out of the block)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    out.push(0x0b); // end if (byte-length mismatch)
+    out.push(0x0b); // end if (pointer fast path)
+    result
+}
+
 /// Linear-scan the map in `map_local` for the entry whose key equals the value in
 /// `key_local` (slot type `key_ty`), returning a fresh `i32` local holding the
 /// matching entry index, or the map's `len` if no key matched (the "found index
 /// else len" convention: `map_set` appends at `len`, `map_get`/`map_has` treat
 /// `index == len` as absent). The scan visits entries front-to-back so the FIRST
 /// matching key wins, mirroring the interpreters' insertion-ordered association
-/// list. `len` is loaded into a caller-visible local so callers can reuse it.
+/// list. When `key_is_string`, the key slot holds an `i32` string POINTER and keys
+/// are compared by CONTENT via [`emit_string_eq`] (decoded bytes, so two distinct
+/// string objects with equal bytes match) instead of an integer slot compare;
+/// otherwise the scalar `key_ty` compare of [`emit_key_eq`] is used. `len` is
+/// loaded into a caller-visible local so callers can reuse it.
 fn emit_map_find(
     ctx: &mut LowerCtx,
     map_local: u32,
     key_local: u32,
     key_ty: WasmValType,
+    key_is_string: bool,
     len_local: u32,
     out: &mut Vec<u8>,
 ) -> u32 {
@@ -4271,10 +4378,20 @@ fn emit_map_find(
     out.push(0x0d); // br_if 1 (out of the block)
     write_uleb(out, 1);
     // if key(entry i) == key_local { found = i; break }
-    emit_map_entry_addr(map_local, i, out); // entry addr
-    emit_load(key_ty, out); // load key slot (offset 0 within the entry)
-    get_local(out, key_local);
-    emit_key_eq(key_ty, out);
+    if key_is_string {
+        // Load the entry's stored string pointer, then compare by content.
+        let entry_key = ctx.add_local(WasmValType::I32);
+        emit_map_entry_addr(map_local, i, out); // entry addr
+        emit_load(WasmValType::I32, out); // load key slot (string pointer at offset 0)
+        set_local(out, entry_key);
+        let eq = emit_string_eq(ctx, entry_key, key_local, out);
+        get_local(out, eq);
+    } else {
+        emit_map_entry_addr(map_local, i, out); // entry addr
+        emit_load(key_ty, out); // load key slot (offset 0 within the entry)
+        get_local(out, key_local);
+        emit_key_eq(key_ty, out);
+    }
     out.push(0x04); // if
     out.push(0x40); // void
     get_local(out, i);
@@ -4311,12 +4428,13 @@ fn lower_map_set(
 ) -> Result<(), String> {
     let (key_ty, value_ty) = supported_map_kv(&map.ty).ok_or_else(|| {
         format!(
-            "map_set expects a scalar-key, scalar-value map but got `{}`",
+            "map_set expects a scalar/string-key, scalar/string-value map but got `{}`",
             map.ty.name
         )
     })?;
-    let key_slot = scalar_val_type(&key_ty)
+    let key_slot = scalar_or_string_slot_type(&key_ty)
         .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let key_is_string = key_ty.name == "string";
     let value_slot = scalar_or_string_slot_type(&value_ty)
         .ok_or_else(|| format!("map value type `{}` is unsupported", value_ty.name))?;
 
@@ -4332,7 +4450,7 @@ fn lower_map_set(
 
     // Scan for the key; `found == len` means "not present".
     let len = ctx.add_local(WasmValType::I32);
-    let found = emit_map_find(ctx, mp, key_local, key_slot, len, out);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, key_is_string, len, out);
 
     // if found == len { append } else { overwrite value in place }
     get_local(out, found);
@@ -4436,12 +4554,13 @@ fn lower_map_get(
 ) -> Result<(), String> {
     let (key_ty, value_ty) = supported_map_kv(&map.ty).ok_or_else(|| {
         format!(
-            "map_get expects a scalar-key, scalar-value map but got `{}`",
+            "map_get expects a scalar/string-key, scalar/string-value map but got `{}`",
             map.ty.name
         )
     })?;
-    let key_slot = scalar_val_type(&key_ty)
+    let key_slot = scalar_or_string_slot_type(&key_ty)
         .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let key_is_string = key_ty.name == "string";
     let value_slot = scalar_or_string_slot_type(&value_ty)
         .ok_or_else(|| format!("map value type `{}` is unsupported", value_ty.name))?;
     // The result `option<V>` enum layout: variant `some(V)` is tag 0, `none` tag 1.
@@ -4461,7 +4580,7 @@ fn lower_map_get(
     set_local(out, key_local);
 
     let len = ctx.add_local(WasmValType::I32);
-    let found = emit_map_find(ctx, mp, key_local, key_slot, len, out);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, key_is_string, len, out);
 
     // Allocate the option record once; fill it in either branch. Result pointer is
     // stashed so both branches leave the same pointer on the stack at the `end`.
@@ -4510,12 +4629,13 @@ fn lower_map_has(
 ) -> Result<(), String> {
     let (key_ty, _value_ty) = supported_map_kv(&map.ty).ok_or_else(|| {
         format!(
-            "map_has expects a scalar-key, scalar-value map but got `{}`",
+            "map_has expects a scalar/string-key, scalar/string-value map but got `{}`",
             map.ty.name
         )
     })?;
-    let key_slot = scalar_val_type(&key_ty)
+    let key_slot = scalar_or_string_slot_type(&key_ty)
         .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let key_is_string = key_ty.name == "string";
 
     lower_expr(ctx, map, out)?;
     let mp = ctx.add_local(WasmValType::I32);
@@ -4525,7 +4645,7 @@ fn lower_map_has(
     set_local(out, key_local);
 
     let len = ctx.add_local(WasmValType::I32);
-    let found = emit_map_find(ctx, mp, key_local, key_slot, len, out);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, key_is_string, len, out);
     // result = found != len
     get_local(out, found);
     get_local(out, len);
@@ -4539,7 +4659,7 @@ fn lower_map_has(
 fn lower_map_len(ctx: &mut LowerCtx, map: &IrExpr, out: &mut Vec<u8>) -> Result<(), String> {
     supported_map_kv(&map.ty).ok_or_else(|| {
         format!(
-            "map_len expects a scalar-key, scalar-value map but got `{}`",
+            "map_len expects a scalar/string-key, scalar/string-value map but got `{}`",
             map.ty.name
         )
     })?;
@@ -5986,15 +6106,64 @@ mod tests {
     }
 
     #[test]
-    fn map_with_heap_key_or_mutable_value_is_skipped() {
-        // A `map<string, i64>` (heap key) and a `map<i64, array<i64>>` (MUTABLE heap
-        // value) are DEFERRED: `supported_map_kv` rejects a heap key or a
-        // non-scalar, non-`string` value, so the signature is ineligible and the
-        // function is skipped (still runs on the interpreters), never miscompiled.
-        // String keys stay deferred (content equality is separate work).
+    fn map_string_key_function_compiles() {
+        // A `map<string, i64>` (string KEY, scalar value) and a `map<string, string>`
+        // (string key AND value) COMPILE: the key slot holds an `i32` string pointer,
+        // and the lookup compares keys by CONTENT — not by pointer identity — so two
+        // distinct string objects with equal bytes are the same key. `map_set`
+        // inserts/updates by content, `map_get` returns `option<V>`, and
+        // `map_has`/`map_len` work through the content-equality scan.
         let source = concat!(
-            "fn by_name -> map<string, i64>\n",
-            "    map_new()\n\n",
+            "fn build n i64 -> map<string, i64>\n",
+            "    let m map<string, i64> = map_new()\n",
+            "    m = map_set(m, \"a\" + \"b\", n)\n",
+            "    m = map_set(m, \"c\", n + 1)\n",
+            "    m = map_set(m, \"ab\", n + 2)\n",
+            "    m\n\n",
+            "fn probe n i64 -> i64\n",
+            "    let m map<string, i64> = build(n)\n",
+            "    let seen i64 = 0\n",
+            "    if map_has(m, \"c\")\n",
+            "        seen = 1\n",
+            "    match map_get(m, \"ab\")\n",
+            "        some(v) -> v + seen + map_len(m)\n",
+            "        none -> 0 - 1\n\n",
+            "fn labels -> map<string, string>\n",
+            "    let m map<string, string> = map_new()\n",
+            "    m = map_set(m, \"k\", \"v\")\n",
+            "    m\n",
+        );
+        let artifact = emit_wasm_module(&module_for(source)).expect("emit");
+        assert!(
+            artifact.compiled.contains(&"build".to_string())
+                && artifact.compiled.contains(&"probe".to_string())
+                && artifact.compiled.contains(&"labels".to_string()),
+            "map<string, _> functions should compile, skipped: {:?}",
+            artifact.skipped
+        );
+        assert!(artifact.skipped.is_empty());
+
+        let code = section_body(&artifact.bytes, 10).expect("code section");
+        // The string-key lookup compares keys by CONTENT: the byte loop emits an
+        // `i32.load8_u` (0x2d) over the UTF-8 bytes — a marker of the content
+        // comparison that a scalar-key map (integer `i64.eq`/`i32.eq` only) never
+        // emits inside its find scan.
+        assert!(
+            find_subslice(&code, &[0x2d]).is_some(),
+            "map<string, _> lookup emits a byte-compare (`i32.load8_u`) key equality"
+        );
+    }
+
+    #[test]
+    fn map_with_mutable_value_is_skipped() {
+        // A `map<i64, array<i64>>` (a MUTABLE heap value) is DEFERRED:
+        // `supported_map_kv` rejects a value that is neither scalar nor `string`, so
+        // the signature is ineligible and the function is skipped (still runs on the
+        // interpreters), never miscompiled. (The semantic layer already restricts
+        // `map` KEYS to `i64` or `string` — L0388 — so a non-string heap key never
+        // reaches this backend.) A `string` key/value, by contrast, now compiles —
+        // see `map_string_key_function_compiles`.
+        let source = concat!(
             "fn rows -> map<i64, array<i64>>\n",
             "    map_new()\n\n",
             "fn ok n i64 -> i64\n    n + 1\n",
@@ -6002,7 +6171,6 @@ mod tests {
         let artifact = emit_wasm_module(&module_for(source)).expect("emit");
         assert_eq!(artifact.compiled, vec!["ok".to_string()]);
         let skipped: Vec<&str> = artifact.skipped.iter().map(|s| s.name.as_str()).collect();
-        assert!(skipped.contains(&"by_name"));
         assert!(skipped.contains(&"rows"));
     }
 
