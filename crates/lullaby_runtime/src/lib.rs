@@ -1811,6 +1811,15 @@ enum ParallelCallable {
     Closure(Closure),
 }
 
+/// One entry in the interpreter's active call stack. The function name is
+/// *borrowed* from the program (`&'a str`), so pushing a frame on every call is
+/// allocation-free; the owned [`TraceFrame`]s a `RuntimeError` carries are
+/// materialized only when a traceback is actually attached on the error path.
+struct CallFrame<'a> {
+    function: &'a str,
+    span: Option<Span>,
+}
+
 struct Runtime<'a> {
     /// The whole program, borrowed so a builtin can spawn sibling interpreters
     /// over the same shared `&Program` (used by `parallel_map`'s scoped threads).
@@ -1839,7 +1848,7 @@ struct Runtime<'a> {
     /// this vector; a killed/reaped process keeps its slot but `child.stdout`/
     /// `stderr` are drained on read. Mirrors `sockets`.
     processes: Vec<Option<ProcessResource>>,
-    call_stack: Vec<TraceFrame>,
+    call_stack: Vec<CallFrame<'a>>,
     /// Trait-method dispatch table: `(receiver type name, method name)` -> the
     /// impl function. Built once from every `impl Trait for Type` block.
     impl_methods: HashMap<(String, String), &'a Function>,
@@ -3393,8 +3402,8 @@ impl<'a> Runtime<'a> {
             env.define(param.name.clone(), value);
         }
 
-        self.call_stack.push(TraceFrame {
-            function: function.name.clone(),
+        self.call_stack.push(CallFrame {
+            function: function.name.as_str(),
             span: Some(function.span),
         });
         let result = self.eval_block(&function.body, &mut env);
@@ -3424,7 +3433,7 @@ impl<'a> Runtime<'a> {
             }
             Err(error) => {
                 let error = if error.traceback.is_empty() {
-                    error.with_traceback(self.call_stack.clone())
+                    error.with_traceback(self.build_traceback())
                 } else {
                     error
                 };
@@ -3974,10 +3983,24 @@ impl<'a> Runtime<'a> {
         let error = error.with_span(span);
         match self.call_stack.last() {
             Some(frame) => error
-                .with_function(frame.function.clone())
-                .with_traceback(self.call_stack.clone()),
+                .with_function(frame.function.to_string())
+                .with_traceback(self.build_traceback()),
             None => error,
         }
+    }
+
+    /// Materialize the active call stack as owned [`TraceFrame`]s for a
+    /// `RuntimeError`. Called only on the error path, so the per-frame name
+    /// clone stays off the hot call path (the live `call_stack` borrows each
+    /// name from the program).
+    fn build_traceback(&self) -> Vec<TraceFrame> {
+        self.call_stack
+            .iter()
+            .map(|frame| TraceFrame {
+                function: frame.function.to_string(),
+                span: frame.span,
+            })
+            .collect()
     }
 
     fn eval_binary(&self, left: Value, op: BinaryOp, right: Value) -> Result<Value, RuntimeError> {
