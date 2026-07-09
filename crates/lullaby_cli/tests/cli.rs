@@ -318,6 +318,60 @@ fn runs_parallel_map_fixture_on_all_backends() {
 }
 
 #[test]
+fn runs_sizeof_fixture_on_all_backends() {
+    // `run_sizeof.lby` sums `size_of`/`align_of` of several scalars, a fixed
+    // `array<i64>`, and a C-packed struct plus two `offset_of` field offsets.
+    // The deterministic total is 116 on the AST, IR, and bytecode interpreters:
+    // s1 = 8+4+1+4 = 17, s2 = 1+8+4 = 13, a1 = 8+2 = 10, arrsz = 3*8 = 24,
+    // msz = 24+8 = 32, offs = 4+16 = 20 -> 116.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_sizeof.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "116",
+            "{backend} result"
+        );
+    }
+}
+
+#[test]
+fn runs_ptr_cast_fixture_on_all_backends() {
+    // `run_ptr_cast.lby` round-trips a raw pointer through `ptr_to_int` /
+    // `int_to_ptr`, then `volatile_store`s 99 and `volatile_load`s it back,
+    // yielding a deterministic 99 on the AST, IR, and bytecode interpreters.
+    let fixture = workspace_root().join("tests/fixtures/valid/run_ptr_cast.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "99",
+            "{backend} result"
+        );
+    }
+}
+
+#[test]
 fn runs_list_map_fixture_on_all_backends() {
     // `list_map` squares [1,2,3,4] -> [1,4,9,16] (sum 30) and doubles them via
     // a closure -> [2,4,6,8] (sum 20); `list_reduce` folds each. The

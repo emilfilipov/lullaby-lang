@@ -364,6 +364,48 @@ unsafe
     raw_write(0x12345678, buffer)  # Bypasses bounds checking
 ```
 
+### Raw-Memory Layout Intrinsics (Implemented)
+
+The compiler exposes a raw-memory intrinsic set that systems and FFI code need.
+Layout follows the **C-natural layout** so it matches the platform C ABI:
+
+- Scalar byte sizes: `i8`/`u8`/`bool`/`byte` = 1, `i16`/`u16` = 2,
+  `i32`/`u32`/`f32`/`char` = 4, `i64`/`u64`/`f64`/`isize`/`usize` = 8; every
+  pointer or reference handle (`ptr<T>`/`rc<T>`/`ref<T>`) = 8. A scalar's
+  alignment equals its size (capped at 8).
+- Struct: fields in declaration order, each aligned up to its natural alignment;
+  the struct size is the offset past the last field rounded up to the struct's
+  alignment (its maximum field alignment). Nested structs recurse.
+- Fixed `array<T>` of length `n`: `n * stride(T)`, where the element stride is
+  `size_of(T)` rounded up to `align_of(T)`; alignment = `align_of(T)`.
+
+```lullaby
+struct Mixed
+    a byte      # offset 0
+    b i32       # offset 4  (3 bytes padding after `a`)
+    c i16       # offset 8
+    d i64       # offset 16 (6 bytes padding after `c`)
+# size_of(Mixed) = 24, align_of(Mixed) = 8, offset_of(m, "d") = 16
+```
+
+- `size_of(x) -> i64` / `align_of(x) -> i64`: safe, compile-time layout queries
+  over `x`'s static type (any scalar, pointer/reference handle, struct, or fixed
+  `array<T>`). They fold to `i64` constants; a type with no defined layout is
+  rejected with `L0431`.
+- `offset_of(x, "field") -> i64`: the byte offset of `field` within struct value
+  `x`. `field` must be a string literal naming an existing field; otherwise
+  `L0431`.
+- `ptr_to_int(ptr<T>) -> i64` / `int_to_ptr(i64) -> ptr<T>` (inside `unsafe`):
+  reinterpret a raw pointer as its integer address/handle and back. They
+  round-trip — `int_to_ptr(ptr_to_int(p))` is the same pointer. On the
+  interpreters a pointer is a heap-slot handle, so the integer is that handle.
+- `volatile_load(ptr<T>) -> T` / `volatile_store(ptr<T>, value) -> void` (inside
+  `unsafe`): element read/write with volatile semantics — no elision and no
+  reordering. On the AST, IR, and bytecode interpreters they behave exactly like
+  `load`/`store` over the single-threaded abstract heap, which is a correct
+  implementation; the volatility guarantee (suppressing compiler elision and
+  reordering) is a code-generation concern realized on the native backend.
+
 ### Memory Safety Features
 
 #### Null Pointer Handling

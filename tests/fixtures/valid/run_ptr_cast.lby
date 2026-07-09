@@ -1,0 +1,11 @@
+fn main -> i64
+    let p ptr_i64 = alloc(7)
+    let handle i64 = 0
+    let result i64 = 0
+    unsafe
+        handle = ptr_to_int(p)
+        let back ptr_i64 = int_to_ptr(handle)
+        volatile_store(back, 99)
+        result = volatile_load(back)
+    dealloc(p)
+    result

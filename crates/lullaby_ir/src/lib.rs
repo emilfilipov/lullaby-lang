@@ -4046,6 +4046,16 @@ impl<'a> IrRuntime<'a> {
             "rc_get" | "ref_get" | "ptr_read" => self.builtin_ref_get(name, args),
             "rc_borrow" => self.builtin_rc_borrow(args),
             "ptr_write" => self.builtin_store(args),
+            "size_of" => Self::builtin_size_of(args),
+            "align_of" => Self::builtin_align_of(args),
+            "offset_of" => Self::builtin_offset_of(args),
+            "ptr_to_int" => Self::builtin_ptr_to_int(args),
+            "int_to_ptr" => Self::builtin_int_to_ptr(args),
+            // Volatile raw-memory access behaves exactly like `load`/`store` on
+            // the interpreters' single-threaded abstract heap; the no-elision /
+            // no-reordering guarantee is a native-codegen concern.
+            "volatile_load" => self.builtin_load(args),
+            "volatile_store" => self.builtin_store(args),
             "env" => Self::builtin_env(args),
             "os_random" => Self::builtin_os_random(args),
             "args" => self.builtin_args(args),
@@ -4759,6 +4769,69 @@ impl<'a> IrRuntime<'a> {
             ));
         }
         Ok(Value::Void)
+    }
+
+    /// `size_of(x) -> i64`: the C-natural byte size of `x`'s type. See
+    /// [`Value::layout_size`].
+    fn builtin_size_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("size_of", 1, args.len()))?;
+        value.layout_size().map(Value::I64).ok_or_else(|| {
+            RuntimeError::new(
+                "L0431",
+                "size_of requires a type with a defined memory layout",
+            )
+        })
+    }
+
+    /// `align_of(x) -> i64`: the C-natural alignment of `x`'s type.
+    fn builtin_align_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("align_of", 1, args.len()))?;
+        value.layout_align().map(Value::I64).ok_or_else(|| {
+            RuntimeError::new(
+                "L0431",
+                "align_of requires a type with a defined memory layout",
+            )
+        })
+    }
+
+    /// `offset_of(x, "field") -> i64`: the C-natural byte offset of `field`
+    /// within struct value `x`.
+    fn builtin_offset_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value, field]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("offset_of", 2, args.len()))?;
+        let field = field.as_string()?;
+        value
+            .layout_field_offset(&field)
+            .map(Value::I64)
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    "L0431",
+                    format!("offset_of could not resolve field `{field}` in a struct value"),
+                )
+            })
+    }
+
+    /// `ptr_to_int(p) -> i64`: the integer handle of a raw pointer; round-trips
+    /// with `int_to_ptr`.
+    fn builtin_ptr_to_int(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ptr]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("ptr_to_int", 1, args.len()))?;
+        Ok(Value::I64(ptr.as_ptr()? as i64))
+    }
+
+    /// `int_to_ptr(n) -> ptr<T>`: reconstruct a raw pointer from an integer
+    /// handle (the inverse of `ptr_to_int`).
+    fn builtin_int_to_ptr(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("int_to_ptr", 1, args.len()))?;
+        Ok(Value::Ptr(handle.as_i64()? as usize))
     }
 
     fn builtin_read_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -8463,8 +8536,23 @@ impl<'a> Lowerer<'a> {
             "store" | "dealloc" | "write_file" | "append_file" | "write_bytes" | "make_dir"
             | "remove_file" | "remove_dir" | "print" | "println" | "warn" | "wasm_log"
             | "console_log" | "dom_set_text" | "flush" | "sleep_millis" | "assert"
-            | "rc_release" | "ptr_write" | "region_create" | "tcp_close" | "tcp_shutdown" => {
-                TypeRef::new("void")
+            | "rc_release" | "ptr_write" | "volatile_store" | "region_create" | "tcp_close"
+            | "tcp_shutdown" => TypeRef::new("void"),
+            // Raw-memory layout queries fold to `i64` constants; the pointer
+            // cast `ptr_to_int` likewise yields the integer handle.
+            "size_of" | "align_of" | "offset_of" | "ptr_to_int" => TypeRef::new("i64"),
+            // `int_to_ptr(n)` reconstructs a raw pointer. The concrete pointee is
+            // fixed by the surrounding `let`/parameter annotation; the call node
+            // itself carries the generic `ptr<i64>` handle spelling.
+            "int_to_ptr" => TypeRef::new("ptr<i64>"),
+            // `volatile_load(p)` reads the pointer's element type, like `load`.
+            "volatile_load" => {
+                let ptr = args.first().ok_or_else(|| {
+                    IrLoweringError::new("volatile_load call missing pointer argument", Some(span))
+                })?;
+                ptr.ty.pointer_target().ok_or_else(|| {
+                    IrLoweringError::new("volatile_load call argument is not a pointer", Some(span))
+                })?
             }
             // Network builtins report failures as runtime `result` values.
             "tcp_connect" | "tcp_listen" | "tcp_accept" | "udp_bind" => {

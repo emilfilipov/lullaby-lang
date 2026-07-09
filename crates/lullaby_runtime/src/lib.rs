@@ -1778,6 +1778,16 @@ impl<'a> Runtime<'a> {
             "rc_get" | "ref_get" | "ptr_read" => self.builtin_ref_get(name, args),
             "rc_borrow" => self.builtin_rc_borrow(args),
             "ptr_write" => self.builtin_store(args),
+            "size_of" => Self::builtin_size_of(args),
+            "align_of" => Self::builtin_align_of(args),
+            "offset_of" => Self::builtin_offset_of(args),
+            "ptr_to_int" => Self::builtin_ptr_to_int(args),
+            "int_to_ptr" => Self::builtin_int_to_ptr(args),
+            // Volatile raw-memory access behaves exactly like `load`/`store` on
+            // the interpreters' single-threaded abstract heap; the no-elision /
+            // no-reordering guarantee is a native-codegen concern.
+            "volatile_load" => self.builtin_load(args),
+            "volatile_store" => self.builtin_store(args),
             "env" => Self::builtin_env(args),
             "os_random" => Self::builtin_os_random(args),
             "args" => self.builtin_args(args),
@@ -3398,6 +3408,70 @@ impl<'a> Runtime<'a> {
             ));
         }
         Ok(Value::Void)
+    }
+
+    /// `size_of(x) -> i64`: the C-natural byte size of `x`'s type (a
+    /// compile-time constant that depends only on the type).
+    fn builtin_size_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("size_of", 1, args.len()))?;
+        value.layout_size().map(Value::I64).ok_or_else(|| {
+            RuntimeError::new(
+                "L0431",
+                "size_of requires a type with a defined memory layout",
+            )
+        })
+    }
+
+    /// `align_of(x) -> i64`: the C-natural alignment of `x`'s type.
+    fn builtin_align_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("align_of", 1, args.len()))?;
+        value.layout_align().map(Value::I64).ok_or_else(|| {
+            RuntimeError::new(
+                "L0431",
+                "align_of requires a type with a defined memory layout",
+            )
+        })
+    }
+
+    /// `offset_of(x, "field") -> i64`: the C-natural byte offset of `field`
+    /// within struct value `x`.
+    fn builtin_offset_of(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [value, field]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("offset_of", 2, args.len()))?;
+        let field = field.as_string()?;
+        value
+            .layout_field_offset(&field)
+            .map(Value::I64)
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    "L0431",
+                    format!("offset_of could not resolve field `{field}` in a struct value"),
+                )
+            })
+    }
+
+    /// `ptr_to_int(p) -> i64`: the integer address/handle of a raw pointer. On
+    /// the interpreters a pointer is a heap-slot handle, so this returns that
+    /// handle; it round-trips through `int_to_ptr`.
+    fn builtin_ptr_to_int(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ptr]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("ptr_to_int", 1, args.len()))?;
+        Ok(Value::I64(ptr.as_ptr()? as i64))
+    }
+
+    /// `int_to_ptr(n) -> ptr<T>`: reconstruct a raw pointer from an integer
+    /// handle (the inverse of `ptr_to_int`).
+    fn builtin_int_to_ptr(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [handle]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("int_to_ptr", 1, args.len()))?;
+        Ok(Value::Ptr(handle.as_i64()? as usize))
     }
 
     fn builtin_read_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -5202,6 +5276,13 @@ impl Env {
     }
 }
 
+/// Round `offset` up to the next multiple of `align` for C-natural struct and
+/// array layout. `align` is always a positive power of two in `1..=8`.
+fn layout_round_up(offset: i64, align: i64) -> i64 {
+    debug_assert!(align > 0);
+    (offset + align - 1) / align * align
+}
+
 impl Value {
     /// Build a fixed-width integer value, normalizing the cell to `ty`'s range so
     /// the stored representation is always canonical (see [`IntKind`]).
@@ -5210,6 +5291,91 @@ impl Value {
             value: ty.normalize(value),
             ty,
         }
+    }
+
+    /// The C-natural raw-memory byte size of this value's type, or `None` when
+    /// the value has no defined raw-memory layout (a `string`, `list`, `map`,
+    /// growable/heap container, enum, closure, or OS handle). Scalars use their
+    /// natural width (`i8`/`u8`/`bool`/`byte` = 1, `i16`/`u16` = 2,
+    /// `i32`/`u32`/`f32`/`char` = 4, `i64`/`u64`/`f64` = 8); every pointer or
+    /// reference handle (`ptr<T>`/`rc<T>`/`ref<T>`) is 8. A struct lays its
+    /// fields out in declaration order, aligning each up to its natural
+    /// alignment and rounding the total to the struct's own alignment (the max
+    /// field alignment). A fixed `array<T>` is `n * stride(T)` where the element
+    /// stride is `size_of(T)` rounded up to `align_of(T)`. See
+    /// `documents/lullaby_memory_management.md`.
+    pub fn layout_size(&self) -> Option<i64> {
+        Some(match self {
+            Value::I64(_) | Value::F64(_) | Value::Ptr(_) => 8,
+            Value::Int { ty, .. } => i64::from(ty.width_bits() / 8),
+            Value::F32(_) => 4,
+            Value::Char(_) => 4,
+            Value::Bool(_) | Value::Byte(_) => 1,
+            Value::Struct { fields, .. } => {
+                let mut offset = 0i64;
+                let mut max_align = 1i64;
+                for (_, field) in fields {
+                    let size = field.layout_size()?;
+                    let align = field.layout_align()?;
+                    max_align = max_align.max(align);
+                    offset = layout_round_up(offset, align) + size;
+                }
+                layout_round_up(offset, max_align)
+            }
+            Value::Array(values) => match values.first() {
+                Some(element) => {
+                    let stride = layout_round_up(element.layout_size()?, element.layout_align()?);
+                    stride * values.len() as i64
+                }
+                // Zero elements occupy zero bytes regardless of the (here
+                // unrecoverable) element type.
+                None => 0,
+            },
+            _ => return None,
+        })
+    }
+
+    /// The C-natural alignment of this value's type (see [`Value::layout_size`]),
+    /// or `None` when the value has no defined raw-memory layout.
+    pub fn layout_align(&self) -> Option<i64> {
+        Some(match self {
+            Value::I64(_) | Value::F64(_) | Value::Ptr(_) => 8,
+            Value::Int { ty, .. } => i64::from(ty.width_bits() / 8),
+            Value::F32(_) => 4,
+            Value::Char(_) => 4,
+            Value::Bool(_) | Value::Byte(_) => 1,
+            Value::Struct { fields, .. } => {
+                let mut max_align = 1i64;
+                for (_, field) in fields {
+                    max_align = max_align.max(field.layout_align()?);
+                }
+                max_align
+            }
+            Value::Array(values) => match values.first() {
+                Some(element) => element.layout_align()?,
+                None => 1,
+            },
+            _ => return None,
+        })
+    }
+
+    /// The C-natural byte offset of `field` within this struct value, or `None`
+    /// when this is not a struct, has no such field, or a preceding field has no
+    /// defined layout. Fields are laid out in declaration order per
+    /// [`Value::layout_size`].
+    pub fn layout_field_offset(&self, field: &str) -> Option<i64> {
+        let Value::Struct { fields, .. } = self else {
+            return None;
+        };
+        let mut offset = 0i64;
+        for (name, value) in fields {
+            offset = layout_round_up(offset, value.layout_align()?);
+            if name == field {
+                return Some(offset);
+            }
+            offset += value.layout_size()?;
+        }
+        None
     }
 
     pub fn as_i64(&self) -> Result<i64, RuntimeError> {

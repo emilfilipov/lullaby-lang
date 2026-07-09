@@ -697,6 +697,13 @@ const DIAGNOSTIC_CATALOG: &[DiagnosticEntry] = &[
         root_cause: "`--freestanding` guarantees the emitted executable links no C runtime (`ucrt`/`vcruntime`/`msvcrt`) — only the minimal OS import (`kernel32!ExitProcess`) needed to terminate. An `extern fn` call reintroduces a C runtime dependency, which is incompatible with that guarantee.",
         suggested_fix: "Remove the `extern fn` (and its calls) from a freestanding build, or drop `--freestanding` and let the default native build link the C runtime for the extern call.",
     },
+    DiagnosticEntry {
+        code: "L0431",
+        phase: DiagnosticPhase::Semantic,
+        explanation: "A raw-memory layout builtin (`size_of`/`align_of`/`offset_of`) received a type or field it cannot lay out.",
+        root_cause: "`size_of`/`align_of` were applied to a type with no defined C-natural layout (a `string`, `list`, `map`, enum, closure, or other non-sized value), or `offset_of` was applied to a non-struct value, a struct with a non-sized field, or a missing or non-literal field name.",
+        suggested_fix: "Query `size_of`/`align_of` only on scalars, pointer/reference handles, structs, and fixed `array<T>` values, and call `offset_of(x, \"field\")` with a struct `x` and a string-literal name of one of its fields.",
+    },
 ];
 
 pub fn render_concise(report: &DiagnosticReport) -> String {
