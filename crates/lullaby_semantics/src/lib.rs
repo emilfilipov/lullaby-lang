@@ -4491,6 +4491,9 @@ impl<'a> Checker<'a> {
         ) {
             // Bounded generic receiver: resolve against the trait signature with
             // `Self` = the type variable itself.
+            // invariant: `trait_name` is `self.trait_methods[method]`, the reverse
+            // index built from the same trait declarations as `self.traits`, so the
+            // named trait is present and declares this method.
             let sig = self
                 .traits
                 .get(trait_name)

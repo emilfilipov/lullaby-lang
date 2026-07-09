@@ -8554,7 +8554,9 @@ impl<'a> Lowerer<'a> {
                     )));
                 }
             },
-            _ => unreachable!(),
+            // `name` was bound to one of these four constructor names by the
+            // `(name, payload_expr)` match at the top of this function.
+            _ => unreachable!("constructor name is one of some/none/ok/err"),
         };
 
         let args = lowered_payload.into_iter().collect();
