@@ -129,12 +129,14 @@ _DOCS_CSS = """
   --bg:#fef9f3; --panel:#ffffff; --ink:#372a54; --muted:#7c6fa6; --line:#efe7f7;
   --lav:#8b6ff0; --lav-050:#f4f0ff; --peach:#fecaca; --sky:#bae6fd;
   --code-bg:#201a33; --code-fg:#f3eefe;
+  --header-grad:linear-gradient(120deg,#f4f0ff,#eaf6ff 58%,#fdeeee);
   --sans:'Nunito',ui-rounded,'Segoe UI',system-ui,-apple-system,sans-serif;
   --mono:'Cascadia Code','JetBrains Mono',ui-monospace,Consolas,monospace;
 }
 @media (prefers-color-scheme:dark){
   :root{ --bg:#161020; --panel:#20182f; --ink:#f1ecff; --muted:#b6a8db;
-    --line:#2e2440; --lav:#c9bafd; --lav-050:#241c38; --code-bg:#0f0b1a; }
+    --line:#2e2440; --lav:#c9bafd; --lav-050:#241c38; --code-bg:#0f0b1a;
+    --header-grad:linear-gradient(120deg,#1f1836,#141a2b 58%,#241a2a); }
 }
 *{box-sizing:border-box}
 body{margin:0; font-family:var(--sans); line-height:1.62; color:var(--ink); background:var(--bg);}
@@ -142,7 +144,7 @@ a{color:var(--lav); text-decoration:none; font-weight:600}
 a:hover{text-decoration:underline}
 a:focus-visible{outline:2px solid var(--lav); outline-offset:2px; border-radius:4px}
 .lb-header{display:flex; align-items:center; gap:16px; padding:1.7rem 2rem;
-  background:linear-gradient(120deg,#f4f0ff,#eaf6ff 58%,#fdeeee); border-bottom:1px solid var(--line);}
+  background:var(--header-grad); border-bottom:1px solid var(--line);}
 .lb-header .logo{width:54px; height:54px; flex:0 0 auto; color:var(--lav)}
 .lb-header h1{margin:0; font-size:1.45rem; font-weight:800; letter-spacing:-.02em}
 .lb-header p{margin:.25rem 0 0; color:var(--muted); font-size:.92rem}
