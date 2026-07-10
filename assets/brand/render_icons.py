@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Render the Lullaby brand raster icons from the canonical geometry.
 
-Draws the filled app icon (the lavender "L cradling a crescent moon" in cream on
-a soft pastel tile) at high resolution, then downsamples to every size a Windows
+Draws the filled app icon (a plain lowercase "l" monogram in cream on a soft
+pastel tile) at high resolution, then downsamples to every size a Windows
 app/installer/favicon needs and writes a multi-size ``.ico`` plus PNGs.
 
 Geometry matches ``lullaby-icon.svg`` (a 120-unit design space). Run from anywhere:
@@ -52,6 +52,31 @@ def sc(v: float) -> float:
     return v * S
 
 
+def quad_bezier(p0, p1, p2, steps: int = 24) -> list[tuple[float, float]]:
+    """Sample a quadratic Bezier curve into a polyline (design-space points)."""
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        u = 1 - t
+        x = u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0]
+        y = u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]
+        pts.append((x, y))
+    return pts
+
+
+# Canonical "l" monogram geometry (matches lullaby-icon.svg: M51 32 V68 Q51 84 68 84).
+MONO_TOP = (51.0, 32.0)      # top of the stem (open, rounded end)
+MONO_KNEE = (51.0, 68.0)     # where the stem meets the foot curve
+MONO_CTRL = (51.0, 84.0)     # quadratic control point
+MONO_END = (68.0, 84.0)      # foot tip (open, rounded end)
+MONO_W = 14.0                # stroke width in design units (matches the SVG)
+
+
+def monogram_points() -> list[tuple[float, float]]:
+    """The full "l" polyline: vertical stem, then the curved foot."""
+    return [MONO_TOP, MONO_KNEE] + quad_bezier(MONO_KNEE, MONO_CTRL, MONO_END)
+
+
 def render_master() -> Image.Image:
     img = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
 
@@ -67,38 +92,16 @@ def render_master() -> Image.Image:
         radius=sc(27.25), outline=(255, 255, 255, 140), width=max(1, round(sc(1.5))),
     )
 
-    # --- mark layer (cream): the L, then the crescent, then the star ---
+    # --- mark layer (cream): the plain lowercase "l" monogram ---
     mark = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
     d = ImageDraw.Draw(mark)
 
-    # L: rounded polyline (matches stroke-linecap/linejoin = round)
-    lw = round(sc(13))
-    pts = [(sc(43), sc(30)), (sc(43), sc(78)), (sc(74), sc(78))]
+    lw = round(sc(MONO_W))
+    pts = [(sc(x), sc(y)) for (x, y) in monogram_points()]
     d.line(pts, fill=CREAM, width=lw, joint="curve")
     r = lw / 2
-    for (cx, cy) in (pts[0], pts[2]):          # round the two open ends
+    for (cx, cy) in (pts[0], pts[-1]):          # round the two open ends
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=CREAM)
-
-    # crescent moon = full disc minus an offset disc (erase via the alpha band).
-    # Lifted into the crook so it clears the L's stroke and reads as a crescent.
-    moon = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
-    md = ImageDraw.Draw(moon)
-    md.ellipse([sc(71 - 18), sc(55 - 18), sc(71 + 18), sc(55 + 18)], fill=CREAM)
-    alpha = moon.split()[3]
-    ImageDraw.Draw(alpha).ellipse(
-        [sc(80 - 15.5), sc(47 - 15.5), sc(80 + 15.5), sc(47 + 15.5)], fill=0
-    )
-    moon.putalpha(alpha)
-    mark = Image.alpha_composite(mark, moon)
-
-    # four-point twinkle star near the moon
-    d2 = ImageDraw.Draw(mark)
-    cxp, cyp, a, b = sc(94), sc(40), sc(6.5), sc(2.2)
-    d2.polygon(
-        [(cxp, cyp - a), (cxp + b, cyp - b), (cxp + a, cyp), (cxp + b, cyp + b),
-         (cxp, cyp + a), (cxp - b, cyp + b), (cxp - a, cyp), (cxp - b, cyp - b)],
-        fill=CREAM,
-    )
 
     return Image.alpha_composite(img, mark)
 

@@ -9,32 +9,31 @@ web, ANSI-approximated in the CLI, and a filled icon for OS/app/installer contex
 > meet, solid underneath.
 
 Canonical assets live in [`assets/brand/`](../assets/brand/). Do not re-draw the
-mark by hand; reuse these files or regenerate the raster icons with
+identity by hand; reuse these files or regenerate the raster icons with
 `python assets/brand/render_icons.py`.
 
-## The mark
+## The wordmark
 
-An **"L" cradling a crescent moon** — the letter's corner becomes a cradle and the
-moon rests in it. One motif carries the whole idea (a lullaby: moon + cradle) and it
-stays legible from a hero down to a 16 px favicon.
+The identity is a **plain wordmark**: the lowercase word **"lullaby"**, always
+lowercase, tightly tracked, set in **Nunito ExtraBold (800)** and tinted **lavender
+`#8b6ff0`** (`#c9bafd` on dark grounds). There is no pictorial mark, crescent, or
+star — the word itself is the logo.
 
-- **Primary — one-ink lavender.** [`lullaby-mark.svg`](../assets/brand/lullaby-mark.svg),
-  drawn in **lavender `#8b6ff0`**. Use everywhere: docs headers, the web, inline, and
-  the CLI (as a Unicode/ANSI approximation with the 🌙 glyph). Recolour to plum ink
-  `#372a54` only where a mono, single-ground lockup is needed.
-- **Filled icon — the small-size exception.** [`lullaby-icon.svg`](../assets/brand/lullaby-icon.svg)
-  and [`lullaby.ico`](../assets/brand/lullaby.ico): the mark in **cream** on a soft
-  lavender→sky tile. Use **only** for the app/file icon, favicon, taskbar, and the
-  installer, where a bare line-mark would look faint. Everywhere else stays one-ink.
+- **Primary — the wordmark.** [`lullaby-mark.svg`](../assets/brand/lullaby-mark.svg),
+  the lowercase `lullaby` in lavender `#8b6ff0`. Use everywhere a lockup fits: docs
+  headers, the web, inline, and the CLI (as a lavender/ANSI-tinted lowercase
+  `lullaby`). Recolour to plum ink `#372a54` only where a mono, single-ground lockup
+  is needed.
+- **`l` monogram — the small-size exception.** [`lullaby-icon.svg`](../assets/brand/lullaby-icon.svg)
+  and [`lullaby.ico`](../assets/brand/lullaby.ico): a plain lowercase **`l`** (a
+  rounded vertical stroke with a small foot) in **cream** on a soft lavender→sky
+  tile. Use **only** for tiny square slots — the app/file icon, favicon, taskbar, and
+  the installer — where the full wordmark would be illegible. Everywhere a lockup
+  fits, use the wordmark.
 
-Clear space: keep at least the height of the crescent clear on all sides. Don't
-recolour the mark outside the palette, rotate it, add effects, or stretch it.
-
-## Wordmark
-
-"**lullaby**" — always lowercase, set in **Nunito ExtraBold (800)**, tinted the same
-lavender as the mark (`#8b6ff0`; `#c9bafd` on dark grounds). Pair it with the mark in
-a horizontal or stacked lockup, or use the mark alone in tight spaces.
+Clear space: keep at least the cap-height of the wordmark clear on all sides. Don't
+recolour the wordmark outside the palette, change its typeface or case, rotate it,
+add effects, or stretch it.
 
 ## Palette
 
@@ -71,8 +70,8 @@ cost of clarity.
 
 | File | Use |
 | --- | --- |
-| `assets/brand/lullaby-mark.svg` | Primary one-ink lavender mark |
-| `assets/brand/lullaby-icon.svg` | Filled tile icon (app/favicon/installer) |
+| `assets/brand/lullaby-mark.svg` | Primary lavender `lullaby` wordmark |
+| `assets/brand/lullaby-icon.svg` | Filled `l`-monogram tile icon (app/favicon/installer) |
 | `assets/brand/lullaby.ico` | Multi-size icon 16–256 (exe, installer, favicon) |
 | `assets/brand/lullaby-icon-256.png`, `-512.png` | Raster app icon |
 | `assets/brand/nunito.woff2` | Bundled body/display typeface (OFL) |

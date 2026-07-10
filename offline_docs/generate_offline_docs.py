@@ -145,7 +145,8 @@ a:hover{text-decoration:underline}
 a:focus-visible{outline:2px solid var(--lav); outline-offset:2px; border-radius:4px}
 .lb-header{display:flex; align-items:center; gap:16px; padding:1.7rem 2rem;
   background:var(--header-grad); border-bottom:1px solid var(--line);}
-.lb-header .logo{width:54px; height:54px; flex:0 0 auto; color:var(--lav)}
+.lb-header .wordmark{flex:0 0 auto; font-family:var(--sans); font-weight:800;
+  font-size:2.1rem; letter-spacing:-.03em; line-height:1; color:var(--lav)}
 .lb-header h1{margin:0; font-size:1.45rem; font-weight:800; letter-spacing:-.02em}
 .lb-header p{margin:.25rem 0 0; color:var(--muted); font-size:.92rem}
 main{display:grid; grid-template-columns:minmax(13rem,16rem) minmax(0,1fr); gap:2rem;
@@ -170,21 +171,11 @@ td{border:1px solid var(--line); padding:.5rem .6rem; vertical-align:top; text-a
 @media (max-width:760px){ main{display:block} nav{position:static; max-height:none} .lb-header{flex-wrap:wrap} }
 """
 
-# The mark, inline for the header. No `xmlns` attribute (inline HTML does not need
-# it, and it keeps the literal "http://…" of the SVG namespace out of the bundle so
-# the no-remote-dependency verifier stays happy). Colour comes from `currentColor`.
-_HEADER_MARK = (
-    '<svg class="logo" viewBox="0 0 120 120" role="img" aria-label="Lullaby">'
-    '<defs><mask id="lb-hdr-moon"><rect width="120" height="120" fill="black"/>'
-    '<circle cx="71" cy="55" r="18" fill="white"/>'
-    '<circle cx="80" cy="47" r="15.5" fill="black"/></mask></defs>'
-    '<g fill="currentColor">'
-    '<path d="M43 30 V78 H74" fill="none" stroke="currentColor" stroke-width="13" '
-    'stroke-linecap="round" stroke-linejoin="round"/>'
-    '<circle cx="71" cy="55" r="18" mask="url(#lb-hdr-moon)"/>'
-    '<path d="M94 33.5 L96.2 37.8 L100.5 40 L96.2 42.2 L94 46.5 L91.8 42.2 '
-    'L87.5 40 L91.8 37.8 Z"/></g></svg>'
-)
+# The plain wordmark, inline for the header: the lowercase word "lullaby" in the
+# bundled Nunito ExtraBold, tinted lavender (var(--lav)). No pictorial mark. The
+# text carries the whole identity, so there is no SVG namespace URL to keep out of
+# the bundle either.
+_HEADER_MARK = '<span class="wordmark">lullaby</span>'
 
 
 def render_brand() -> tuple[str, str, str]:

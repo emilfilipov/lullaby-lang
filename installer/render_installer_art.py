@@ -5,9 +5,11 @@ WixUI dialogs use two fixed-size 24-bit BMPs:
     banner.bmp   493x58   top strip on most wizard pages
     dialog.bmp   493x312  full background on the Welcome and Exit pages
 
-Both carry the Lullaby mark (the "L cradling a crescent moon") on a soft pastel
-ground, matching the visual identity. Drawn with shapes only (no font dependency),
-supersampled and downsampled for clean edges. Run:
+Both carry the Lullaby `l` monogram (a rounded vertical stroke with a small foot)
+on a soft pastel ground, matching the visual identity. The full `lullaby` wordmark
+is the identity everywhere a lockup fits; these fixed, compact bitmap slots use the
+`l` monogram, drawn with shapes only (no font dependency), supersampled and
+downsampled for clean edges. Run:
 
     python installer/render_installer_art.py
 """
@@ -38,40 +40,44 @@ def gradient(w: int, h: int) -> Image.Image:
     return small.resize((w, h), Image.LANCZOS)
 
 
+# Canonical "l" monogram geometry (matches assets/brand/lullaby-icon.svg:
+# M51 32 V68 Q51 84 68 84), expressed in the shared 120-unit design space.
+MONO_TOP = (51.0, 32.0)
+MONO_KNEE = (51.0, 68.0)
+MONO_CTRL = (51.0, 84.0)
+MONO_END = (68.0, 84.0)
+MONO_W = 14.0
+
+
+def quad_bezier(p0, p1, p2, steps: int = 24):
+    """Sample a quadratic Bezier curve into a polyline (design-space points)."""
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        u = 1 - t
+        x = u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0]
+        y = u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]
+        pts.append((x, y))
+    return pts
+
+
 def draw_mark(img: Image.Image, cx: float, cy: float, size: float, color) -> None:
-    """Draw the L+crescent+star mark centred at (cx, cy), `size` px tall."""
+    """Draw the plain `l` monogram centred at (cx, cy), `size` px tall."""
     s = size / 120.0
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
 
     def P(x, y):
-        return (cx + (x - 60) * s, cy + (y - 54) * s)
+        return (cx + (x - 60) * s, cy + (y - 58) * s)
 
-    lw = max(1, round(13 * s))
-    pts = [P(43, 30), P(43, 78), P(74, 78)]
+    lw = max(1, round(MONO_W * s))
+    design_pts = [MONO_TOP, MONO_KNEE] + quad_bezier(MONO_KNEE, MONO_CTRL, MONO_END)
+    pts = [P(x, y) for (x, y) in design_pts]
     d.line(pts, fill=color + (255,), width=lw, joint="curve")
     r = lw / 2
-    for (px, py) in (pts[0], pts[2]):
+    for (px, py) in (pts[0], pts[-1]):          # round the two open ends
         d.ellipse([px - r, py - r, px + r, py + r], fill=color + (255,))
 
-    moon = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    md = ImageDraw.Draw(moon)
-    mx, my = P(71, 55)
-    md.ellipse([mx - 18 * s, my - 18 * s, mx + 18 * s, my + 18 * s], fill=color + (255,))
-    a = moon.split()[3]
-    cxo, cyo = P(80, 47)
-    ImageDraw.Draw(a).ellipse([cxo - 15.5 * s, cyo - 15.5 * s, cxo + 15.5 * s, cyo + 15.5 * s], fill=0)
-    moon.putalpha(a)
-    layer = Image.alpha_composite(layer, moon)
-
-    sx, sy = P(94, 40)
-    ss = 6.5 * s
-    b = 2.2 * s
-    ImageDraw.Draw(layer).polygon(
-        [(sx, sy - ss), (sx + b, sy - b), (sx + ss, sy), (sx + b, sy + b),
-         (sx, sy + ss), (sx - b, sy + b), (sx - ss, sy), (sx - b, sy - b)],
-        fill=color + (255,),
-    )
     img.alpha_composite(layer)
 
 

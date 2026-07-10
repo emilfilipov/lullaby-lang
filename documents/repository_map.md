@@ -65,7 +65,7 @@ This file maps the repository layout and explains where to find core information
 - `documents/lullaby_input_output.md`: I/O and concurrency model, including files, streams, memory-mapped files, threads, processes, async, multiplexing, IPC, sockets, and performance strategies.
 - `documents/lullaby_error_handling.md`: error model, compact error tokens, compile-time and runtime categories, throw/catch/recovery behavior, diagnostics, and compiler integration.
 - `documents/lullaby_compilation_architecture.md`: compiler architecture from tokenization through semantic analysis, IR, optimization, code generation, linking, and binary verification.
-- `documents/brand_guidelines.md`: Lullaby visual identity — the "L cradling a crescent moon" mark (one-ink lavender primary; filled tile for small-size app/installer/favicon), the soft-pastel palette with hex tokens and roles, Nunito typography, voice and tagline, and the `assets/brand/` asset inventory.
+- `documents/brand_guidelines.md`: Lullaby visual identity — the plain lavender `lullaby` wordmark (with an `l`-monogram filled tile for small-size app/installer/favicon), the soft-pastel palette with hex tokens and roles, Nunito typography, voice and tagline, and the `assets/brand/` asset inventory.
 - `documents/packaging_roadmap.md`: distribution-channel roadmap — the shipped Windows `.msi` and portable archives, plus planned release automation, one-line web installer, winget, Homebrew, Linux `.deb`/`.rpm`, macOS tarball, and code signing, each with its build machinery and the owner-provided prerequisites.
 - `documents/repository_map.md`: this file. Use it as the first navigation aid and update it with repository changes.
 
