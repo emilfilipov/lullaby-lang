@@ -87,7 +87,8 @@ almost always a public release to point at, or an account to publish under.
 ## Owner checklist to light up the remaining channels
 1. Enable GitHub Actions and cut the first tagged release (→ #1, unblocks all).
 2. Register a domain for the web installer (→ #2).
-3. Decide a license and add a `LICENSE` file (used by the installer notice, Homebrew,
-   and the Linux packages' metadata).
+3. ~~Decide a license and add a `LICENSE` file.~~ **Done** — MIT (`LICENSE` at the
+   repo root, inherited by every crate; shown by the installer wizard and reused by
+   the Homebrew formula and Linux package metadata).
 4. Acquire a Windows code-signing certificate (→ signing).
 5. (Optional, macOS-signed) enroll in the Apple Developer Program.
