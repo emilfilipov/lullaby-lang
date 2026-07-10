@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="Lullaby">
+  <title>Lullaby app icon</title>
+  <!-- Filled app/installer/favicon icon: the lavender mark rendered in cream on a
+       soft pastel tile so it stays legible at small sizes (16 px taskbar / tab).
+       One-ink lavender remains the primary mark everywhere else. -->
+  <defs>
+    <linearGradient id="lb-tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9ccff"/>
+      <stop offset=".5" stop-color="#c4b5fd"/>
+      <stop offset="1" stop-color="#bfe6fb"/>
+    </linearGradient>
+    <mask id="lb-moon-i">
+      <rect x="0" y="0" width="120" height="120" fill="black"/>
+      <circle cx="71" cy="55" r="18" fill="white"/>
+      <circle cx="80" cy="47" r="15.5" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="4" y="4" width="112" height="112" rx="28" fill="url(#lb-tile)"/>
+  <rect x="4.75" y="4.75" width="110.5" height="110.5" rx="27.25" fill="none" stroke="#ffffff" stroke-opacity=".55" stroke-width="1.5"/>
+  <g fill="#fff8ef">
+    <path d="M43 30 V78 H74" fill="none" stroke="#fff8ef" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="71" cy="55" r="18" mask="url(#lb-moon-i)"/>
+    <path d="M94 33.5 L96.2 37.8 L100.5 40 L96.2 42.2 L94 46.5 L91.8 42.2 L87.5 40 L91.8 37.8 Z"/>
+  </g>
+</svg>

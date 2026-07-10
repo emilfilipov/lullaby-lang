@@ -10,6 +10,7 @@ This file maps the repository layout and explains where to find core information
 - `.gitignore`: ignores local build outputs, caches, editor state, and generated artifacts once implementation begins.
 - `.gitattributes`: normalizes repository text files to LF line endings.
 - `crates/`: Rust implementation crates.
+- `assets/`: brand and visual-identity assets. `assets/brand/` holds the canonical logo (`lullaby-mark.svg` one-ink lavender; `lullaby-icon.svg` filled tile), the multi-size app/installer/favicon icon (`lullaby.ico` + `lullaby-icon-256/512.png`), the bundled Nunito typeface (`nunito.woff2`, OFL), and `render_icons.py` which regenerates the raster icons from the mark geometry.
 - `examples/`: user-facing `.lby` examples packaged with the toolchain.
 - `scripts/`: release packaging and verification scripts.
 - `tests/`: shared `.lby` fixtures used by crate and CLI tests.
@@ -62,6 +63,7 @@ This file maps the repository layout and explains where to find core information
 - `documents/lullaby_input_output.md`: I/O and concurrency model, including files, streams, memory-mapped files, threads, processes, async, multiplexing, IPC, sockets, and performance strategies.
 - `documents/lullaby_error_handling.md`: error model, compact error tokens, compile-time and runtime categories, throw/catch/recovery behavior, diagnostics, and compiler integration.
 - `documents/lullaby_compilation_architecture.md`: compiler architecture from tokenization through semantic analysis, IR, optimization, code generation, linking, and binary verification.
+- `documents/brand_guidelines.md`: Lullaby visual identity — the "L cradling a crescent moon" mark (one-ink lavender primary; filled tile for small-size app/installer/favicon), the soft-pastel palette with hex tokens and roles, Nunito typography, voice and tagline, and the `assets/brand/` asset inventory.
 - `documents/repository_map.md`: this file. Use it as the first navigation aid and update it with repository changes.
 
 ## Offline Browser Docs

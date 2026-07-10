@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="Lullaby">
+  <title>Lullaby mark</title>
+  <!-- One-ink lavender "L cradling a crescent moon". Primary mark: use on light
+       or dark grounds. Recolor by changing the fill/stroke to currentColor in an
+       inline context, or to another brand ink. -->
+  <defs>
+    <mask id="lb-moon">
+      <rect x="0" y="0" width="120" height="120" fill="black"/>
+      <circle cx="71" cy="55" r="18" fill="white"/>
+      <circle cx="80" cy="47" r="15.5" fill="black"/>
+    </mask>
+  </defs>
+  <g fill="#8b6ff0">
+    <path d="M43 30 V78 H74" fill="none" stroke="#8b6ff0" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="71" cy="55" r="18" mask="url(#lb-moon)"/>
+    <path d="M94 33.5 L96.2 37.8 L100.5 40 L96.2 42.2 L94 46.5 L91.8 42.2 L87.5 40 L91.8 37.8 Z"/>
+  </g>
+</svg>
