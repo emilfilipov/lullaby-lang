@@ -33,14 +33,26 @@ almost always a public release to point at, or an account to publish under.
 - **Cross-build note:** Linux/macOS toolchain binaries are Rust builds for those
   targets; produced by CI runners (or cross-compilation), not on the Windows dev box.
 
-### 2. One-line web installer
-- **Build:** `install.sh` (POSIX) and `install.ps1` (Windows) that detect OS/arch,
-  download the matching portable archive from the latest GitHub Release, verify its
-  `.sha256`, unpack to a per-user prefix, and add `bin` to PATH. The existing
-  `scripts/install_unix_path.sh` / `install_windows_path.ps1` cover the PATH step.
-- **Prerequisite (owner):** a **domain** to host the short URL
-  (`curl -fsSL lullaby.dev/install | sh`) — a redirect/static host pointing at the raw
-  scripts is enough. Until then the scripts install from a full GitHub raw URL.
+### 2. One-line web installer — **built** (`web/install.sh`, `web/install.ps1`)
+- **Status:** both bootstrappers are implemented and pure-ASCII. They detect
+  OS/arch, resolve the newest release (stable, falling back to the newest
+  prerelease so the command works pre-1.0), download the matching portable
+  archive **and its `.sha256`**, verify the checksum (abort on mismatch), unpack
+  to a per-user prefix (`~/.lullaby` / `%LOCALAPPDATA%\Programs\Lullaby`), and add
+  `bin` to PATH by delegating to the bundled `install.sh` / `install.ps1`.
+  `LULLABY_VERSION` / `LULLABY_PREFIX` / `LULLABY_REPO` override defaults; the
+  scripts also support an `uninstall` mode.
+- **Verified:** `install.ps1` was tested end-to-end against the live GitHub
+  prerelease (resolve → download → checksum → extract → run `lullaby --version`
+  → PATH add/remove) with the user PATH left byte-identical after
+  install+uninstall. `install.sh` is POSIX-`sh -n` clean and its asset/tag
+  matching is verified against real GitHub Releases JSON; its download path is
+  exercised once a `*-linux-*`/`*-macos-*` `.tar.gz` is published by the release
+  workflow (§1).
+- **Remaining (owner/deploy):** serve the two files verbatim at
+  `https://lullaby.skazkasolutions.com/install.sh` and `/install.ps1` (static
+  host). A dedicated short domain is optional; the scripts already work from any
+  host that serves the raw text.
 
 ### 3. winget (Windows)
 - **Build:** a manifest set (`Lullaby.Lullaby.yaml`) referencing the released `.msi`

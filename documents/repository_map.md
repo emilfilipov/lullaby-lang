@@ -15,6 +15,7 @@ This file maps the repository layout and explains where to find core information
 - `examples/`: user-facing `.lby` examples packaged with the toolchain.
 - `scripts/`: release packaging and verification scripts, including `build_windows_installer.py` (stages the payload and builds the branded WiX `.msi`).
 - `installer/`: Windows installer authoring — `lullaby.wxs` (WiX v7 package: Program Files layout, PATH entry, Start Menu shortcuts, branded ARP icon + wizard), `notice.rtf` (the MIT license the wizard shows on its license page), `banner.bmp`/`dialog.bmp` (branded wizard bitmaps), and `render_installer_art.py` (regenerates the bitmaps from the mark geometry).
+- `web/`: one-line web installers served from the site — `install.sh` (POSIX) and `install.ps1` (Windows), pure-ASCII bootstrappers that detect OS/arch, resolve the newest GitHub Release (stable, falling back to the newest prerelease), download the matching portable archive, verify its published `.sha256` (abort on mismatch), unpack to a per-user prefix, and wire PATH via the package's bundled helper; support `LULLABY_VERSION`/`LULLABY_PREFIX`/`LULLABY_REPO` and an `uninstall` mode. `web/README.md` documents usage and the checksum-verification security posture.
 - `tests/`: shared `.lby` fixtures used by crate and CLI tests.
 - `documents/`: core language documents and planning material.
 - `offline_docs/`: self-contained browser documentation bundle that can be opened directly from disk.
