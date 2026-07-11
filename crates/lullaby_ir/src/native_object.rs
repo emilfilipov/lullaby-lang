@@ -2618,6 +2618,13 @@ struct NativeCtx<'a> {
     /// function uses these to materialize by-pointer arguments and allocate the
     /// hidden return destination.
     signatures: &'a HashMap<String, NativeSignature>,
+    /// Scalar `i64` locals kept in callee-saved registers (slot -> register) for a
+    /// purely-scalar function. Empty for every other function. Loads/stores of a
+    /// promoted slot go to the register instead of `[rbp - slot]`.
+    promoted: HashMap<i32, PReg>,
+    /// For each promoted register, the frame slot into which the prologue spills
+    /// the caller's (callee-saved) value and from which the epilogue restores it.
+    saved_reg_slots: Vec<(PReg, i32)>,
 }
 
 /// The native signature of a compiled function: the layout of each parameter and
@@ -2737,6 +2744,17 @@ impl<'a> NativeCtx<'a> {
         let scratch_base = next_slot;
         next_slot += (scratch_words as i32 + 1) * 8;
 
+        // Register promotion (purely-scalar functions only): keep a couple of hot
+        // `i64` locals in callee-saved registers. Reserve one frame word per
+        // promoted register to spill the caller's value across this function; the
+        // promoted locals keep their (now unused) stack slots for simplicity.
+        let (promoted, saved_regs) = plan_register_promotion(function, &locals);
+        let mut saved_reg_slots = Vec::new();
+        for reg in saved_regs {
+            next_slot += 8;
+            saved_reg_slots.push((reg, next_slot));
+        }
+
         let has_call = body_has_call(&function.instructions);
         // Reserve local slots plus (if calling) 32 bytes of shadow space, plus an
         // outgoing stack-argument area for any call passing more than four
@@ -2764,7 +2782,14 @@ impl<'a> NativeCtx<'a> {
             sret_slot,
             return_ty,
             signatures,
+            promoted,
+            saved_reg_slots,
         })
+    }
+
+    /// The register a local slot is promoted into, if any.
+    fn promoted_reg(&self, slot: i32) -> Option<PReg> {
+        self.promoted.get(&slot).copied()
     }
 
     /// Allocate `words` contiguous scratch words, returning the base slot of the
@@ -3309,6 +3334,196 @@ struct NativeLoop {
 }
 
 #[allow(clippy::too_many_arguments)]
+// -- Scalar local register promotion -----------------------------------------
+//
+// A purely-i64-scalar function's lowering only ever touches the caller-saved
+// scratch registers (rax/rcx/rdx/r8/r9); the callee-saved rbx/rsi are used only
+// by the shared `.text` string/aggregate helpers, which save and restore them.
+// So for such a function we can keep a couple of its hot `i64` locals in rbx/rsi
+// for the whole body instead of the stack — and because they are callee-saved,
+// they survive every `call` (each callee that uses them saves/restores them),
+// exactly as a C compiler keeps a hot local in a register across recursion.
+//
+// This is deliberately conservative: any construct that could stray outside the
+// scalar register set (strings, floats, aggregates, arrays, indexing, `for`/
+// `match`, non-i64 params) disqualifies the whole function, which then keeps its
+// existing, unchanged codegen. Correctness never depends on the analysis being
+// generous — only on it never promoting a function that isn't purely scalar.
+
+/// A callee-saved register a scalar `i64` local can be promoted into.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PReg {
+    Rbx,
+    Rsi,
+}
+
+impl PReg {
+    /// `mov rax, <reg>`.
+    fn to_rax(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x89, 0xD8],
+            PReg::Rsi => &[0x48, 0x89, 0xF0],
+        });
+    }
+    /// `mov <reg>, rax`.
+    fn from_rax(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x89, 0xC3],
+            PReg::Rsi => &[0x48, 0x89, 0xC6],
+        });
+    }
+    /// `mov <reg>, <arg-register>` where arg is the Win64 integer arg index
+    /// (0..3 = rcx/rdx/r8/r9). Used to seat a promoted parameter on entry.
+    fn from_arg(self, code: &mut Vec<u8>, arg: usize) {
+        let bytes: &[u8] = match (self, arg) {
+            (PReg::Rbx, 0) => &[0x48, 0x89, 0xCB], // mov rbx, rcx
+            (PReg::Rbx, 1) => &[0x48, 0x89, 0xD3], // mov rbx, rdx
+            (PReg::Rbx, 2) => &[0x4C, 0x89, 0xC3], // mov rbx, r8
+            (PReg::Rbx, 3) => &[0x4C, 0x89, 0xCB], // mov rbx, r9
+            (PReg::Rsi, 0) => &[0x48, 0x89, 0xCE], // mov rsi, rcx
+            (PReg::Rsi, 1) => &[0x48, 0x89, 0xD6], // mov rsi, rdx
+            (PReg::Rsi, 2) => &[0x4C, 0x89, 0xC6], // mov rsi, r8
+            (PReg::Rsi, 3) => &[0x4C, 0x89, 0xCE], // mov rsi, r9
+            _ => unreachable!("promoted parameters are among the first four (register) args"),
+        };
+        code.extend_from_slice(bytes);
+    }
+    /// `mov <reg>, [rbp - slot]` (save the incoming callee-saved value into its
+    /// spill slot) and its inverse `mov [rbp - slot], <reg>`.
+    fn spill_to_slot(self, code: &mut Vec<u8>, slot: i32) {
+        // mov [rbp + disp32], <reg>
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x89, 0x9D],
+            PReg::Rsi => &[0x48, 0x89, 0xB5],
+        });
+        code.extend_from_slice(&(-slot).to_le_bytes());
+    }
+    fn restore_from_slot(self, code: &mut Vec<u8>, slot: i32) {
+        // mov <reg>, [rbp + disp32]
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x8B, 0x9D],
+            PReg::Rsi => &[0x48, 0x8B, 0xB5],
+        });
+        code.extend_from_slice(&(-slot).to_le_bytes());
+    }
+    /// `add/sub <reg>, imm32` and `add/sub <reg>, rax` for the memory-destination
+    /// self-assign fast path when the target is promoted.
+    fn add_imm(self, code: &mut Vec<u8>, imm: i32) {
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x81, 0xC3],
+            PReg::Rsi => &[0x48, 0x81, 0xC6],
+        });
+        code.extend_from_slice(&imm.to_le_bytes());
+    }
+    fn sub_imm(self, code: &mut Vec<u8>, imm: i32) {
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x81, 0xEB],
+            PReg::Rsi => &[0x48, 0x81, 0xEE],
+        });
+        code.extend_from_slice(&imm.to_le_bytes());
+    }
+    fn add_rax(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x01, 0xC3],
+            PReg::Rsi => &[0x48, 0x01, 0xC6],
+        });
+    }
+    fn sub_rax(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x29, 0xC3],
+            PReg::Rsi => &[0x48, 0x29, 0xC6],
+        });
+    }
+}
+
+/// Whether an expression lowers entirely within the scalar register set (never
+/// touching rbx/rsi). Conservative: only plain `i64` integer arithmetic/
+/// comparison over `i64` operands, `i64` variables/literals, and all-`i64` calls.
+fn expr_reg_promotable(expr: &BytecodeExpr) -> bool {
+    match &expr.kind {
+        BytecodeExprKind::Integer(_) | BytecodeExprKind::Bool(_) | BytecodeExprKind::Char(_) => true,
+        BytecodeExprKind::Variable(_) => expr.ty.name == "i64",
+        BytecodeExprKind::Unary { expr: inner, .. } => {
+            inner.ty.name == "i64" && expr_reg_promotable(inner)
+        }
+        BytecodeExprKind::Binary { left, right, .. } => {
+            left.ty.name == "i64"
+                && right.ty.name == "i64"
+                && expr_reg_promotable(left)
+                && expr_reg_promotable(right)
+        }
+        BytecodeExprKind::Call { args, .. } => {
+            expr.ty.name == "i64" && args.iter().all(|a| a.ty.name == "i64" && expr_reg_promotable(a))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an instruction lowers entirely within the scalar register set.
+fn instr_reg_promotable(instr: &BytecodeInstruction) -> bool {
+    match instr {
+        BytecodeInstruction::Let { ty, value, .. } => ty.name == "i64" && expr_reg_promotable(value),
+        // A path-less assignment to a scalar local (no field/index hop).
+        BytecodeInstruction::Assign { path, value, .. } => {
+            path.is_empty() && expr_reg_promotable(value)
+        }
+        BytecodeInstruction::Return(Some(e)) => expr_reg_promotable(e),
+        BytecodeInstruction::Return(None) => true,
+        BytecodeInstruction::Expr(e) => expr_reg_promotable(e),
+        BytecodeInstruction::Break(_) | BytecodeInstruction::Continue(_) => true,
+        BytecodeInstruction::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches.iter().all(|b| {
+                expr_reg_promotable(&b.condition) && b.body.iter().all(instr_reg_promotable)
+            }) && else_body.iter().all(instr_reg_promotable)
+        }
+        BytecodeInstruction::While {
+            condition, body, ..
+        } => expr_reg_promotable(condition) && body.iter().all(instr_reg_promotable),
+        // For / Loop / Match / Asm / Throw / Try are conservatively excluded.
+        _ => false,
+    }
+}
+
+/// Decide which of a purely-scalar function's `i64` locals to keep in callee-saved
+/// registers. Returns (local-slot -> register) and the ordered registers to
+/// preserve. Empty (no promotion) unless the whole function is scalar-only with
+/// `i64` params and an `i64` return.
+fn plan_register_promotion(
+    function: &BytecodeFunction,
+    locals: &HashMap<String, NativeLocal>,
+) -> (HashMap<i32, PReg>, Vec<PReg>) {
+    let none = (HashMap::new(), Vec::new());
+    if function.return_type.name != "i64" {
+        return none;
+    }
+    if !function.params.iter().all(|p| p.ty.name == "i64") {
+        return none;
+    }
+    if !function.instructions.iter().all(instr_reg_promotable) {
+        return none;
+    }
+    // Every local is now a single-word `i64`. Keep the first couple (lowest slots
+    // — parameters precede body locals) in registers; the rest stay on the stack.
+    let mut slots: Vec<i32> = locals
+        .values()
+        .filter(|l| matches!(l.ty, NativeType::I64))
+        .map(|l| l.slot)
+        .collect();
+    slots.sort_unstable();
+    let regs = [PReg::Rbx, PReg::Rsi];
+    let mut promoted = HashMap::new();
+    let mut saved = Vec::new();
+    for (slot, reg) in slots.into_iter().zip(regs) {
+        promoted.insert(slot, reg);
+        saved.push(reg);
+    }
+    (promoted, saved)
+}
+
 fn lower_native_function(
     function: &BytecodeFunction,
     callable: &std::collections::HashSet<&str>,
@@ -3334,6 +3549,14 @@ fn lower_native_function(
     // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size.
     code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5]);
     emit_sub_rsp(&mut code, ctx.frame_size);
+
+    // Preserve the callee-saved registers used to hold promoted locals, spilling
+    // each caller value into its reserved frame slot (restored in the epilogue).
+    // Done before parameters are seated so a promoted parameter can overwrite its
+    // register next.
+    for (reg, slot) in &ctx.saved_reg_slots {
+        reg.spill_to_slot(&mut code, *slot);
+    }
 
     // Register argument order: `mov [rbp - slot], reg`. When the function returns
     // an aggregate, the hidden result pointer consumes the first register (rcx),
@@ -3424,12 +3647,24 @@ fn lower_native_function(
                 // list/map parameter also shares by pointer safely: their mutators
                 // (`push`/`set`/`pop`, `map_set`) deep-copy their source, so the
                 // callee cannot alter the caller's value through the shared pointer.
-                if on_stack {
-                    emit_mov_rax_from_rbp_pos(&mut code, stack_disp);
-                    store_local(&mut code, local.slot);
-                } else {
-                    code.extend_from_slice(PARAM_STORE[reg]);
-                    code.extend_from_slice(&(-local.slot).to_le_bytes());
+                // A promoted parameter is seated in its callee-saved register
+                // instead of a stack slot (promotion only picks i64 params, which
+                // are among the first register args, so `from_arg` always applies;
+                // the on-stack arm is defensive).
+                match (on_stack, ctx.promoted_reg(local.slot)) {
+                    (false, Some(preg)) => preg.from_arg(&mut code, reg),
+                    (true, Some(preg)) => {
+                        emit_mov_rax_from_rbp_pos(&mut code, stack_disp);
+                        preg.from_rax(&mut code);
+                    }
+                    (false, None) => {
+                        code.extend_from_slice(PARAM_STORE[reg]);
+                        code.extend_from_slice(&(-local.slot).to_le_bytes());
+                    }
+                    (true, None) => {
+                        emit_mov_rax_from_rbp_pos(&mut code, stack_disp);
+                        store_local(&mut code, local.slot);
+                    }
                 }
             }
         }
@@ -3466,7 +3701,7 @@ fn lower_native_function(
         if let BytecodeInstruction::Asm { bytes, .. } = &tail[0] {
             code.extend_from_slice(bytes);
         }
-        emit_native_epilogue(&mut code, ctx.frame_size);
+        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else if tail_is_value_expr {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
@@ -3483,7 +3718,7 @@ fn lower_native_function(
                 lower_native_expr(&mut ctx, expr, &mut code)?;
             }
         }
-        emit_native_epilogue(&mut code, ctx.frame_size);
+        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else if tail_is_value_match {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
@@ -3493,7 +3728,7 @@ fn lower_native_function(
         {
             lower_native_match(&mut ctx, scrutinee, arms, true, &mut code, &mut loops)?;
         }
-        emit_native_epilogue(&mut code, ctx.frame_size);
+        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else {
         lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
     }
@@ -3502,7 +3737,7 @@ fn lower_native_function(
     // return on every path, but emit a safe `xor eax,eax` + epilogue so a missing
     // tail return cannot run off the end of the section.
     code.extend_from_slice(&[0x48, 0x31, 0xC0]); // xor rax, rax
-    emit_native_epilogue(&mut code, ctx.frame_size);
+    emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
 
     Ok(LoweredNativeFunction {
         name: function.name.clone(),
@@ -3525,8 +3760,13 @@ fn emit_sub_rsp(code: &mut Vec<u8>, amount: i32) {
     }
 }
 
-/// Emit `add rsp, imm; pop rbp; ret`.
-fn emit_native_epilogue(code: &mut Vec<u8>, frame_size: i32) {
+/// Emit the function epilogue: restore any promoted callee-saved registers from
+/// their spill slots (rbp-relative, still valid), then `add rsp, imm; pop rbp;
+/// ret`. `saved_reg_slots` is empty for functions without register promotion.
+fn emit_native_epilogue(code: &mut Vec<u8>, frame_size: i32, saved_reg_slots: &[(PReg, i32)]) {
+    for (reg, slot) in saved_reg_slots {
+        reg.restore_from_slot(code, *slot);
+    }
     if frame_size != 0 {
         if (0..=127).contains(&frame_size) {
             code.extend_from_slice(&[0x48, 0x83, 0xC4, frame_size as u8]);
@@ -3573,7 +3813,10 @@ fn lower_native_stmt(
                 | NativeType::HeapStruct { .. } => {
                     lower_native_expr(ctx, value, code)?;
                     let slot = ctx.local_slot(name)?;
-                    store_local(code, slot); // mov [rbp - slot], rax
+                    match ctx.promoted_reg(slot) {
+                        Some(reg) => reg.from_rax(code), // mov <reg>, rax
+                        None => store_local(code, slot), // mov [rbp - slot], rax
+                    }
                 }
                 NativeType::F64 | NativeType::F32 => {
                     let slot = ctx.local_slot(name)?;
@@ -3685,14 +3928,15 @@ fn lower_native_stmt(
                     match place {
                         ScalarPlace::Const { slot } => {
                             // `x = x + rhs` / `x = x - rhs`, where the assigned
-                            // local is also the left operand, folds into a
-                            // memory-destination `add`/`sub [rbp-slot], …`,
-                            // skipping the load of the target and the store back
-                            // (the dominant per-iteration cost in a counting loop).
-                            // Plain i64 only — fixed-width kinds need width
-                            // re-normalization, floats/aggregates are handled
-                            // above — and only when the left operand resolves to
-                            // this exact slot. `add`/`sub` on memory keep the low
+                            // local is also the left operand, folds the update into
+                            // the destination: a memory-destination `add`/`sub
+                            // [rbp-slot], …`, or `add`/`sub <reg>, …` when the target
+                            // is a promoted register — skipping the load of the
+                            // target and the store back (the dominant per-iteration
+                            // cost in a counting loop). Plain i64 only (fixed-width
+                            // kinds need width re-normalization; floats/aggregates
+                            // handled above), and only when the left operand
+                            // resolves to this exact slot. `add`/`sub` keep the low
                             // 64 bits, matching the interpreters' wrapping add/sub.
                             if let BytecodeExprKind::Binary {
                                 left,
@@ -3705,34 +3949,51 @@ fn lower_native_stmt(
                                 && let BytecodeExprKind::Variable(lname) = &left.kind
                                 && ctx.local_slot(lname).ok() == Some(slot)
                             {
-                                let disp = (-slot).to_le_bytes();
-                                if let BytecodeExprKind::Integer(rhs) = &right.kind
-                                    && let Ok(imm) = i32::try_from(*rhs)
-                                {
-                                    // add/sub qword ptr [rbp-slot], imm32
-                                    let modrm = if matches!(bop, BinaryOp::Add) {
-                                        0x85
-                                    } else {
-                                        0xAD
-                                    };
-                                    code.extend_from_slice(&[0x48, 0x81, modrm]);
-                                    code.extend_from_slice(&disp);
-                                    code.extend_from_slice(&imm.to_le_bytes());
-                                } else {
-                                    lower_native_expr(ctx, right, code)?; // rhs → rax
-                                    // add/sub qword ptr [rbp-slot], rax
-                                    let opcode = if matches!(bop, BinaryOp::Add) {
-                                        0x01
-                                    } else {
-                                        0x29
-                                    };
-                                    code.extend_from_slice(&[0x48, opcode, 0x85]);
-                                    code.extend_from_slice(&disp);
+                                let is_add = matches!(bop, BinaryOp::Add);
+                                let imm = match &right.kind {
+                                    BytecodeExprKind::Integer(rhs) => i32::try_from(*rhs).ok(),
+                                    _ => None,
+                                };
+                                match ctx.promoted_reg(slot) {
+                                    Some(reg) => match imm {
+                                        Some(imm) if is_add => reg.add_imm(code, imm),
+                                        Some(imm) => reg.sub_imm(code, imm),
+                                        None => {
+                                            lower_native_expr(ctx, right, code)?; // rhs → rax
+                                            if is_add {
+                                                reg.add_rax(code)
+                                            } else {
+                                                reg.sub_rax(code)
+                                            }
+                                        }
+                                    },
+                                    None => {
+                                        let disp = (-slot).to_le_bytes();
+                                        match imm {
+                                            Some(imm) => {
+                                                // add/sub qword ptr [rbp-slot], imm32
+                                                let modrm = if is_add { 0x85 } else { 0xAD };
+                                                code.extend_from_slice(&[0x48, 0x81, modrm]);
+                                                code.extend_from_slice(&disp);
+                                                code.extend_from_slice(&imm.to_le_bytes());
+                                            }
+                                            None => {
+                                                lower_native_expr(ctx, right, code)?; // rhs → rax
+                                                // add/sub qword ptr [rbp-slot], rax
+                                                let opcode = if is_add { 0x01 } else { 0x29 };
+                                                code.extend_from_slice(&[0x48, opcode, 0x85]);
+                                                code.extend_from_slice(&disp);
+                                            }
+                                        }
+                                    }
                                 }
                                 return Ok(());
                             }
                             lower_native_expr(ctx, value, code)?;
-                            store_local(code, slot);
+                            match ctx.promoted_reg(slot) {
+                                Some(reg) => reg.from_rax(code),
+                                None => store_local(code, slot),
+                            }
                         }
                         ScalarPlace::Dynamic { .. } => {
                             lower_native_expr(ctx, value, code)?;
@@ -3753,11 +4014,17 @@ fn lower_native_stmt(
                     };
                     match place {
                         ScalarPlace::Const { slot } => {
-                            load_local(code, slot); // rax = current
+                            match ctx.promoted_reg(slot) {
+                                Some(reg) => reg.to_rax(code), // rax = current
+                                None => load_local(code, slot),
+                            }
                             code.push(0x50); // push rax (left)
                             lower_native_expr(ctx, value, code)?; // rax = right
                             emit_i64_binop_from_stack(code, bin)?;
-                            store_local(code, slot);
+                            match ctx.promoted_reg(slot) {
+                                Some(reg) => reg.from_rax(code),
+                                None => store_local(code, slot),
+                            }
                         }
                         ScalarPlace::Dynamic { .. } => {
                             // Compute &slot into rcx and keep it across the op.
@@ -3785,7 +4052,7 @@ fn lower_native_stmt(
             } else {
                 lower_native_expr(ctx, expr, code)?;
             }
-            emit_native_epilogue(code, ctx.frame_size);
+            emit_native_epilogue(code, ctx.frame_size, &ctx.saved_reg_slots);
             Ok(())
         }
         BytecodeInstruction::Return(None) => {
@@ -4873,7 +5140,10 @@ fn lower_native_expr(
         }
         BytecodeExprKind::Variable(name) => {
             let slot = ctx.local_slot(name)?;
-            load_local(code, slot);
+            match ctx.promoted_reg(slot) {
+                Some(reg) => reg.to_rax(code),
+                None => load_local(code, slot),
+            }
             Ok(())
         }
         BytecodeExprKind::Unary { op, expr: inner } => match op {
