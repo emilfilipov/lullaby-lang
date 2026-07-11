@@ -5709,6 +5709,29 @@ fn lower_native_binary(
             {
                 return lower_native_float_compare(ctx, left, op, right, width, code);
             }
+            // Constant right operand on a plain `i64` add/sub/mul: fold into an
+            // immediate (`add`/`sub rax, imm32`, or `imul rax, rax, imm32`),
+            // skipping the operand-stack shuffle. x86 `add`/`sub`/`imul` keep the
+            // low 64 bits, matching the interpreters' wrapping arithmetic. Only for
+            // plain `i64` (fixed-width kinds need width re-normalization) with an
+            // i32-range immediate; anything else uses the general path below.
+            if fixed_int_kind(left.ty.name.as_str()).is_none()
+                && let BytecodeExprKind::Integer(rhs) = &right.kind
+                && let Ok(imm) = i32::try_from(*rhs)
+            {
+                let opcode: Option<&[u8]> = match op {
+                    BinaryOp::Add => Some(&[0x48, 0x05]),        // add rax, imm32
+                    BinaryOp::Subtract => Some(&[0x48, 0x2D]),   // sub rax, imm32
+                    BinaryOp::Multiply => Some(&[0x48, 0x69, 0xC0]), // imul rax, rax, imm32
+                    _ => None,
+                };
+                if let Some(prefix) = opcode {
+                    lower_native_expr(ctx, left, code)?; // left in rax
+                    code.extend_from_slice(prefix);
+                    code.extend_from_slice(&imm.to_le_bytes());
+                    return Ok(());
+                }
+            }
             lower_native_expr(ctx, left, code)?;
             code.push(0x50); // push rax (left)
             lower_native_expr(ctx, right, code)?; // right in rax
