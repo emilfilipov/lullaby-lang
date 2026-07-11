@@ -1,0 +1,138 @@
+# Cross-language encoding suite (Lullaby). Checksums, ciphers, bit tricks over
+# i64 byte arrays (values 0..255). Pure integer arithmetic — no bitwise ops, so
+# every language matches Lullaby's arithmetic-only model. See ../../SPEC.md.
+# Lullaby has no `%` operator; `rem` is truncating remainder (matches C's `%`).
+
+fn rem a i64 b i64 -> i64
+    a - (a / b) * b
+
+fn sum_bytes a array<i64> n i64 -> i64
+    let total i64 = 0
+    for i from 0 to n - 1
+        total += a[i]
+    total
+
+fn add_checksum_mod256 a array<i64> n i64 -> i64
+    let total i64 = 0
+    for i from 0 to n - 1
+        total += a[i]
+    rem(total, 256)
+
+fn fletcher16 a array<i64> n i64 -> i64
+    let sum1 i64 = 0
+    let sum2 i64 = 0
+    for i from 0 to n - 1
+        sum1 = rem(sum1 + a[i], 255)
+        sum2 = rem(sum2 + sum1, 255)
+    sum2 * 256 + sum1
+
+fn adler32_small a array<i64> n i64 -> i64
+    let s1 i64 = 1
+    let s2 i64 = 0
+    for i from 0 to n - 1
+        s1 = rem(s1 + a[i], 65521)
+        s2 = rem(s2 + s1, 65521)
+    s2 * 65536 + s1
+
+fn caesar_encrypt_val c i64 k i64 -> i64
+    if c >= 97 and c <= 122
+        return 97 + rem(c - 97 + rem(k, 26), 26)
+    c
+
+fn caesar_decrypt_val c i64 k i64 -> i64
+    if c >= 97 and c <= 122
+        return 97 + rem(c - 97 + 26 - rem(k, 26), 26)
+    c
+
+fn rot13_val c i64 -> i64
+    if c >= 97 and c <= 122
+        return 97 + rem(c - 97 + 13, 26)
+    if c >= 65 and c <= 90
+        return 65 + rem(c - 65 + 13, 26)
+    c
+
+fn count_set_bits x i64 -> i64
+    let count i64 = 0
+    while x > 0
+        count += rem(x, 2)
+        x = x / 2
+    count
+
+fn to_binary_length x i64 -> i64
+    if x == 0
+        return 1
+    let len i64 = 0
+    while x > 0
+        len += 1
+        x = x / 2
+    len
+
+fn hex_digit_value c i64 -> i64
+    if c >= 48 and c <= 57
+        return c - 48
+    if c >= 97 and c <= 102
+        return c - 97 + 10
+    0 - 1
+
+fn nibble_to_hex_code v i64 -> i64
+    if v < 10
+        return 48 + v
+    97 + v - 10
+
+fn luhn_from_array a array<i64> n i64 -> i64
+    let sum i64 = 0
+    for i from 0 to n - 1
+        let d i64 = a[n - 1 - i]
+        if rem(i, 2) == 1
+            d = d * 2
+            if d > 9
+                d = d - 9
+        sum += d
+    if rem(sum, 10) == 0
+        1
+    else
+        0
+
+fn parity_bit a array<i64> n i64 -> i64
+    let ones i64 = 0
+    for i from 0 to n - 1
+        ones += a[i]
+    rem(ones, 2)
+
+fn crc8_simple a array<i64> n i64 -> i64
+    let crc i64 = 0
+    for i from 0 to n - 1
+        crc = rem(crc + a[i], 256)
+        crc = rem(crc * 2, 256) + crc / 128
+    crc
+
+fn digit_product x i64 -> i64
+    if x < 0
+        x = 0 - x
+    if x == 0
+        return 0
+    let p i64 = 1
+    while x > 0
+        p = p * rem(x, 10)
+        x = x / 10
+    p
+
+fn main -> void
+    let data array<i64> = [72, 101, 108, 108, 111]
+    println("sum_bytes=" + to_string(sum_bytes(data, 5)))
+    println("add_checksum_mod256=" + to_string(add_checksum_mod256(data, 5)))
+    println("fletcher16=" + to_string(fletcher16(data, 5)))
+    println("adler32_small=" + to_string(adler32_small(data, 5)))
+    println("caesar_encrypt_val=" + to_string(caesar_encrypt_val(104, 3)))
+    println("caesar_decrypt_val=" + to_string(caesar_decrypt_val(107, 3)))
+    println("rot13_val=" + to_string(rot13_val(97)))
+    println("count_set_bits=" + to_string(count_set_bits(181)))
+    println("to_binary_length=" + to_string(to_binary_length(181)))
+    println("hex_digit_value=" + to_string(hex_digit_value(102)))
+    println("nibble_to_hex_code=" + to_string(nibble_to_hex_code(12)))
+    let card array<i64> = [7, 9, 9, 2, 7, 3, 9, 8, 7, 1, 3]
+    println("luhn_from_array=" + to_string(luhn_from_array(card, 11)))
+    let bits array<i64> = [1, 0, 1, 1, 0]
+    println("parity_bit=" + to_string(parity_bit(bits, 5)))
+    println("crc8_simple=" + to_string(crc8_simple(data, 5)))
+    println("digit_product=" + to_string(digit_product(1234)))

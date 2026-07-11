@@ -1,0 +1,123 @@
+# Cross-language data_records suite (Lullaby). Structs + record operations.
+# Lullaby has no `%` operator; `rem` is truncating remainder (matches C's `%`).
+
+fn rem a i64 b i64 -> i64
+    a - (a / b) * b
+
+struct Point
+    x i64
+    y i64
+
+struct Rect
+    w i64
+    h i64
+
+struct Money
+    cents i64
+
+struct Interval
+    lo i64
+    hi i64
+
+struct Vec3
+    x i64
+    y i64
+    z i64
+
+fn abs_val n i64 -> i64
+    if n < 0
+        return 0 - n
+    n
+
+fn manhattan a Point b Point -> i64
+    abs_val(a.x - b.x) + abs_val(a.y - b.y)
+
+fn chebyshev a Point b Point -> i64
+    let dx i64 = abs_val(a.x - b.x)
+    let dy i64 = abs_val(a.y - b.y)
+    if dx > dy
+        dx
+    else
+        dy
+
+fn rect_area r Rect -> i64
+    r.w * r.h
+
+fn rect_perimeter r Rect -> i64
+    2 * (r.w + r.h)
+
+fn rect_contains r Rect px i64 py i64 -> i64
+    if px >= 0 and py >= 0 and px <= r.w and py <= r.h
+        1
+    else
+        0
+
+fn money_add a Money b Money -> Money
+    Money(a.cents + b.cents)
+
+fn money_dollars m Money -> i64
+    m.cents / 100
+
+fn money_cents_part m Money -> i64
+    rem(m.cents, 100)
+
+fn interval_overlaps a Interval b Interval -> i64
+    if a.lo < b.hi and b.lo < a.hi
+        1
+    else
+        0
+
+fn interval_length a Interval -> i64
+    let n i64 = a.hi - a.lo
+    if n < 0
+        return 0
+    n
+
+fn interval_intersect_len a Interval b Interval -> i64
+    let lo i64 = a.lo
+    if b.lo > lo
+        lo = b.lo
+    let hi i64 = a.hi
+    if b.hi < hi
+        hi = b.hi
+    let n i64 = hi - lo
+    if n < 0
+        return 0
+    n
+
+fn vec3_dot a Vec3 b Vec3 -> i64
+    a.x * b.x + a.y * b.y + a.z * b.z
+
+fn vec3_add a Vec3 b Vec3 -> Vec3
+    Vec3(a.x + b.x, a.y + b.y, a.z + b.z)
+
+fn vec3_manhattan_norm v Vec3 -> i64
+    abs_val(v.x) + abs_val(v.y) + abs_val(v.z)
+
+fn midpoint_x a Point b Point -> i64
+    (a.x + b.x) / 2
+
+fn main -> void
+    let p Point = Point(1, 2)
+    let q Point = Point(4, 6)
+    println("manhattan=" + to_string(manhattan(p, q)))
+    println("chebyshev=" + to_string(chebyshev(p, q)))
+    let r Rect = Rect(3, 5)
+    println("rect_area=" + to_string(rect_area(r)))
+    println("rect_perimeter=" + to_string(rect_perimeter(r)))
+    println("rect_contains=" + to_string(rect_contains(r, 2, 4)))
+    let m Money = money_add(Money(150), Money(275))
+    println("money_dollars=" + to_string(money_dollars(m)))
+    println("money_cents_part=" + to_string(money_cents_part(m)))
+    let a Interval = Interval(1, 5)
+    let b Interval = Interval(3, 8)
+    println("interval_overlaps=" + to_string(interval_overlaps(a, b)))
+    println("interval_length=" + to_string(interval_length(a)))
+    println("interval_intersect_len=" + to_string(interval_intersect_len(a, b)))
+    let u Vec3 = Vec3(1, 2, 3)
+    let w Vec3 = Vec3(4, 5, 6)
+    println("vec3_dot=" + to_string(vec3_dot(u, w)))
+    let s Vec3 = vec3_add(u, w)
+    println("vec3_add.x=" + to_string(s.x))
+    println("vec3_manhattan_norm=" + to_string(vec3_manhattan_norm(Vec3(0 - 1, 2, 0 - 3))))
+    println("midpoint_x=" + to_string(midpoint_x(p, q)))

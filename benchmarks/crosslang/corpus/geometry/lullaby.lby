@@ -1,0 +1,105 @@
+# Cross-language geometry suite (Lullaby). Integer geometry on Point structs.
+
+struct Point
+    x i64
+    y i64
+
+fn abs_val n i64 -> i64
+    if n < 0
+        return 0 - n
+    n
+
+fn dist_sq a Point b Point -> i64
+    let dx i64 = a.x - b.x
+    let dy i64 = a.y - b.y
+    dx * dx + dy * dy
+
+fn manhattan a Point b Point -> i64
+    abs_val(a.x - b.x) + abs_val(a.y - b.y)
+
+fn cross ax i64 ay i64 bx i64 by i64 -> i64
+    ax * by - ay * bx
+
+fn dot ax i64 ay i64 bx i64 by i64 -> i64
+    ax * bx + ay * by
+
+fn triangle_area2 a Point b Point c Point -> i64
+    cross(b.x - a.x, b.y - a.y, c.x - a.x, c.y - a.y)
+
+fn is_ccw a Point b Point c Point -> i64
+    if triangle_area2(a, b, c) > 0
+        1
+    else
+        0
+
+fn collinear a Point b Point c Point -> i64
+    if triangle_area2(a, b, c) == 0
+        1
+    else
+        0
+
+fn on_segment_x a Point b Point px i64 -> i64
+    let lo i64 = a.x
+    let hi i64 = b.x
+    if hi < lo
+        lo = b.x
+        hi = a.x
+    if px >= lo and px <= hi
+        1
+    else
+        0
+
+fn rect_area w i64 h i64 -> i64
+    w * h
+
+fn perimeter_rect w i64 h i64 -> i64
+    2 * (w + h)
+
+fn point_in_rect px i64 py i64 w i64 h i64 -> i64
+    if px >= 0 and py >= 0 and px <= w and py <= h
+        1
+    else
+        0
+
+fn midpoint_x a Point b Point -> i64
+    (a.x + b.x) / 2
+
+fn midpoint_y a Point b Point -> i64
+    (a.y + b.y) / 2
+
+fn taxicab_circle_points r i64 -> i64
+    if r > 0
+        4 * r
+    else
+        1
+
+fn quadrant px i64 py i64 -> i64
+    if px == 0 or py == 0
+        return 0
+    if px > 0 and py > 0
+        return 1
+    if px < 0 and py > 0
+        return 2
+    if px < 0 and py < 0
+        return 3
+    4
+
+fn main -> void
+    let a Point = Point(0, 0)
+    let b Point = Point(3, 4)
+    let c Point = Point(6, 8)
+    println("dist_sq=" + to_string(dist_sq(a, b)))
+    println("manhattan=" + to_string(manhattan(a, b)))
+    println("cross=" + to_string(cross(3, 4, 6, 8)))
+    println("dot=" + to_string(dot(3, 4, 6, 8)))
+    println("triangle_area2=" + to_string(triangle_area2(a, b, Point(4, 0))))
+    println("is_ccw=" + to_string(is_ccw(a, b, Point(4, 0))))
+    println("collinear=" + to_string(collinear(a, b, c)))
+    println("on_segment_x=" + to_string(on_segment_x(a, b, 2)))
+    println("rect_area=" + to_string(rect_area(3, 5)))
+    println("perimeter_rect=" + to_string(perimeter_rect(3, 5)))
+    println("point_in_rect=" + to_string(point_in_rect(2, 4, 3, 5)))
+    println("midpoint_x=" + to_string(midpoint_x(a, c)))
+    println("midpoint_y=" + to_string(midpoint_y(a, c)))
+    println("taxicab_circle_points=" + to_string(taxicab_circle_points(3)))
+    println("quadrant=" + to_string(quadrant(0 - 2, 5)))

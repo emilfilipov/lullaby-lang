@@ -1,0 +1,48 @@
+{
+  "note": "All measured on the same Windows/MSVC box. Compiled tiers at -O2/release; CPython for Python. See benchmarks/README.md and benchmarks/crosslang/run_perf.ps1.",
+  "workloads": [
+    {
+      "name": "count_primes_below(300000)",
+      "kind": "compute (trial division, function calls + loops)",
+      "unit": "ms (whole-program wall time, best-of-5; Python best-of-1)",
+      "checksum": 25997,
+      "results": [
+        {"lang": "Rust (rustc -O)", "value": 26.1, "vsC": 0.91},
+        {"lang": "C++ (cl /O2)", "value": 28.3, "vsC": 0.98},
+        {"lang": "C (cl /O2)", "value": 28.8, "vsC": 1.0},
+        {"lang": "Lullaby (native)", "value": 45.1, "vsC": 1.57},
+        {"lang": "Python (CPython)", "value": 782.4, "vsC": 27.17}
+      ]
+    },
+    {
+      "name": "fib(40) recursive",
+      "kind": "call/recursion-bound",
+      "unit": "ns per fib-call (best-of-7)",
+      "results": [
+        {"lang": "C (cl /O2)", "value": 1.28, "vsC": 1.0},
+        {"lang": "Lullaby (native)", "value": 1.53, "vsC": 1.2},
+        {"lang": "Lullaby (bytecode)", "value": 242.2, "vsC": 189.0},
+        {"lang": "Lullaby (ir)", "value": 241.2, "vsC": 188.0},
+        {"lang": "Lullaby (ast)", "value": 242.4, "vsC": 189.0}
+      ]
+    },
+    {
+      "name": "sum 0..1e9 (tight loop)",
+      "kind": "compute-bound loop",
+      "unit": "ns per iteration (best-of-5)",
+      "results": [
+        {"lang": "C (cl /O2)", "value": 0.129, "vsC": 1.0},
+        {"lang": "Lullaby (native)", "value": 0.27, "vsC": 2.1},
+        {"lang": "Lullaby (bytecode)", "value": 162.0, "vsC": 1256.0},
+        {"lang": "Lullaby (ir)", "value": 160.6, "vsC": 1245.0},
+        {"lang": "Lullaby (ast)", "value": 160.7, "vsC": 1246.0}
+      ]
+    }
+  ],
+  "optimization_history": {
+    "note": "Native backend progression this campaign (fib ns/call vs C, and loop ns/iter vs C).",
+    "native_fib_vs_c": [{"stage": "baseline", "vsC": 1.72}, {"stage": "compare-fusion + imm-fold", "vsC": 1.35}, {"stage": "+register promotion", "vsC": 1.2}],
+    "native_loop_vs_c": [{"stage": "compare-fusion + imm-fold", "vsC": 5.6}, {"stage": "+register promotion", "vsC": 2.1}],
+    "interpreter_fib_ns": [{"stage": "baseline", "value": 435}, {"stage": "+release profile", "value": 383}, {"stage": "+env pooling", "value": 230}]
+  }
+}

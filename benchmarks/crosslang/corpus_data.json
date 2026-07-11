@@ -1,0 +1,3922 @@
+{
+ "langs": [
+  "Lullaby",
+  "C",
+  "C++",
+  "Rust",
+  "Python"
+ ],
+ "functions": [
+  {
+   "name": "binary_search",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 104,
+     "source": "fn binary_search a array<i64> n i64 x i64 -> i64\n    let lo i64 = 0\n    let hi i64 = n - 1\n    while lo <= hi\n        let mid i64 = (lo + hi) / 2\n        if a[mid] == x\n            return mid\n        elif a[mid] < x\n            lo = mid + 1\n        else\n            hi = mid - 1\n    0 - 1"
+    },
+    "C": {
+     "tokens": 108,
+     "source": "int64_t binary_search(const int64_t *a, int64_t n, int64_t x) {\n    int64_t lo = 0, hi = n - 1;\n    while (lo <= hi) {\n        int64_t mid = (lo + hi) / 2;\n        if (a[mid] == x) return mid;\n        else if (a[mid] < x) lo = mid + 1;\n        else hi = mid - 1;\n    }\n    return -1;\n}"
+    },
+    "C++": {
+     "tokens": 120,
+     "source": "std::int64_t binary_search(const std::int64_t *a, std::int64_t n, std::int64_t x) {\n    std::int64_t lo = 0, hi = n - 1;\n    while (lo <= hi) {\n        std::int64_t mid = (lo + hi) / 2;\n        if (a[mid] == x) return mid;\n        else if (a[mid] < x) lo = mid + 1;\n        else hi = mid - 1;\n    }\n    return -1;\n}"
+    },
+    "Rust": {
+     "tokens": 113,
+     "source": "fn binary_search(a: &[i64], n: i64, x: i64) -> i64 {\n    let mut lo = 0i64;\n    let mut hi = n - 1;\n    while lo <= hi {\n        let mid = (lo + hi) / 2;\n        if a[mid as usize] == x { return mid; }\n        else if a[mid as usize] < x { lo = mid + 1; }\n        else { hi = mid - 1; }\n    }\n    -1\n}"
+    },
+    "Python": {
+     "tokens": 92,
+     "source": "def binary_search(a: list, n: int, x: int) -> int:\n    lo, hi = 0, n - 1\n    while lo <= hi:\n        mid = (lo + hi) // 2\n        if a[mid] == x:\n            return mid\n        elif a[mid] < x:\n            lo = mid + 1\n        else:\n            hi = mid - 1\n    return -1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "bubble_sort_checksum",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 115,
+     "source": "fn bubble_sort_checksum a array<i64> n i64 -> i64\n    for i from 0 to n - 1\n        for j from 0 to n - 2 - i\n            if a[j] > a[j + 1]\n                let t i64 = a[j]\n                a[j] = a[j + 1]\n                a[j + 1] = t\n    let sum i64 = 0\n    for i from 0 to n - 1\n        sum += i * a[i]\n    sum"
+    },
+    "C": {
+     "tokens": 172,
+     "source": "int64_t bubble_sort_checksum(const int64_t *a, int64_t n) {\n    int64_t buf[256];\n    for (int64_t i = 0; i < n; i++) buf[i] = a[i];\n    for (int64_t i = 0; i < n; i++)\n        for (int64_t j = 0; j + 1 + i < n; j++)\n            if (buf[j] > buf[j + 1]) {\n                int64_t t = buf[j]; buf[j] = buf[j + 1]; buf[j + 1] = t;\n            }\n    int64_t sum = 0;\n    for (int64_t i = 0; i < n; i++) sum += i * buf[i];\n    return sum;\n}"
+    },
+    "C++": {
+     "tokens": 152,
+     "source": "std::int64_t bubble_sort_checksum(const std::int64_t *a, std::int64_t n) {\n    std::vector<std::int64_t> buf(a, a + n);\n    for (std::int64_t i = 0; i < n; i++)\n        for (std::int64_t j = 0; j + 1 + i < n; j++)\n            if (buf[j] > buf[j + 1]) std::swap(buf[j], buf[j + 1]);\n    std::int64_t sum = 0;\n    for (std::int64_t i = 0; i < n; i++) sum += i * buf[i];\n    return sum;\n}"
+    },
+    "Rust": {
+     "tokens": 123,
+     "source": "fn bubble_sort_checksum(a: &[i64], n: i64) -> i64 {\n    let mut buf = a[..n as usize].to_vec();\n    for i in 0..n as usize {\n        for j in 0..(n as usize - 1 - i) {\n            if buf[j] > buf[j + 1] { buf.swap(j, j + 1); }\n        }\n    }\n    let mut sum = 0;\n    for i in 0..n as usize { sum += i as i64 * buf[i]; }\n    sum\n}"
+    },
+    "Python": {
+     "tokens": 87,
+     "source": "def bubble_sort_checksum(a: list, n: int) -> int:\n    buf = a[:n]\n    for i in range(n):\n        for j in range(n - 1 - i):\n            if buf[j] > buf[j + 1]:\n                buf[j], buf[j + 1] = buf[j + 1], buf[j]\n    return sum(i * buf[i] for i in range(n))"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_distinct_sorted",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 70,
+     "source": "fn count_distinct_sorted a array<i64> n i64 -> i64\n    if n == 0\n        return 0\n    let count i64 = 1\n    for i from 1 to n - 1\n        if a[i] != a[i - 1]\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "int64_t count_distinct_sorted(const int64_t *a, int64_t n) {\n    if (n == 0) return 0;\n    int64_t count = 1;\n    for (int64_t i = 1; i < n; i++) if (a[i] != a[i - 1]) count++;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 87,
+     "source": "std::int64_t count_distinct_sorted(const std::int64_t *a, std::int64_t n) {\n    if (n == 0) return 0;\n    std::int64_t count = 1;\n    for (std::int64_t i = 1; i < n; i++) if (a[i] != a[i - 1]) count++;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 74,
+     "source": "fn count_distinct_sorted(a: &[i64], n: i64) -> i64 {\n    if n == 0 { return 0; }\n    let mut count = 1;\n    for i in 1..n as usize { if a[i] != a[i - 1] { count += 1; } }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 65,
+     "source": "def count_distinct_sorted(a: list, n: int) -> int:\n    if n == 0:\n        return 0\n    count = 1\n    for i in range(1, n):\n        if a[i] != a[i - 1]:\n            count += 1\n    return count"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_equal",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 55,
+     "source": "fn count_equal a array<i64> n i64 x i64 -> i64\n    let count i64 = 0\n    for i from 0 to n - 1\n        if a[i] == x\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 64,
+     "source": "int64_t count_equal(const int64_t *a, int64_t n, int64_t x) {\n    int64_t count = 0;\n    for (int64_t i = 0; i < n; i++) if (a[i] == x) count++;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 76,
+     "source": "std::int64_t count_equal(const std::int64_t *a, std::int64_t n, std::int64_t x) {\n    std::int64_t count = 0;\n    for (std::int64_t i = 0; i < n; i++) if (a[i] == x) count++;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 60,
+     "source": "fn count_equal(a: &[i64], n: i64, x: i64) -> i64 {\n    let mut count = 0;\n    for i in 0..n as usize { if a[i] == x { count += 1; } }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def count_equal(a: list, n: int, x: int) -> int:\n    count = 0\n    for i in range(n):\n        if a[i] == x:\n            count += 1\n    return count"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_positive",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 53,
+     "source": "fn count_positive a array<i64> n i64 -> i64\n    let count i64 = 0\n    for i from 0 to n - 1\n        if a[i] > 0\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 60,
+     "source": "int64_t count_positive(const int64_t *a, int64_t n) {\n    int64_t count = 0;\n    for (int64_t i = 0; i < n; i++) if (a[i] > 0) count++;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 70,
+     "source": "std::int64_t count_positive(const std::int64_t *a, std::int64_t n) {\n    std::int64_t count = 0;\n    for (std::int64_t i = 0; i < n; i++) if (a[i] > 0) count++;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 56,
+     "source": "fn count_positive(a: &[i64], n: i64) -> i64 {\n    let mut count = 0;\n    for i in 0..n as usize { if a[i] > 0 { count += 1; } }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 45,
+     "source": "def count_positive(a: list, n: int) -> int:\n    count = 0\n    for i in range(n):\n        if a[i] > 0:\n            count += 1\n    return count"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "dot_product",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 53,
+     "source": "fn dot_product a array<i64> b array<i64> n i64 -> i64\n    let sum i64 = 0\n    for i from 0 to n - 1\n        sum += a[i] * b[i]\n    sum"
+    },
+    "C": {
+     "tokens": 65,
+     "source": "int64_t dot_product(const int64_t *a, const int64_t *b, int64_t n) {\n    int64_t sum = 0;\n    for (int64_t i = 0; i < n; i++) sum += a[i] * b[i];\n    return sum;\n}"
+    },
+    "C++": {
+     "tokens": 77,
+     "source": "std::int64_t dot_product(const std::int64_t *a, const std::int64_t *b, std::int64_t n) {\n    std::int64_t sum = 0;\n    for (std::int64_t i = 0; i < n; i++) sum += a[i] * b[i];\n    return sum;\n}"
+    },
+    "Rust": {
+     "tokens": 57,
+     "source": "fn dot_product(a: &[i64], b: &[i64], n: i64) -> i64 {\n    let mut sum = 0;\n    for i in 0..n as usize { sum += a[i] * b[i]; }\n    sum\n}"
+    },
+    "Python": {
+     "tokens": 44,
+     "source": "def dot_product(a: list, b: list, n: int) -> int:\n    total = 0\n    for i in range(n):\n        total += a[i] * b[i]\n    return total"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "index_of",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 48,
+     "source": "fn index_of a array<i64> n i64 x i64 -> i64\n    for i from 0 to n - 1\n        if a[i] == x\n            return i\n    0 - 1"
+    },
+    "C": {
+     "tokens": 57,
+     "source": "int64_t index_of(const int64_t *a, int64_t n, int64_t x) {\n    for (int64_t i = 0; i < n; i++) if (a[i] == x) return i;\n    return -1;\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": "std::int64_t index_of(const std::int64_t *a, std::int64_t n, std::int64_t x) {\n    for (std::int64_t i = 0; i < n; i++) if (a[i] == x) return i;\n    return -1;\n}"
+    },
+    "Rust": {
+     "tokens": 54,
+     "source": "fn index_of(a: &[i64], n: i64, x: i64) -> i64 {\n    for i in 0..n as usize { if a[i] == x { return i as i64; } }\n    -1\n}"
+    },
+    "Python": {
+     "tokens": 41,
+     "source": "def index_of(a: list, n: int, x: int) -> int:\n    for i in range(n):\n        if a[i] == x:\n            return i\n    return -1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_sorted_asc",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 49,
+     "source": "fn is_sorted_asc a array<i64> n i64 -> i64\n    for i from 1 to n - 1\n        if a[i] < a[i - 1]\n            return 0\n    1"
+    },
+    "C": {
+     "tokens": 59,
+     "source": "int64_t is_sorted_asc(const int64_t *a, int64_t n) {\n    for (int64_t i = 1; i < n; i++) if (a[i] < a[i - 1]) return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": "std::int64_t is_sorted_asc(const std::int64_t *a, std::int64_t n) {\n    for (std::int64_t i = 1; i < n; i++) if (a[i] < a[i - 1]) return 0;\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 54,
+     "source": "fn is_sorted_asc(a: &[i64], n: i64) -> i64 {\n    for i in 1..n as usize { if a[i] < a[i - 1] { return 0; } }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 47,
+     "source": "def is_sorted_asc(a: list, n: int) -> int:\n    for i in range(1, n):\n        if a[i] < a[i - 1]:\n            return 0\n    return 1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "max_array",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 53,
+     "source": "fn max_array a array<i64> n i64 -> i64\n    let m i64 = a[0]\n    for i from 1 to n - 1\n        if a[i] > m\n            m = a[i]\n    m"
+    },
+    "C": {
+     "tokens": 63,
+     "source": "int64_t max_array(const int64_t *a, int64_t n) {\n    int64_t m = a[0];\n    for (int64_t i = 1; i < n; i++) if (a[i] > m) m = a[i];\n    return m;\n}"
+    },
+    "C++": {
+     "tokens": 73,
+     "source": "std::int64_t max_array(const std::int64_t *a, std::int64_t n) {\n    std::int64_t m = a[0];\n    for (std::int64_t i = 1; i < n; i++) if (a[i] > m) m = a[i];\n    return m;\n}"
+    },
+    "Rust": {
+     "tokens": 56,
+     "source": "fn max_array(a: &[i64], n: i64) -> i64 {\n    let mut m = a[0];\n    for i in 1..n as usize { if a[i] > m { m = a[i]; } }\n    m\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def max_array(a: list, n: int) -> int:\n    m = a[0]\n    for i in range(1, n):\n        if a[i] > m:\n            m = a[i]\n    return m"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "mean_floor",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 24,
+     "source": "fn mean_floor a array<i64> n i64 -> i64\n    sum_array(a, n) / n"
+    },
+    "C": {
+     "tokens": 30,
+     "source": "int64_t mean_floor(const int64_t *a, int64_t n) {\n    return sum_array(a, n) / n;\n}"
+    },
+    "C++": {
+     "tokens": 36,
+     "source": "std::int64_t mean_floor(const std::int64_t *a, std::int64_t n) {\n    return sum_array(a, n) / n;\n}"
+    },
+    "Rust": {
+     "tokens": 29,
+     "source": "fn mean_floor(a: &[i64], n: i64) -> i64 {\n    sum_array(a, n) / n\n}"
+    },
+    "Python": {
+     "tokens": 24,
+     "source": "def mean_floor(a: list, n: int) -> int:\n    return sum_array(a, n) // n"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "min_array",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 53,
+     "source": "fn min_array a array<i64> n i64 -> i64\n    let m i64 = a[0]\n    for i from 1 to n - 1\n        if a[i] < m\n            m = a[i]\n    m"
+    },
+    "C": {
+     "tokens": 63,
+     "source": "int64_t min_array(const int64_t *a, int64_t n) {\n    int64_t m = a[0];\n    for (int64_t i = 1; i < n; i++) if (a[i] < m) m = a[i];\n    return m;\n}"
+    },
+    "C++": {
+     "tokens": 73,
+     "source": "std::int64_t min_array(const std::int64_t *a, std::int64_t n) {\n    std::int64_t m = a[0];\n    for (std::int64_t i = 1; i < n; i++) if (a[i] < m) m = a[i];\n    return m;\n}"
+    },
+    "Rust": {
+     "tokens": 56,
+     "source": "fn min_array(a: &[i64], n: i64) -> i64 {\n    let mut m = a[0];\n    for i in 1..n as usize { if a[i] < m { m = a[i]; } }\n    m\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def min_array(a: list, n: int) -> int:\n    m = a[0]\n    for i in range(1, n):\n        if a[i] < m:\n            m = a[i]\n    return m"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "prefix_sum_last",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 45,
+     "source": "fn prefix_sum_last a array<i64> n i64 -> i64\n    let prefix i64 = 0\n    for i from 0 to n - 1\n        prefix += a[i]\n    prefix"
+    },
+    "C": {
+     "tokens": 55,
+     "source": "int64_t prefix_sum_last(const int64_t *a, int64_t n) {\n    int64_t prefix = 0;\n    for (int64_t i = 0; i < n; i++) prefix += a[i];\n    return prefix;\n}"
+    },
+    "C++": {
+     "tokens": 65,
+     "source": "std::int64_t prefix_sum_last(const std::int64_t *a, std::int64_t n) {\n    std::int64_t prefix = 0;\n    for (std::int64_t i = 0; i < n; i++) prefix += a[i];\n    return prefix;\n}"
+    },
+    "Rust": {
+     "tokens": 48,
+     "source": "fn prefix_sum_last(a: &[i64], n: i64) -> i64 {\n    let mut prefix = 0;\n    for i in 0..n as usize { prefix += a[i]; }\n    prefix\n}"
+    },
+    "Python": {
+     "tokens": 37,
+     "source": "def prefix_sum_last(a: list, n: int) -> int:\n    prefix = 0\n    for i in range(n):\n        prefix += a[i]\n    return prefix"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "range_span",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 29,
+     "source": "fn range_span a array<i64> n i64 -> i64\n    max_array(a, n) - min_array(a, n)"
+    },
+    "C": {
+     "tokens": 34,
+     "source": "int64_t range_span(const int64_t *a, int64_t n) {\n    return max_array(a, n) - min_array(a, n);\n}"
+    },
+    "C++": {
+     "tokens": 40,
+     "source": "std::int64_t range_span(const std::int64_t *a, std::int64_t n) {\n    return max_array(a, n) - min_array(a, n);\n}"
+    },
+    "Rust": {
+     "tokens": 33,
+     "source": "fn range_span(a: &[i64], n: i64) -> i64 {\n    max_array(a, n) - min_array(a, n)\n}"
+    },
+    "Python": {
+     "tokens": 29,
+     "source": "def range_span(a: list, n: int) -> int:\n    return max_array(a, n) - min_array(a, n)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "second_largest",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 107,
+     "source": "fn second_largest a array<i64> n i64 -> i64\n    let first i64 = a[0]\n    let second i64 = a[1]\n    if second > first\n        let t i64 = first\n        first = second\n        second = t\n    for i from 2 to n - 1\n        if a[i] > first\n            second = first\n            first = a[i]\n        elif a[i] > second\n            second = a[i]\n    second"
+    },
+    "C": {
+     "tokens": 119,
+     "source": "int64_t second_largest(const int64_t *a, int64_t n) {\n    int64_t first = a[0], second = a[1];\n    if (second > first) { int64_t t = first; first = second; second = t; }\n    for (int64_t i = 2; i < n; i++) {\n        if (a[i] > first) { second = first; first = a[i]; }\n        else if (a[i] > second) second = a[i];\n    }\n    return second;\n}"
+    },
+    "C++": {
+     "tokens": 119,
+     "source": "std::int64_t second_largest(const std::int64_t *a, std::int64_t n) {\n    std::int64_t first = a[0], second = a[1];\n    if (second > first) std::swap(first, second);\n    for (std::int64_t i = 2; i < n; i++) {\n        if (a[i] > first) { second = first; first = a[i]; }\n        else if (a[i] > second) second = a[i];\n    }\n    return second;\n}"
+    },
+    "Rust": {
+     "tokens": 108,
+     "source": "fn second_largest(a: &[i64], n: i64) -> i64 {\n    let (mut first, mut second) = (a[0], a[1]);\n    if second > first { std::mem::swap(&mut first, &mut second); }\n    for i in 2..n as usize {\n        if a[i] > first { second = first; first = a[i]; }\n        else if a[i] > second { second = a[i]; }\n    }\n    second\n}"
+    },
+    "Python": {
+     "tokens": 88,
+     "source": "def second_largest(a: list, n: int) -> int:\n    first, second = a[0], a[1]\n    if second > first:\n        first, second = second, first\n    for i in range(2, n):\n        if a[i] > first:\n            second, first = first, a[i]\n        elif a[i] > second:\n            second = a[i]\n    return second"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "sum_array",
+   "category": "arrays",
+   "langs": {
+    "Lullaby": {
+     "tokens": 44,
+     "source": "fn sum_array a array<i64> n i64 -> i64\n    let sum i64 = 0\n    for i from 0 to n - 1\n        sum += a[i]\n    sum"
+    },
+    "C": {
+     "tokens": 54,
+     "source": "int64_t sum_array(const int64_t *a, int64_t n) {\n    int64_t sum = 0;\n    for (int64_t i = 0; i < n; i++) sum += a[i];\n    return sum;\n}"
+    },
+    "C++": {
+     "tokens": 64,
+     "source": "std::int64_t sum_array(const std::int64_t *a, std::int64_t n) {\n    std::int64_t sum = 0;\n    for (std::int64_t i = 0; i < n; i++) sum += a[i];\n    return sum;\n}"
+    },
+    "Rust": {
+     "tokens": 47,
+     "source": "fn sum_array(a: &[i64], n: i64) -> i64 {\n    let mut sum = 0;\n    for i in 0..n as usize { sum += a[i]; }\n    sum\n}"
+    },
+    "Python": {
+     "tokens": 36,
+     "source": "def sum_array(a: list, n: int) -> int:\n    total = 0\n    for i in range(n):\n        total += a[i]\n    return total"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "abs_val",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 26,
+     "source": "fn abs_val n i64 -> i64\n    if n < 0\n        return 0 - n\n    n"
+    },
+    "C": {
+     "tokens": 28,
+     "source": "Vec3;\nstatic int64_t abs_val(int64_t n) {\n    return n < 0 ? -n : n;\n}"
+    },
+    "C++": {
+     "tokens": 29,
+     "source": ";\nstd::int64_t abs_val(std::int64_t n) {\n    return n < 0 ? -n : n;\n}"
+    }
+   },
+   "present": 3
+  },
+  {
+   "name": "chebyshev",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 54,
+     "source": "fn chebyshev a Point b Point -> i64\n    let dx i64 = abs_val(a.x - b.x)\n    let dy i64 = abs_val(a.y - b.y)\n    if dx > dy\n        dx\n    else\n        dy"
+    },
+    "C": {
+     "tokens": 52,
+     "source": "int64_t chebyshev(Point a, Point b) {\n    int64_t dx = abs_val(a.x - b.x);\n    int64_t dy = abs_val(a.y - b.y);\n    return dx > dy ? dx : dy;\n}"
+    },
+    "C++": {
+     "tokens": 58,
+     "source": "std::int64_t chebyshev(Point a, Point b) {\n    std::int64_t dx = abs_val(a.x - b.x);\n    std::int64_t dy = abs_val(a.y - b.y);\n    return dx > dy ? dx : dy;\n}"
+    },
+    "Rust": {
+     "tokens": 37,
+     "source": "fn chebyshev(a: Point, b: Point) -> i64 {\n    (a.x - b.x).abs().max((a.y - b.y).abs())\n}"
+    },
+    "Python": {
+     "tokens": 32,
+     "source": "def chebyshev(a: Point, b: Point) -> int:\n    return max(abs(a.x - b.x), abs(a.y - b.y))"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "interval_intersect_len",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 84,
+     "source": "fn interval_intersect_len a Interval b Interval -> i64\n    let lo i64 = a.lo\n    if b.lo > lo\n        lo = b.lo\n    let hi i64 = a.hi\n    if b.hi < hi\n        hi = b.hi\n    let n i64 = hi - lo\n    if n < 0\n        return 0\n    n"
+    },
+    "C": {
+     "tokens": 78,
+     "source": "int64_t interval_intersect_len(Interval a, Interval b) {\n    int64_t lo = a.lo > b.lo ? a.lo : b.lo;\n    int64_t hi = a.hi < b.hi ? a.hi : b.hi;\n    int64_t n = hi - lo;\n    return n < 0 ? 0 : n;\n}"
+    },
+    "C++": {
+     "tokens": 86,
+     "source": "std::int64_t interval_intersect_len(Interval a, Interval b) {\n    std::int64_t lo = a.lo > b.lo ? a.lo : b.lo;\n    std::int64_t hi = a.hi < b.hi ? a.hi : b.hi;\n    std::int64_t n = hi - lo;\n    return n < 0 ? 0 : n;\n}"
+    },
+    "Rust": {
+     "tokens": 50,
+     "source": "fn interval_intersect_len(a: Interval, b: Interval) -> i64 {\n    let lo = a.lo.max(b.lo);\n    let hi = a.hi.min(b.hi);\n    (hi - lo).max(0)\n}"
+    },
+    "Python": {
+     "tokens": 49,
+     "source": "def interval_intersect_len(a: Interval, b: Interval) -> int:\n    lo = max(a.lo, b.lo)\n    hi = min(a.hi, b.hi)\n    return max(hi - lo, 0)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "interval_length",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 36,
+     "source": "fn interval_length a Interval -> i64\n    let n i64 = a.hi - a.lo\n    if n < 0\n        return 0\n    n"
+    },
+    "C": {
+     "tokens": 36,
+     "source": "int64_t interval_length(Interval a) {\n    int64_t n = a.hi - a.lo;\n    return n < 0 ? 0 : n;\n}"
+    },
+    "C++": {
+     "tokens": 40,
+     "source": "std::int64_t interval_length(Interval a) {\n    std::int64_t n = a.hi - a.lo;\n    return n < 0 ? 0 : n;\n}"
+    },
+    "Rust": {
+     "tokens": 25,
+     "source": "fn interval_length(a: Interval) -> i64 {\n    (a.hi - a.lo).max(0)\n}"
+    },
+    "Python": {
+     "tokens": 23,
+     "source": "def interval_length(a: Interval) -> int:\n    return max(a.hi - a.lo, 0)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "interval_overlaps",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 38,
+     "source": "fn interval_overlaps a Interval b Interval -> i64\n    if a.lo < b.hi and b.lo < a.hi\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 39,
+     "source": "int64_t interval_overlaps(Interval a, Interval b) {\n    return (a.lo < b.hi && b.lo < a.hi) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 41,
+     "source": "std::int64_t interval_overlaps(Interval a, Interval b) {\n    return (a.lo < b.hi && b.lo < a.hi) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 41,
+     "source": "fn interval_overlaps(a: Interval, b: Interval) -> i64 {\n    if a.lo < b.hi && b.lo < a.hi { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 36,
+     "source": "def interval_overlaps(a: Interval, b: Interval) -> int:\n    return 1 if a.lo < b.hi and b.lo < a.hi else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "manhattan",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 29,
+     "source": "fn manhattan a Point b Point -> i64\n    abs_val(a.x - b.x) + abs_val(a.y - b.y)"
+    },
+    "C": {
+     "tokens": 32,
+     "source": "int64_t manhattan(Point a, Point b) {\n    return abs_val(a.x - b.x) + abs_val(a.y - b.y);\n}"
+    },
+    "C++": {
+     "tokens": 34,
+     "source": "std::int64_t manhattan(Point a, Point b) {\n    return abs_val(a.x - b.x) + abs_val(a.y - b.y);\n}"
+    },
+    "Rust": {
+     "tokens": 36,
+     "source": "fn manhattan(a: Point, b: Point) -> i64 {\n    (a.x - b.x).abs() + (a.y - b.y).abs()\n}"
+    },
+    "Python": {
+     "tokens": 31,
+     "source": "def manhattan(a: Point, b: Point) -> int:\n    return abs(a.x - b.x) + abs(a.y - b.y)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "midpoint_x",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn midpoint_x a Point b Point -> i64\n    (a.x + b.x) / 2"
+    },
+    "C": {
+     "tokens": 26,
+     "source": "int64_t midpoint_x(Point a, Point b) {\n    return (a.x + b.x) / 2;\n}"
+    },
+    "C++": {
+     "tokens": 28,
+     "source": "std::int64_t midpoint_x(Point a, Point b) {\n    return (a.x + b.x) / 2;\n}"
+    },
+    "Rust": {
+     "tokens": 28,
+     "source": "fn midpoint_x(a: Point, b: Point) -> i64 {\n    (a.x + b.x) / 2\n}"
+    },
+    "Python": {
+     "tokens": 26,
+     "source": "def midpoint_x(a: Point, b: Point) -> int:\n    return (a.x + b.x) // 2"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "money_add",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 20,
+     "source": "fn money_add a Money b Money -> Money\n    Money(a.cents + b.cents)"
+    },
+    "C": {
+     "tokens": 29,
+     "source": "Money money_add(Money a, Money b) {\n    Money m = { a.cents + b.cents };\n    return m;\n}"
+    },
+    "C++": {
+     "tokens": 24,
+     "source": "Money money_add(Money a, Money b) {\n    return Money{ a.cents + b.cents };\n}"
+    },
+    "Rust": {
+     "tokens": 28,
+     "source": "fn money_add(a: Money, b: Money) -> Money {\n    Money { cents: a.cents + b.cents }\n}"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def money_add(a: Money, b: Money) -> Money:\n    return Money(a.cents + b.cents)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "money_cents_part",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 20,
+     "source": "fn money_cents_part m Money -> i64\n    rem(m.cents, 100)"
+    },
+    "C": {
+     "tokens": 22,
+     "source": "int64_t money_cents_part(Money m) {\n    return m.cents % 100;\n}"
+    },
+    "C++": {
+     "tokens": 24,
+     "source": "std::int64_t money_cents_part(Money m) {\n    return m.cents % 100;\n}"
+    },
+    "Rust": {
+     "tokens": 22,
+     "source": "fn money_cents_part(m: Money) -> i64 {\n    m.cents % 100\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def money_cents_part(m: Money) -> int:\n    return m.cents % 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "money_dollars",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 17,
+     "source": "fn money_dollars m Money -> i64\n    m.cents / 100"
+    },
+    "C": {
+     "tokens": 21,
+     "source": "int64_t money_dollars(Money m) {\n    return m.cents / 100;\n}"
+    },
+    "C++": {
+     "tokens": 23,
+     "source": "std::int64_t money_dollars(Money m) {\n    return m.cents / 100;\n}"
+    },
+    "Rust": {
+     "tokens": 21,
+     "source": "fn money_dollars(m: Money) -> i64 {\n    m.cents / 100\n}"
+    },
+    "Python": {
+     "tokens": 19,
+     "source": "def money_dollars(m: Money) -> int:\n    return m.cents // 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rect_area",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 15,
+     "source": "fn rect_area r Rect -> i64\n    r.w * r.h"
+    },
+    "C": {
+     "tokens": 18,
+     "source": "int64_t rect_area(Rect r) {\n    return r.w * r.h;\n}"
+    },
+    "C++": {
+     "tokens": 20,
+     "source": "std::int64_t rect_area(Rect r) {\n    return r.w * r.h;\n}"
+    },
+    "Rust": {
+     "tokens": 19,
+     "source": "fn rect_area(r: Rect) -> i64 {\n    r.w * r.h\n}"
+    },
+    "Python": {
+     "tokens": 17,
+     "source": "def rect_area(r: Rect) -> int:\n    return r.w * r.h"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rect_contains",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 47,
+     "source": "fn rect_contains r Rect px i64 py i64 -> i64\n    if px >= 0 and py >= 0 and px <= r.w and py <= r.h\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 50,
+     "source": "int64_t rect_contains(Rect r, int64_t px, int64_t py) {\n    return (px >= 0 && py >= 0 && px <= r.w && py <= r.h) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 56,
+     "source": "std::int64_t rect_contains(Rect r, std::int64_t px, std::int64_t py) {\n    return (px >= 0 && py >= 0 && px <= r.w && py <= r.h) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 52,
+     "source": "fn rect_contains(r: Rect, px: i64, py: i64) -> i64 {\n    if px >= 0 && py >= 0 && px <= r.w && py <= r.h { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 41,
+     "source": "def rect_contains(r: Rect, px: int, py: int) -> int:\n    return 1 if 0 <= px <= r.w and 0 <= py <= r.h else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rect_perimeter",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 21,
+     "source": "fn rect_perimeter r Rect -> i64\n    2 * (r.w + r.h)"
+    },
+    "C": {
+     "tokens": 23,
+     "source": "int64_t rect_perimeter(Rect r) {\n    return 2 * (r.w + r.h);\n}"
+    },
+    "C++": {
+     "tokens": 25,
+     "source": "std::int64_t rect_perimeter(Rect r) {\n    return 2 * (r.w + r.h);\n}"
+    },
+    "Rust": {
+     "tokens": 24,
+     "source": "fn rect_perimeter(r: Rect) -> i64 {\n    2 * (r.w + r.h)\n}"
+    },
+    "Python": {
+     "tokens": 23,
+     "source": "def rect_perimeter(r: Rect) -> int:\n    return 2 * (r.w + r.h)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rem",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 88,
+     "source": "fn rem a i64 b i64 -> i64\n    a - (a / b) * b\nstruct Point\n    x i64\n    y i64\nstruct Rect\n    w i64\n    h i64\nstruct Money\n    cents i64\nstruct Interval\n    lo i64\n    hi i64\nstruct Vec3\n    x i64\n    y i64\n    z i64"
+    }
+   },
+   "present": 1
+  },
+  {
+   "name": "vec3_add",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 35,
+     "source": "fn vec3_add a Vec3 b Vec3 -> Vec3\n    Vec3(a.x + b.x, a.y + b.y, a.z + b.z)"
+    },
+    "C": {
+     "tokens": 43,
+     "source": "Vec3 vec3_add(Vec3 a, Vec3 b) {\n    Vec3 r = { a.x + b.x, a.y + b.y, a.z + b.z };\n    return r;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "Vec3 vec3_add(Vec3 a, Vec3 b) {\n    return Vec3{ a.x + b.x, a.y + b.y, a.z + b.z };\n}"
+    },
+    "Rust": {
+     "tokens": 47,
+     "source": "fn vec3_add(a: Vec3, b: Vec3) -> Vec3 {\n    Vec3 { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }\n}"
+    },
+    "Python": {
+     "tokens": 40,
+     "source": "def vec3_add(a: Vec3, b: Vec3) -> Vec3:\n    return Vec3(a.x + b.x, a.y + b.y, a.z + b.z)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "vec3_dot",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 32,
+     "source": "fn vec3_dot a Vec3 b Vec3 -> i64\n    a.x * b.x + a.y * b.y + a.z * b.z"
+    },
+    "C": {
+     "tokens": 36,
+     "source": "int64_t vec3_dot(Vec3 a, Vec3 b) {\n    return a.x * b.x + a.y * b.y + a.z * b.z;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "std::int64_t vec3_dot(Vec3 a, Vec3 b) {\n    return a.x * b.x + a.y * b.y + a.z * b.z;\n}"
+    },
+    "Rust": {
+     "tokens": 38,
+     "source": "fn vec3_dot(a: Vec3, b: Vec3) -> i64 {\n    a.x * b.x + a.y * b.y + a.z * b.z\n}"
+    },
+    "Python": {
+     "tokens": 36,
+     "source": "def vec3_dot(a: Vec3, b: Vec3) -> int:\n    return a.x * b.x + a.y * b.y + a.z * b.z"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "vec3_manhattan_norm",
+   "category": "data_records",
+   "langs": {
+    "Lullaby": {
+     "tokens": 32,
+     "source": "fn vec3_manhattan_norm v Vec3 -> i64\n    abs_val(v.x) + abs_val(v.y) + abs_val(v.z)"
+    },
+    "C": {
+     "tokens": 34,
+     "source": "int64_t vec3_manhattan_norm(Vec3 v) {\n    return abs_val(v.x) + abs_val(v.y) + abs_val(v.z);\n}"
+    },
+    "C++": {
+     "tokens": 36,
+     "source": "std::int64_t vec3_manhattan_norm(Vec3 v) {\n    return abs_val(v.x) + abs_val(v.y) + abs_val(v.z);\n}"
+    },
+    "Rust": {
+     "tokens": 32,
+     "source": "fn vec3_manhattan_norm(v: Vec3) -> i64 {\n    v.x.abs() + v.y.abs() + v.z.abs()\n}"
+    },
+    "Python": {
+     "tokens": 31,
+     "source": "def vec3_manhattan_norm(v: Vec3) -> int:\n    return abs(v.x) + abs(v.y) + abs(v.z)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "add_days_year",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 37,
+     "source": "fn add_days_year y i64 m i64 d i64 n i64 -> i64\n    year_from_days(days_from_civil(y, m, d) + n)"
+    },
+    "C": {
+     "tokens": 46,
+     "source": "int64_t add_days_year(int64_t y, int64_t m, int64_t d, int64_t n) {\n    return year_from_days(days_from_civil(y, m, d) + n);\n}"
+    },
+    "C++": {
+     "tokens": 46,
+     "source": "int64_t add_days_year(int64_t y, int64_t m, int64_t d, int64_t n) {\n    return year_from_days(days_from_civil(y, m, d) + n);\n}"
+    },
+    "Rust": {
+     "tokens": 46,
+     "source": "fn add_days_year(y: i64, m: i64, d: i64, n: i64) -> i64 {\n    year_from_days(days_from_civil(y, m, d) + n)\n}"
+    },
+    "Python": {
+     "tokens": 41,
+     "source": "def add_days_year(y: int, m: int, d: int, n: int) -> int:\n    return year_from_days(days_from_civil(y, m, d) + n)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "age_years",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 61,
+     "source": "fn age_years yb i64 mb i64 db i64 yn i64 mn i64 dn i64 -> i64\n    let years i64 = yn - yb\n    if mn < mb or (mn == mb and dn < db)\n        years -= 1\n    years"
+    },
+    "C": {
+     "tokens": 76,
+     "source": "int64_t age_years(int64_t yb, int64_t mb, int64_t db,\n                  int64_t yn, int64_t mn, int64_t dn) {\n    int64_t years = yn - yb;\n    if (mn < mb || (mn == mb && dn < db)) years -= 1;\n    return years;\n}"
+    },
+    "C++": {
+     "tokens": 76,
+     "source": "int64_t age_years(int64_t yb, int64_t mb, int64_t db,\n                  int64_t yn, int64_t mn, int64_t dn) {\n    int64_t years = yn - yb;\n    if (mn < mb || (mn == mb && dn < db)) years -= 1;\n    return years;\n}"
+    },
+    "Rust": {
+     "tokens": 77,
+     "source": "fn age_years(yb: i64, mb: i64, db: i64, yn: i64, mn: i64, dn: i64) -> i64 {\n    let mut years = yn - yb;\n    if mn < mb || (mn == mb && dn < db) {\n        years -= 1;\n    }\n    years\n}"
+    },
+    "Python": {
+     "tokens": 64,
+     "source": "def age_years(yb: int, mb: int, db: int, yn: int, mn: int, dn: int) -> int:\n    years = yn - yb\n    if mn < mb or (mn == mb and dn < db):\n        years -= 1\n    return years"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "clock_add_minutes",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 42,
+     "source": "fn clock_add_minutes h i64 mi i64 add i64 -> i64\n    let total i64 = rem(h * 60 + mi + add, 1440)\n    total / 60"
+    },
+    "C": {
+     "tokens": 44,
+     "source": "int64_t clock_add_minutes(int64_t h, int64_t mi, int64_t add) {\n    return ((h * 60 + mi + add) % 1440) / 60;\n}"
+    },
+    "C++": {
+     "tokens": 44,
+     "source": "int64_t clock_add_minutes(int64_t h, int64_t mi, int64_t add) {\n    return ((h * 60 + mi + add) % 1440) / 60;\n}"
+    },
+    "Rust": {
+     "tokens": 44,
+     "source": "fn clock_add_minutes(h: i64, mi: i64, add: i64) -> i64 {\n    ((h * 60 + mi + add) % 1440) / 60\n}"
+    },
+    "Python": {
+     "tokens": 38,
+     "source": "def clock_add_minutes(h: int, mi: int, add: int) -> int:\n    return (h * 60 + mi + add) % 1440 // 60"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "day_of_year",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 49,
+     "source": "fn day_of_year y i64 m i64 d i64 -> i64\n    let total i64 = d\n    for mm from 1 to m - 1\n        total += days_in_month(y, mm)\n    total"
+    },
+    "C": {
+     "tokens": 61,
+     "source": "int64_t day_of_year(int64_t y, int64_t m, int64_t d) {\n    int64_t total = d;\n    for (int64_t mm = 1; mm < m; mm++) total += days_in_month(y, mm);\n    return total;\n}"
+    },
+    "C++": {
+     "tokens": 62,
+     "source": "int64_t day_of_year(int64_t y, int64_t m, int64_t d) {\n    int64_t total = d;\n    for (int64_t mm = 1; mm < m; ++mm) total += days_in_month(y, mm);\n    return total;\n}"
+    },
+    "Rust": {
+     "tokens": 55,
+     "source": "fn day_of_year(y: i64, m: i64, d: i64) -> i64 {\n    let mut total = d;\n    for mm in 1..m {\n        total += days_in_month(y, mm);\n    }\n    total\n}"
+    },
+    "Python": {
+     "tokens": 47,
+     "source": "def day_of_year(y: int, m: int, d: int) -> int:\n    total = d\n    for mm in range(1, m):\n        total += days_in_month(y, mm)\n    return total"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "days_between",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 59,
+     "source": "fn days_between y1 i64 m1 i64 d1 i64 y2 i64 m2 i64 d2 i64 -> i64\n    days_from_civil(y2, m2, d2) - days_from_civil(y1, m1, d1)"
+    },
+    "C": {
+     "tokens": 73,
+     "source": "int64_t days_between(int64_t y1, int64_t m1, int64_t d1,\n                     int64_t y2, int64_t m2, int64_t d2) {\n    return days_from_civil(y2, m2, d2) - days_from_civil(y1, m1, d1);\n}"
+    },
+    "C++": {
+     "tokens": 73,
+     "source": "int64_t days_between(int64_t y1, int64_t m1, int64_t d1,\n                     int64_t y2, int64_t m2, int64_t d2) {\n    return days_from_civil(y2, m2, d2) - days_from_civil(y1, m1, d1);\n}"
+    },
+    "Rust": {
+     "tokens": 72,
+     "source": "fn days_between(y1: i64, m1: i64, d1: i64, y2: i64, m2: i64, d2: i64) -> i64 {\n    days_from_civil(y2, m2, d2) - days_from_civil(y1, m1, d1)\n}"
+    },
+    "Python": {
+     "tokens": 65,
+     "source": "def days_between(y1: int, m1: int, d1: int, y2: int, m2: int, d2: int) -> int:\n    return days_from_civil(y2, m2, d2) - days_from_civil(y1, m1, d1)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "days_from_civil",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 183,
+     "source": "fn days_from_civil y i64 m i64 d i64 -> i64\n    if m <= 2\n        y = y - 1\n    let era i64 = 0\n    if y >= 0\n        era = y / 400\n    else\n        era = (y - 399) / 400\n    let yoe i64 = y - era * 400\n    let mp i64 = 0\n    if m > 2\n        mp = m - 3\n    else\n        mp = m + 9\n    let doy i64 = (153 * mp + 2) / 5 + d - 1\n    let doe i64 = yoe * 365 + yoe / 4 - yoe / 100 + doy\n    era * 146097 + doe - 719468"
+    },
+    "C": {
+     "tokens": 147,
+     "source": "int64_t days_from_civil(int64_t y, int64_t m, int64_t d) {\n    y -= m <= 2;\n    int64_t era = (y >= 0 ? y : y - 399) / 400;\n    int64_t yoe = y - era * 400;\n    int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;\n    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;\n    return era * 146097 + doe - 719468;\n}"
+    },
+    "C++": {
+     "tokens": 147,
+     "source": "int64_t days_from_civil(int64_t y, int64_t m, int64_t d) {\n    y -= m <= 2;\n    int64_t era = (y >= 0 ? y : y - 399) / 400;\n    int64_t yoe = y - era * 400;\n    int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;\n    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;\n    return era * 146097 + doe - 719468;\n}"
+    },
+    "Rust": {
+     "tokens": 151,
+     "source": "fn days_from_civil(mut y: i64, m: i64, d: i64) -> i64 {\n    y -= (m <= 2) as i64;\n    let era = (if y >= 0 { y } else { y - 399 }) / 400;\n    let yoe = y - era * 400;\n    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;\n    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;\n    era * 146097 + doe - 719468\n}"
+    },
+    "Python": {
+     "tokens": 130,
+     "source": "def days_from_civil(y: int, m: int, d: int) -> int:\n    y -= m <= 2\n    era = (y if y >= 0 else y - 399) // 400\n    yoe = y - era * 400\n    doy = (153 * (m - 3 if m > 2 else m + 9) + 2) // 5 + d - 1\n    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy\n    return era * 146097 + doe - 719468"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "days_in_month",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 73,
+     "source": "fn days_in_month y i64 m i64 -> i64\n    if m == 2\n        if is_leap_year(y) == 1\n            return 29\n        return 28\n    if m == 4 or m == 6 or m == 9 or m == 11\n        return 30\n    31"
+    },
+    "C": {
+     "tokens": 72,
+     "source": "int64_t days_in_month(int64_t y, int64_t m) {\n    if (m == 2) return is_leap_year(y) ? 29 : 28;\n    if (m == 4 || m == 6 || m == 9 || m == 11) return 30;\n    return 31;\n}"
+    },
+    "C++": {
+     "tokens": 72,
+     "source": "int64_t days_in_month(int64_t y, int64_t m) {\n    if (m == 2) return is_leap_year(y) ? 29 : 28;\n    if (m == 4 || m == 6 || m == 9 || m == 11) return 30;\n    return 31;\n}"
+    },
+    "Rust": {
+     "tokens": 84,
+     "source": "fn days_in_month(y: i64, m: i64) -> i64 {\n    if m == 2 {\n        if is_leap_year(y) == 1 { 29 } else { 28 }\n    } else if m == 4 || m == 6 || m == 9 || m == 11 {\n        30\n    } else {\n        31\n    }\n}"
+    },
+    "Python": {
+     "tokens": 62,
+     "source": "def days_in_month(y: int, m: int) -> int:\n    if m == 2:\n        return 29 if is_leap_year(y) else 28\n    if m in (4, 6, 9, 11):\n        return 30\n    return 31"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "hours_to_minutes",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 16,
+     "source": "fn hours_to_minutes h i64 -> i64\n    h * 60"
+    },
+    "C": {
+     "tokens": 19,
+     "source": "int64_t hours_to_minutes(int64_t h) { return h * 60; }"
+    },
+    "C++": {
+     "tokens": 19,
+     "source": "int64_t hours_to_minutes(int64_t h) { return h * 60; }"
+    },
+    "Rust": {
+     "tokens": 18,
+     "source": "fn hours_to_minutes(h: i64) -> i64 { h * 60 }"
+    },
+    "Python": {
+     "tokens": 17,
+     "source": "def hours_to_minutes(h: int) -> int:\n    return h * 60"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_leap_year",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 55,
+     "source": "fn is_leap_year y i64 -> i64\n    if rem(y, 4) == 0 and (rem(y, 100) != 0 or rem(y, 400) == 0)\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 49,
+     "source": "int64_t is_leap_year(int64_t y) {\n    return (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 49,
+     "source": "int64_t is_leap_year(int64_t y) {\n    return (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 51,
+     "source": "fn is_leap_year(y: i64) -> i64 {\n    if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 45,
+     "source": "def is_leap_year(y: int) -> int:\n    return 1 if y % 4 == 0 and (y % 100 != 0 or y % 400 == 0) else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_valid_time",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 59,
+     "source": "fn is_valid_time h i64 mi i64 s i64 -> i64\n    if h >= 0 and h <= 23 and mi >= 0 and mi <= 59 and s >= 0 and s <= 59\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 63,
+     "source": "int64_t is_valid_time(int64_t h, int64_t mi, int64_t s) {\n    return (h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && s >= 0 && s <= 59) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 63,
+     "source": "int64_t is_valid_time(int64_t h, int64_t mi, int64_t s) {\n    return (h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && s >= 0 && s <= 59) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 64,
+     "source": "fn is_valid_time(h: i64, mi: i64, s: i64) -> i64 {\n    if h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && s >= 0 && s <= 59 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 50,
+     "source": "def is_valid_time(h: int, mi: int, s: int) -> int:\n    return 1 if 0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_weekend",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 33,
+     "source": "fn is_weekend dow i64 -> i64\n    if dow == 0 or dow == 6\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 33,
+     "source": "int64_t is_weekend(int64_t dow) {\n    return (dow == 0 || dow == 6) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 33,
+     "source": "int64_t is_weekend(int64_t dow) {\n    return (dow == 0 || dow == 6) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 35,
+     "source": "fn is_weekend(dow: i64) -> i64 {\n    if dow == 0 || dow == 6 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 29,
+     "source": "def is_weekend(dow: int) -> int:\n    return 1 if dow == 0 or dow == 6 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "minutes_to_seconds",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 16,
+     "source": "fn minutes_to_seconds m i64 -> i64\n    m * 60"
+    },
+    "C": {
+     "tokens": 19,
+     "source": "int64_t minutes_to_seconds(int64_t m) { return m * 60; }"
+    },
+    "C++": {
+     "tokens": 19,
+     "source": "int64_t minutes_to_seconds(int64_t m) { return m * 60; }"
+    },
+    "Rust": {
+     "tokens": 18,
+     "source": "fn minutes_to_seconds(m: i64) -> i64 { m * 60 }"
+    },
+    "Python": {
+     "tokens": 17,
+     "source": "def minutes_to_seconds(m: int) -> int:\n    return m * 60"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "quarter_of_month",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 24,
+     "source": "fn quarter_of_month m i64 -> i64\n    (m - 1) / 3 + 1"
+    },
+    "C": {
+     "tokens": 27,
+     "source": "int64_t quarter_of_month(int64_t m) { return (m - 1) / 3 + 1; }"
+    },
+    "C++": {
+     "tokens": 27,
+     "source": "int64_t quarter_of_month(int64_t m) { return (m - 1) / 3 + 1; }"
+    },
+    "Rust": {
+     "tokens": 26,
+     "source": "fn quarter_of_month(m: i64) -> i64 { (m - 1) / 3 + 1 }"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def quarter_of_month(m: int) -> int:\n    return (m - 1) // 3 + 1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rem",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn rem a i64 b i64 -> i64\n    a - (a / b) * b"
+    }
+   },
+   "present": 1
+  },
+  {
+   "name": "seconds_in_days",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 17,
+     "source": "fn seconds_in_days d i64 -> i64\n    d * 86400"
+    },
+    "C": {
+     "tokens": 20,
+     "source": "int64_t seconds_in_days(int64_t d) { return d * 86400; }"
+    },
+    "C++": {
+     "tokens": 20,
+     "source": "int64_t seconds_in_days(int64_t d) { return d * 86400; }"
+    },
+    "Rust": {
+     "tokens": 19,
+     "source": "fn seconds_in_days(d: i64) -> i64 { d * 86400 }"
+    },
+    "Python": {
+     "tokens": 18,
+     "source": "def seconds_in_days(d: int) -> int:\n    return d * 86400"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "year_from_days",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 220,
+     "source": "fn year_from_days z i64 -> i64\n    z = z + 719468\n    let era i64 = 0\n    if z >= 0\n        era = z / 146097\n    else\n        era = (z - 146096) / 146097\n    let doe i64 = z - era * 146097\n    let yoe i64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365\n    let y i64 = yoe + era * 400\n    let doy i64 = doe - (365 * yoe + yoe / 4 - yoe / 100)\n    let mp i64 = (5 * doy + 2) / 153\n    let m i64 = 0\n    if mp < 10\n        m = mp + 3\n    else\n        m = mp - 9\n    if m <= 2\n        y = y + 1\n    y"
+    },
+    "C": {
+     "tokens": 181,
+     "source": "int64_t year_from_days(int64_t z) {\n    z += 719468;\n    int64_t era = (z >= 0 ? z : z - 146096) / 146097;\n    int64_t doe = z - era * 146097;\n    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;\n    int64_t y = yoe + era * 400;\n    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);\n    int64_t mp = (5 * doy + 2) / 153;\n    int64_t m = mp < 10 ? mp + 3 : mp - 9;\n    return y + (m <= 2);\n}"
+    },
+    "C++": {
+     "tokens": 181,
+     "source": "int64_t year_from_days(int64_t z) {\n    z += 719468;\n    int64_t era = (z >= 0 ? z : z - 146096) / 146097;\n    int64_t doe = z - era * 146097;\n    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;\n    int64_t y = yoe + era * 400;\n    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);\n    int64_t mp = (5 * doy + 2) / 153;\n    int64_t m = mp < 10 ? mp + 3 : mp - 9;\n    return y + (m <= 2);\n}"
+    },
+    "Rust": {
+     "tokens": 178,
+     "source": "fn year_from_days(mut z: i64) -> i64 {\n    z += 719468;\n    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;\n    let doe = z - era * 146097;\n    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;\n    let y = yoe + era * 400;\n    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);\n    let mp = (5 * doy + 2) / 153;\n    let m = if mp < 10 { mp + 3 } else { mp - 9 };\n    y + (m <= 2) as i64\n}"
+    },
+    "Python": {
+     "tokens": 158,
+     "source": "def year_from_days(z: int) -> int:\n    z += 719468\n    era = (z if z >= 0 else z - 146096) // 146097\n    doe = z - era * 146097\n    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365\n    y = yoe + era * 400\n    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)\n    mp = (5 * doy + 2) // 153\n    m = mp + 3 if mp < 10 else mp - 9\n    return y + (m <= 2)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "zeller_dow",
+   "category": "datetime",
+   "langs": {
+    "Lullaby": {
+     "tokens": 116,
+     "source": "fn zeller_dow y i64 m i64 d i64 -> i64\n    if m < 3\n        m = m + 12\n        y = y - 1\n    let k i64 = rem(y, 100)\n    let j i64 = y / 100\n    let h i64 = rem(d + 13 * (m + 1) / 5 + k + k / 4 + j / 4 + 5 * j, 7)\n    rem(h + 6, 7)"
+    },
+    "C": {
+     "tokens": 121,
+     "source": "int64_t zeller_dow(int64_t y, int64_t m, int64_t d) {\n    if (m < 3) { m += 12; y -= 1; }\n    int64_t k = y % 100;\n    int64_t j = y / 100;\n    int64_t h = (d + 13 * (m + 1) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;\n    return (h + 6) % 7;\n}"
+    },
+    "C++": {
+     "tokens": 121,
+     "source": "int64_t zeller_dow(int64_t y, int64_t m, int64_t d) {\n    if (m < 3) { m += 12; y -= 1; }\n    int64_t k = y % 100;\n    int64_t j = y / 100;\n    int64_t h = (d + 13 * (m + 1) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;\n    return (h + 6) % 7;\n}"
+    },
+    "Rust": {
+     "tokens": 118,
+     "source": "fn zeller_dow(mut y: i64, mut m: i64, d: i64) -> i64 {\n    if m < 3 {\n        m += 12;\n        y -= 1;\n    }\n    let k = y % 100;\n    let j = y / 100;\n    let h = (d + 13 * (m + 1) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;\n    (h + 6) % 7\n}"
+    },
+    "Python": {
+     "tokens": 106,
+     "source": "def zeller_dow(y: int, m: int, d: int) -> int:\n    if m < 3:\n        m += 12\n        y -= 1\n    k = y % 100\n    j = y // 100\n    h = (d + 13 * (m + 1) // 5 + k + k // 4 + j // 4 + 5 * j) % 7\n    return (h + 6) % 7"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "add_checksum_mod256",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 51,
+     "source": "fn add_checksum_mod256 a array<i64> n i64 -> i64\n    let total i64 = 0\n    for i from 0 to n - 1\n        total += a[i]\n    rem(total, 256)"
+    },
+    "C": {
+     "tokens": 59,
+     "source": "int64_t add_checksum_mod256(const int64_t *a, int64_t n) {\n    int64_t total = 0;\n    for (int64_t i = 0; i < n; i++) total += a[i];\n    return total % 256;\n}"
+    },
+    "C++": {
+     "tokens": 59,
+     "source": "int64_t add_checksum_mod256(const int64_t *a, int64_t n) {\n    int64_t total = 0;\n    for (int64_t i = 0; i < n; i++) total += a[i];\n    return total % 256;\n}"
+    },
+    "Rust": {
+     "tokens": 54,
+     "source": "fn add_checksum_mod256(a: &[i64], n: i64) -> i64 {\n    let mut total = 0;\n    for i in 0..n {\n        total += a[i as usize];\n    }\n    total % 256\n}"
+    },
+    "Python": {
+     "tokens": 42,
+     "source": "def add_checksum_mod256(a: list[int], n: int) -> int:\n    total = 0\n    for i in range(n):\n        total += a[i]\n    return total % 256"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "adler32_small",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 89,
+     "source": "fn adler32_small a array<i64> n i64 -> i64\n    let s1 i64 = 1\n    let s2 i64 = 0\n    for i from 0 to n - 1\n        s1 = rem(s1 + a[i], 65521)\n        s2 = rem(s2 + s1, 65521)\n    s2 * 65536 + s1"
+    },
+    "C": {
+     "tokens": 101,
+     "source": "int64_t adler32_small(const int64_t *a, int64_t n) {\n    int64_t s1 = 1, s2 = 0;\n    for (int64_t i = 0; i < n; i++) {\n        s1 = (s1 + a[i]) % 65521;\n        s2 = (s2 + s1) % 65521;\n    }\n    return s2 * 65536 + s1;\n}"
+    },
+    "C++": {
+     "tokens": 101,
+     "source": "int64_t adler32_small(const int64_t *a, int64_t n) {\n    int64_t s1 = 1, s2 = 0;\n    for (int64_t i = 0; i < n; i++) {\n        s1 = (s1 + a[i]) % 65521;\n        s2 = (s2 + s1) % 65521;\n    }\n    return s2 * 65536 + s1;\n}"
+    },
+    "Rust": {
+     "tokens": 95,
+     "source": "fn adler32_small(a: &[i64], n: i64) -> i64 {\n    let mut s1 = 1;\n    let mut s2 = 0;\n    for i in 0..n {\n        s1 = (s1 + a[i as usize]) % 65521;\n        s2 = (s2 + s1) % 65521;\n    }\n    s2 * 65536 + s1\n}"
+    },
+    "Python": {
+     "tokens": 81,
+     "source": "def adler32_small(a: list[int], n: int) -> int:\n    s1 = 1\n    s2 = 0\n    for i in range(n):\n        s1 = (s1 + a[i]) % 65521\n        s2 = (s2 + s1) % 65521\n    return s2 * 65536 + s1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "caesar_decrypt_val",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 53,
+     "source": "fn caesar_decrypt_val c i64 k i64 -> i64\n    if c >= 97 and c <= 122\n        return 97 + rem(c - 97 + 26 - rem(k, 26), 26)\n    c"
+    },
+    "C": {
+     "tokens": 59,
+     "source": "int64_t caesar_decrypt_val(int64_t c, int64_t k) {\n    if (c >= 97 && c <= 122) return 97 + (c - 97 + 26 - k % 26) % 26;\n    return c;\n}"
+    },
+    "C++": {
+     "tokens": 59,
+     "source": "int64_t caesar_decrypt_val(int64_t c, int64_t k) {\n    if (c >= 97 && c <= 122) return 97 + (c - 97 + 26 - k % 26) % 26;\n    return c;\n}"
+    },
+    "Rust": {
+     "tokens": 62,
+     "source": "fn caesar_decrypt_val(c: i64, k: i64) -> i64 {\n    if (97..=122).contains(&c) {\n        return 97 + (c - 97 + 26 - k % 26) % 26;\n    }\n    c\n}"
+    },
+    "Python": {
+     "tokens": 53,
+     "source": "def caesar_decrypt_val(c: int, k: int) -> int:\n    if 97 <= c <= 122:\n        return 97 + (c - 97 + 26 - k % 26) % 26\n    return c"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "caesar_encrypt_val",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 49,
+     "source": "fn caesar_encrypt_val c i64 k i64 -> i64\n    if c >= 97 and c <= 122\n        return 97 + rem(c - 97 + rem(k, 26), 26)\n    c"
+    },
+    "C": {
+     "tokens": 55,
+     "source": "int64_t caesar_encrypt_val(int64_t c, int64_t k) {\n    if (c >= 97 && c <= 122) return 97 + (c - 97 + k % 26) % 26;\n    return c;\n}"
+    },
+    "C++": {
+     "tokens": 55,
+     "source": "int64_t caesar_encrypt_val(int64_t c, int64_t k) {\n    if (c >= 97 && c <= 122) return 97 + (c - 97 + k % 26) % 26;\n    return c;\n}"
+    },
+    "Rust": {
+     "tokens": 58,
+     "source": "fn caesar_encrypt_val(c: i64, k: i64) -> i64 {\n    if (97..=122).contains(&c) {\n        return 97 + (c - 97 + k % 26) % 26;\n    }\n    c\n}"
+    },
+    "Python": {
+     "tokens": 49,
+     "source": "def caesar_encrypt_val(c: int, k: int) -> int:\n    if 97 <= c <= 122:\n        return 97 + (c - 97 + k % 26) % 26\n    return c"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_set_bits",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 46,
+     "source": "fn count_set_bits x i64 -> i64\n    let count i64 = 0\n    while x > 0\n        count += rem(x, 2)\n        x = x / 2\n    count"
+    },
+    "C": {
+     "tokens": 51,
+     "source": "int64_t count_set_bits(int64_t x) {\n    int64_t count = 0;\n    while (x > 0) {\n        count += x % 2;\n        x /= 2;\n    }\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 51,
+     "source": "int64_t count_set_bits(int64_t x) {\n    int64_t count = 0;\n    while (x > 0) {\n        count += x % 2;\n        x /= 2;\n    }\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 49,
+     "source": "fn count_set_bits(mut x: i64) -> i64 {\n    let mut count = 0;\n    while x > 0 {\n        count += x % 2;\n        x /= 2;\n    }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 42,
+     "source": "def count_set_bits(x: int) -> int:\n    count = 0\n    while x > 0:\n        count += x % 2\n        x //= 2\n    return count"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "crc8_simple",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 71,
+     "source": "fn crc8_simple a array<i64> n i64 -> i64\n    let crc i64 = 0\n    for i from 0 to n - 1\n        crc = rem(crc + a[i], 256)\n        crc = rem(crc * 2, 256) + crc / 128\n    crc"
+    },
+    "C": {
+     "tokens": 84,
+     "source": "int64_t crc8_simple(const int64_t *a, int64_t n) {\n    int64_t crc = 0;\n    for (int64_t i = 0; i < n; i++) {\n        crc = (crc + a[i]) % 256;\n        crc = (crc * 2) % 256 + crc / 128;\n    }\n    return crc;\n}"
+    },
+    "C++": {
+     "tokens": 84,
+     "source": "int64_t crc8_simple(const int64_t *a, int64_t n) {\n    int64_t crc = 0;\n    for (int64_t i = 0; i < n; i++) {\n        crc = (crc + a[i]) % 256;\n        crc = (crc * 2) % 256 + crc / 128;\n    }\n    return crc;\n}"
+    },
+    "Rust": {
+     "tokens": 75,
+     "source": "fn crc8_simple(a: &[i64], n: i64) -> i64 {\n    let mut crc = 0;\n    for i in 0..n {\n        crc = (crc + a[i as usize]) % 256;\n        crc = (crc * 2) % 256 + crc / 128;\n    }\n    crc\n}"
+    },
+    "Python": {
+     "tokens": 63,
+     "source": "def crc8_simple(a: list[int], n: int) -> int:\n    crc = 0\n    for i in range(n):\n        crc = (crc + a[i]) % 256\n        crc = (crc * 2) % 256 + crc // 128\n    return crc"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "digit_product",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 74,
+     "source": "fn digit_product x i64 -> i64\n    if x < 0\n        x = 0 - x\n    if x == 0\n        return 0\n    let p i64 = 1\n    while x > 0\n        p = p * rem(x, 10)\n        x = x / 10\n    p"
+    },
+    "C": {
+     "tokens": 78,
+     "source": "int64_t digit_product(int64_t x) {\n    if (x < 0) x = -x;\n    if (x == 0) return 0;\n    int64_t p = 1;\n    while (x > 0) {\n        p = p * (x % 10);\n        x /= 10;\n    }\n    return p;\n}"
+    },
+    "C++": {
+     "tokens": 78,
+     "source": "int64_t digit_product(int64_t x) {\n    if (x < 0) x = -x;\n    if (x == 0) return 0;\n    int64_t p = 1;\n    while (x > 0) {\n        p = p * (x % 10);\n        x /= 10;\n    }\n    return p;\n}"
+    },
+    "Rust": {
+     "tokens": 77,
+     "source": "fn digit_product(mut x: i64) -> i64 {\n    if x < 0 {\n        x = -x;\n    }\n    if x == 0 {\n        return 0;\n    }\n    let mut p = 1;\n    while x > 0 {\n        p *= x % 10;\n        x /= 10;\n    }\n    p\n}"
+    },
+    "Python": {
+     "tokens": 69,
+     "source": "def digit_product(x: int) -> int:\n    if x < 0:\n        x = -x\n    if x == 0:\n        return 0\n    p = 1\n    while x > 0:\n        p = p * (x % 10)\n        x //= 10\n    return p"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "fletcher16",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 85,
+     "source": "fn fletcher16 a array<i64> n i64 -> i64\n    let sum1 i64 = 0\n    let sum2 i64 = 0\n    for i from 0 to n - 1\n        sum1 = rem(sum1 + a[i], 255)\n        sum2 = rem(sum2 + sum1, 255)\n    sum2 * 256 + sum1"
+    },
+    "C": {
+     "tokens": 97,
+     "source": "int64_t fletcher16(const int64_t *a, int64_t n) {\n    int64_t sum1 = 0, sum2 = 0;\n    for (int64_t i = 0; i < n; i++) {\n        sum1 = (sum1 + a[i]) % 255;\n        sum2 = (sum2 + sum1) % 255;\n    }\n    return sum2 * 256 + sum1;\n}"
+    },
+    "C++": {
+     "tokens": 97,
+     "source": "int64_t fletcher16(const int64_t *a, int64_t n) {\n    int64_t sum1 = 0, sum2 = 0;\n    for (int64_t i = 0; i < n; i++) {\n        sum1 = (sum1 + a[i]) % 255;\n        sum2 = (sum2 + sum1) % 255;\n    }\n    return sum2 * 256 + sum1;\n}"
+    },
+    "Rust": {
+     "tokens": 91,
+     "source": "fn fletcher16(a: &[i64], n: i64) -> i64 {\n    let mut sum1 = 0;\n    let mut sum2 = 0;\n    for i in 0..n {\n        sum1 = (sum1 + a[i as usize]) % 255;\n        sum2 = (sum2 + sum1) % 255;\n    }\n    sum2 * 256 + sum1\n}"
+    },
+    "Python": {
+     "tokens": 77,
+     "source": "def fletcher16(a: list[int], n: int) -> int:\n    sum1 = 0\n    sum2 = 0\n    for i in range(n):\n        sum1 = (sum1 + a[i]) % 255\n        sum2 = (sum2 + sum1) % 255\n    return sum2 * 256 + sum1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "hex_digit_value",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 58,
+     "source": "fn hex_digit_value c i64 -> i64\n    if c >= 48 and c <= 57\n        return c - 48\n    if c >= 97 and c <= 102\n        return c - 97 + 10\n    0 - 1"
+    },
+    "C": {
+     "tokens": 59,
+     "source": "int64_t hex_digit_value(int64_t c) {\n    if (c >= 48 && c <= 57) return c - 48;\n    if (c >= 97 && c <= 102) return c - 97 + 10;\n    return -1;\n}"
+    },
+    "C++": {
+     "tokens": 59,
+     "source": "int64_t hex_digit_value(int64_t c) {\n    if (c >= 48 && c <= 57) return c - 48;\n    if (c >= 97 && c <= 102) return c - 97 + 10;\n    return -1;\n}"
+    },
+    "Rust": {
+     "tokens": 65,
+     "source": "fn hex_digit_value(c: i64) -> i64 {\n    if (48..=57).contains(&c) {\n        return c - 48;\n    }\n    if (97..=102).contains(&c) {\n        return c - 97 + 10;\n    }\n    -1\n}"
+    },
+    "Python": {
+     "tokens": 52,
+     "source": "def hex_digit_value(c: int) -> int:\n    if 48 <= c <= 57:\n        return c - 48\n    if 97 <= c <= 102:\n        return c - 97 + 10\n    return -1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "luhn_from_array",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 114,
+     "source": "fn luhn_from_array a array<i64> n i64 -> i64\n    let sum i64 = 0\n    for i from 0 to n - 1\n        let d i64 = a[n - 1 - i]\n        if rem(i, 2) == 1\n            d = d * 2\n            if d > 9\n                d = d - 9\n        sum += d\n    if rem(sum, 10) == 0\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 122,
+     "source": "int64_t luhn_from_array(const int64_t *a, int64_t n) {\n    int64_t sum = 0;\n    for (int64_t i = 0; i < n; i++) {\n        int64_t d = a[n - 1 - i];\n        if (i % 2 == 1) {\n            d = d * 2;\n            if (d > 9) d = d - 9;\n        }\n        sum += d;\n    }\n    return sum % 10 == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 122,
+     "source": "int64_t luhn_from_array(const int64_t *a, int64_t n) {\n    int64_t sum = 0;\n    for (int64_t i = 0; i < n; i++) {\n        int64_t d = a[n - 1 - i];\n        if (i % 2 == 1) {\n            d = d * 2;\n            if (d > 9) d = d - 9;\n        }\n        sum += d;\n    }\n    return sum % 10 == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 113,
+     "source": "fn luhn_from_array(a: &[i64], n: i64) -> i64 {\n    let mut sum = 0;\n    for i in 0..n {\n        let mut d = a[(n - 1 - i) as usize];\n        if i % 2 == 1 {\n            d *= 2;\n            if d > 9 {\n                d -= 9;\n            }\n        }\n        sum += d;\n    }\n    if sum % 10 == 0 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 94,
+     "source": "def luhn_from_array(a: list[int], n: int) -> int:\n    total = 0\n    for i in range(n):\n        d = a[n - 1 - i]\n        if i % 2 == 1:\n            d = d * 2\n            if d > 9:\n                d = d - 9\n        total += d\n    return 1 if total % 10 == 0 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "nibble_to_hex_code",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 35,
+     "source": "fn nibble_to_hex_code v i64 -> i64\n    if v < 10\n        return 48 + v\n    97 + v - 10"
+    },
+    "C": {
+     "tokens": 39,
+     "source": "int64_t nibble_to_hex_code(int64_t v) {\n    if (v < 10) return 48 + v;\n    return 97 + v - 10;\n}"
+    },
+    "C++": {
+     "tokens": 39,
+     "source": "int64_t nibble_to_hex_code(int64_t v) {\n    if (v < 10) return 48 + v;\n    return 97 + v - 10;\n}"
+    },
+    "Rust": {
+     "tokens": 41,
+     "source": "fn nibble_to_hex_code(v: i64) -> i64 {\n    if v < 10 {\n        return 48 + v;\n    }\n    97 + v - 10\n}"
+    },
+    "Python": {
+     "tokens": 36,
+     "source": "def nibble_to_hex_code(v: int) -> int:\n    if v < 10:\n        return 48 + v\n    return 97 + v - 10"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "parity_bit",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 50,
+     "source": "fn parity_bit a array<i64> n i64 -> i64\n    let ones i64 = 0\n    for i from 0 to n - 1\n        ones += a[i]\n    rem(ones, 2)"
+    },
+    "C": {
+     "tokens": 57,
+     "source": "int64_t parity_bit(const int64_t *a, int64_t n) {\n    int64_t ones = 0;\n    for (int64_t i = 0; i < n; i++) ones += a[i];\n    return ones % 2;\n}"
+    },
+    "C++": {
+     "tokens": 57,
+     "source": "int64_t parity_bit(const int64_t *a, int64_t n) {\n    int64_t ones = 0;\n    for (int64_t i = 0; i < n; i++) ones += a[i];\n    return ones % 2;\n}"
+    },
+    "Rust": {
+     "tokens": 52,
+     "source": "fn parity_bit(a: &[i64], n: i64) -> i64 {\n    let mut ones = 0;\n    for i in 0..n {\n        ones += a[i as usize];\n    }\n    ones % 2\n}"
+    },
+    "Python": {
+     "tokens": 40,
+     "source": "def parity_bit(a: list[int], n: int) -> int:\n    ones = 0\n    for i in range(n):\n        ones += a[i]\n    return ones % 2"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rem",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn rem a i64 b i64 -> i64\n    a - (a / b) * b"
+    }
+   },
+   "present": 1
+  },
+  {
+   "name": "rot13_val",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 71,
+     "source": "fn rot13_val c i64 -> i64\n    if c >= 97 and c <= 122\n        return 97 + rem(c - 97 + 13, 26)\n    if c >= 65 and c <= 90\n        return 65 + rem(c - 65 + 13, 26)\n    c"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "int64_t rot13_val(int64_t c) {\n    if (c >= 97 && c <= 122) return 97 + (c - 97 + 13) % 26;\n    if (c >= 65 && c <= 90) return 65 + (c - 65 + 13) % 26;\n    return c;\n}"
+    },
+    "C++": {
+     "tokens": 77,
+     "source": "int64_t rot13_val(int64_t c) {\n    if (c >= 97 && c <= 122) return 97 + (c - 97 + 13) % 26;\n    if (c >= 65 && c <= 90) return 65 + (c - 65 + 13) % 26;\n    return c;\n}"
+    },
+    "Rust": {
+     "tokens": 83,
+     "source": "fn rot13_val(c: i64) -> i64 {\n    if (97..=122).contains(&c) {\n        return 97 + (c - 97 + 13) % 26;\n    }\n    if (65..=90).contains(&c) {\n        return 65 + (c - 65 + 13) % 26;\n    }\n    c\n}"
+    },
+    "Python": {
+     "tokens": 70,
+     "source": "def rot13_val(c: int) -> int:\n    if 97 <= c <= 122:\n        return 97 + (c - 97 + 13) % 26\n    if 65 <= c <= 90:\n        return 65 + (c - 65 + 13) % 26\n    return c"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "sum_bytes",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 44,
+     "source": "fn sum_bytes a array<i64> n i64 -> i64\n    let total i64 = 0\n    for i from 0 to n - 1\n        total += a[i]\n    total"
+    },
+    "C": {
+     "tokens": 54,
+     "source": "int64_t sum_bytes(const int64_t *a, int64_t n) {\n    int64_t total = 0;\n    for (int64_t i = 0; i < n; i++) total += a[i];\n    return total;\n}"
+    },
+    "C++": {
+     "tokens": 54,
+     "source": "int64_t sum_bytes(const int64_t *a, int64_t n) {\n    int64_t total = 0;\n    for (int64_t i = 0; i < n; i++) total += a[i];\n    return total;\n}"
+    },
+    "Rust": {
+     "tokens": 49,
+     "source": "fn sum_bytes(a: &[i64], n: i64) -> i64 {\n    let mut total = 0;\n    for i in 0..n {\n        total += a[i as usize];\n    }\n    total\n}"
+    },
+    "Python": {
+     "tokens": 37,
+     "source": "def sum_bytes(a: list[int], n: int) -> int:\n    total = 0\n    for i in range(n):\n        total += a[i]\n    return total"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "to_binary_length",
+   "category": "encoding",
+   "langs": {
+    "Lullaby": {
+     "tokens": 55,
+     "source": "fn to_binary_length x i64 -> i64\n    if x == 0\n        return 1\n    let len i64 = 0\n    while x > 0\n        len += 1\n        x = x / 2\n    len"
+    },
+    "C": {
+     "tokens": 58,
+     "source": "int64_t to_binary_length(int64_t x) {\n    if (x == 0) return 1;\n    int64_t len = 0;\n    while (x > 0) {\n        len++;\n        x /= 2;\n    }\n    return len;\n}"
+    },
+    "C++": {
+     "tokens": 58,
+     "source": "int64_t to_binary_length(int64_t x) {\n    if (x == 0) return 1;\n    int64_t len = 0;\n    while (x > 0) {\n        len++;\n        x /= 2;\n    }\n    return len;\n}"
+    },
+    "Rust": {
+     "tokens": 61,
+     "source": "fn to_binary_length(mut x: i64) -> i64 {\n    if x == 0 {\n        return 1;\n    }\n    let mut len = 0;\n    while x > 0 {\n        len += 1;\n        x /= 2;\n    }\n    len\n}"
+    },
+    "Python": {
+     "tokens": 52,
+     "source": "def to_binary_length(x: int) -> int:\n    if x == 0:\n        return 1\n    length = 0\n    while x > 0:\n        length += 1\n        x //= 2\n    return length"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "add_tax",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 25,
+     "source": "fn add_tax cents i64 rate_bp i64 -> i64\n    cents + cents * rate_bp / 10000"
+    },
+    "C": {
+     "tokens": 31,
+     "source": "int64_t add_tax(int64_t cents, int64_t rate_bp) {\n    return cents + cents * rate_bp / 10000;\n}"
+    },
+    "C++": {
+     "tokens": 31,
+     "source": "int64_t add_tax(int64_t cents, int64_t rate_bp) {\n    return cents + cents * rate_bp / 10000;\n}"
+    },
+    "Rust": {
+     "tokens": 32,
+     "source": "fn add_tax(cents: i64, rate_bp: i64) -> i64 {\n    cents + cents * rate_bp / 10000\n}"
+    },
+    "Python": {
+     "tokens": 21,
+     "source": "def add_tax(cents, rate_bp):\n    return cents + cents * rate_bp // 10000"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "apply_discount",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn apply_discount cents i64 pct i64 -> i64\n    cents - cents * pct / 100"
+    },
+    "C": {
+     "tokens": 28,
+     "source": "int64_t apply_discount(int64_t cents, int64_t pct) {\n    return cents - cents * pct / 100;\n}"
+    },
+    "C++": {
+     "tokens": 28,
+     "source": "int64_t apply_discount(int64_t cents, int64_t pct) {\n    return cents - cents * pct / 100;\n}"
+    },
+    "Rust": {
+     "tokens": 29,
+     "source": "fn apply_discount(cents: i64, pct: i64) -> i64 {\n    cents - cents * pct / 100\n}"
+    },
+    "Python": {
+     "tokens": 18,
+     "source": "def apply_discount(cents, pct):\n    return cents - cents * pct // 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "cents_part",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 18,
+     "source": "fn cents_part cents i64 -> i64\n    rem(cents, 100)"
+    },
+    "C": {
+     "tokens": 19,
+     "source": "int64_t cents_part(int64_t cents) {\n    return cents % 100;\n}"
+    },
+    "C++": {
+     "tokens": 19,
+     "source": "int64_t cents_part(int64_t cents) {\n    return cents % 100;\n}"
+    },
+    "Rust": {
+     "tokens": 20,
+     "source": "fn cents_part(cents: i64) -> i64 {\n    cents % 100\n}"
+    },
+    "Python": {
+     "tokens": 12,
+     "source": "def cents_part(cents):\n    return cents % 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "cents_to_dollars",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 17,
+     "source": "fn cents_to_dollars cents i64 -> i64\n    cents / 100"
+    },
+    "C": {
+     "tokens": 21,
+     "source": "int64_t cents_to_dollars(int64_t cents) {\n    return cents / 100;\n}"
+    },
+    "C++": {
+     "tokens": 21,
+     "source": "int64_t cents_to_dollars(int64_t cents) {\n    return cents / 100;\n}"
+    },
+    "Rust": {
+     "tokens": 22,
+     "source": "fn cents_to_dollars(cents: i64) -> i64 {\n    cents / 100\n}"
+    },
+    "Python": {
+     "tokens": 14,
+     "source": "def cents_to_dollars(cents):\n    return cents // 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "compound_interest",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 50,
+     "source": "fn compound_interest principal i64 rate_bp i64 years i64 -> i64\n    let amount i64 = principal\n    for y from 1 to years\n        amount = amount + amount * rate_bp / 10000\n    amount"
+    },
+    "C": {
+     "tokens": 69,
+     "source": "int64_t compound_interest(int64_t principal, int64_t rate_bp, int64_t years) {\n    int64_t amount = principal;\n    for (int64_t y = 0; y < years; y++) {\n        amount = amount + amount * rate_bp / 10000;\n    }\n    return amount;\n}"
+    },
+    "C++": {
+     "tokens": 69,
+     "source": "int64_t compound_interest(int64_t principal, int64_t rate_bp, int64_t years) {\n    int64_t amount = principal;\n    for (int64_t y = 0; y < years; y++) {\n        amount = amount + amount * rate_bp / 10000;\n    }\n    return amount;\n}"
+    },
+    "Rust": {
+     "tokens": 60,
+     "source": "fn compound_interest(principal: i64, rate_bp: i64, years: i64) -> i64 {\n    let mut amount = principal;\n    for _ in 0..years {\n        amount = amount + amount * rate_bp / 10000;\n    }\n    amount\n}"
+    },
+    "Python": {
+     "tokens": 41,
+     "source": "def compound_interest(principal, rate_bp, years):\n    amount = principal\n    for _ in range(years):\n        amount = amount + amount * rate_bp // 10000\n    return amount"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "future_value_years",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 62,
+     "source": "fn future_value_years principal i64 rate_bp i64 years i64 -> i64\n    let amount i64 = principal\n    let y i64 = 0\n    while y < years\n        amount += amount * rate_bp / 10000\n        y += 1\n    amount"
+    },
+    "C": {
+     "tokens": 71,
+     "source": "int64_t future_value_years(int64_t principal, int64_t rate_bp, int64_t years) {\n    int64_t amount = principal;\n    int64_t y = 0;\n    while (y < years) {\n        amount += amount * rate_bp / 10000;\n        y++;\n    }\n    return amount;\n}"
+    },
+    "C++": {
+     "tokens": 71,
+     "source": "int64_t future_value_years(int64_t principal, int64_t rate_bp, int64_t years) {\n    int64_t amount = principal;\n    int64_t y = 0;\n    while (y < years) {\n        amount += amount * rate_bp / 10000;\n        y++;\n    }\n    return amount;\n}"
+    },
+    "Rust": {
+     "tokens": 71,
+     "source": "fn future_value_years(principal: i64, rate_bp: i64, years: i64) -> i64 {\n    let mut amount = principal;\n    let mut y = 0;\n    while y < years {\n        amount += amount * rate_bp / 10000;\n        y += 1;\n    }\n    amount\n}"
+    },
+    "Python": {
+     "tokens": 51,
+     "source": "def future_value_years(principal, rate_bp, years):\n    amount = principal\n    y = 0\n    while y < years:\n        amount += amount * rate_bp // 10000\n        y += 1\n    return amount"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "margin_pct",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 36,
+     "source": "fn margin_pct cost i64 price i64 -> i64\n    if price == 0\n        return 0\n    (price - cost) * 100 / price"
+    },
+    "C": {
+     "tokens": 42,
+     "source": "int64_t margin_pct(int64_t cost, int64_t price) {\n    if (price == 0) return 0;\n    return (price - cost) * 100 / price;\n}"
+    },
+    "C++": {
+     "tokens": 42,
+     "source": "int64_t margin_pct(int64_t cost, int64_t price) {\n    if (price == 0) return 0;\n    return (price - cost) * 100 / price;\n}"
+    },
+    "Rust": {
+     "tokens": 44,
+     "source": "fn margin_pct(cost: i64, price: i64) -> i64 {\n    if price == 0 {\n        return 0;\n    }\n    (price - cost) * 100 / price\n}"
+    },
+    "Python": {
+     "tokens": 31,
+     "source": "def margin_pct(cost, price):\n    if price == 0:\n        return 0\n    return (price - cost) * 100 // price"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "markup",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 21,
+     "source": "fn markup cost i64 pct i64 -> i64\n    cost + cost * pct / 100"
+    },
+    "C": {
+     "tokens": 27,
+     "source": "int64_t markup(int64_t cost, int64_t pct) {\n    return cost + cost * pct / 100;\n}"
+    },
+    "C++": {
+     "tokens": 27,
+     "source": "int64_t markup(int64_t cost, int64_t pct) {\n    return cost + cost * pct / 100;\n}"
+    },
+    "Rust": {
+     "tokens": 27,
+     "source": "fn markup(cost: i64, pct: i64) -> i64 {\n    cost + cost * pct / 100\n}"
+    },
+    "Python": {
+     "tokens": 16,
+     "source": "def markup(cost, pct):\n    return cost + cost * pct // 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "monthly_payment_flat",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 18,
+     "source": "fn monthly_payment_flat principal i64 months i64 -> i64\n    principal / months"
+    },
+    "C": {
+     "tokens": 24,
+     "source": "int64_t monthly_payment_flat(int64_t principal, int64_t months) {\n    return principal / months;\n}"
+    },
+    "C++": {
+     "tokens": 24,
+     "source": "int64_t monthly_payment_flat(int64_t principal, int64_t months) {\n    return principal / months;\n}"
+    },
+    "Rust": {
+     "tokens": 25,
+     "source": "fn monthly_payment_flat(principal: i64, months: i64) -> i64 {\n    principal / months\n}"
+    },
+    "Python": {
+     "tokens": 14,
+     "source": "def monthly_payment_flat(principal, months):\n    return principal // months"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "percent_of",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 32,
+     "source": "fn percent_of part i64 whole i64 -> i64\n    if whole == 0\n        return 0\n    part * 100 / whole"
+    },
+    "C": {
+     "tokens": 38,
+     "source": "int64_t percent_of(int64_t part, int64_t whole) {\n    if (whole == 0) return 0;\n    return part * 100 / whole;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "int64_t percent_of(int64_t part, int64_t whole) {\n    if (whole == 0) return 0;\n    return part * 100 / whole;\n}"
+    },
+    "Rust": {
+     "tokens": 40,
+     "source": "fn percent_of(part: i64, whole: i64) -> i64 {\n    if whole == 0 {\n        return 0;\n    }\n    part * 100 / whole\n}"
+    },
+    "Python": {
+     "tokens": 27,
+     "source": "def percent_of(part, whole):\n    if whole == 0:\n        return 0\n    return part * 100 // whole"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rem",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn rem a i64 b i64 -> i64\n    a - (a / b) * b"
+    }
+   },
+   "present": 1
+  },
+  {
+   "name": "round_to_nearest",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 29,
+     "source": "fn round_to_nearest cents i64 step i64 -> i64\n    (cents + step / 2) / step * step"
+    },
+    "C": {
+     "tokens": 35,
+     "source": "int64_t round_to_nearest(int64_t cents, int64_t step) {\n    return (cents + step / 2) / step * step;\n}"
+    },
+    "C++": {
+     "tokens": 35,
+     "source": "int64_t round_to_nearest(int64_t cents, int64_t step) {\n    return (cents + step / 2) / step * step;\n}"
+    },
+    "Rust": {
+     "tokens": 36,
+     "source": "fn round_to_nearest(cents: i64, step: i64) -> i64 {\n    (cents + step / 2) / step * step\n}"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def round_to_nearest(cents, step):\n    return (cents + step // 2) // step * step"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "simple_interest",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 28,
+     "source": "fn simple_interest principal i64 rate_bp i64 years i64 -> i64\n    principal * rate_bp * years / 10000"
+    },
+    "C": {
+     "tokens": 36,
+     "source": "int64_t simple_interest(int64_t principal, int64_t rate_bp, int64_t years) {\n    return principal * rate_bp * years / 10000;\n}"
+    },
+    "C++": {
+     "tokens": 36,
+     "source": "int64_t simple_interest(int64_t principal, int64_t rate_bp, int64_t years) {\n    return principal * rate_bp * years / 10000;\n}"
+    },
+    "Rust": {
+     "tokens": 37,
+     "source": "fn simple_interest(principal: i64, rate_bp: i64, years: i64) -> i64 {\n    principal * rate_bp * years / 10000\n}"
+    },
+    "Python": {
+     "tokens": 23,
+     "source": "def simple_interest(principal, rate_bp, years):\n    return principal * rate_bp * years // 10000"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "split_bill",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 17,
+     "source": "fn split_bill cents i64 people i64 -> i64\n    cents / people"
+    },
+    "C": {
+     "tokens": 23,
+     "source": "int64_t split_bill(int64_t cents, int64_t people) {\n    return cents / people;\n}"
+    },
+    "C++": {
+     "tokens": 23,
+     "source": "int64_t split_bill(int64_t cents, int64_t people) {\n    return cents / people;\n}"
+    },
+    "Rust": {
+     "tokens": 24,
+     "source": "fn split_bill(cents: i64, people: i64) -> i64 {\n    cents / people\n}"
+    },
+    "Python": {
+     "tokens": 13,
+     "source": "def split_bill(cents, people):\n    return cents // people"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "split_remainder",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 21,
+     "source": "fn split_remainder cents i64 people i64 -> i64\n    rem(cents, people)"
+    },
+    "C": {
+     "tokens": 24,
+     "source": "int64_t split_remainder(int64_t cents, int64_t people) {\n    return cents % people;\n}"
+    },
+    "C++": {
+     "tokens": 24,
+     "source": "int64_t split_remainder(int64_t cents, int64_t people) {\n    return cents % people;\n}"
+    },
+    "Rust": {
+     "tokens": 25,
+     "source": "fn split_remainder(cents: i64, people: i64) -> i64 {\n    cents % people\n}"
+    },
+    "Python": {
+     "tokens": 14,
+     "source": "def split_remainder(cents, people):\n    return cents % people"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "tip_amount",
+   "category": "finance",
+   "langs": {
+    "Lullaby": {
+     "tokens": 20,
+     "source": "fn tip_amount cents i64 pct i64 -> i64\n    cents * pct / 100"
+    },
+    "C": {
+     "tokens": 26,
+     "source": "int64_t tip_amount(int64_t cents, int64_t pct) {\n    return cents * pct / 100;\n}"
+    },
+    "C++": {
+     "tokens": 26,
+     "source": "int64_t tip_amount(int64_t cents, int64_t pct) {\n    return cents * pct / 100;\n}"
+    },
+    "Rust": {
+     "tokens": 27,
+     "source": "fn tip_amount(cents: i64, pct: i64) -> i64 {\n    cents * pct / 100\n}"
+    },
+    "Python": {
+     "tokens": 16,
+     "source": "def tip_amount(cents, pct):\n    return cents * pct // 100"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "dir_clockwise_index",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 38,
+     "source": "fn dir_clockwise_index d Direction -> i64\n    match d\n        North -> 0\n        East -> 1\n        South -> 2\n        West -> 3"
+    },
+    "C": {
+     "tokens": 57,
+     "source": "int64_t dir_clockwise_index(Direction d) {\n    switch (d) {\n        case North: return 0;\n        case East: return 1;\n        case South: return 2;\n        case West: return 3;\n    }\n    return 0;\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": "std::int64_t dir_clockwise_index(Direction d) {\n    switch (d) {\n        case Direction::North: return 0;\n        case Direction::East: return 1;\n        case Direction::South: return 2;\n        case Direction::West: return 3;\n    }\n    return 0;\n}"
+    },
+    "Rust": {
+     "tokens": 52,
+     "source": "fn dir_clockwise_index(d: Direction) -> i64 {\n    match d {\n        Direction::North => 0,\n        Direction::East => 1,\n        Direction::South => 2,\n        Direction::West => 3,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 54,
+     "source": "def dir_clockwise_index(d):\n    match d:\n        case Direction.North:\n            return 0\n        case Direction.East:\n            return 1\n        case Direction.South:\n            return 2\n        case Direction.West:\n            return 3"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "dir_dx",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 39,
+     "source": "fn dir_dx d Direction -> i64\n    match d\n        East -> 1\n        West -> 0 - 1\n        North -> 0\n        South -> 0"
+    },
+    "C": {
+     "tokens": 41,
+     "source": "int64_t dir_dx(Direction d) {\n    switch (d) {\n        case East: return 1;\n        case West: return -1;\n        default: return 0;\n    }\n}"
+    },
+    "C++": {
+     "tokens": 47,
+     "source": "std::int64_t dir_dx(Direction d) {\n    switch (d) {\n        case Direction::East: return 1;\n        case Direction::West: return -1;\n        default: return 0;\n    }\n}"
+    },
+    "Rust": {
+     "tokens": 40,
+     "source": "fn dir_dx(d: Direction) -> i64 {\n    match d {\n        Direction::East => 1,\n        Direction::West => -1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 39,
+     "source": "def dir_dx(d):\n    match d:\n        case Direction.East:\n            return 1\n        case Direction.West:\n            return -1\n        case _:\n            return 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "dir_dy",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 40,
+     "source": "fn dir_dy d Direction -> i64\n    match d\n        North -> 1\n        South -> 0 - 1\n        East -> 0\n        West -> 0"
+    },
+    "C": {
+     "tokens": 42,
+     "source": "int64_t dir_dy(Direction d) {\n    switch (d) {\n        case North: return 1;\n        case South: return -1;\n        default: return 0;\n    }\n}"
+    },
+    "C++": {
+     "tokens": 48,
+     "source": "std::int64_t dir_dy(Direction d) {\n    switch (d) {\n        case Direction::North: return 1;\n        case Direction::South: return -1;\n        default: return 0;\n    }\n}"
+    },
+    "Rust": {
+     "tokens": 41,
+     "source": "fn dir_dy(d: Direction) -> i64 {\n    match d {\n        Direction::North => 1,\n        Direction::South => -1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 40,
+     "source": "def dir_dy(d):\n    match d:\n        case Direction.North:\n            return 1\n        case Direction.South:\n            return -1\n        case _:\n            return 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "light_duration",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 31,
+     "source": "fn light_duration t TrafficLight -> i64\n    match t\n        Red -> 30\n        Green -> 25\n        Yellow -> 5"
+    },
+    "C": {
+     "tokens": 50,
+     "source": "int64_t light_duration(TrafficLight t) {\n    switch (t) {\n        case Red: return 30;\n        case Green: return 25;\n        case Yellow: return 5;\n    }\n    return 0;\n}"
+    },
+    "C++": {
+     "tokens": 61,
+     "source": "std::int64_t light_duration(TrafficLight t) {\n    switch (t) {\n        case TrafficLight::Red: return 30;\n        case TrafficLight::Green: return 25;\n        case TrafficLight::Yellow: return 5;\n    }\n    return 0;\n}"
+    },
+    "Rust": {
+     "tokens": 46,
+     "source": "fn light_duration(t: TrafficLight) -> i64 {\n    match t {\n        TrafficLight::Red => 30,\n        TrafficLight::Green => 25,\n        TrafficLight::Yellow => 5,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 42,
+     "source": "def light_duration(t):\n    match t:\n        case TrafficLight.Red:\n            return 30\n        case TrafficLight.Green:\n            return 25\n        case TrafficLight.Yellow:\n            return 5"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "light_go",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 31,
+     "source": "fn light_go t TrafficLight -> i64\n    match t\n        Green -> 1\n        Red -> 0\n        Yellow -> 0"
+    },
+    "C": {
+     "tokens": 25,
+     "source": "int64_t light_go(TrafficLight t) {\n    return t == Green ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 30,
+     "source": "std::int64_t light_go(TrafficLight t) {\n    return t == TrafficLight::Green ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 34,
+     "source": "fn light_go(t: TrafficLight) -> i64 {\n    match t {\n        TrafficLight::Green => 1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 18,
+     "source": "def light_go(t):\n    return 1 if t == TrafficLight.Green else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "light_name",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 32,
+     "source": "fn light_name t TrafficLight -> string\n    match t\n        Red -> \"RED\"\n        Green -> \"GREEN\"\n        Yellow -> \"YELLOW\""
+    },
+    "C": {
+     "tokens": 51,
+     "source": "static const char *light_name(TrafficLight t) {\n    switch (t) {\n        case Red: return \"RED\";\n        case Green: return \"GREEN\";\n        case Yellow: return \"YELLOW\";\n    }\n    return \"?\";\n}"
+    },
+    "C++": {
+     "tokens": 59,
+     "source": "const char *light_name(TrafficLight t) {\n    switch (t) {\n        case TrafficLight::Red: return \"RED\";\n        case TrafficLight::Green: return \"GREEN\";\n        case TrafficLight::Yellow: return \"YELLOW\";\n    }\n    return \"?\";\n}"
+    },
+    "Rust": {
+     "tokens": 48,
+     "source": "fn light_name(t: TrafficLight) -> &'static str {\n    match t {\n        TrafficLight::Red => \"RED\",\n        TrafficLight::Green => \"GREEN\",\n        TrafficLight::Yellow => \"YELLOW\",\n    }\n}"
+    },
+    "Python": {
+     "tokens": 44,
+     "source": "def light_name(t):\n    match t:\n        case TrafficLight.Red:\n            return \"RED\"\n        case TrafficLight.Green:\n            return \"GREEN\"\n        case TrafficLight.Yellow:\n            return \"YELLOW\""
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "light_next",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 28,
+     "source": "fn light_next t TrafficLight -> TrafficLight\n    match t\n        Red -> Green\n        Green -> Yellow\n        Yellow -> Red"
+    },
+    "C": {
+     "tokens": 47,
+     "source": "Token;\nTrafficLight light_next(TrafficLight t) {\n    switch (t) {\n        case Red: return Green;\n        case Green: return Yellow;\n        case Yellow: return Red;\n    }\n    return Red;\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": ";\nTrafficLight light_next(TrafficLight t) {\n    switch (t) {\n        case TrafficLight::Red: return TrafficLight::Green;\n        case TrafficLight::Green: return TrafficLight::Yellow;\n        case TrafficLight::Yellow: return TrafficLight::Red;\n    }\n    return TrafficLight::Red;\n}"
+    },
+    "Rust": {
+     "tokens": 52,
+     "source": "fn light_next(t: TrafficLight) -> TrafficLight {\n    match t {\n        TrafficLight::Red => TrafficLight::Green,\n        TrafficLight::Green => TrafficLight::Yellow,\n        TrafficLight::Yellow => TrafficLight::Red,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 46,
+     "source": "def light_next(t):\n    match t:\n        case TrafficLight.Red:\n            return TrafficLight.Green\n        case TrafficLight.Green:\n            return TrafficLight.Yellow\n        case TrafficLight.Yellow:\n            return TrafficLight.Red"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "opposite",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 30,
+     "source": "fn opposite d Direction -> Direction\n    match d\n        North -> South\n        South -> North\n        East -> West\n        West -> East"
+    },
+    "C": {
+     "tokens": 47,
+     "source": "Direction opposite(Direction d) {\n    switch (d) {\n        case North: return South;\n        case South: return North;\n        case East: return West;\n        case West: return East;\n    }\n    return North;\n}"
+    },
+    "C++": {
+     "tokens": 65,
+     "source": "Direction opposite(Direction d) {\n    switch (d) {\n        case Direction::North: return Direction::South;\n        case Direction::South: return Direction::North;\n        case Direction::East: return Direction::West;\n        case Direction::West: return Direction::East;\n    }\n    return Direction::North;\n}"
+    },
+    "Rust": {
+     "tokens": 52,
+     "source": "fn opposite(d: Direction) -> Direction {\n    match d {\n        Direction::North => Direction::South,\n        Direction::South => Direction::North,\n        Direction::East => Direction::West,\n        Direction::West => Direction::East,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 55,
+     "source": "def opposite(d):\n    match d:\n        case Direction.North:\n            return Direction.South\n        case Direction.South:\n            return Direction.North\n        case Direction.East:\n            return Direction.West\n        case Direction.West:\n            return Direction.East"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "order_can_cancel",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 46,
+     "source": "fn order_can_cancel s OrderStatus -> i64\n    match s\n        Pending -> 1\n        Paid -> 1\n        Shipped -> 0\n        Delivered -> 0\n        Cancelled -> 0"
+    },
+    "C": {
+     "tokens": 30,
+     "source": "int64_t order_can_cancel(OrderStatus s) {\n    return (s == Pending || s == Paid) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "std::int64_t order_can_cancel(OrderStatus s) {\n    return (s == OrderStatus::Pending || s == OrderStatus::Paid) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 40,
+     "source": "fn order_can_cancel(s: OrderStatus) -> i64 {\n    match s {\n        OrderStatus::Pending | OrderStatus::Paid => 1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 26,
+     "source": "def order_can_cancel(s):\n    return 1 if s in (OrderStatus.Pending, OrderStatus.Paid) else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "order_is_final",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 46,
+     "source": "fn order_is_final s OrderStatus -> i64\n    match s\n        Delivered -> 1\n        Cancelled -> 1\n        Pending -> 0\n        Paid -> 0\n        Shipped -> 0"
+    },
+    "C": {
+     "tokens": 31,
+     "source": "int64_t order_is_final(OrderStatus s) {\n    return (s == Delivered || s == Cancelled) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "std::int64_t order_is_final(OrderStatus s) {\n    return (s == OrderStatus::Delivered || s == OrderStatus::Cancelled) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 40,
+     "source": "fn order_is_final(s: OrderStatus) -> i64 {\n    match s {\n        OrderStatus::Delivered | OrderStatus::Cancelled => 1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 27,
+     "source": "def order_is_final(s):\n    return 1 if s in (OrderStatus.Delivered, OrderStatus.Cancelled) else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "order_next",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 42,
+     "source": "fn order_next s OrderStatus -> OrderStatus\n    match s\n        Pending -> Paid\n        Paid -> Shipped\n        Shipped -> Delivered\n        Delivered -> Delivered\n        Cancelled -> Cancelled"
+    },
+    "C": {
+     "tokens": 61,
+     "source": "OrderStatus order_next(OrderStatus s) {\n    switch (s) {\n        case Pending: return Paid;\n        case Paid: return Shipped;\n        case Shipped: return Delivered;\n        case Delivered: return Delivered;\n        case Cancelled: return Cancelled;\n    }\n    return s;\n}"
+    },
+    "C++": {
+     "tokens": 89,
+     "source": "OrderStatus order_next(OrderStatus s) {\n    switch (s) {\n        case OrderStatus::Pending: return OrderStatus::Paid;\n        case OrderStatus::Paid: return OrderStatus::Shipped;\n        case OrderStatus::Shipped: return OrderStatus::Delivered;\n        case OrderStatus::Delivered: return OrderStatus::Delivered;\n        case OrderStatus::Cancelled: return OrderStatus::Cancelled;\n    }\n    return s;\n}"
+    },
+    "Rust": {
+     "tokens": 76,
+     "source": "fn order_next(s: OrderStatus) -> OrderStatus {\n    match s {\n        OrderStatus::Pending => OrderStatus::Paid,\n        OrderStatus::Paid => OrderStatus::Shipped,\n        OrderStatus::Shipped => OrderStatus::Delivered,\n        OrderStatus::Delivered => OrderStatus::Delivered,\n        OrderStatus::Cancelled => OrderStatus::Cancelled,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 79,
+     "source": "def order_next(s):\n    match s:\n        case OrderStatus.Pending:\n            return OrderStatus.Paid\n        case OrderStatus.Paid:\n            return OrderStatus.Shipped\n        case OrderStatus.Shipped:\n            return OrderStatus.Delivered\n        case OrderStatus.Delivered:\n            return OrderStatus.Delivered\n        case OrderStatus.Cancelled:\n            return OrderStatus.Cancelled"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "token_is_operator",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 63,
+     "source": "fn token_is_operator t Token -> i64\n    match t\n        Plus -> 1\n        Minus -> 1\n        Star -> 1\n        Slash -> 1\n        Num -> 0\n        LParen -> 0\n        RParen -> 0\n        End -> 0"
+    },
+    "C": {
+     "tokens": 43,
+     "source": "int64_t token_is_operator(Token t) {\n    switch (t) {\n        case Plus: case Minus: case Star: case Slash: return 1;\n        default: return 0;\n    }\n}"
+    },
+    "C++": {
+     "tokens": 53,
+     "source": "std::int64_t token_is_operator(Token t) {\n    switch (t) {\n        case Token::Plus: case Token::Minus: case Token::Star: case Token::Slash: return 1;\n        default: return 0;\n    }\n}"
+    },
+    "Rust": {
+     "tokens": 45,
+     "source": "fn token_is_operator(t: Token) -> i64 {\n    match t {\n        Token::Plus | Token::Minus | Token::Star | Token::Slash => 1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 41,
+     "source": "def token_is_operator(t):\n    match t:\n        case Token.Plus | Token.Minus | Token.Star | Token.Slash:\n            return 1\n        case _:\n            return 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "token_is_paren",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 64,
+     "source": "fn token_is_paren t Token -> i64\n    match t\n        LParen -> 1\n        RParen -> 1\n        Num -> 0\n        Plus -> 0\n        Minus -> 0\n        Star -> 0\n        Slash -> 0\n        End -> 0"
+    },
+    "C": {
+     "tokens": 32,
+     "source": "int64_t token_is_paren(Token t) {\n    return (t == LParen || t == RParen) ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "std::int64_t token_is_paren(Token t) {\n    return (t == Token::LParen || t == Token::RParen) ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 40,
+     "source": "fn token_is_paren(t: Token) -> i64 {\n    match t {\n        Token::LParen | Token::RParen => 1,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 26,
+     "source": "def token_is_paren(t):\n    return 1 if t in (Token.LParen, Token.RParen) else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "token_precedence",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 63,
+     "source": "fn token_precedence t Token -> i64\n    match t\n        Plus -> 1\n        Minus -> 1\n        Star -> 2\n        Slash -> 2\n        Num -> 0\n        LParen -> 0\n        RParen -> 0\n        End -> 0"
+    },
+    "C": {
+     "tokens": 48,
+     "source": "int64_t token_precedence(Token t) {\n    switch (t) {\n        case Plus: case Minus: return 1;\n        case Star: case Slash: return 2;\n        default: return 0;\n    }\n}"
+    },
+    "C++": {
+     "tokens": 58,
+     "source": "std::int64_t token_precedence(Token t) {\n    switch (t) {\n        case Token::Plus: case Token::Minus: return 1;\n        case Token::Star: case Token::Slash: return 2;\n        default: return 0;\n    }\n}"
+    },
+    "Rust": {
+     "tokens": 49,
+     "source": "fn token_precedence(t: Token) -> i64 {\n    match t {\n        Token::Plus | Token::Minus => 1,\n        Token::Star | Token::Slash => 2,\n        _ => 0,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def token_precedence(t):\n    match t:\n        case Token.Plus | Token.Minus:\n            return 1\n        case Token.Star | Token.Slash:\n            return 2\n        case _:\n            return 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "turn_left",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 31,
+     "source": "fn turn_left d Direction -> Direction\n    match d\n        North -> West\n        West -> South\n        South -> East\n        East -> North"
+    },
+    "C": {
+     "tokens": 48,
+     "source": "Direction turn_left(Direction d) {\n    switch (d) {\n        case North: return West;\n        case West: return South;\n        case South: return East;\n        case East: return North;\n    }\n    return North;\n}"
+    },
+    "C++": {
+     "tokens": 66,
+     "source": "Direction turn_left(Direction d) {\n    switch (d) {\n        case Direction::North: return Direction::West;\n        case Direction::West: return Direction::South;\n        case Direction::South: return Direction::East;\n        case Direction::East: return Direction::North;\n    }\n    return Direction::North;\n}"
+    },
+    "Rust": {
+     "tokens": 53,
+     "source": "fn turn_left(d: Direction) -> Direction {\n    match d {\n        Direction::North => Direction::West,\n        Direction::West => Direction::South,\n        Direction::South => Direction::East,\n        Direction::East => Direction::North,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 56,
+     "source": "def turn_left(d):\n    match d:\n        case Direction.North:\n            return Direction.West\n        case Direction.West:\n            return Direction.South\n        case Direction.South:\n            return Direction.East\n        case Direction.East:\n            return Direction.North"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "turn_right",
+   "category": "state_machines",
+   "langs": {
+    "Lullaby": {
+     "tokens": 31,
+     "source": "fn turn_right d Direction -> Direction\n    match d\n        North -> East\n        East -> South\n        South -> West\n        West -> North"
+    },
+    "C": {
+     "tokens": 48,
+     "source": "Direction turn_right(Direction d) {\n    switch (d) {\n        case North: return East;\n        case East: return South;\n        case South: return West;\n        case West: return North;\n    }\n    return North;\n}"
+    },
+    "C++": {
+     "tokens": 66,
+     "source": "Direction turn_right(Direction d) {\n    switch (d) {\n        case Direction::North: return Direction::East;\n        case Direction::East: return Direction::South;\n        case Direction::South: return Direction::West;\n        case Direction::West: return Direction::North;\n    }\n    return Direction::North;\n}"
+    },
+    "Rust": {
+     "tokens": 53,
+     "source": "fn turn_right(d: Direction) -> Direction {\n    match d {\n        Direction::North => Direction::East,\n        Direction::East => Direction::South,\n        Direction::South => Direction::West,\n        Direction::West => Direction::North,\n    }\n}"
+    },
+    "Python": {
+     "tokens": 56,
+     "source": "def turn_right(d):\n    match d:\n        case Direction.North:\n            return Direction.East\n        case Direction.East:\n            return Direction.South\n        case Direction.South:\n            return Direction.West\n        case Direction.West:\n            return Direction.North"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "char_count",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 13,
+     "source": "fn char_count s string -> i64\n    len(s)"
+    },
+    "C": {
+     "tokens": 20,
+     "source": "i64 char_count(const char *s) {\n    return (i64)strlen(s);\n}"
+    },
+    "C++": {
+     "tokens": 23,
+     "source": "long long char_count(const std::string &s) {\n    return static_cast<long long>(s.size());\n}"
+    },
+    "Rust": {
+     "tokens": 24,
+     "source": "fn char_count(s: &str) -> i64 {\n    s.chars().count() as i64\n}"
+    },
+    "Python": {
+     "tokens": 10,
+     "source": "def char_count(s):\n    return len(s)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "contains_sub",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 28,
+     "source": "fn contains_sub s string sub string -> i64\n    if contains(s, sub)\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 32,
+     "source": "i64 contains_sub(const char *s, const char *sub) {\n    return strstr(s, sub) != NULL ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 39,
+     "source": "long long contains_sub(const std::string &s, const std::string &sub) {\n    return s.find(sub) != std::string::npos ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 33,
+     "source": "fn contains_sub(s: &str, sub: &str) -> i64 {\n    if s.contains(sub) { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 18,
+     "source": "def contains_sub(s, sub):\n    return 1 if sub in s else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_char",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 81,
+     "source": "fn count_char s string c string -> i64\n    let target char = get(chars(c), 0)\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    let count i64 = 0\n    for i from 0 to n - 1\n        if get(cs, i) == target\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 54,
+     "source": "i64 count_char(const char *s, const char *c) {\n    i64 count = 0;\n    for (const char *p = s; *p; p++)\n        if (*p == c[0]) count++;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 51,
+     "source": "long long count_char(const std::string &s, const std::string &c) {\n    long long count = 0;\n    for (char ch : s)\n        if (ch == c[0]) count++;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 50,
+     "source": "fn count_char(s: &str, c: &str) -> i64 {\n    let target = c.chars().next().unwrap();\n    s.chars().filter(|&ch| ch == target).count() as i64\n}"
+    },
+    "Python": {
+     "tokens": 15,
+     "source": "def count_char(s, c):\n    return s.count(c[0])"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_vowels",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 99,
+     "source": "fn count_vowels s string -> i64\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    let count i64 = 0\n    for i from 0 to n - 1\n        let c char = get(cs, i)\n        if c == 'a' or c == 'e' or c == 'i' or c == 'o' or c == 'u'\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "i64 count_vowels(const char *s) {\n    i64 count = 0;\n    for (const char *p = s; *p; p++)\n        if (*p == 'a' || *p == 'e' || *p == 'i' || *p == 'o' || *p == 'u') count++;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 68,
+     "source": "long long count_vowels(const std::string &s) {\n    long long count = 0;\n    for (char c : s)\n        if (c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u') count++;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 52,
+     "source": "fn count_vowels(s: &str) -> i64 {\n    s.chars().filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u')).count() as i64\n}"
+    },
+    "Python": {
+     "tokens": 35,
+     "source": "def count_vowels(s):\n    count = 0\n    for c in s:\n        if c in \"aeiou\":\n            count += 1\n    return count"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "ends_with_suffix",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 30,
+     "source": "fn ends_with_suffix s string p string -> i64\n    if ends_with(s, p)\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 63,
+     "source": "i64 ends_with_suffix(const char *s, const char *p) {\n    size_t ls = strlen(s), lp = strlen(p);\n    if (lp > ls) return 0;\n    return strcmp(s + (ls - lp), p) == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 61,
+     "source": "long long ends_with_suffix(const std::string &s, const std::string &p) {\n    if (p.size() > s.size()) return 0;\n    return s.compare(s.size() - p.size(), p.size(), p) == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 35,
+     "source": "fn ends_with_suffix(s: &str, p: &str) -> i64 {\n    if s.ends_with(p) { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def ends_with_suffix(s, p):\n    return 1 if s.endswith(p) else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "initials",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 143,
+     "source": "fn initials name string -> string\n    let cs list<char> = chars(name)\n    let n i64 = len(cs)\n    let out string = \"\"\n    let in_word i64 = 0\n    for i from 0 to n - 1\n        let c char = get(cs, i)\n        if is_whitespace(c)\n            in_word = 0\n        elif in_word == 0\n            in_word = 1\n            let code i64 = char_code(c)\n            if code >= 97 and code <= 122\n                out = out + to_string(char_from(code - 32))\n            else\n                out = out + to_string(c)\n    out"
+    },
+    "C": {
+     "tokens": 138,
+     "source": "void initials(const char *name, char *out) {\n    size_t pos = 0;\n    int in_word = 0;\n    for (const char *p = name; *p; p++) {\n        if (*p == ' ' || *p == '\\t' || *p == '\\n') {\n            in_word = 0;\n        } else if (!in_word) {\n            in_word = 1;\n            char c = *p;\n            out[pos++] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;\n        }\n    }\n    out[pos] = '\\0';\n}"
+    },
+    "C++": {
+     "tokens": 107,
+     "source": "std::string initials(const std::string &name) {\n    std::string out;\n    bool in_word = false;\n    for (char c : name) {\n        if (std::isspace(static_cast<unsigned char>(c))) {\n            in_word = false;\n        } else if (!in_word) {\n            in_word = true;\n            out += (c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c;\n        }\n    }\n    return out;\n}"
+    },
+    "Rust": {
+     "tokens": 46,
+     "source": "fn initials(name: &str) -> String {\n    name.split_whitespace()\n        .filter_map(|w| w.chars().next())\n        .map(|c| c.to_ascii_uppercase())\n        .collect()\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def initials(name):\n    return \"\".join(word[0].upper() for word in name.split())"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_blank",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 59,
+     "source": "fn is_blank s string -> i64\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    for i from 0 to n - 1\n        if not is_whitespace(get(cs, i))\n            return 0\n    1"
+    },
+    "C": {
+     "tokens": 56,
+     "source": "i64 is_blank(const char *s) {\n    for (const char *p = s; *p; p++)\n        if (*p != ' ' && *p != '\\t' && *p != '\\n') return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 44,
+     "source": "long long is_blank(const std::string &s) {\n    for (char c : s)\n        if (!std::isspace(static_cast<unsigned char>(c))) return 0;\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 37,
+     "source": "fn is_blank(s: &str) -> i64 {\n    if s.chars().all(|c| c.is_whitespace()) { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 18,
+     "source": "def is_blank(s):\n    return 1 if s.strip() == \"\" else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "left_pad",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 50,
+     "source": "fn left_pad s string width i64 c string -> string\n    let pad i64 = width - len(s)\n    let out string = \"\"\n    for i from 1 to pad\n        out = out + c\n    out + s"
+    },
+    "C": {
+     "tokens": 79,
+     "source": "void left_pad(const char *s, i64 width, const char *c, char *out) {\n    size_t len = strlen(s), pos = 0;\n    for (i64 pad = (i64)(width - (i64)len); pad > 0; pad--)\n        out[pos++] = c[0];\n    strcpy(out + pos, s);\n}"
+    },
+    "C++": {
+     "tokens": 66,
+     "source": "std::string left_pad(const std::string &s, long long width, const std::string &c) {\n    long long pad = width - static_cast<long long>(s.size());\n    if (pad <= 0) return s;\n    return std::string(pad, c[0]) + s;\n}"
+    },
+    "Rust": {
+     "tokens": 67,
+     "source": "fn left_pad(s: &str, width: i64, c: &str) -> String {\n    let pad = width - s.chars().count() as i64;\n    if pad <= 0 {\n        s.to_string()\n    } else {\n        c.repeat(pad as usize) + s\n    }\n}"
+    },
+    "Python": {
+     "tokens": 34,
+     "source": "def left_pad(s, width, c):\n    pad = width - len(s)\n    return c[0] * pad + s if pad > 0 else s"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "repeat_str",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 35,
+     "source": "fn repeat_str s string n i64 -> string\n    let out string = \"\"\n    for i from 1 to n\n        out = out + s\n    out"
+    },
+    "C": {
+     "tokens": 73,
+     "source": "void repeat_str(const char *s, i64 n, char *out) {\n    size_t len = strlen(s), pos = 0;\n    for (i64 i = 0; i < n; i++) {\n        memcpy(out + pos, s, len);\n        pos += len;\n    }\n    out[pos] = '\\0';\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": "std::string repeat_str(const std::string &s, long long n) {\n    std::string out;\n    out.reserve(s.size() * (n > 0 ? n : 0));\n    for (long long i = 0; i < n; i++)\n        out += s;\n    return out;\n}"
+    },
+    "Rust": {
+     "tokens": 42,
+     "source": "fn repeat_str(s: &str, n: i64) -> String {\n    if n <= 0 {\n        String::new()\n    } else {\n        s.repeat(n as usize)\n    }\n}"
+    },
+    "Python": {
+     "tokens": 19,
+     "source": "def repeat_str(s, n):\n    return s * n if n > 0 else \"\""
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "reverse_str",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 64,
+     "source": "fn reverse_str s string -> string\n    let cs list<char> = chars(s)\n    let out string = \"\"\n    let i i64 = len(cs) - 1\n    while i >= 0\n        out = out + to_string(get(cs, i))\n        i -= 1\n    out"
+    },
+    "C": {
+     "tokens": 59,
+     "source": "void reverse_str(const char *s, char *out) {\n    size_t n = strlen(s);\n    for (size_t i = 0; i < n; i++)\n        out[i] = s[n - 1 - i];\n    out[n] = '\\0';\n}"
+    },
+    "C++": {
+     "tokens": 27,
+     "source": "std::string reverse_str(const std::string &s) {\n    return std::string(s.rbegin(), s.rend());\n}"
+    },
+    "Rust": {
+     "tokens": 21,
+     "source": "fn reverse_str(s: &str) -> String {\n    s.chars().rev().collect()\n}"
+    },
+    "Python": {
+     "tokens": 11,
+     "source": "def reverse_str(s):\n    return s[::-1]"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "starts_with_prefix",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 30,
+     "source": "fn starts_with_prefix s string p string -> i64\n    if starts_with(s, p)\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 38,
+     "source": "i64 starts_with_prefix(const char *s, const char *p) {\n    return strncmp(s, p, strlen(p)) == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 41,
+     "source": "long long starts_with_prefix(const std::string &s, const std::string &p) {\n    return s.rfind(p, 0) == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 35,
+     "source": "fn starts_with_prefix(s: &str, p: &str) -> i64 {\n    if s.starts_with(p) { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def starts_with_prefix(s, p):\n    return 1 if s.startswith(p) else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "to_lower_ascii",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 106,
+     "source": "fn to_lower_ascii s string -> string\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    let out string = \"\"\n    for i from 0 to n - 1\n        let c char = get(cs, i)\n        let code i64 = char_code(c)\n        if code >= 65 and code <= 90\n            out = out + to_string(char_from(code + 32))\n        else\n            out = out + to_string(c)\n    out"
+    },
+    "C": {
+     "tokens": 78,
+     "source": "void to_lower_ascii(const char *s, char *out) {\n    size_t i = 0;\n    for (; s[i]; i++) {\n        char c = s[i];\n        out[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;\n    }\n    out[i] = '\\0';\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": "std::string to_lower_ascii(const std::string &s) {\n    std::string out;\n    out.reserve(s.size());\n    for (char c : s)\n        out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;\n    return out;\n}"
+    },
+    "Rust": {
+     "tokens": 20,
+     "source": "fn to_lower_ascii(s: &str) -> String {\n    s.to_ascii_lowercase()\n}"
+    },
+    "Python": {
+     "tokens": 35,
+     "source": "def to_lower_ascii(s):\n    return \"\".join(chr(ord(c) + 32) if \"A\" <= c <= \"Z\" else c for c in s)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "to_upper_ascii",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 106,
+     "source": "fn to_upper_ascii s string -> string\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    let out string = \"\"\n    for i from 0 to n - 1\n        let c char = get(cs, i)\n        let code i64 = char_code(c)\n        if code >= 97 and code <= 122\n            out = out + to_string(char_from(code - 32))\n        else\n            out = out + to_string(c)\n    out"
+    },
+    "C": {
+     "tokens": 78,
+     "source": "void to_upper_ascii(const char *s, char *out) {\n    size_t i = 0;\n    for (; s[i]; i++) {\n        char c = s[i];\n        out[i] = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;\n    }\n    out[i] = '\\0';\n}"
+    },
+    "C++": {
+     "tokens": 67,
+     "source": "std::string to_upper_ascii(const std::string &s) {\n    std::string out;\n    out.reserve(s.size());\n    for (char c : s)\n        out += (c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c;\n    return out;\n}"
+    },
+    "Rust": {
+     "tokens": 20,
+     "source": "fn to_upper_ascii(s: &str) -> String {\n    s.to_ascii_uppercase()\n}"
+    },
+    "Python": {
+     "tokens": 35,
+     "source": "def to_upper_ascii(s):\n    return \"\".join(chr(ord(c) - 32) if \"a\" <= c <= \"z\" else c for c in s)"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "truncate_ellipsis",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 39,
+     "source": "fn truncate_ellipsis s string max i64 -> string\n    if len(s) <= max\n        return s\n    substring(s, 0, max - 3) + \"...\""
+    },
+    "C": {
+     "tokens": 78,
+     "source": "void truncate_ellipsis(const char *s, i64 max, char *out) {\n    size_t n = strlen(s);\n    if ((i64)n <= max) {\n        strcpy(out, s);\n        return;\n    }\n    size_t keep = (size_t)(max - 3);\n    memcpy(out, s, keep);\n    strcpy(out + keep, \"...\");\n}"
+    },
+    "C++": {
+     "tokens": 51,
+     "source": "std::string truncate_ellipsis(const std::string &s, long long max) {\n    if (static_cast<long long>(s.size()) <= max) return s;\n    return s.substr(0, max - 3) + \"...\";\n}"
+    },
+    "Rust": {
+     "tokens": 77,
+     "source": "fn truncate_ellipsis(s: &str, max: i64) -> String {\n    if s.chars().count() as i64 <= max {\n        s.to_string()\n    } else {\n        let keep = (max - 3) as usize;\n        let head: String = s.chars().take(keep).collect();\n        head + \"...\"\n    }\n}"
+    },
+    "Python": {
+     "tokens": 32,
+     "source": "def truncate_ellipsis(s, max):\n    if len(s) <= max:\n        return s\n    return s[: max - 3] + \"...\""
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "word_count",
+   "category": "text_processing",
+   "langs": {
+    "Lullaby": {
+     "tokens": 106,
+     "source": "fn word_count s string -> i64\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    let count i64 = 0\n    let in_word i64 = 0\n    for i from 0 to n - 1\n        let c char = get(cs, i)\n        if is_whitespace(c)\n            in_word = 0\n        elif in_word == 0\n            count += 1\n            in_word = 1\n    count"
+    },
+    "C": {
+     "tokens": 105,
+     "source": "typedef long long i64;\ni64 word_count(const char *s) {\n    i64 count = 0;\n    int in_word = 0;\n    for (const char *p = s; *p; p++) {\n        if (*p == ' ' || *p == '\\t' || *p == '\\n') {\n            in_word = 0;\n        } else if (!in_word) {\n            in_word = 1;\n            count++;\n        }\n    }\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 84,
+     "source": "long long word_count(const std::string &s) {\n    long long count = 0;\n    bool in_word = false;\n    for (char c : s) {\n        if (std::isspace(static_cast<unsigned char>(c))) {\n            in_word = false;\n        } else if (!in_word) {\n            in_word = true;\n            count++;\n        }\n    }\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 25,
+     "source": "fn word_count(s: &str) -> i64 {\n    s.split_whitespace().count() as i64\n}"
+    },
+    "Python": {
+     "tokens": 11,
+     "source": "def word_count(s):\n    return len(s.split())"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "all_digits",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 85,
+     "source": "fn all_digits s string -> i64\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    if n == 0\n        return 0\n    for i from 0 to n - 1\n        let code i64 = char_code(get(cs, i))\n        if code < 48 or code > 57\n            return 0\n    1"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "i64 all_digits(const char *s) {\n    size_t n = strlen(s);\n    if (n == 0) return 0;\n    for (size_t i = 0; i < n; i++) {\n        if (s[i] < '0' || s[i] > '9') return 0;\n    }\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 57,
+     "source": "long long all_digits(const std::string &s) {\n    if (s.empty()) return 0;\n    for (char c : s) {\n        if (c < '0' || c > '9') return 0;\n    }\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 64,
+     "source": "fn all_digits(s: &str) -> i64 {\n    if s.is_empty() {\n        return 0;\n    }\n    for b in s.bytes() {\n        if b < b'0' || b > b'9' {\n            return 0;\n        }\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 43,
+     "source": "def all_digits(s):\n    if not s:\n        return 0\n    for c in s:\n        if c < \"0\" or c > \"9\":\n            return 0\n    return 1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "checksum_mod10",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 50,
+     "source": "fn checksum_mod10 digits array<i64> n i64 -> i64\n    let sum i64 = 0\n    for i from 0 to n - 1\n        sum += digits[i]\n    rem(sum, 10)"
+    },
+    "C": {
+     "tokens": 53,
+     "source": "i64 checksum_mod10(const i64 *digits, i64 n) {\n    i64 sum = 0;\n    for (i64 i = 0; i < n; i++) sum += digits[i];\n    return sum % 10;\n}"
+    },
+    "C++": {
+     "tokens": 53,
+     "source": "long long checksum_mod10(const long long *digits, long long n) {\n    long long sum = 0;\n    for (long long i = 0; i < n; i++) sum += digits[i];\n    return sum % 10;\n}"
+    },
+    "Rust": {
+     "tokens": 54,
+     "source": "fn checksum_mod10(digits: &[i64], n: i64) -> i64 {\n    let mut sum = 0;\n    for i in 0..n {\n        sum += digits[i as usize];\n    }\n    sum % 10\n}"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def checksum_mod10(digits, n):\n    return sum(digits[i] for i in range(n)) % 10"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "days_in_month",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 90,
+     "source": "fn days_in_month y i64 m i64 -> i64\n    if m == 2\n        if is_leap_year(y) == 1\n            return 29\n        return 28\n    if m == 4 or m == 6 or m == 9 or m == 11\n        return 30\n    if m >= 1 and m <= 12\n        return 31\n    0"
+    },
+    "C": {
+     "tokens": 86,
+     "source": "i64 days_in_month(i64 y, i64 m) {\n    if (m == 2) return is_leap_year(y) ? 29 : 28;\n    if (m == 4 || m == 6 || m == 9 || m == 11) return 30;\n    if (m >= 1 && m <= 12) return 31;\n    return 0;\n}"
+    },
+    "C++": {
+     "tokens": 86,
+     "source": "long long days_in_month(long long y, long long m) {\n    if (m == 2) return is_leap_year(y) ? 29 : 28;\n    if (m == 4 || m == 6 || m == 9 || m == 11) return 30;\n    if (m >= 1 && m <= 12) return 31;\n    return 0;\n}"
+    },
+    "Rust": {
+     "tokens": 101,
+     "source": "fn days_in_month(y: i64, m: i64) -> i64 {\n    if m == 2 {\n        return if is_leap_year(y) == 1 { 29 } else { 28 };\n    }\n    if m == 4 || m == 6 || m == 9 || m == 11 {\n        return 30;\n    }\n    if m >= 1 && m <= 12 {\n        return 31;\n    }\n    0\n}"
+    },
+    "Python": {
+     "tokens": 70,
+     "source": "def days_in_month(y, m):\n    if m == 2:\n        return 29 if is_leap_year(y) else 28\n    if m in (4, 6, 9, 11):\n        return 30\n    if 1 <= m <= 12:\n        return 31\n    return 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "even_parity",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 75,
+     "source": "fn even_parity bits array<i64> n i64 -> i64\n    let ones i64 = 0\n    for i from 0 to n - 1\n        if bits[i] == 1\n            ones += 1\n    if rem(ones, 2) == 0\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 72,
+     "source": "i64 even_parity(const i64 *bits, i64 n) {\n    i64 ones = 0;\n    for (i64 i = 0; i < n; i++) {\n        if (bits[i] == 1) ones++;\n    }\n    return ones % 2 == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 72,
+     "source": "long long even_parity(const long long *bits, long long n) {\n    long long ones = 0;\n    for (long long i = 0; i < n; i++) {\n        if (bits[i] == 1) ones++;\n    }\n    return ones % 2 == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 76,
+     "source": "fn even_parity(bits: &[i64], n: i64) -> i64 {\n    let mut ones = 0;\n    for i in 0..n {\n        if bits[i as usize] == 1 {\n            ones += 1;\n        }\n    }\n    if ones % 2 == 0 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 43,
+     "source": "def even_parity(bits, n):\n    ones = sum(1 for i in range(n) if bits[i] == 1)\n    return 1 if ones % 2 == 0 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "in_range",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 36,
+     "source": "fn in_range x i64 lo i64 hi i64 -> i64\n    if x >= lo and x <= hi\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 34,
+     "source": "i64 in_range(i64 x, i64 lo, i64 hi) {\n    return x >= lo && x <= hi ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 34,
+     "source": "long long in_range(long long x, long long lo, long long hi) {\n    return x >= lo && x <= hi ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 41,
+     "source": "fn in_range(x: i64, lo: i64, hi: i64) -> i64 {\n    if x >= lo && x <= hi { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 22,
+     "source": "def in_range(x, lo, hi):\n    return 1 if lo <= x <= hi else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_ascii_alpha",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 60,
+     "source": "fn is_ascii_alpha c string -> i64\n    let code i64 = char_code(get(chars(c), 0))\n    if (code >= 65 and code <= 90) or (code >= 97 and code <= 122)\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 58,
+     "source": "i64 is_ascii_alpha(const char *c) {\n    return (c[0] >= 'A' && c[0] <= 'Z') || (c[0] >= 'a' && c[0] <= 'z') ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 60,
+     "source": "long long is_ascii_alpha(const std::string &c) {\n    return (c[0] >= 'A' && c[0] <= 'Z') || (c[0] >= 'a' && c[0] <= 'z') ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 61,
+     "source": "fn is_ascii_alpha(c: &str) -> i64 {\n    let b = c.as_bytes()[0];\n    if (b >= b'A' && b <= b'Z') || (b >= b'a' && b <= b'z') { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 33,
+     "source": "def is_ascii_alpha(c):\n    return 1 if (\"A\" <= c <= \"Z\") or (\"a\" <= c <= \"z\") else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_ascii_digit",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 47,
+     "source": "fn is_ascii_digit c string -> i64\n    let code i64 = char_code(get(chars(c), 0))\n    if code >= 48 and code <= 57\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 38,
+     "source": "i64 is_ascii_digit(const char *c) {\n    return c[0] >= '0' && c[0] <= '9' ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 40,
+     "source": "long long is_ascii_digit(const std::string &c) {\n    return c[0] >= '0' && c[0] <= '9' ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 48,
+     "source": "fn is_ascii_digit(c: &str) -> i64 {\n    let b = c.as_bytes()[0];\n    if b >= b'0' && b <= b'9' { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 23,
+     "source": "def is_ascii_digit(c):\n    return 1 if \"0\" <= c <= \"9\" else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_hex_string",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 144,
+     "source": "fn is_hex_string s string -> i64\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    if n == 0\n        return 0\n    for i from 0 to n - 1\n        let code i64 = char_code(get(cs, i))\n        let ok i64 = 0\n        if code >= 48 and code <= 57\n            ok = 1\n        if code >= 97 and code <= 102\n            ok = 1\n        if code >= 65 and code <= 70\n            ok = 1\n        if ok == 0\n            return 0\n    1"
+    },
+    "C": {
+     "tokens": 114,
+     "source": "i64 is_hex_string(const char *s) {\n    size_t n = strlen(s);\n    if (n == 0) return 0;\n    for (size_t i = 0; i < n; i++) {\n        char c = s[i];\n        int ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');\n        if (!ok) return 0;\n    }\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 91,
+     "source": "long long is_hex_string(const std::string &s) {\n    if (s.empty()) return 0;\n    for (char c : s) {\n        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');\n        if (!ok) return 0;\n    }\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 99,
+     "source": "fn is_hex_string(s: &str) -> i64 {\n    if s.is_empty() {\n        return 0;\n    }\n    for b in s.bytes() {\n        let ok = (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F');\n        if !ok {\n            return 0;\n        }\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 68,
+     "source": "def is_hex_string(s):\n    if not s:\n        return 0\n    for c in s:\n        ok = (\"0\" <= c <= \"9\") or (\"a\" <= c <= \"f\") or (\"A\" <= c <= \"F\")\n        if not ok:\n            return 0\n    return 1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_leap_year",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 66,
+     "source": "fn is_leap_year y i64 -> i64\n    if rem(y, 400) == 0\n        return 1\n    if rem(y, 100) == 0\n        return 0\n    if rem(y, 4) == 0\n        return 1\n    0"
+    },
+    "C": {
+     "tokens": 58,
+     "source": "i64 is_leap_year(i64 y) {\n    if (y % 400 == 0) return 1;\n    if (y % 100 == 0) return 0;\n    return y % 4 == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 58,
+     "source": "long long is_leap_year(long long y) {\n    if (y % 400 == 0) return 1;\n    if (y % 100 == 0) return 0;\n    return y % 4 == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 71,
+     "source": "fn is_leap_year(y: i64) -> i64 {\n    if y % 400 == 0 {\n        1\n    } else if y % 100 == 0 {\n        0\n    } else if y % 4 == 0 {\n        1\n    } else {\n        0\n    }\n}"
+    },
+    "Python": {
+     "tokens": 52,
+     "source": "def is_leap_year(y):\n    if y % 400 == 0:\n        return 1\n    if y % 100 == 0:\n        return 0\n    return 1 if y % 4 == 0 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_valid_day",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 57,
+     "source": "fn is_valid_day y i64 m i64 d i64 -> i64\n    if is_valid_month(m) == 0\n        return 0\n    if d < 1 or d > days_in_month(y, m)\n        return 0\n    1"
+    },
+    "C": {
+     "tokens": 57,
+     "source": "i64 is_valid_day(i64 y, i64 m, i64 d) {\n    if (!is_valid_month(m)) return 0;\n    if (d < 1 || d > days_in_month(y, m)) return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 57,
+     "source": "long long is_valid_day(long long y, long long m, long long d) {\n    if (!is_valid_month(m)) return 0;\n    if (d < 1 || d > days_in_month(y, m)) return 0;\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 70,
+     "source": "fn is_valid_day(y: i64, m: i64, d: i64) -> i64 {\n    if is_valid_month(m) == 0 {\n        return 0;\n    }\n    if d < 1 || d > days_in_month(y, m) {\n        return 0;\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def is_valid_day(y, m, d):\n    if not is_valid_month(m):\n        return 0\n    if d < 1 or d > days_in_month(y, m):\n        return 0\n    return 1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_valid_isbn10",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 83,
+     "source": "fn is_valid_isbn10 digits array<i64> n i64 -> i64\n    if n != 10\n        return 0\n    let sum i64 = 0\n    for i from 0 to 9\n        sum += (10 - i) * digits[i]\n    if rem(sum, 11) == 0\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 87,
+     "source": "i64 is_valid_isbn10(const i64 *digits, i64 n) {\n    if (n != 10) return 0;\n    i64 sum = 0;\n    for (i64 i = 0; i < 10; i++) {\n        sum += (10 - i) * digits[i];\n    }\n    return sum % 11 == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 87,
+     "source": "long long is_valid_isbn10(const long long *digits, long long n) {\n    if (n != 10) return 0;\n    long long sum = 0;\n    for (long long i = 0; i < 10; i++) {\n        sum += (10 - i) * digits[i];\n    }\n    return sum % 11 == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 88,
+     "source": "fn is_valid_isbn10(digits: &[i64], n: i64) -> i64 {\n    if n != 10 {\n        return 0;\n    }\n    let mut sum = 0;\n    for i in 0..10 {\n        sum += (10 - i) * digits[i as usize];\n    }\n    if sum % 11 == 0 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 58,
+     "source": "def is_valid_isbn10(digits, n):\n    if n != 10:\n        return 0\n    total = sum((10 - i) * digits[i] for i in range(10))\n    return 1 if total % 11 == 0 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_valid_month",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 33,
+     "source": "fn is_valid_month m i64 -> i64\n    if m >= 1 and m <= 12\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 29,
+     "source": "i64 is_valid_month(i64 m) {\n    return m >= 1 && m <= 12 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 29,
+     "source": "long long is_valid_month(long long m) {\n    return m >= 1 && m <= 12 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 34,
+     "source": "fn is_valid_month(m: i64) -> i64 {\n    if m >= 1 && m <= 12 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 21,
+     "source": "def is_valid_month(m):\n    return 1 if 1 <= m <= 12 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_valid_rgb",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 59,
+     "source": "fn is_valid_rgb r i64 g i64 b i64 -> i64\n    if r >= 0 and r <= 255 and g >= 0 and g <= 255 and b >= 0 and b <= 255\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 57,
+     "source": "i64 is_valid_rgb(i64 r, i64 g, i64 b) {\n    return r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 57,
+     "source": "long long is_valid_rgb(long long r, long long g, long long b) {\n    return r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 70,
+     "source": "fn is_valid_rgb(r: i64, g: i64, b: i64) -> i64 {\n    if r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255 {\n        1\n    } else {\n        0\n    }\n}"
+    },
+    "Python": {
+     "tokens": 41,
+     "source": "def is_valid_rgb(r, g, b):\n    return 1 if 0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "luhn_check",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 121,
+     "source": "fn luhn_check digits array<i64> n i64 -> i64\n    let sum i64 = 0\n    for i from 0 to n - 1\n        let d i64 = digits[i]\n        let pos i64 = n - 1 - i\n        if rem(pos, 2) == 1\n            d = d * 2\n            if d > 9\n                d = d - 9\n        sum += d\n    if rem(sum, 10) == 0\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 124,
+     "source": "typedef long long i64;\ni64 luhn_check(const i64 *digits, i64 n) {\n    i64 sum = 0;\n    for (i64 i = 0; i < n; i++) {\n        i64 d = digits[i];\n        i64 pos = n - 1 - i;\n        if (pos % 2 == 1) {\n            d *= 2;\n            if (d > 9) d -= 9;\n        }\n        sum += d;\n    }\n    return sum % 10 == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 118,
+     "source": "long long luhn_check(const long long *digits, long long n) {\n    long long sum = 0;\n    for (long long i = 0; i < n; i++) {\n        long long d = digits[i];\n        long long pos = n - 1 - i;\n        if (pos % 2 == 1) {\n            d *= 2;\n            if (d > 9) d -= 9;\n        }\n        sum += d;\n    }\n    return sum % 10 == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 117,
+     "source": "fn luhn_check(digits: &[i64], n: i64) -> i64 {\n    let mut sum = 0;\n    for i in 0..n {\n        let mut d = digits[i as usize];\n        let pos = n - 1 - i;\n        if pos % 2 == 1 {\n            d *= 2;\n            if d > 9 {\n                d -= 9;\n            }\n        }\n        sum += d;\n    }\n    if sum % 10 == 0 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 87,
+     "source": "def luhn_check(digits, n):\n    total = 0\n    for i in range(n):\n        d = digits[i]\n        pos = n - 1 - i\n        if pos % 2 == 1:\n            d *= 2\n            if d > 9:\n                d -= 9\n        total += d\n    return 1 if total % 10 == 0 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "password_score",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 173,
+     "source": "fn password_score s string -> i64\n    let cs list<char> = chars(s)\n    let n i64 = len(cs)\n    let score i64 = 0\n    if n >= 8\n        score += 1\n    let has_digit i64 = 0\n    let has_lower i64 = 0\n    let has_upper i64 = 0\n    for i from 0 to n - 1\n        let code i64 = char_code(get(cs, i))\n        if code >= 48 and code <= 57\n            has_digit = 1\n        elif code >= 97 and code <= 122\n            has_lower = 1\n        elif code >= 65 and code <= 90\n            has_upper = 1\n    score + has_digit + has_lower + has_upper"
+    },
+    "C": {
+     "tokens": 159,
+     "source": "i64 password_score(const char *s) {\n    size_t n = strlen(s);\n    i64 score = 0;\n    if (n >= 8) score++;\n    i64 has_digit = 0, has_lower = 0, has_upper = 0;\n    for (size_t i = 0; i < n; i++) {\n        char c = s[i];\n        if (c >= '0' && c <= '9') has_digit = 1;\n        else if (c >= 'a' && c <= 'z') has_lower = 1;\n        else if (c >= 'A' && c <= 'Z') has_upper = 1;\n    }\n    return score + has_digit + has_lower + has_upper;\n}"
+    },
+    "C++": {
+     "tokens": 140,
+     "source": "long long password_score(const std::string &s) {\n    long long score = 0;\n    if (s.size() >= 8) score++;\n    long long has_digit = 0, has_lower = 0, has_upper = 0;\n    for (char c : s) {\n        if (c >= '0' && c <= '9') has_digit = 1;\n        else if (c >= 'a' && c <= 'z') has_lower = 1;\n        else if (c >= 'A' && c <= 'Z') has_upper = 1;\n    }\n    return score + has_digit + has_lower + has_upper;\n}"
+    },
+    "Rust": {
+     "tokens": 159,
+     "source": "fn password_score(s: &str) -> i64 {\n    let mut score = 0;\n    if s.len() >= 8 {\n        score += 1;\n    }\n    let mut has_digit = 0;\n    let mut has_lower = 0;\n    let mut has_upper = 0;\n    for b in s.bytes() {\n        if b >= b'0' && b <= b'9' {\n            has_digit = 1;\n        } else if b >= b'a' && b <= b'z' {\n            has_lower = 1;\n        } else if b >= b'A' && b <= b'Z' {\n            has_upper = 1;\n        }\n    }\n    score + has_digit + has_lower + has_upper\n}"
+    },
+    "Python": {
+     "tokens": 111,
+     "source": "def password_score(s):\n    score = 0\n    if len(s) >= 8:\n        score += 1\n    has_digit = has_lower = has_upper = 0\n    for c in s:\n        if \"0\" <= c <= \"9\":\n            has_digit = 1\n        elif \"a\" <= c <= \"z\":\n            has_lower = 1\n        elif \"A\" <= c <= \"Z\":\n            has_upper = 1\n    return score + has_digit + has_lower + has_upper"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rem",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn rem a i64 b i64 -> i64\n    a - (a / b) * b"
+    }
+   },
+   "present": 1
+  },
+  {
+   "name": "valid_percentage",
+   "category": "validation",
+   "langs": {
+    "Lullaby": {
+     "tokens": 32,
+     "source": "fn valid_percentage x i64 -> i64\n    if x >= 0 and x <= 100\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 28,
+     "source": "i64 valid_percentage(i64 x) {\n    return x >= 0 && x <= 100 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 28,
+     "source": "long long valid_percentage(long long x) {\n    return x >= 0 && x <= 100 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 33,
+     "source": "fn valid_percentage(x: i64) -> i64 {\n    if x >= 0 && x <= 100 { 1 } else { 0 }\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def valid_percentage(x):\n    return 1 if 0 <= x <= 100 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "abs_val",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 26,
+     "source": "fn abs_val n i64 -> i64\n    if n < 0\n        return 0 - n\n    n"
+    },
+    "C": {
+     "tokens": 22,
+     "source": "i64 abs_val(i64 n) {\n    return n < 0 ? -n : n;\n}"
+    },
+    "C++": {
+     "tokens": 22,
+     "source": "long long abs_val(long long n) {\n    return n < 0 ? -n : n;\n}"
+    },
+    "Rust": {
+     "tokens": 33,
+     "source": "fn abs_val(n: i64) -> i64 {\n    if n < 0 {\n        -n\n    } else {\n        n\n    }\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def abs_val(n):\n    if n < 0:\n        return -n\n    return n"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "ackermann",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 63,
+     "source": "fn ackermann m i64 n i64 -> i64\n    if m == 0\n        return n + 1\n    if n == 0\n        return ackermann(m - 1, 1)\n    ackermann(m - 1, ackermann(m, n - 1))"
+    },
+    "C": {
+     "tokens": 65,
+     "source": "i64 ackermann(i64 m, i64 n) {\n    if (m == 0) return n + 1;\n    if (n == 0) return ackermann(m - 1, 1);\n    return ackermann(m - 1, ackermann(m, n - 1));\n}"
+    },
+    "C++": {
+     "tokens": 65,
+     "source": "long long ackermann(long long m, long long n) {\n    if (m == 0) return n + 1;\n    if (n == 0) return ackermann(m - 1, 1);\n    return ackermann(m - 1, ackermann(m, n - 1));\n}"
+    },
+    "Rust": {
+     "tokens": 72,
+     "source": "fn ackermann(m: i64, n: i64) -> i64 {\n    if m == 0 {\n        return n + 1;\n    }\n    if n == 0 {\n        return ackermann(m - 1, 1);\n    }\n    ackermann(m - 1, ackermann(m, n - 1))\n}"
+    },
+    "Python": {
+     "tokens": 58,
+     "source": "def ackermann(m, n):\n    if m == 0:\n        return n + 1\n    if n == 0:\n        return ackermann(m - 1, 1)\n    return ackermann(m - 1, ackermann(m, n - 1))"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "add",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 16,
+     "source": "fn add a i64 b i64 -> i64\n    a + b"
+    },
+    "C": {
+     "tokens": 25,
+     "source": "typedef long long i64;\ni64 add(i64 a, i64 b) {\n    return a + b;\n}"
+    },
+    "C++": {
+     "tokens": 19,
+     "source": "long long add(long long a, long long b) {\n    return a + b;\n}"
+    },
+    "Rust": {
+     "tokens": 25,
+     "source": "fn add(a: i64, b: i64) -> i64 {\n    a.wrapping_add(b)\n}"
+    },
+    "Python": {
+     "tokens": 11,
+     "source": "def add(a, b):\n    return a + b"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "clamp",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 37,
+     "source": "fn clamp x i64 lo i64 hi i64 -> i64\n    if x < lo\n        return lo\n    if x > hi\n        return hi\n    x"
+    },
+    "C": {
+     "tokens": 41,
+     "source": "i64 clamp(i64 x, i64 lo, i64 hi) {\n    if (x < lo) return lo;\n    if (x > hi) return hi;\n    return x;\n}"
+    },
+    "C++": {
+     "tokens": 41,
+     "source": "long long clamp(long long x, long long lo, long long hi) {\n    if (x < lo) return lo;\n    if (x > hi) return hi;\n    return x;\n}"
+    },
+    "Rust": {
+     "tokens": 49,
+     "source": "fn clamp(x: i64, lo: i64, hi: i64) -> i64 {\n    if x < lo {\n        return lo;\n    }\n    if x > hi {\n        return hi;\n    }\n    x\n}"
+    },
+    "Python": {
+     "tokens": 31,
+     "source": "def clamp(x, lo, hi):\n    if x < lo:\n        return lo\n    if x > hi:\n        return hi\n    return x"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "collatz_len",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 69,
+     "source": "fn collatz_len n i64 -> i64\n    let steps i64 = 0\n    while n != 1\n        if rem(n, 2) == 0\n            n = n / 2\n        else\n            n = 3 * n + 1\n        steps += 1\n    steps"
+    },
+    "C": {
+     "tokens": 70,
+     "source": "i64 collatz_len(i64 n) {\n    i64 steps = 0;\n    while (n != 1) {\n        if (n % 2 == 0)\n            n = n / 2;\n        else\n            n = 3 * n + 1;\n        steps++;\n    }\n    return steps;\n}"
+    },
+    "C++": {
+     "tokens": 66,
+     "source": "long long collatz_len(long long n) {\n    long long steps = 0;\n    while (n != 1) {\n        if (n % 2 == 0) n /= 2;\n        else n = 3 * n + 1;\n        ++steps;\n    }\n    return steps;\n}"
+    },
+    "Rust": {
+     "tokens": 77,
+     "source": "fn collatz_len(mut n: i64) -> i64 {\n    let mut steps: i64 = 0;\n    while n != 1 {\n        if n % 2 == 0 {\n            n /= 2;\n        } else {\n            n = 3 * n + 1;\n        }\n        steps += 1;\n    }\n    steps\n}"
+    },
+    "Python": {
+     "tokens": 59,
+     "source": "def collatz_len(n):\n    steps = 0\n    while n != 1:\n        if n % 2 == 0:\n            n //= 2\n        else:\n            n = 3 * n + 1\n        steps += 1\n    return steps"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "count_primes_below",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 52,
+     "source": "fn count_primes_below n i64 -> i64\n    let count i64 = 0\n    for k from 2 to n - 1\n        if is_prime(k) == 1\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 54,
+     "source": "i64 count_primes_below(i64 n) {\n    i64 count = 0;\n    for (i64 k = 2; k < n; k++)\n        if (is_prime(k) == 1) count++;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 59,
+     "source": "long long count_primes_below(long long n) {\n    long long count = 0;\n    for (long long k = 2; k < n; ++k) {\n        if (is_prime(k) == 1) ++count;\n    }\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 73,
+     "source": "fn count_primes_below(n: i64) -> i64 {\n    let mut count: i64 = 0;\n    let mut k: i64 = 2;\n    while k < n {\n        if is_prime(k) == 1 {\n            count += 1;\n        }\n        k += 1;\n    }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 51,
+     "source": "def count_primes_below(n):\n    count = 0\n    k = 2\n    while k < n:\n        if is_prime(k) == 1:\n            count += 1\n        k += 1\n    return count"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "digit_sum",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 60,
+     "source": "fn digit_sum n i64 -> i64\n    if n < 0\n        n = 0 - n\n    let s i64 = 0\n    while n > 0\n        s += rem(n, 10)\n        n = n / 10\n    s"
+    },
+    "C": {
+     "tokens": 60,
+     "source": "i64 digit_sum(i64 n) {\n    if (n < 0) n = -n;\n    i64 s = 0;\n    while (n > 0) {\n        s += n % 10;\n        n /= 10;\n    }\n    return s;\n}"
+    },
+    "C++": {
+     "tokens": 60,
+     "source": "long long digit_sum(long long n) {\n    if (n < 0) n = -n;\n    long long s = 0;\n    while (n > 0) {\n        s += n % 10;\n        n /= 10;\n    }\n    return s;\n}"
+    },
+    "Rust": {
+     "tokens": 66,
+     "source": "fn digit_sum(mut n: i64) -> i64 {\n    if n < 0 {\n        n = -n;\n    }\n    let mut s: i64 = 0;\n    while n > 0 {\n        s += n % 10;\n        n /= 10;\n    }\n    s\n}"
+    },
+    "Python": {
+     "tokens": 49,
+     "source": "def digit_sum(n):\n    if n < 0:\n        n = -n\n    s = 0\n    while n > 0:\n        s += n % 10\n        n //= 10\n    return s"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "factorial",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 36,
+     "source": "fn factorial n i64 -> i64\n    let r i64 = 1\n    for i from 2 to n\n        r = r * i\n    r"
+    },
+    "C": {
+     "tokens": 42,
+     "source": "i64 factorial(i64 n) {\n    i64 r = 1;\n    for (i64 i = 2; i <= n; i++)\n        r *= i;\n    return r;\n}"
+    },
+    "C++": {
+     "tokens": 42,
+     "source": "long long factorial(long long n) {\n    long long r = 1;\n    for (long long i = 2; i <= n; ++i) r *= i;\n    return r;\n}"
+    },
+    "Rust": {
+     "tokens": 61,
+     "source": "fn factorial(n: i64) -> i64 {\n    let mut r: i64 = 1;\n    let mut i: i64 = 2;\n    while i <= n {\n        r = r.wrapping_mul(i);\n        i += 1;\n    }\n    r\n}"
+    },
+    "Python": {
+     "tokens": 36,
+     "source": "def factorial(n):\n    r = 1\n    i = 2\n    while i <= n:\n        r *= i\n        i += 1\n    return r"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "fib_iter",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 59,
+     "source": "fn fib_iter n i64 -> i64\n    let a i64 = 0\n    let b i64 = 1\n    for i from 1 to n\n        let t i64 = a + b\n        a = b\n        b = t\n    a"
+    },
+    "C": {
+     "tokens": 65,
+     "source": "i64 fib_iter(i64 n) {\n    i64 a = 0, b = 1;\n    for (i64 i = 0; i < n; i++) {\n        i64 t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"
+    },
+    "C++": {
+     "tokens": 66,
+     "source": "long long fib_iter(long long n) {\n    long long a = 0, b = 1;\n    for (long long i = 0; i < n; ++i) {\n        long long t = a + b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"
+    },
+    "Rust": {
+     "tokens": 84,
+     "source": "fn fib_iter(n: i64) -> i64 {\n    let mut a: i64 = 0;\n    let mut b: i64 = 1;\n    let mut i: i64 = 0;\n    while i < n {\n        let t = a.wrapping_add(b);\n        a = b;\n        b = t;\n        i += 1;\n    }\n    a\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def fib_iter(n):\n    a, b = 0, 1\n    i = 0\n    while i < n:\n        a, b = b, a + b\n        i += 1\n    return a"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "gcd",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 42,
+     "source": "fn gcd a i64 b i64 -> i64\n    while b != 0\n        let t i64 = rem(a, b)\n        a = b\n        b = t\n    a"
+    },
+    "C": {
+     "tokens": 47,
+     "source": "i64 gcd(i64 a, i64 b) {\n    while (b != 0) {\n        i64 t = a % b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"
+    },
+    "C++": {
+     "tokens": 47,
+     "source": "long long gcd(long long a, long long b) {\n    while (b != 0) {\n        long long t = a % b;\n        a = b;\n        b = t;\n    }\n    return a;\n}"
+    },
+    "Rust": {
+     "tokens": 49,
+     "source": "fn gcd(mut a: i64, mut b: i64) -> i64 {\n    while b != 0 {\n        let t = a % b;\n        a = b;\n        b = t;\n    }\n    a\n}"
+    },
+    "Python": {
+     "tokens": 27,
+     "source": "def gcd(a, b):\n    while b != 0:\n        a, b = b, a % b\n    return a"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "int_pow",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 40,
+     "source": "fn int_pow base i64 exp i64 -> i64\n    let r i64 = 1\n    for i from 1 to exp\n        r = r * base\n    r"
+    },
+    "C": {
+     "tokens": 47,
+     "source": "i64 int_pow(i64 base, i64 exp) {\n    i64 r = 1;\n    for (i64 i = 0; i < exp; i++)\n        r *= base;\n    return r;\n}"
+    },
+    "C++": {
+     "tokens": 47,
+     "source": "long long int_pow(long long base, long long exp) {\n    long long r = 1;\n    for (long long i = 0; i < exp; ++i) r *= base;\n    return r;\n}"
+    },
+    "Rust": {
+     "tokens": 67,
+     "source": "fn int_pow(base: i64, exp: i64) -> i64 {\n    let mut r: i64 = 1;\n    let mut i: i64 = 0;\n    while i < exp {\n        r = r.wrapping_mul(base);\n        i += 1;\n    }\n    r\n}"
+    },
+    "Python": {
+     "tokens": 39,
+     "source": "def int_pow(base, exp):\n    r = 1\n    i = 0\n    while i < exp:\n        r *= base\n        i += 1\n    return r"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_even",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 32,
+     "source": "fn is_even n i64 -> i64\n    if rem(n, 2) == 0\n        1\n    else\n        0"
+    },
+    "C": {
+     "tokens": 26,
+     "source": "i64 is_even(i64 n) {\n    return n % 2 == 0 ? 1 : 0;\n}"
+    },
+    "C++": {
+     "tokens": 26,
+     "source": "long long is_even(long long n) {\n    return n % 2 == 0 ? 1 : 0;\n}"
+    },
+    "Rust": {
+     "tokens": 37,
+     "source": "fn is_even(n: i64) -> i64 {\n    if n % 2 == 0 {\n        1\n    } else {\n        0\n    }\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def is_even(n):\n    return 1 if n % 2 == 0 else 0"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "is_prime",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 64,
+     "source": "fn is_prime n i64 -> i64\n    if n < 2\n        return 0\n    let d i64 = 2\n    while d * d <= n\n        if rem(n, d) == 0\n            return 0\n        d += 1\n    1"
+    },
+    "C": {
+     "tokens": 59,
+     "source": "i64 is_prime(i64 n) {\n    if (n < 2) return 0;\n    for (i64 d = 2; d * d <= n; d++)\n        if (n % d == 0) return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 63,
+     "source": "long long is_prime(long long n) {\n    if (n < 2) return 0;\n    for (long long d = 2; d * d <= n; ++d) {\n        if (n % d == 0) return 0;\n    }\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 74,
+     "source": "fn is_prime(n: i64) -> i64 {\n    if n < 2 {\n        return 0;\n    }\n    let mut d: i64 = 2;\n    while d * d <= n {\n        if n % d == 0 {\n            return 0;\n        }\n        d += 1;\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 55,
+     "source": "def is_prime(n):\n    if n < 2:\n        return 0\n    d = 2\n    while d * d <= n:\n        if n % d == 0:\n            return 0\n        d += 1\n    return 1"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "max2",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 27,
+     "source": "fn max2 a i64 b i64 -> i64\n    if a > b\n        a\n    else\n        b"
+    },
+    "C": {
+     "tokens": 24,
+     "source": "i64 max2(i64 a, i64 b) {\n    return a > b ? a : b;\n}"
+    },
+    "C++": {
+     "tokens": 24,
+     "source": "long long max2(long long a, long long b) {\n    return a > b ? a : b;\n}"
+    },
+    "Rust": {
+     "tokens": 36,
+     "source": "fn max2(a: i64, b: i64) -> i64 {\n    if a > b {\n        a\n    } else {\n        b\n    }\n}"
+    },
+    "Python": {
+     "tokens": 16,
+     "source": "def max2(a, b):\n    return a if a > b else b"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "power_mod",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 82,
+     "source": "fn power_mod base i64 exp i64 m i64 -> i64\n    let r i64 = 1\n    base = rem(base, m)\n    while exp > 0\n        if rem(exp, 2) == 1\n            r = rem(r * base, m)\n        exp = exp / 2\n        base = rem(base * base, m)\n    r"
+    },
+    "C": {
+     "tokens": 87,
+     "source": "i64 power_mod(i64 base, i64 exp, i64 m) {\n    i64 r = 1;\n    base = base % m;\n    while (exp > 0) {\n        if (exp % 2 == 1)\n            r = (r * base) % m;\n        exp /= 2;\n        base = (base * base) % m;\n    }\n    return r;\n}"
+    },
+    "C++": {
+     "tokens": 84,
+     "source": "long long power_mod(long long base, long long exp, long long m) {\n    long long r = 1;\n    base %= m;\n    while (exp > 0) {\n        if (exp % 2 == 1) r = (r * base) % m;\n        exp /= 2;\n        base = (base * base) % m;\n    }\n    return r;\n}"
+    },
+    "Rust": {
+     "tokens": 97,
+     "source": "fn power_mod(mut base: i64, mut exp: i64, m: i64) -> i64 {\n    let mut r: i64 = 1;\n    base %= m;\n    while exp > 0 {\n        if exp % 2 == 1 {\n            r = r.wrapping_mul(base) % m;\n        }\n        exp /= 2;\n        base = base.wrapping_mul(base) % m;\n    }\n    r\n}"
+    },
+    "Python": {
+     "tokens": 69,
+     "source": "def power_mod(base, exp, m):\n    r = 1\n    base %= m\n    while exp > 0:\n        if exp % 2 == 1:\n            r = (r * base) % m\n        exp //= 2\n        base = (base * base) % m\n    return r"
+    }
+   },
+   "present": 5
+  },
+  {
+   "name": "rem",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 22,
+     "source": "fn rem a i64 b i64 -> i64\n    a - (a / b) * b"
+    }
+   },
+   "present": 1
+  },
+  {
+   "name": "sign",
+   "category": "numeric_basics",
+   "langs": {
+    "Lullaby": {
+     "tokens": 39,
+     "source": "fn sign n i64 -> i64\n    if n < 0\n        return 0 - 1\n    if n > 0\n        return 1\n    0"
+    },
+    "C": {
+     "tokens": 38,
+     "source": "i64 sign(i64 n) {\n    if (n < 0) return -1;\n    if (n > 0) return 1;\n    return 0;\n}"
+    },
+    "C++": {
+     "tokens": 38,
+     "source": "long long sign(long long n) {\n    if (n < 0) return -1;\n    if (n > 0) return 1;\n    return 0;\n}"
+    },
+    "Rust": {
+     "tokens": 44,
+     "source": "fn sign(n: i64) -> i64 {\n    if n < 0 {\n        return -1;\n    }\n    if n > 0 {\n        return 1;\n    }\n    0\n}"
+    },
+    "Python": {
+     "tokens": 32,
+     "source": "def sign(n):\n    if n < 0:\n        return -1\n    if n > 0:\n        return 1\n    return 0"
+    }
+   },
+   "present": 5
+  }
+ ],
+ "totals": {
+  "Lullaby": 7450,
+  "C": 7894,
+  "C++": 7991,
+  "Rust": 7543,
+  "Python": 5749
+ },
+ "categories": {
+  "arrays": {
+   "Lullaby": 902,
+   "C": 1080,
+   "C++": 1186,
+   "Rust": 968,
+   "Python": 779
+  },
+  "data_records": {
+   "Lullaby": 528,
+   "C": 567,
+   "C++": 600,
+   "Rust": 500,
+   "Python": 449
+  },
+  "datetime": {
+   "Lullaby": 1060,
+   "C": 1051,
+   "C++": 1052,
+   "Rust": 1056,
+   "Python": 912
+  },
+  "encoding": {
+   "Lullaby": 945,
+   "C": 1050,
+   "C++": 1050,
+   "Rust": 1025,
+   "Python": 857
+  },
+  "finance": {
+   "Lullaby": 416,
+   "C": 514,
+   "C++": 514,
+   "Rust": 519,
+   "Python": 336
+  },
+  "state_machines": {
+   "Lullaby": 655,
+   "C": 701,
+   "C++": 890,
+   "Rust": 761,
+   "Python": 697
+  },
+  "text_processing": {
+   "Lullaby": 989,
+   "C": 1028,
+   "C++": 863,
+   "Rust": 584,
+   "Python": 333
+  },
+  "validation": {
+   "Lullaby": 1211,
+   "C": 1131,
+   "C++": 1067,
+   "Rust": 1186,
+   "Python": 765
+  },
+  "numeric_basics": {
+   "Lullaby": 744,
+   "C": 772,
+   "C++": 769,
+   "Rust": 944,
+   "Python": 621
+  }
+ },
+ "n_functions": 140
+}

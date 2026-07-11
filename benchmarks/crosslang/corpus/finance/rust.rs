@@ -1,0 +1,95 @@
+// Cross-language finance suite (Rust). Money/business math in integer cents.
+
+fn add_tax(cents: i64, rate_bp: i64) -> i64 {
+    cents + cents * rate_bp / 10000
+}
+
+fn apply_discount(cents: i64, pct: i64) -> i64 {
+    cents - cents * pct / 100
+}
+
+fn tip_amount(cents: i64, pct: i64) -> i64 {
+    cents * pct / 100
+}
+
+fn split_bill(cents: i64, people: i64) -> i64 {
+    cents / people
+}
+
+fn split_remainder(cents: i64, people: i64) -> i64 {
+    cents % people
+}
+
+fn simple_interest(principal: i64, rate_bp: i64, years: i64) -> i64 {
+    principal * rate_bp * years / 10000
+}
+
+fn compound_interest(principal: i64, rate_bp: i64, years: i64) -> i64 {
+    let mut amount = principal;
+    for _ in 0..years {
+        amount = amount + amount * rate_bp / 10000;
+    }
+    amount
+}
+
+fn monthly_payment_flat(principal: i64, months: i64) -> i64 {
+    principal / months
+}
+
+fn cents_to_dollars(cents: i64) -> i64 {
+    cents / 100
+}
+
+fn cents_part(cents: i64) -> i64 {
+    cents % 100
+}
+
+fn percent_of(part: i64, whole: i64) -> i64 {
+    if whole == 0 {
+        return 0;
+    }
+    part * 100 / whole
+}
+
+fn markup(cost: i64, pct: i64) -> i64 {
+    cost + cost * pct / 100
+}
+
+fn margin_pct(cost: i64, price: i64) -> i64 {
+    if price == 0 {
+        return 0;
+    }
+    (price - cost) * 100 / price
+}
+
+fn round_to_nearest(cents: i64, step: i64) -> i64 {
+    (cents + step / 2) / step * step
+}
+
+fn future_value_years(principal: i64, rate_bp: i64, years: i64) -> i64 {
+    let mut amount = principal;
+    let mut y = 0;
+    while y < years {
+        amount += amount * rate_bp / 10000;
+        y += 1;
+    }
+    amount
+}
+
+fn main() {
+    println!("add_tax={}", add_tax(1000, 825));
+    println!("apply_discount={}", apply_discount(1000, 15));
+    println!("tip_amount={}", tip_amount(4200, 18));
+    println!("split_bill={}", split_bill(10000, 3));
+    println!("split_remainder={}", split_remainder(10000, 3));
+    println!("simple_interest={}", simple_interest(100000, 500, 3));
+    println!("compound_interest={}", compound_interest(100000, 500, 3));
+    println!("monthly_payment_flat={}", monthly_payment_flat(120000, 12));
+    println!("cents_to_dollars={}", cents_to_dollars(12345));
+    println!("cents_part={}", cents_part(12345));
+    println!("percent_of={}", percent_of(45, 200));
+    println!("markup={}", markup(5000, 40));
+    println!("margin_pct={}", margin_pct(6000, 10000));
+    println!("round_to_nearest={}", round_to_nearest(1237, 25));
+    println!("future_value_years={}", future_value_years(100000, 500, 3));
+}
