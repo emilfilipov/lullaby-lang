@@ -12274,8 +12274,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 81,
-     "source": "fn all_digits s string -> i64\n    let cs list<char> = chars(s)\n    let n = len(cs)\n    if n == 0\n        return 0\n    for i from 0 to n - 1\n        let code = char_code(get(cs, i))\n        if code < 48 or code > 57\n            return 0\n    1"
+     "tokens": 44,
+     "source": "fn all_digits s string -> i64\n    if len(s) == 0\n        return 0\n    for c in s\n        if not is_digit(c)\n            return 0\n    1"
     },
     "C": {
      "tokens": 77,
@@ -12305,8 +12305,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 46,
-     "source": "fn checksum_mod10 digits array<i64> n i64 -> i64\n    let sum = 0\n    for i from 0 to n - 1\n        sum += digits[i]\n    sum % 10"
+     "tokens": 36,
+     "source": "fn checksum_mod10 digits array<i64> -> i64\n    let sum = 0\n    for d in digits\n        sum += d\n    sum % 10"
     },
     "C": {
      "tokens": 53,
@@ -12367,8 +12367,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 70,
-     "source": "fn even_parity bits array<i64> n i64 -> i64\n    let ones = 0\n    for i from 0 to n - 1\n        if bits[i] == 1\n            ones += 1\n    if ones % 2 == 0\n        1\n    else\n        0"
+     "tokens": 59,
+     "source": "fn even_parity bits array<i64> -> i64\n    let ones = 0\n    for b in bits\n        if b == 1\n            ones += 1\n    if ones % 2 == 0\n        1\n    else\n        0"
     },
     "C": {
      "tokens": 72,
@@ -12429,8 +12429,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 58,
-     "source": "fn is_ascii_alpha c string -> i64\n    let code = char_code(get(chars(c), 0))\n    if (code >= 65 and code <= 90) or (code >= 97 and code <= 122)\n        1\n    else\n        0"
+     "tokens": 55,
+     "source": "fn is_ascii_alpha c string -> i64\n    let code = char_code(c[0])\n    if (code >= 65 and code <= 90) or (code >= 97 and code <= 122)\n        1\n    else\n        0"
     },
     "C": {
      "tokens": 58,
@@ -12460,8 +12460,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 45,
-     "source": "fn is_ascii_digit c string -> i64\n    let code = char_code(get(chars(c), 0))\n    if code >= 48 and code <= 57\n        1\n    else\n        0"
+     "tokens": 28,
+     "source": "fn is_ascii_digit c string -> i64\n    if is_digit(c[0])\n        1\n    else\n        0"
     },
     "C": {
      "tokens": 38,
@@ -12491,8 +12491,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 138,
-     "source": "fn is_hex_string s string -> i64\n    let cs list<char> = chars(s)\n    let n = len(cs)\n    if n == 0\n        return 0\n    for i from 0 to n - 1\n        let code = char_code(get(cs, i))\n        let ok = 0\n        if code >= 48 and code <= 57\n            ok = 1\n        if code >= 97 and code <= 102\n            ok = 1\n        if code >= 65 and code <= 70\n            ok = 1\n        if ok == 0\n            return 0\n    1"
+     "tokens": 114,
+     "source": "fn is_hex_string s string -> i64\n    if len(s) == 0\n        return 0\n    for c in s\n        let code = char_code(c)\n        let ok = 0\n        if code >= 48 and code <= 57\n            ok = 1\n        if code >= 97 and code <= 102\n            ok = 1\n        if code >= 65 and code <= 70\n            ok = 1\n        if ok == 0\n            return 0\n    1"
     },
     "C": {
      "tokens": 114,
@@ -12585,7 +12585,7 @@
    "langs": {
     "Lullaby": {
      "tokens": 79,
-     "source": "fn is_valid_isbn10 digits array<i64> n i64 -> i64\n    if n != 10\n        return 0\n    let sum = 0\n    for i from 0 to 9\n        sum += (10 - i) * digits[i]\n    if sum % 11 == 0\n        1\n    else\n        0"
+     "source": "fn is_valid_isbn10 digits array<i64> -> i64\n    if len(digits) != 10\n        return 0\n    let sum = 0\n    for i from 0 to 9\n        sum += (10 - i) * digits[i]\n    if sum % 11 == 0\n        1\n    else\n        0"
     },
     "C": {
      "tokens": 87,
@@ -12677,8 +12677,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 111,
-     "source": "fn luhn_check digits array<i64> n i64 -> i64\n    let sum = 0\n    for i from 0 to n - 1\n        let d = digits[i]\n        let pos = n - 1 - i\n        if pos % 2 == 1\n            d = d * 2\n            if d > 9\n                d = d - 9\n        sum += d\n    if sum % 10 == 0\n        1\n    else\n        0"
+     "tokens": 116,
+     "source": "fn luhn_check digits array<i64> -> i64\n    let n = len(digits)\n    let sum = 0\n    for i from 0 to n - 1\n        let d = digits[i]\n        let pos = n - 1 - i\n        if pos % 2 == 1\n            d = d * 2\n            if d > 9\n                d = d - 9\n        sum += d\n    if sum % 10 == 0\n        1\n    else\n        0"
     },
     "C": {
      "tokens": 124,
@@ -12704,8 +12704,8 @@
    "category": "validation",
    "langs": {
     "Lullaby": {
-     "tokens": 161,
-     "source": "fn password_score s string -> i64\n    let cs list<char> = chars(s)\n    let n = len(cs)\n    let score = 0\n    if n >= 8\n        score += 1\n    let has_digit = 0\n    let has_lower = 0\n    let has_upper = 0\n    for i from 0 to n - 1\n        let code = char_code(get(cs, i))\n        if code >= 48 and code <= 57\n            has_digit = 1\n        elif code >= 97 and code <= 122\n            has_lower = 1\n        elif code >= 65 and code <= 90\n            has_upper = 1\n    score + has_digit + has_lower + has_upper"
+     "tokens": 137,
+     "source": "fn password_score s string -> i64\n    let score = 0\n    if len(s) >= 8\n        score += 1\n    let has_digit = 0\n    let has_lower = 0\n    let has_upper = 0\n    for c in s\n        let code = char_code(c)\n        if code >= 48 and code <= 57\n            has_digit = 1\n        elif code >= 97 and code <= 122\n            has_lower = 1\n        elif code >= 65 and code <= 90\n            has_upper = 1\n    score + has_digit + has_lower + has_upper"
     },
     "C": {
      "tokens": 159,
@@ -13281,7 +13281,7 @@
   }
  ],
  "totals": {
-  "Lullaby": 22477,
+  "Lullaby": 22356,
   "C": 26030,
   "C++": 26894,
   "Rust": 24867,
@@ -13482,7 +13482,7 @@
    "JavaScript": 319
   },
   "validation": {
-   "Lullaby": 1156,
+   "Lullaby": 1035,
    "C": 1131,
    "C++": 1067,
    "Rust": 1186,
