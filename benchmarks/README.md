@@ -62,10 +62,12 @@ N=1e9, interpreters at N=1e7; ns per iteration.
 | lullaby native | 0.78 | 6.0× |
 | bytecode / ir / ast | ~160 | ~1230× |
 
-The native loop is 6× C because loop locals (`acc`, `i`) are spilled to the
-stack and reloaded each iteration — **register allocation is the largest
-remaining native lever**. Interpreters run ~160 ns/iter here vs ~380 ns/call on
-fib, so per-call setup (env/frame/args) is a major interpreter cost.
+After **register promotion** (keeping a purely-scalar function's hot `i64` locals
+in callee-saved `rbx`/`rsi` instead of the stack), the native loop dropped from
+**0.70 → 0.285 ns/iter (5.6× → 2.1× C)** — the loop body is now
+`add rbx, rax; add rsi, 1` with `acc`/`i` in registers. fib is ~neutral (it's
+call-bound, so `n` in a register offsets the register save/restore). Interpreters
+run ~160 ns/iter here vs ~230 ns/call on fib, so per-call setup remains a cost.
 
 The optimization backlog lives in ClickUp: Lullaby → **18 Performance
 Optimization**.
