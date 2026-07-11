@@ -8579,6 +8579,130 @@ impl<'a> Lowerer<'a> {
                     span: *span,
                 })
             }
+            // `for x in coll` desugars to an index-based `for` over `0..len-1`.
+            // The collection is bound to a hidden local (via the prelude) so it is
+            // evaluated exactly once, then each element is read by `[]` (arrays and
+            // strings) or `get` (lists) into `x` as the loop body's first binding.
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                span,
+            } => {
+                let coll = self.lower_expr(iterable, scope)?;
+                let coll_ty = coll.ty.clone();
+                let elem_ty = if coll_ty.name == "string" {
+                    TypeRef::new("char")
+                } else {
+                    coll_ty
+                        .array_element()
+                        .or_else(|| coll_ty.list_element())
+                        .ok_or_else(|| {
+                            IrLoweringError::new(
+                                "`for … in` requires an array, list, or string",
+                                Some(*span),
+                            )
+                        })?
+                };
+                // A bare variable iterable (`for x in xs`) is re-read for free, so
+                // reference it directly — no hidden copy, which also keeps the
+                // native backend's array-length inference intact. Only a computed
+                // iterable is bound to a hidden local (evaluated once).
+                let coll_binding = match &coll.kind {
+                    IrExprKind::Variable(name) => Some(name.clone()),
+                    _ => None,
+                };
+                let coll_name = coll_binding
+                    .clone()
+                    .unwrap_or_else(|| format!("__foreach_coll_{}_{}", span.line, span.column));
+                let idx_name = format!("__foreach_idx_{}_{}", span.line, span.column);
+                let i64_ty = TypeRef::new("i64");
+                let coll_var = IrExpr {
+                    kind: IrExprKind::Variable(coll_name.clone()),
+                    ty: coll_ty.clone(),
+                    span: *span,
+                };
+                let idx_var = IrExpr {
+                    kind: IrExprKind::Variable(idx_name.clone()),
+                    ty: i64_ty.clone(),
+                    span: *span,
+                };
+                // element read: `coll[idx]` (array/string) or `get(coll, idx)` (list)
+                let element = if coll_ty.list_element().is_some() {
+                    IrExpr {
+                        kind: IrExprKind::Call {
+                            name: "get".to_string(),
+                            args: vec![coll_var.clone(), idx_var.clone()],
+                        },
+                        ty: elem_ty.clone(),
+                        span: *span,
+                    }
+                } else {
+                    IrExpr {
+                        kind: IrExprKind::Index {
+                            target: Box::new(coll_var.clone()),
+                            index: Box::new(idx_var.clone()),
+                        },
+                        ty: elem_ty.clone(),
+                        span: *span,
+                    }
+                };
+                // end = len(coll) - 1
+                let end = IrExpr {
+                    kind: IrExprKind::Binary {
+                        left: Box::new(IrExpr {
+                            kind: IrExprKind::Call {
+                                name: "len".to_string(),
+                                args: vec![coll_var],
+                            },
+                            ty: i64_ty.clone(),
+                            span: *span,
+                        }),
+                        op: BinaryOp::Subtract,
+                        right: Box::new(IrExpr {
+                            kind: IrExprKind::Integer(1),
+                            ty: i64_ty.clone(),
+                            span: *span,
+                        }),
+                    },
+                    ty: i64_ty.clone(),
+                    span: *span,
+                };
+                // Lower the user body first (drains any nested preludes correctly),
+                // then prepend `let x = <element>`.
+                let mut loop_scope = scope.clone();
+                loop_scope.insert(idx_name.clone(), i64_ty.clone());
+                loop_scope.insert(name.clone(), elem_ty.clone());
+                let mut for_body = vec![IrStmt::Let {
+                    name: name.clone(),
+                    ty: elem_ty,
+                    value: element,
+                    span: *span,
+                }];
+                for_body.extend(self.lower_block(body, &mut loop_scope)?);
+                // Bind a computed collection once, before the loop (a bare variable
+                // needs no binding — it is referenced directly above).
+                if coll_binding.is_none() {
+                    self.try_prelude.borrow_mut().push(IrStmt::Let {
+                        name: coll_name,
+                        ty: coll_ty,
+                        value: coll,
+                        span: *span,
+                    });
+                }
+                Ok(IrStmt::For {
+                    name: idx_name,
+                    start: IrExpr {
+                        kind: IrExprKind::Integer(0),
+                        ty: i64_ty.clone(),
+                        span: *span,
+                    },
+                    end,
+                    step: None,
+                    body: for_body,
+                    span: *span,
+                })
+            }
             Stmt::Loop { body, span } => {
                 let mut loop_scope = scope.clone();
                 let body = self.lower_block(body, &mut loop_scope)?;

@@ -258,6 +258,19 @@ fn render_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
             line(out, &pad, &head);
             render_block(body, depth + 1, out);
         }
+        Stmt::ForEach {
+            name,
+            iterable,
+            body,
+            ..
+        } => {
+            line(
+                out,
+                &pad,
+                &format!("for {name} in {}", render_expr(iterable)),
+            );
+            render_block(body, depth + 1, out);
+        }
         Stmt::Loop { body, .. } => {
             line(out, &pad, "loop");
             render_block(body, depth + 1, out);

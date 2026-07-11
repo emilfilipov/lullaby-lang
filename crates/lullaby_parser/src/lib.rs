@@ -480,6 +480,15 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// `for x in collection` — iterate `x` over each element of an `array<T>`,
+    /// `list<T>`, or the characters of a `string`. Lowered by desugaring to an
+    /// index-based `for` in the IR; the AST interpreter iterates directly.
+    ForEach {
+        name: String,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     Loop {
         body: Vec<Stmt>,
         span: Span,
@@ -1758,8 +1767,27 @@ impl<'a> Parser<'a> {
     fn parse_for(&mut self) -> Option<Stmt> {
         let span = self.previous().span;
         let name = self.expect_identifier("expected loop variable after `for`")?;
+        // `for x in COLLECTION` iterates elements; `for x from S to E` is the
+        // numeric range form.
+        if self.eat_keyword(Keyword::In).is_some() {
+            let iterable = self.parse_expr_line(span)?;
+            self.expect_newline("expected newline after for-in header");
+            self.expect(TokenKindRef::Indent, "expected indented for body")?;
+            let body = self.parse_block(&[BlockEnd::Dedent]);
+            self.expect(TokenKindRef::Dedent, "expected for body dedent")?;
+            return Some(Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                span,
+            });
+        }
         if self.eat_keyword(Keyword::From).is_none() {
-            self.error("L0209", "expected `from` in for loop", self.peek().span);
+            self.error(
+                "L0209",
+                "expected `from` or `in` in for loop",
+                self.peek().span,
+            );
             return None;
         }
         let start = self.parse_expr_until_keywords(span, &[Keyword::To])?;

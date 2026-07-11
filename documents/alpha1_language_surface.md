@@ -62,7 +62,8 @@ This document freezes the installable Alpha 1 surface. The implemented parser gr
 ## Control Flow
 
 - Implemented branches: `if`, `elif`, and `else`.
-- Implemented loops: `while`, inclusive range `for name from start to end`, optional `by step`, and `loop`.
+- Implemented loops: `while`, inclusive range `for name from start to end` (optional `by step`), element iteration `for name in collection`, and `loop`.
+- Element iteration `for x in collection`: iterates `x` over each element of an `array<T>` or `list<T>` (binding `x: T`), or each character of a `string` (binding `x: char`). A non-iterable collection is `L0434`. It desugars to an index-based range `for` (over `0..len-1`) in the IR, with the collection evaluated once, so it runs identically on every backend — including native codegen when the collection is a bare local/parameter (a computed collection binds to a hidden local and, being heap-shaped, defers to the interpreters). This replaces the `for i from 0 to len(xs) - 1` + `xs[i]` idiom.
 - Implemented loop controls: `break` and `continue`.
 - Loop control outside a loop is a semantic error.
 - Pattern matching: `match SCRUTINEE` selects on an enum value with an indented arm list. Each arm is a pattern (`Variant(bind1, bind2, ...)` binding positional payloads, a bare `Variant` for a unit variant, or `_` wildcard), then `->`, then an inline expression or an indented block whose last expression is the arm's value. Like `if`/`try`, a `match` is an expression: when every arm yields the same type it produces that value (so it can be a function's final expression); otherwise it is a void statement. Matches must be exhaustive — every variant covered or a `_` present (`L0384`); a non-enum scrutinee reports `L0383`, and an unknown/duplicate variant arm or wrong binding arity reports `L0385`. Pattern matching runs identically on the AST, IR, and bytecode backends (including under optimization).

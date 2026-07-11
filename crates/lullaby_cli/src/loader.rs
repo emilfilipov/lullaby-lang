@@ -566,6 +566,10 @@ fn collect_stmt_references(stmt: &Stmt, out: &mut Vec<(String, Span)>) {
             }
             collect_block_references(body, out);
         }
+        Stmt::ForEach { iterable, body, .. } => {
+            collect_expr_references(iterable, out);
+            collect_block_references(body, out);
+        }
         Stmt::Loop { body, .. } | Stmt::Unsafe { body, .. } => collect_block_references(body, out),
         Stmt::Region(_) => {}
         Stmt::Throw { value, .. } => collect_expr_references(value, out),

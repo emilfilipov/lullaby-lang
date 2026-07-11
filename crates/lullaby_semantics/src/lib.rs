@@ -601,6 +601,17 @@ fn rewrite_stmt_types(stmt: &Stmt, map: &HashMap<String, TypeRef>) -> Stmt {
             body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
             span: *span,
         },
+        Stmt::ForEach {
+            name,
+            iterable,
+            body,
+            span,
+        } => Stmt::ForEach {
+            name: name.clone(),
+            iterable: iterable.clone(),
+            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
+            span: *span,
+        },
         Stmt::Loop { body, span } => Stmt::Loop {
             body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
             span: *span,
@@ -1648,6 +1659,36 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
                 None
             }
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
+                // The loop variable takes the element type: `array<T>`/`list<T>`
+                // yield `T`, and a `string` yields `char`.
+                let iter_type = self.check_expr(iterable, scope, function);
+                let element = match iter_type.as_ref() {
+                    Some(ty) if ty.name == "string" => Some(TypeRef::new("char")),
+                    Some(ty) => ty.array_element().or_else(|| ty.list_element()),
+                    None => None,
+                };
+                let element = element.unwrap_or_else(|| {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0434",
+                        "`for … in` requires an array, list, or string",
+                        Some(function.name.clone()),
+                        iterable.span,
+                    ));
+                    TypeRef::new("<unknown>")
+                });
+                let mut loop_scope = scope.clone();
+                loop_scope.locals.insert(name.clone(), element);
+                self.loop_depth += 1;
+                self.check_block(body, &mut loop_scope, function);
+                self.loop_depth -= 1;
+                None
+            }
             Stmt::Loop { body, .. } => {
                 let mut loop_scope = scope.clone();
                 self.loop_depth += 1;
@@ -1830,6 +1871,10 @@ impl<'a> Checker<'a> {
                     if let Some(step) = step {
                         self.check_freed_uses(step, freed, function);
                     }
+                    self.walk_lifetimes(body, &mut freed.clone(), function);
+                }
+                Stmt::ForEach { iterable, body, .. } => {
+                    self.check_freed_uses(iterable, freed, function);
                     self.walk_lifetimes(body, &mut freed.clone(), function);
                 }
                 Stmt::Loop { body, .. } | Stmt::Unsafe { body, .. } => {

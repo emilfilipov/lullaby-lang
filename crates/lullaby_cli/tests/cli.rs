@@ -220,6 +220,31 @@ fn runs_modulo_across_backends() {
 }
 
 #[test]
+fn runs_for_in_across_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_for_in.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // `for x in` over an array sums to 50; over a string's chars counts 5
+        // vowels in "education"; over a list sums 10+20+30 = 60.
+        assert_eq!(
+            stdout(&output).replace("\r\n", "\n").trim(),
+            "50\n5\n60",
+            "{backend} stdout mismatch"
+        );
+    }
+}
+
+#[test]
 fn runs_sum_reduction_across_backends() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_sum_reduction.lby");
     for backend in ["ast", "ir", "bytecode"] {

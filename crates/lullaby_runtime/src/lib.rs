@@ -1785,6 +1785,10 @@ fn collect_closures_in_stmt<'a>(
             }
             collect_closures_in_block(body, table);
         }
+        Stmt::ForEach { iterable, body, .. } => {
+            collect_closures_in_expr(iterable, table);
+            collect_closures_in_block(body, table);
+        }
         Stmt::Loop { body, .. } | Stmt::Unsafe { body, .. } => {
             collect_closures_in_block(body, table);
         }
@@ -3711,6 +3715,37 @@ impl<'a> Runtime<'a> {
                     }
 
                     current += step;
+                }
+                Ok(Control::Value(Value::Void))
+            }
+            Stmt::ForEach {
+                name,
+                iterable,
+                body,
+                ..
+            } => {
+                // Iterate `name` over each element of an array/list, or each char
+                // of a string. (Semantics guarantees the collection type.)
+                let elements: Vec<Value> = match self.eval_expr(iterable, env)? {
+                    Value::Array(values) => values,
+                    Value::String(text) => text.chars().map(Value::Char).collect(),
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "L0412",
+                            "`for … in` target is not an array, list, or string",
+                        ));
+                    }
+                };
+                for element in elements {
+                    env.push_scope();
+                    env.define(name.clone(), element);
+                    let result = self.eval_block(body, env);
+                    env.pop_scope();
+                    match result? {
+                        Control::Return(value) => return Ok(Control::Return(value)),
+                        Control::Break => break,
+                        Control::Continue | Control::Value(_) => {}
+                    }
                 }
                 Ok(Control::Value(Value::Void))
             }
@@ -6177,6 +6212,7 @@ fn statement_span(statement: &Stmt) -> Span {
         | Stmt::If { span, .. }
         | Stmt::While { span, .. }
         | Stmt::For { span, .. }
+        | Stmt::ForEach { span, .. }
         | Stmt::Loop { span, .. }
         | Stmt::Unsafe { span, .. }
         | Stmt::Asm { span, .. }
@@ -6274,6 +6310,9 @@ fn stmt_mentions_var(stmt: &Stmt, name: &str) -> bool {
                 || expr_mentions_var(end, name)
                 || step.as_ref().is_some_and(|e| expr_mentions_var(e, name))
                 || body.iter().any(|s| stmt_mentions_var(s, name))
+        }
+        Stmt::ForEach { iterable, body, .. } => {
+            expr_mentions_var(iterable, name) || body.iter().any(|s| stmt_mentions_var(s, name))
         }
         Stmt::Loop { body, .. } | Stmt::Unsafe { body, .. } => {
             body.iter().any(|s| stmt_mentions_var(s, name))
