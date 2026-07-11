@@ -1,0 +1,7 @@
+# Generated benchmark artifact (regenerate with run_benchmark.ps1)
+report.html
+
+# Compiled perf-harness binaries (regenerate with run_perf.ps1)
+*.exe
+*.obj
+*.pdb

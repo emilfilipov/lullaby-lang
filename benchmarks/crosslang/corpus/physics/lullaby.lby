@@ -1,0 +1,79 @@
+# Cross-language physics suite (Lullaby). Integer physics & unit conversions.
+# All math is scaled-integer (no floats): temperatures are tenths (x10),
+# distances/speeds use fixed scale factors, energy uses g = 10 m/s^2.
+
+fn distance_uniform v i64 t i64 -> i64
+    v * t
+
+fn distance_accel v i64 t i64 a i64 -> i64
+    v * t + a * t * t / 2
+
+fn final_velocity v i64 a i64 t i64 -> i64
+    v + a * t
+
+fn kinetic_energy_x2 m i64 v i64 -> i64
+    m * v * v
+
+fn momentum m i64 v i64 -> i64
+    m * v
+
+fn force m i64 a i64 -> i64
+    m * a
+
+fn work f i64 d i64 -> i64
+    f * d
+
+fn power_watts work i64 t i64 -> i64
+    work / t
+
+fn pressure f i64 area i64 -> i64
+    if area == 0
+        return 0
+    f / area
+
+fn density mass i64 vol i64 -> i64
+    mass / vol
+
+fn celsius_to_fahrenheit_x10 c i64 -> i64
+    c * 18 + 320
+
+fn fahrenheit_to_celsius_x10 f i64 -> i64
+    (f - 32) * 100 / 18
+
+fn celsius_to_kelvin_x10 c i64 -> i64
+    c * 10 + 2732
+
+fn km_to_miles_scaled km i64 -> i64
+    km * 621 / 1000
+
+fn miles_to_km_scaled mi i64 -> i64
+    mi * 1609 / 1000
+
+fn mps_to_kmh mps i64 -> i64
+    mps * 36 / 10
+
+fn gravity_fall_dist t i64 -> i64
+    5 * t * t
+
+fn potential_energy m i64 h i64 -> i64
+    m * 10 * h
+
+fn main -> void
+    println("distance_uniform=" + to_string(distance_uniform(60, 2)))
+    println("distance_accel=" + to_string(distance_accel(10, 4, 3)))
+    println("final_velocity=" + to_string(final_velocity(5, 3, 4)))
+    println("kinetic_energy_x2=" + to_string(kinetic_energy_x2(4, 5)))
+    println("momentum=" + to_string(momentum(8, 3)))
+    println("force=" + to_string(force(10, 9)))
+    println("work=" + to_string(work(50, 4)))
+    println("power_watts=" + to_string(power_watts(1000, 4)))
+    println("pressure=" + to_string(pressure(200, 4)))
+    println("density=" + to_string(density(1000, 8)))
+    println("celsius_to_fahrenheit_x10=" + to_string(celsius_to_fahrenheit_x10(25)))
+    println("fahrenheit_to_celsius_x10=" + to_string(fahrenheit_to_celsius_x10(77)))
+    println("celsius_to_kelvin_x10=" + to_string(celsius_to_kelvin_x10(25)))
+    println("km_to_miles_scaled=" + to_string(km_to_miles_scaled(100)))
+    println("miles_to_km_scaled=" + to_string(miles_to_km_scaled(100)))
+    println("mps_to_kmh=" + to_string(mps_to_kmh(10)))
+    println("gravity_fall_dist=" + to_string(gravity_fall_dist(3)))
+    println("potential_energy=" + to_string(potential_energy(2, 10)))

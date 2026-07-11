@@ -1,0 +1,282 @@
+# Cross-language string-algorithms suite (Lullaby). Classic string algorithms
+# expressed over i64 ARRAYS of character codes, NOT string types, so all six
+# languages run the identical array algorithm and Lullaby's string-builtin gaps
+# do not distort the comparison. Arrays pass by value, so each function receives
+# a private copy.
+#
+# LANGUAGE GAP (dynamic programming buffer): edit_distance and lcs_length need a
+# rolling DP row of length lb+1. Lullaby has no sized-array allocation
+# (`array<i64>` of a runtime length) and rejects the empty literal `[]`, so the
+# idiomatic `vec![0; lb+1]` / `int dp[lb+1]` of the other languages has no direct
+# equivalent. The workaround is a fixed-capacity 64-element array literal indexed
+# up to lb; it is correct for lb <= 63. A real sized-array or fill builtin
+# (e.g. `array_fill(n, 0)`) would remove the 64-element literal entirely.
+
+fn edit_distance a array<i64> la i64 b array<i64> lb i64 -> i64
+    # Levenshtein distance via a single rolling row (capacity 64; needs lb <= 63).
+    let dp array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for j from 0 to lb
+        dp[j] = j
+    for i from 1 to la
+        let prev i64 = dp[0]
+        dp[0] = i
+        for j from 1 to lb
+            let tmp i64 = dp[j]
+            if a[i - 1] == b[j - 1]
+                dp[j] = prev
+            else
+                let m i64 = dp[j - 1]
+                if dp[j] < m
+                    m = dp[j]
+                if prev < m
+                    m = prev
+                dp[j] = m + 1
+            prev = tmp
+    dp[lb]
+
+fn lcs_length a array<i64> la i64 b array<i64> lb i64 -> i64
+    # Longest common subsequence length via a single rolling row (needs lb <= 63).
+    let dp array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for j from 0 to lb
+        dp[j] = 0
+    for i from 1 to la
+        let prev i64 = 0
+        for j from 1 to lb
+            let tmp i64 = dp[j]
+            if a[i - 1] == b[j - 1]
+                dp[j] = prev + 1
+            else
+                if dp[j - 1] > dp[j]
+                    dp[j] = dp[j - 1]
+            prev = tmp
+    dp[lb]
+
+fn hamming_distance a array<i64> b array<i64> n i64 -> i64
+    let d i64 = 0
+    for i from 0 to n - 1
+        if a[i] != b[i]
+            d += 1
+    d
+
+fn longest_common_prefix_len a array<i64> la i64 b array<i64> lb i64 -> i64
+    let m i64 = la
+    if lb < m
+        m = lb
+    let i i64 = 0
+    while i < m
+        if a[i] != b[i]
+            return i
+        i += 1
+    i
+
+fn count_occurrences text array<i64> tn i64 pat array<i64> pn i64 -> i64
+    # Naive substring count (overlapping matches allowed).
+    if pn == 0
+        return 0
+    let count i64 = 0
+    let i i64 = 0
+    while i <= tn - pn
+        let j i64 = 0
+        let ok i64 = 1
+        while j < pn
+            if text[i + j] != pat[j]
+                ok = 0
+                j = pn
+            else
+                j += 1
+        if ok == 1
+            count += 1
+        i += 1
+    count
+
+fn is_rotation a array<i64> b array<i64> n i64 -> i64
+    # b is a rotation of a when some offset k makes b[i] == a[(i+k) mod n].
+    # No `%` operator, so the wrap is a single subtraction (i+k < 2n).
+    if n == 0
+        return 1
+    let k i64 = 0
+    while k < n
+        let ok i64 = 1
+        let i i64 = 0
+        while i < n
+            let idx i64 = i + k
+            if idx >= n
+                idx = idx - n
+            if a[idx] != b[i]
+                ok = 0
+                i = n
+            else
+                i += 1
+        if ok == 1
+            return 1
+        k += 1
+    0
+
+fn is_anagram_sorted a array<i64> b array<i64> n i64 -> i64
+    # Both inputs are already sorted, so equality is an elementwise compare.
+    for i from 0 to n - 1
+        if a[i] != b[i]
+            return 0
+    1
+
+fn longest_run a array<i64> n i64 -> i64
+    if n == 0
+        return 0
+    let best i64 = 1
+    let cur i64 = 1
+    for i from 1 to n - 1
+        if a[i] == a[i - 1]
+            cur += 1
+        else
+            cur = 1
+        if cur > best
+            best = cur
+    best
+
+fn count_transitions a array<i64> n i64 -> i64
+    let c i64 = 0
+    for i from 1 to n - 1
+        if a[i] != a[i - 1]
+            c += 1
+    c
+
+fn first_unique_index a array<i64> n i64 -> i64
+    for i from 0 to n - 1
+        let count i64 = 0
+        for j from 0 to n - 1
+            if a[j] == a[i]
+                count += 1
+        if count == 1
+            return i
+    0 - 1
+
+fn palindrome_check a array<i64> n i64 -> i64
+    let i i64 = 0
+    let j i64 = n - 1
+    while i < j
+        if a[i] != a[j]
+            return 0
+        i += 1
+        j -= 1
+    1
+
+fn longest_increasing_run a array<i64> n i64 -> i64
+    if n == 0
+        return 0
+    let best i64 = 1
+    let cur i64 = 1
+    for i from 1 to n - 1
+        if a[i] > a[i - 1]
+            cur += 1
+        else
+            cur = 1
+        if cur > best
+            best = cur
+    best
+
+fn count_distinct_chars a array<i64> n i64 -> i64
+    # Input is sorted, so distinct values are the boundaries between runs.
+    if n == 0
+        return 0
+    let count i64 = 1
+    for i from 1 to n - 1
+        if a[i] != a[i - 1]
+            count += 1
+    count
+
+fn max_char_frequency a array<i64> n i64 -> i64
+    # Input is sorted, so the most frequent value is the longest run.
+    if n == 0
+        return 0
+    let best i64 = 1
+    let cur i64 = 1
+    for i from 1 to n - 1
+        if a[i] == a[i - 1]
+            cur += 1
+        else
+            cur = 1
+        if cur > best
+            best = cur
+    best
+
+fn common_char_count a array<i64> la i64 b array<i64> lb i64 -> i64
+    # Multiset intersection size via a merge walk (both inputs sorted).
+    let i i64 = 0
+    let j i64 = 0
+    let count i64 = 0
+    while i < la and j < lb
+        if a[i] == b[j]
+            count += 1
+            i += 1
+            j += 1
+        elif a[i] < b[j]
+            i += 1
+        else
+            j += 1
+    count
+
+fn reverse_equal a array<i64> n i64 -> i64
+    # Whether the array equals its own reverse (two-pointer scan).
+    let i i64 = 0
+    let j i64 = n - 1
+    while i < j
+        if a[i] != a[j]
+            return 0
+        i += 1
+        j -= 1
+    1
+
+fn run_length_pairs a array<i64> n i64 -> i64
+    # Number of (value, count) pairs a run-length encoding would emit.
+    if n == 0
+        return 0
+    let pairs i64 = 1
+    for i from 1 to n - 1
+        if a[i] != a[i - 1]
+            pairs += 1
+    pairs
+
+fn starts_with_arr text array<i64> tn i64 pre array<i64> pn i64 -> i64
+    if pn > tn
+        return 0
+    for i from 0 to pn - 1
+        if text[i] != pre[i]
+            return 0
+    1
+
+fn main -> void
+    let kit array<i64> = [107, 105, 116, 116, 101, 110]
+    let sit array<i64> = [115, 105, 116, 116, 105, 110, 103]
+    let r1 array<i64> = [97, 98, 99, 100, 101]
+    let r2 array<i64> = [97, 98, 122, 100, 101]
+    let rota array<i64> = [97, 98, 99, 100, 101, 102]
+    let rotb array<i64> = [99, 100, 101, 102, 97, 98]
+    let an array<i64> = [97, 97, 98, 98, 99]
+    let run array<i64> = [1, 1, 1, 2, 2, 3]
+    let fu array<i64> = [1, 2, 2, 3, 1, 4]
+    let pal array<i64> = [1, 2, 3, 2, 1]
+    let inc array<i64> = [1, 2, 3, 1, 2]
+    let sd array<i64> = [1, 1, 2, 3, 3, 3]
+    let c1 array<i64> = [1, 2, 2, 3, 5]
+    let c2 array<i64> = [2, 2, 3, 4]
+    let occt array<i64> = [1, 2, 1, 2, 1]
+    let occp array<i64> = [1, 2]
+    let pre array<i64> = [107, 105, 116]
+    println("edit_distance=" + to_string(edit_distance(kit, 6, sit, 7)))
+    println("lcs_length=" + to_string(lcs_length(kit, 6, sit, 7)))
+    println("hamming_distance=" + to_string(hamming_distance(r1, r2, 5)))
+    println("longest_common_prefix_len=" + to_string(longest_common_prefix_len(kit, 6, pre, 3)))
+    println("count_occurrences=" + to_string(count_occurrences(occt, 5, occp, 2)))
+    println("is_rotation=" + to_string(is_rotation(rota, rotb, 6)))
+    println("is_anagram_sorted=" + to_string(is_anagram_sorted(an, an, 5)))
+    println("longest_run=" + to_string(longest_run(run, 6)))
+    println("count_transitions=" + to_string(count_transitions(run, 6)))
+    println("first_unique_index=" + to_string(first_unique_index(fu, 6)))
+    println("palindrome_check=" + to_string(palindrome_check(pal, 5)))
+    println("longest_increasing_run=" + to_string(longest_increasing_run(inc, 5)))
+    println("count_distinct_chars=" + to_string(count_distinct_chars(sd, 6)))
+    println("max_char_frequency=" + to_string(max_char_frequency(sd, 6)))
+    println("common_char_count=" + to_string(common_char_count(c1, 5, c2, 4)))
+    println("reverse_equal=" + to_string(reverse_equal(pal, 5)))
+    println("run_length_pairs=" + to_string(run_length_pairs(run, 6)))
+    println("starts_with_arr=" + to_string(starts_with_arr(kit, 6, pre, 3)))

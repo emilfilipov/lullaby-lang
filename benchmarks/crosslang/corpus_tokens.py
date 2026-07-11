@@ -23,10 +23,10 @@ ENC = tiktoken.get_encoding("o200k_base")
 ROOT = Path(__file__).resolve().parent
 CORPUS = ROOT / "corpus"
 
-LANGS = ["Lullaby", "C", "C++", "Rust", "Python"]
-EXT = {"Lullaby": "lullaby.lby", "C": "c.c", "C++": "cpp.cpp", "Rust": "rust.rs", "Python": "python.py"}
-KIND = {"Lullaby": "lullaby", "C": "clike", "C++": "clike", "Rust": "rust", "Python": "python"}
-DRIVER = {"Lullaby": "fn main", "C": "int main", "C++": "int main", "Rust": "fn main", "Python": "if __name__"}
+LANGS = ["Lullaby", "C", "C++", "Rust", "Python", "JavaScript"]
+EXT = {"Lullaby": "lullaby.lby", "C": "c.c", "C++": "cpp.cpp", "Rust": "rust.rs", "Python": "python.py", "JavaScript": "js.js"}
+KIND = {"Lullaby": "lullaby", "C": "clike", "C++": "clike", "Rust": "rust", "Python": "python", "JavaScript": "clike"}
+DRIVER = {"Lullaby": "fn main", "C": "int main", "C++": "int main", "Rust": "fn main", "Python": "if __name__", "JavaScript": "function main"}
 
 
 def strip_comments(text, kind):
@@ -129,7 +129,8 @@ if CORPUS.exists():
             categories[d.name] = {lang: d / EXT[lang] for lang in LANGS}
 # legacy scalar suite -> numeric_basics
 scalar = {lang: ROOT / {"Lullaby": "lullaby/scalar.lby", "C": "c/scalar.c", "C++": "cpp/scalar.cpp",
-                        "Rust": "rust/scalar.rs", "Python": "python/scalar.py"}[lang] for lang in LANGS}
+                        "Rust": "rust/scalar.rs", "Python": "python/scalar.py",
+                        "JavaScript": "js/scalar.js"}[lang] for lang in LANGS}
 if all(p.exists() for p in scalar.values()):
     categories["numeric_basics"] = scalar
 

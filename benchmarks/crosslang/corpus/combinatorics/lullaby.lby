@@ -1,0 +1,173 @@
+# Cross-language combinatorics suite (Lullaby). Counting functions, all i64.
+# Lullaby has no `%` operator; `rem` is truncating remainder (matches C's `%`).
+# Lullaby has no sized-array allocation, so `partition_count` seeds a fixed-size
+# `array<i64>` literal (indices 0..40) as its DP table — see the note there.
+
+fn rem a i64 b i64 -> i64
+    a - (a / b) * b
+
+fn factorial n i64 -> i64
+    let result i64 = 1
+    for i from 2 to n
+        result = result * i
+    result
+
+fn permutations_count n i64 r i64 -> i64
+    let result i64 = 1
+    for i from 0 to r - 1
+        result = result * (n - i)
+    result
+
+fn combinations_count n i64 r i64 -> i64
+    let result i64 = 1
+    for i from 1 to r
+        result = result * (n - r + i) / i
+    result
+
+fn catalan n i64 -> i64
+    let result i64 = 1
+    for i from 0 to n - 1
+        result = result * 2 * (2 * i + 1) / (i + 2)
+    result
+
+fn pascal_value row i64 col i64 -> i64
+    if col == 0 or col == row
+        return 1
+    pascal_value(row - 1, col - 1) + pascal_value(row - 1, col)
+
+fn tribonacci n i64 -> i64
+    if n == 0
+        return 0
+    if n <= 2
+        return 1
+    let a i64 = 0
+    let b i64 = 1
+    let c i64 = 1
+    for i from 3 to n
+        let d i64 = a + b + c
+        a = b
+        b = c
+        c = d
+    c
+
+fn lucas n i64 -> i64
+    if n == 0
+        return 2
+    if n == 1
+        return 1
+    let a i64 = 2
+    let b i64 = 1
+    for i from 2 to n
+        let c i64 = a + b
+        a = b
+        b = c
+    b
+
+fn derangement_count n i64 -> i64
+    if n == 0
+        return 1
+    if n == 1
+        return 0
+    let a i64 = 1
+    let b i64 = 0
+    for i from 2 to n
+        let c i64 = (i - 1) * (a + b)
+        a = b
+        b = c
+    b
+
+fn stirling_second n i64 k i64 -> i64
+    if k == 0 and n == 0
+        return 1
+    if k == 0 or n == 0
+        return 0
+    k * stirling_second(n - 1, k) + stirling_second(n - 1, k - 1)
+
+fn bell_number n i64 -> i64
+    let sum i64 = 0
+    for k from 0 to n
+        sum += stirling_second(n, k)
+    sum
+
+fn partition_count n i64 -> i64
+    # DP over parts. Lullaby has no sized-array alloc (no `array<i64>(len)`), so
+    # this seeds a fixed 41-element literal covering indices 0..40 (n <= 40). A
+    # growable-then-indexable structure would remove this workaround.
+    let dp array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    dp[0] = 1
+    for p from 1 to n
+        for j from p to n
+            dp[j] = dp[j] + dp[j - p]
+    dp[n]
+
+fn subfactorial n i64 -> i64
+    let d i64 = 1
+    let sign i64 = 1
+    for i from 1 to n
+        sign = -sign
+        d = i * d + sign
+    d
+
+fn binomial_mod n i64 r i64 m i64 -> i64
+    if r == 0 or r == n
+        return rem(1, m)
+    rem(binomial_mod(n - 1, r - 1, m) + binomial_mod(n - 1, r, m), m)
+
+fn fibonacci_iter n i64 -> i64
+    if n == 0
+        return 0
+    let a i64 = 0
+    let b i64 = 1
+    for i from 2 to n
+        let c i64 = a + b
+        a = b
+        b = c
+    b
+
+fn padovan n i64 -> i64
+    if n <= 2
+        return 1
+    let a i64 = 1
+    let b i64 = 1
+    let c i64 = 1
+    for i from 3 to n
+        let d i64 = b + a
+        a = b
+        b = c
+        c = d
+    c
+
+fn jacobsthal n i64 -> i64
+    if n == 0
+        return 0
+    if n == 1
+        return 1
+    let a i64 = 0
+    let b i64 = 1
+    for i from 2 to n
+        let c i64 = b + 2 * a
+        a = b
+        b = c
+    b
+
+fn pentagonal n i64 -> i64
+    n * (3 * n - 1) / 2
+
+fn main -> void
+    println("factorial(10)=" + to_string(factorial(10)))
+    println("permutations_count(10,3)=" + to_string(permutations_count(10, 3)))
+    println("combinations_count(10,3)=" + to_string(combinations_count(10, 3)))
+    println("catalan(10)=" + to_string(catalan(10)))
+    println("pascal_value(10,4)=" + to_string(pascal_value(10, 4)))
+    println("tribonacci(10)=" + to_string(tribonacci(10)))
+    println("lucas(10)=" + to_string(lucas(10)))
+    println("derangement_count(10)=" + to_string(derangement_count(10)))
+    println("bell_number(10)=" + to_string(bell_number(10)))
+    println("stirling_second(10,3)=" + to_string(stirling_second(10, 3)))
+    println("partition_count(40)=" + to_string(partition_count(40)))
+    println("subfactorial(10)=" + to_string(subfactorial(10)))
+    println("binomial_mod(20,10,1000)=" + to_string(binomial_mod(20, 10, 1000)))
+    println("fibonacci_iter(20)=" + to_string(fibonacci_iter(20)))
+    println("padovan(12)=" + to_string(padovan(12)))
+    println("jacobsthal(10)=" + to_string(jacobsthal(10)))
+    println("pentagonal(10)=" + to_string(pentagonal(10)))

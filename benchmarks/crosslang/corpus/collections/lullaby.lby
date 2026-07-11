@@ -1,0 +1,234 @@
+# Cross-language collections suite (Lullaby). Array-as-collection algorithms:
+# frequency, grouping, and set-like operations over an i64 array and a length.
+# No maps are used so the code stays native-friendly: everything is done by
+# counting and scanning, relying on sorted inputs where noted. Arrays pass by
+# value, so a function receives a private copy it may reorder freely.
+
+# Lullaby has no `%` operator, so remainder is a small helper (a real gap).
+fn rem a i64 b i64 -> i64
+    a - (a / b) * b
+
+fn count_frequency_of a array<i64> n i64 x i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        if a[i] == x
+            count += 1
+    count
+
+# a is sorted; returns the length of the longest run of equal values.
+fn max_frequency a array<i64> n i64 -> i64
+    if n == 0
+        return 0
+    let best i64 = 1
+    let run i64 = 1
+    for i from 1 to n - 1
+        if a[i] == a[i - 1]
+            run += 1
+        else
+            run = 1
+        if run > best
+            best = run
+    best
+
+# a is sorted; returns the first value that repeats, or -1 if all distinct.
+fn first_duplicate_value a array<i64> n i64 -> i64
+    for i from 1 to n - 1
+        if a[i] == a[i - 1]
+            return a[i]
+    0 - 1
+
+# a is sorted; two-pointer scan for a pair summing to target.
+fn has_pair_sum a array<i64> n i64 target i64 -> i64
+    let lo i64 = 0
+    let hi i64 = n - 1
+    while lo < hi
+        let s i64 = a[lo] + a[hi]
+        if s == target
+            return 1
+        elif s < target
+            lo = lo + 1
+        else
+            hi = hi - 1
+    0
+
+fn count_distinct_sorted a array<i64> n i64 -> i64
+    if n == 0
+        return 0
+    let count i64 = 1
+    for i from 1 to n - 1
+        if a[i] != a[i - 1]
+            count += 1
+    count
+
+# a is sorted; returns the value owning the longest run.
+fn most_common_sorted a array<i64> n i64 -> i64
+    let best_val i64 = a[0]
+    let best i64 = 1
+    let run i64 = 1
+    for i from 1 to n - 1
+        if a[i] == a[i - 1]
+            run += 1
+        else
+            run = 1
+        if run > best
+            best = run
+            best_val = a[i]
+    best_val
+
+fn count_even a array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        if rem(a[i], 2) == 0
+            count += 1
+    count
+
+fn count_odd a array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        if rem(a[i], 2) != 0
+            count += 1
+    count
+
+# a is sorted; first index whose value is >= 0 (n if none).
+fn partition_point a array<i64> n i64 -> i64
+    for i from 0 to n - 1
+        if a[i] >= 0
+            return i
+    n
+
+fn count_in_range a array<i64> n i64 lo i64 hi i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        if a[i] >= lo and a[i] <= hi
+            count += 1
+    count
+
+fn running_total_last a array<i64> n i64 -> i64
+    let total i64 = 0
+    for i from 0 to n - 1
+        total += a[i]
+    total
+
+fn zip_sum a array<i64> b array<i64> n i64 -> i64
+    let sum i64 = 0
+    for i from 0 to n - 1
+        sum += a[i] + b[i]
+    sum
+
+# Both sorted; count elements common to both (two-pointer merge).
+fn intersect_count_sorted a array<i64> la i64 b array<i64> lb i64 -> i64
+    let i i64 = 0
+    let j i64 = 0
+    let count i64 = 0
+    while i < la and j < lb
+        if a[i] == b[j]
+            count += 1
+            i = i + 1
+            j = j + 1
+        elif a[i] < b[j]
+            i = i + 1
+        else
+            j = j + 1
+    count
+
+# Both distinct-sorted; size of the union.
+fn union_count_sorted a array<i64> la i64 b array<i64> lb i64 -> i64
+    let i i64 = 0
+    let j i64 = 0
+    let count i64 = 0
+    while i < la and j < lb
+        if a[i] == b[j]
+            count += 1
+            i = i + 1
+            j = j + 1
+        elif a[i] < b[j]
+            count += 1
+            i = i + 1
+        else
+            count += 1
+            j = j + 1
+    while i < la
+        count += 1
+        i = i + 1
+    while j < lb
+        count += 1
+        j = j + 1
+    count
+
+# Both distinct-sorted; 1 if every element of a is present in b.
+fn is_subset_sorted a array<i64> la i64 b array<i64> lb i64 -> i64
+    let i i64 = 0
+    let j i64 = 0
+    while i < la and j < lb
+        if a[i] == b[j]
+            i = i + 1
+            j = j + 1
+        elif a[i] > b[j]
+            j = j + 1
+        else
+            return 0
+    if i < la
+        return 0
+    1
+
+# Rotate left by k, then checksum sum(i * value). Uses no extra storage.
+fn rotate_left_checksum a array<i64> n i64 k i64 -> i64
+    let shift i64 = rem(k, n)
+    let sum i64 = 0
+    for i from 0 to n - 1
+        let idx i64 = i + shift
+        if idx >= n
+            idx = idx - n
+        sum += i * a[idx]
+    sum
+
+# a is sorted; checksum sum(pos * value) over the distinct values in order.
+fn dedup_sorted_checksum a array<i64> n i64 -> i64
+    if n == 0
+        return 0
+    let sum i64 = 0
+    let pos i64 = 0
+    let prev i64 = a[0]
+    for i from 1 to n - 1
+        if a[i] != prev
+            pos = pos + 1
+            sum += pos * a[i]
+            prev = a[i]
+    sum
+
+# Maximum sum of any k consecutive elements (sliding window).
+fn chunk_sum_max a array<i64> n i64 k i64 -> i64
+    let window i64 = 0
+    for i from 0 to k - 1
+        window += a[i]
+    let best i64 = window
+    for i from k to n - 1
+        window += a[i] - a[i - k]
+        if window > best
+            best = window
+    best
+
+fn main -> void
+    let a array<i64> = [0 - 5, 0 - 2, 0 - 2, 0, 1, 1, 1, 4, 7, 7]
+    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    let c array<i64> = [1, 3, 5, 7, 9]
+    let d array<i64> = [2, 3, 5, 8, 9]
+    let e array<i64> = [3, 5, 9]
+    println("count_frequency_of=" + to_string(count_frequency_of(a, 10, 1)))
+    println("max_frequency=" + to_string(max_frequency(a, 10)))
+    println("first_duplicate_value=" + to_string(first_duplicate_value(a, 10)))
+    println("has_pair_sum=" + to_string(has_pair_sum(a, 10, 2)))
+    println("count_distinct_sorted=" + to_string(count_distinct_sorted(a, 10)))
+    println("most_common_sorted=" + to_string(most_common_sorted(a, 10)))
+    println("count_even=" + to_string(count_even(a, 10)))
+    println("count_odd=" + to_string(count_odd(a, 10)))
+    println("partition_point=" + to_string(partition_point(a, 10)))
+    println("count_in_range=" + to_string(count_in_range(a, 10, 0 - 2, 1)))
+    println("running_total_last=" + to_string(running_total_last(a, 10)))
+    println("zip_sum=" + to_string(zip_sum(a, b, 10)))
+    println("intersect_count_sorted=" + to_string(intersect_count_sorted(c, 5, d, 5)))
+    println("union_count_sorted=" + to_string(union_count_sorted(c, 5, d, 5)))
+    println("is_subset_sorted=" + to_string(is_subset_sorted(e, 3, d, 5)))
+    println("rotate_left_checksum=" + to_string(rotate_left_checksum(b, 10, 3)))
+    println("dedup_sorted_checksum=" + to_string(dedup_sorted_checksum(a, 10)))
+    println("chunk_sum_max=" + to_string(chunk_sum_max(b, 10, 3)))

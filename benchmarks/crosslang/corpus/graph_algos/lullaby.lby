@@ -1,0 +1,188 @@
+# Cross-language graph-algorithm suite (Lullaby). A directed graph on n vertices
+# is stored as a flat row-major adjacency matrix `g` (array<i64> of length n*n):
+# g[r * n + c] == 1 means an edge r -> c, else 0. Undirected graphs are the
+# symmetric special case. Lullaby arrays pass by value, so read-only helpers are
+# safe to call; the BFS routines mutate LOCAL buffers only.
+#
+# Lullaby gap notes:
+#   - No `%` operator, but none of these functions need modulo, so no `rem` helper.
+#   - No sized-array allocation and no empty `[]` literal, so the BFS visited/queue
+#     buffers are FIXED-capacity 64-element array literals indexed up to n. The test
+#     graphs keep n <= 6, well under the 64-vertex capacity.
+
+fn has_edge g array<i64> n i64 r i64 c i64 -> i64
+    g[r * n + c]
+
+fn out_degree g array<i64> n i64 v i64 -> i64
+    let sum i64 = 0
+    for c from 0 to n - 1
+        sum += g[v * n + c]
+    sum
+
+fn in_degree g array<i64> n i64 v i64 -> i64
+    let sum i64 = 0
+    for r from 0 to n - 1
+        sum += g[r * n + v]
+    sum
+
+fn total_degree g array<i64> n i64 v i64 -> i64
+    out_degree(g, n, v) + in_degree(g, n, v)
+
+fn count_self_loops g array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        count += g[i * n + i]
+    count
+
+fn edge_count_directed g array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n * n - 1
+        count += g[i]
+    count
+
+fn edge_count_undirected g array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        for j from i + 1 to n - 1
+            if g[i * n + j] == 1
+                count += 1
+    count
+
+fn is_complete_graph g array<i64> n i64 -> i64
+    for i from 0 to n - 1
+        for j from 0 to n - 1
+            if i != j
+                if g[i * n + j] != 1
+                    return 0
+    1
+
+fn is_symmetric g array<i64> n i64 -> i64
+    for i from 0 to n - 1
+        for j from 0 to n - 1
+            if g[i * n + j] != g[j * n + i]
+                return 0
+    1
+
+fn count_triangles g array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        for j from i + 1 to n - 1
+            for k from j + 1 to n - 1
+                if g[i * n + j] == 1
+                    if g[j * n + k] == 1
+                        if g[i * n + k] == 1
+                            count += 1
+    count
+
+fn max_degree_vertex g array<i64> n i64 -> i64
+    let best_v i64 = 0
+    let best_d i64 = out_degree(g, n, 0)
+    for v from 1 to n - 1
+        let d i64 = out_degree(g, n, v)
+        if d > best_d
+            best_d = d
+            best_v = v
+    best_v
+
+fn count_isolated_vertices g array<i64> n i64 -> i64
+    let count i64 = 0
+    for v from 0 to n - 1
+        if total_degree(g, n, v) == 0
+            count += 1
+    count
+
+fn count_leaves g array<i64> n i64 -> i64
+    let count i64 = 0
+    for v from 0 to n - 1
+        if out_degree(g, n, v) == 1
+            count += 1
+    count
+
+fn path_exists_len2 g array<i64> n i64 s i64 t i64 -> i64
+    for k from 0 to n - 1
+        if g[s * n + k] == 1
+            if g[k * n + t] == 1
+                return 1
+    0
+
+fn common_neighbors_count g array<i64> n i64 a i64 b i64 -> i64
+    let count i64 = 0
+    for k from 0 to n - 1
+        if g[a * n + k] == 1
+            if g[b * n + k] == 1
+                count += 1
+    count
+
+fn is_regular g array<i64> n i64 -> i64
+    let d0 i64 = out_degree(g, n, 0)
+    for v from 1 to n - 1
+        if out_degree(g, n, v) != d0
+            return 0
+    1
+
+fn reachable_count_bfs g array<i64> n i64 start i64 -> i64
+    let visited array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let queue array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let head i64 = 0
+    let tail i64 = 0
+    visited[start] = 1
+    queue[tail] = start
+    tail += 1
+    let count i64 = 0
+    while head < tail
+        let v i64 = queue[head]
+        head += 1
+        count += 1
+        for c from 0 to n - 1
+            if g[v * n + c] == 1
+                if visited[c] == 0
+                    visited[c] = 1
+                    queue[tail] = c
+                    tail += 1
+    count
+
+fn connected_components_count g array<i64> n i64 -> i64
+    let visited array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let queue array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let components i64 = 0
+    for s from 0 to n - 1
+        if visited[s] == 0
+            components += 1
+            let head i64 = 0
+            let tail i64 = 0
+            visited[s] = 1
+            queue[0] = s
+            tail = 1
+            while head < tail
+                let v i64 = queue[head]
+                head += 1
+                for c from 0 to n - 1
+                    if g[v * n + c] == 1
+                        if visited[c] == 0
+                            visited[c] = 1
+                            queue[tail] = c
+                            tail += 1
+    components
+
+fn main -> void
+    let g array<i64> = [0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]
+    let sym array<i64> = [0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+    let comp array<i64> = [0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0]
+    println("has_edge=" + to_string(has_edge(g, 6, 0, 2)))
+    println("out_degree=" + to_string(out_degree(g, 6, 0)))
+    println("in_degree=" + to_string(in_degree(g, 6, 3)))
+    println("total_degree=" + to_string(total_degree(g, 6, 2)))
+    println("count_self_loops=" + to_string(count_self_loops(g, 6)))
+    println("edge_count_directed=" + to_string(edge_count_directed(g, 6)))
+    println("edge_count_undirected=" + to_string(edge_count_undirected(sym, 6)))
+    println("is_complete_graph=" + to_string(is_complete_graph(comp, 4)))
+    println("is_symmetric=" + to_string(is_symmetric(g, 6)))
+    println("count_triangles=" + to_string(count_triangles(sym, 6)))
+    println("max_degree_vertex=" + to_string(max_degree_vertex(sym, 6)))
+    println("count_isolated_vertices=" + to_string(count_isolated_vertices(sym, 6)))
+    println("count_leaves=" + to_string(count_leaves(sym, 6)))
+    println("path_exists_len2=" + to_string(path_exists_len2(sym, 6, 0, 1)))
+    println("common_neighbors_count=" + to_string(common_neighbors_count(sym, 6, 0, 1)))
+    println("is_regular=" + to_string(is_regular(comp, 4)))
+    println("reachable_count_bfs=" + to_string(reachable_count_bfs(sym, 6, 0)))
+    println("connected_components_count=" + to_string(connected_components_count(sym, 6)))

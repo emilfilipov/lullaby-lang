@@ -131,8 +131,8 @@ footer{border-top:1px solid var(--line);color:var(--muted);font-size:.85rem;padd
   <div class="head">
     <div>
       <div class="brand"><span class="wordmark">lullaby</span><span class="sub">cross-language benchmark</span></div>
-      <h1 class="title">Tokens &amp; performance vs C, C++, Rust, Python</h1>
-      <p class="lead">Every function implemented identically in five languages. How many tokens an LLM spends to write the same logic, and how fast the compiled result runs.</p>
+      <h1 class="title">Tokens &amp; performance vs C, C++, Rust, Python, JavaScript</h1>
+      <p class="lead">Every function implemented identically in six languages. How many tokens an LLM spends to write the same logic, and how fast the compiled result runs.</p>
     </div>
     <button class="toggle" id="themeBtn" aria-label="Toggle theme"> theme</button>
   </div>
@@ -186,17 +186,18 @@ footer{border-top:1px solid var(--line);color:var(--muted);font-size:.85rem;padd
   <div class="panel" id="p-findings" role="tabpanel" hidden>
     <div class="prose">
       <div class="h2row"><h2>What the numbers say</h2></div>
-      <div class="callout"><strong>Headline.</strong> Across 204 real-world functions, Lullaby is <strong>terser than C and C++</strong> (4-6% fewer tokens) and <strong>on par with Rust</strong>, while its native code runs within <strong>~1.2-1.6x of C</strong> and <strong>17-27x faster than CPython</strong>. It is <em>not</em> "half the tokens of C"  -  that isn't borne out. The real, defensible claim is <em>as terse as the tersest systems language (Rust), ahead of C/C++, at near-C speed</em>.</p></div>
+      <div class="callout"><strong>Headline.</strong> Across 417 real-world functions in six languages, Lullaby is <strong>the tersest of the compiled/systems languages</strong>  -  7% fewer tokens than C, 11% fewer than C++, and slightly ahead of Rust  -  while its native code runs within <strong>~1.2-1.6x of C</strong> and <strong>17-27x faster than CPython</strong>. The two dynamically-typed languages are terser still: <strong>Python by 21%, JavaScript by 9%</strong> (no type annotations to spend tokens on). It is <em>not</em> "half the tokens of C"  -  that isn't borne out. The real, defensible claim is <em>the tersest statically-typed systems language here, at near-C speed</em>.</p></div>
       <h3>Tokens</h3>
-      <p><strong>Python is the tersest overall</strong> (dynamic typing, no annotations)  -  25% fewer tokens  -  and Lullaby cannot match it on scripting-shaped code. Among the languages Lullaby actually competes with on performance  -  C, C++, Rust  -  it is <strong>the joint-tersest</strong>: level with Rust, and 4-6% ahead of C/C++.</p>
-      <p>The advantage is <strong>uneven and instructive</strong>. Lullaby is at its best on <strong>structured, branch-heavy logic</strong>: enum + <code>match</code> state machines, record/struct math, numeric business logic. It is at its <strong>worst on text processing and validation</strong>, where three concrete language gaps inflate its token count (see Language gaps): no <code>%</code> operator, no string <code>+=</code>, and no direct character indexing.</p>
+      <p><strong>Python is the tersest overall</strong> (dynamic typing, no annotations)  -  21% fewer tokens  -  with <strong>JavaScript second</strong> (9% fewer); Lullaby cannot match the untyped languages on scripting-shaped code. But among the languages Lullaby actually competes with on <em>performance</em>  -  C, C++, Rust  -  it is <strong>the tersest</strong>: 7% ahead of C, 11% ahead of C++, and marginally ahead of Rust. Static typing plus indentation-only blocks buys back most of what the annotations cost.</p>
+      <p>The advantage is <strong>uneven and instructive</strong>. Lullaby is at its best on <strong>structured, branch-heavy logic</strong>: enum + <code>match</code> state machines, record/struct math, numeric business logic, sorting. It is at its <strong>worst on text/string-heavy code</strong> (parsing, string algorithms, validation), where concrete language gaps inflate its token count (see Language gaps): no <code>%</code> operator, no sized-array allocation, and limited string ergonomics.</p>
       <h3>Performance</h3>
       <p>Lullaby's native backend clusters with C/C++/Rust (all ~1x) and leaves CPython far behind. The remaining gap to C is <strong>optimizer maturity, not language design</strong>  -  the same campaign already moved native fib from 1.72x to 1.2x C and loops from 5.6x to 2.1x C with register allocation. Interpreted tiers (ast/ir/bytecode) are ~200-1200x C and are dev-time tools, not the performance story.</p>
       <h3>Honest caveats</h3>
       <ul>
         <li>The corpus is deterministic integer/string logic  -  it deliberately excludes GC-pressure, heavy generics, and async, where the picture would differ.</li>
         <li>Every implementation is written idiomatic-but-minimal in each language (not code-golfed), and every Lullaby file passes <code>lullaby check</code>. Tokens count definitions only.</li>
-        <li>Python's `%`/floor-division coincide with the others only because inputs are non-negative.</li>
+        <li>Integer-division semantics are aligned across languages: JavaScript uses <code>Math.trunc</code>, and Python's <code>//</code>/<code>%</code> coincide with C-style truncation only because inputs are non-negative.</li>
+        <li>JavaScript runs on Node (no compiled/native tier here), so it appears in the token comparison but not the performance one.</li>
       </ul>
     </div>
   </div>
@@ -225,8 +226,8 @@ footer{border-top:1px solid var(--line);color:var(--muted);font-size:.85rem;padd
 </div></footer>
 
 <script>
-const LANGCOLOR={Lullaby:'var(--cLullaby)',C:'var(--cC)','C++':'var(--cCpp)',Rust:'var(--cRust)',Python:'var(--cPython)'};
-const RAWC={Lullaby:'#8b6ff0',C:'#64748b','C++':'#4f46e5',Rust:'#e06a3b',Python:'#3f7ca8'};
+const LANGCOLOR={Lullaby:'var(--cLullaby)',C:'var(--cC)','C++':'var(--cCpp)',Rust:'var(--cRust)',Python:'var(--cPython)',JavaScript:'#c99a06'};
+const RAWC={Lullaby:'#8b6ff0',C:'#64748b','C++':'#4f46e5',Rust:'#e06a3b',Python:'#3f7ca8',JavaScript:'#c99a06'};
 const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const D=JSON.parse(document.getElementById('corpus-data').textContent);
 const P=JSON.parse(document.getElementById('perf-data').textContent);
@@ -327,9 +328,9 @@ function bar(label,val,max,color,valtext){
 /* ---------- gaps ---------- */
 const GAPS=[
   {t:'No <code>%</code> (modulo) operator',tok:1,perf:1,eff:'feature',d:'Every modulo is a <code>rem(a,b)=a-(a/b)*b</code> helper plus a call  -  extra tokens across validation, encoding, datetime, number-theory, and a div+mul+sub at runtime where C emits one <code>idiv</code>. A native <code>%</code> fixes both at once.'},
-  {t:'String ergonomics',tok:1,perf:0,eff:'medium',d:'No string <code>+=</code> (L0315), no character indexing (walk via <code>chars()/get()</code>), no string ordering compare (L0327). Text-processing code is Lullaby\'s worst category  -  up to ~70% more tokens than Rust. Indexable string chars + <code>+=</code> would close most of it.'},
+  {t:'Sized-array allocation / indexable lists',tok:1,perf:1,eff:'feature',d:'No runtime-sized array (<code>array&lt;i64&gt;(n)</code>) and no zero-fill; <code>list&lt;T&gt;</code> is growable but not indexable. Every DP table in the corpus  -  edit distance, LCS, partition counts, BFS visited/queue buffers  -  had to be faked with a <strong>fixed-capacity array literal</strong> (e.g. 64 hand-written zeros) capped at a max input size, where the other five languages just write <code>vec![0; n]</code> / <code>new Array(n).fill(0)</code>. The single biggest structural blocker: it corners whole algorithm classes into awkward, size-limited workarounds. A sized-array builtin fixes both tokens and expressiveness.'},
+  {t:'String ergonomics',tok:1,perf:0,eff:'medium',d:'No string <code>+=</code> (L0315), no character indexing (walk via <code>chars()/get()</code>), no string ordering compare (L0327). Text/parsing/string-algorithm code is Lullaby\'s worst area  -  the corpus works over i64 char-code arrays to sidestep it. Indexable string chars + <code>+=</code> would close most of it.'},
   {t:'Register allocation for <code>for</code>-loops',tok:0,perf:1,eff:'medium',d:'Scalar register promotion already lands for <code>if</code>/<code>while</code> functions; extending it to <code>for</code> induction variables removes per-iteration memory traffic in the many counting loops here (a chunk of the 1.57x prime-count gap).'},
-  {t:'Dynamic arrays / indexable lists',tok:1,perf:1,eff:'feature',d:'No runtime-sized array and <code>list&lt;T&gt;</code> is not indexable, so sieve/matrix/DP algorithms can\'t be written naturally. Blocks whole classes of real-world code and forces awkward workarounds.'},
   {t:'Function inlining (native)',tok:0,perf:1,eff:'medium',d:'Small helpers (like <code>rem</code>, <code>is_prime</code>) are real calls. Inlining non-recursive callees moves call-bound microbenchmarks toward ~1.0-1.1x C and compounds with register promotion.'},
   {t:'Boolean-returning predicates',tok:1,perf:0,eff:'small',d:'The corpus returns <code>1/0</code> i64 from predicates for cross-language uniformity, but idiomatic Lullaby <code>bool</code> + implicit truthiness in <code>if</code> would shave tokens on the many <code>is_*</code>/validators.'},
   {t:'Auto-vectorization (SIMD)',tok:0,perf:1,eff:'large',d:'Reduction/map loops (sum, dot product) are where LLVM crushes a scalar backend. The last, largest optimizer lever  -  numeric loops from ~2x toward ~1x C or better.'},

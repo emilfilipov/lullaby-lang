@@ -1,0 +1,150 @@
+// Cross-language business suite (Rust). Inventory/pricing/operations in integer cents/units.
+
+fn reorder_needed(stock: i64, threshold: i64) -> i64 {
+    if stock <= threshold {
+        1
+    } else {
+        0
+    }
+}
+
+fn stock_after(stock: i64, sold: i64, received: i64) -> i64 {
+    stock - sold + received
+}
+
+fn bulk_price(qty: i64, unit_cents: i64) -> i64 {
+    let base = qty * unit_cents;
+    if qty >= 100 {
+        return base - base * 10 / 100;
+    }
+    base
+}
+
+fn shipping_cost(weight_g: i64) -> i64 {
+    if weight_g <= 500 {
+        return 500;
+    }
+    if weight_g <= 2000 {
+        return 1000;
+    }
+    if weight_g <= 10000 {
+        return 2500;
+    }
+    5000
+}
+
+fn tax_bracket(mut income: i64) -> i64 {
+    let mut tax = 0;
+    if income > 8500000 {
+        tax += (income - 8500000) * 30 / 100;
+        income = 8500000;
+    }
+    if income > 4000000 {
+        tax += (income - 4000000) * 20 / 100;
+        income = 4000000;
+    }
+    if income > 1000000 {
+        tax += (income - 1000000) * 10 / 100;
+    }
+    tax
+}
+
+fn sales_commission(sales: i64, rate_bp: i64) -> i64 {
+    sales * rate_bp / 10000
+}
+
+fn loyalty_points(spend_cents: i64) -> i64 {
+    spend_cents / 100
+}
+
+fn discount_tier(qty: i64) -> i64 {
+    if qty >= 100 {
+        return 20;
+    }
+    if qty >= 50 {
+        return 10;
+    }
+    if qty >= 10 {
+        return 5;
+    }
+    0
+}
+
+fn unit_price(total_cents: i64, qty: i64) -> i64 {
+    if qty == 0 {
+        return 0;
+    }
+    total_cents / qty
+}
+
+fn break_even_units(fixed: i64, price: i64, var: i64) -> i64 {
+    if price <= var {
+        return 0;
+    }
+    fixed / (price - var)
+}
+
+fn gross_margin_pct(cost: i64, price: i64) -> i64 {
+    if price == 0 {
+        return 0;
+    }
+    (price - cost) * 100 / price
+}
+
+fn net_after_fees(gross: i64, fee_bp: i64) -> i64 {
+    gross - gross * fee_bp / 10000
+}
+
+fn invoice_total(subtotal: i64, tax_bp: i64, ship: i64) -> i64 {
+    subtotal + subtotal * tax_bp / 10000 + ship
+}
+
+fn late_fee(days: i64, amount: i64) -> i64 {
+    if days <= 0 {
+        return 0;
+    }
+    amount * 5 / 100 + amount * days / 100
+}
+
+fn restock_quantity(current: i64, max: i64, min: i64) -> i64 {
+    if current <= min {
+        return max - current;
+    }
+    0
+}
+
+fn profit(revenue: i64, cost: i64) -> i64 {
+    revenue - cost
+}
+
+fn roi_pct(gain: i64, cost: i64) -> i64 {
+    if cost == 0 {
+        return 0;
+    }
+    gain * 100 / cost
+}
+
+fn markup_price(cost: i64, pct: i64) -> i64 {
+    cost + cost * pct / 100
+}
+
+fn main() {
+    println!("reorder_needed={}", reorder_needed(8, 10));
+    println!("stock_after={}", stock_after(100, 30, 50));
+    println!("bulk_price={}", bulk_price(120, 500));
+    println!("shipping_cost={}", shipping_cost(1500));
+    println!("tax_bracket={}", tax_bracket(5000000));
+    println!("sales_commission={}", sales_commission(1000000, 250));
+    println!("loyalty_points={}", loyalty_points(45678));
+    println!("discount_tier={}", discount_tier(60));
+    println!("unit_price={}", unit_price(10000, 8));
+    println!("break_even_units={}", break_even_units(500000, 1500, 500));
+    println!("gross_margin_pct={}", gross_margin_pct(6000, 10000));
+    println!("net_after_fees={}", net_after_fees(100000, 290));
+    println!("invoice_total={}", invoice_total(50000, 825, 1000));
+    println!("late_fee={}", late_fee(5, 20000));
+    println!("restock_quantity={}", restock_quantity(5, 100, 10));
+    println!("profit={}", profit(120000, 90000));
+    println!("roi_pct={}", roi_pct(30000, 90000));
+    println!("markup_price={}", markup_price(5000, 40));
+}

@@ -1,0 +1,267 @@
+# Cross-language sorting suite (Lullaby). Classic sort algorithms and order
+# statistics over an i64 array and a length. Each function returns a scalar
+# (a checksum sum(i*sorted[i]), a count, or an index). Lullaby arrays pass by
+# value, so a function receives a private copy it may sort in place without
+# disturbing the caller.
+
+fn is_even x i64 -> bool
+    x - (x / 2) * 2 == 0
+
+fn checksum a array<i64> n i64 -> i64
+    let sum i64 = 0
+    for i from 0 to n - 1
+        sum += i * a[i]
+    sum
+
+fn insertion_sorted a array<i64> n i64 -> array<i64>
+    for i from 1 to n - 1
+        let key i64 = a[i]
+        let j i64 = i - 1
+        while j >= 0 and a[j] > key
+            a[j + 1] = a[j]
+            j -= 1
+        a[j + 1] = key
+    a
+
+fn insertion_sort_checksum a array<i64> n i64 -> i64
+    for i from 1 to n - 1
+        let key i64 = a[i]
+        let j i64 = i - 1
+        while j >= 0 and a[j] > key
+            a[j + 1] = a[j]
+            j -= 1
+        a[j + 1] = key
+    checksum(a, n)
+
+fn selection_sort_checksum a array<i64> n i64 -> i64
+    for i from 0 to n - 2
+        let mi i64 = i
+        for j from i + 1 to n - 1
+            if a[j] < a[mi]
+                mi = j
+        let t i64 = a[i]
+        a[i] = a[mi]
+        a[mi] = t
+    checksum(a, n)
+
+fn bubble_sort_swaps a array<i64> n i64 -> i64
+    let swaps i64 = 0
+    for i from 0 to n - 1
+        for j from 0 to n - 2 - i
+            if a[j] > a[j + 1]
+                let t i64 = a[j]
+                a[j] = a[j + 1]
+                a[j + 1] = t
+                swaps += 1
+    swaps
+
+fn gnome_sort_checksum a array<i64> n i64 -> i64
+    let i i64 = 0
+    while i < n
+        if i == 0 or a[i] >= a[i - 1]
+            i += 1
+        else
+            let t i64 = a[i]
+            a[i] = a[i - 1]
+            a[i - 1] = t
+            i -= 1
+    checksum(a, n)
+
+fn cocktail_sort_checksum a array<i64> n i64 -> i64
+    let lo i64 = 0
+    let hi i64 = n - 1
+    let swapped bool = true
+    while swapped
+        swapped = false
+        for i from lo to hi - 1
+            if a[i] > a[i + 1]
+                let t i64 = a[i]
+                a[i] = a[i + 1]
+                a[i + 1] = t
+                swapped = true
+        if not swapped
+            return checksum(a, n)
+        hi -= 1
+        swapped = false
+        let k i64 = hi - 1
+        while k >= lo
+            if a[k] > a[k + 1]
+                let u i64 = a[k]
+                a[k] = a[k + 1]
+                a[k + 1] = u
+                swapped = true
+            k -= 1
+        lo += 1
+    checksum(a, n)
+
+fn comb_sort_checksum a array<i64> n i64 -> i64
+    let gap i64 = n
+    let swapped bool = true
+    while gap > 1 or swapped
+        gap = (gap * 10) / 13
+        if gap < 1
+            gap = 1
+        swapped = false
+        for i from 0 to n - 1 - gap
+            if a[i] > a[i + gap]
+                let t i64 = a[i]
+                a[i] = a[i + gap]
+                a[i + gap] = t
+                swapped = true
+    checksum(a, n)
+
+fn count_inversions a array<i64> n i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        for j from i + 1 to n - 1
+            if a[i] > a[j]
+                count += 1
+    count
+
+fn is_sorted_desc a array<i64> n i64 -> i64
+    for i from 1 to n - 1
+        if a[i] > a[i - 1]
+            return 0
+    1
+
+fn merge_two_sorted_checksum a array<i64> la i64 b array<i64> lb i64 -> i64
+    let i i64 = 0
+    let j i64 = 0
+    let k i64 = 0
+    let sum i64 = 0
+    while i < la and j < lb
+        if a[i] <= b[j]
+            sum += k * a[i]
+            i += 1
+        else
+            sum += k * b[j]
+            j += 1
+        k += 1
+    while i < la
+        sum += k * a[i]
+        i += 1
+        k += 1
+    while j < lb
+        sum += k * b[j]
+        j += 1
+        k += 1
+    sum
+
+fn partition_lomuto_index a array<i64> n i64 -> i64
+    let pivot i64 = a[n - 1]
+    let i i64 = 0
+    for j from 0 to n - 2
+        if a[j] < pivot
+            let t i64 = a[i]
+            a[i] = a[j]
+            a[j] = t
+            i += 1
+    let u i64 = a[i]
+    a[i] = a[n - 1]
+    a[n - 1] = u
+    i
+
+fn kth_smallest a array<i64> n i64 k i64 -> i64
+    for i from 0 to k - 1
+        let mi i64 = i
+        for j from i + 1 to n - 1
+            if a[j] < a[mi]
+                mi = j
+        let t i64 = a[i]
+        a[i] = a[mi]
+        a[mi] = t
+    a[k - 1]
+
+fn count_sorted_runs a array<i64> n i64 -> i64
+    if n == 0
+        return 0
+    let runs i64 = 1
+    for i from 1 to n - 1
+        if a[i] < a[i - 1]
+            runs += 1
+    runs
+
+fn min_swaps_selection a array<i64> n i64 -> i64
+    let swaps i64 = 0
+    for i from 0 to n - 2
+        let mi i64 = i
+        for j from i + 1 to n - 1
+            if a[j] < a[mi]
+                mi = j
+        if mi != i
+            let t i64 = a[i]
+            a[i] = a[mi]
+            a[mi] = t
+            swaps += 1
+    swaps
+
+fn sorted_median a array<i64> n i64 -> i64
+    let s array<i64> = insertion_sorted(a, n)
+    s[n / 2]
+
+fn sort_evens_first_checksum a array<i64> n i64 -> i64
+    let s array<i64> = insertion_sorted(a, n)
+    let sum i64 = 0
+    let k i64 = 0
+    for i from 0 to n - 1
+        if is_even(s[i])
+            sum += k * s[i]
+            k += 1
+    for i from 0 to n - 1
+        if not is_even(s[i])
+            sum += k * s[i]
+            k += 1
+    sum
+
+fn reverse_checksum a array<i64> n i64 -> i64
+    let sum i64 = 0
+    for i from 0 to n - 1
+        sum += i * a[n - 1 - i]
+    sum
+
+fn max_gap_sorted a array<i64> n i64 -> i64
+    let s array<i64> = insertion_sorted(a, n)
+    let g i64 = 0
+    for i from 1 to n - 1
+        let d i64 = s[i] - s[i - 1]
+        if d > g
+            g = d
+    g
+
+fn second_smallest a array<i64> n i64 -> i64
+    let first i64 = a[0]
+    let second i64 = a[1]
+    if second < first
+        let t i64 = first
+        first = second
+        second = t
+    for i from 2 to n - 1
+        if a[i] < first
+            second = first
+            first = a[i]
+        elif a[i] < second
+            second = a[i]
+    second
+
+fn main -> void
+    let t array<i64> = [5, 3, 8, 1, 9, 2]
+    let p array<i64> = [1, 4, 6, 8]
+    let q array<i64> = [2, 3, 5, 7, 9]
+    println("insertion_sort_checksum=" + to_string(insertion_sort_checksum(t, 6)))
+    println("selection_sort_checksum=" + to_string(selection_sort_checksum(t, 6)))
+    println("bubble_sort_swaps=" + to_string(bubble_sort_swaps(t, 6)))
+    println("gnome_sort_checksum=" + to_string(gnome_sort_checksum(t, 6)))
+    println("cocktail_sort_checksum=" + to_string(cocktail_sort_checksum(t, 6)))
+    println("comb_sort_checksum=" + to_string(comb_sort_checksum(t, 6)))
+    println("count_inversions=" + to_string(count_inversions(t, 6)))
+    println("is_sorted_desc=" + to_string(is_sorted_desc(t, 6)))
+    println("merge_two_sorted_checksum=" + to_string(merge_two_sorted_checksum(p, 4, q, 5)))
+    println("partition_lomuto_index=" + to_string(partition_lomuto_index(t, 6)))
+    println("kth_smallest=" + to_string(kth_smallest(t, 6, 3)))
+    println("count_sorted_runs=" + to_string(count_sorted_runs(t, 6)))
+    println("min_swaps_selection=" + to_string(min_swaps_selection(t, 6)))
+    println("sorted_median=" + to_string(sorted_median(t, 6)))
+    println("sort_evens_first_checksum=" + to_string(sort_evens_first_checksum(t, 6)))
+    println("reverse_checksum=" + to_string(reverse_checksum(t, 6)))
+    println("max_gap_sorted=" + to_string(max_gap_sorted(t, 6)))
+    println("second_smallest=" + to_string(second_smallest(t, 6)))
