@@ -1,0 +1,16 @@
+# A sum reduction over an array<i64>. The native backend auto-vectorizes this
+# `for i: acc += a[i]` shape into an SSE2 packed loop; every backend computes the
+# same total (integer addition is associative mod 2^64, so the pairing order the
+# vectorizer uses does not change the result).
+fn sum_range a array<i64> lo i64 hi i64 -> i64
+    let s i64 = 0
+    for i from lo to hi
+        s += a[i]
+    s
+
+fn main -> void
+    let a array<i64> = [10, 20, 30, 40, 50, 0 - 5, 0 - 100, 7]
+    wasm_log(sum_range(a, 0, 7))
+    wasm_log(sum_range(a, 0, 0))
+    wasm_log(sum_range(a, 2, 5))
+    wasm_log(sum_range(a, 5, 4))

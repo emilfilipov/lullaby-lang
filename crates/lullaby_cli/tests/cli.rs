@@ -220,6 +220,31 @@ fn runs_modulo_across_backends() {
 }
 
 #[test]
+fn runs_sum_reduction_across_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_sum_reduction.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // Full sum 52; single 10; a[2..5] = 115; empty range 0. The native
+        // backend auto-vectorizes this shape; the total must match every backend.
+        assert_eq!(
+            stdout(&output).replace("\r\n", "\n").trim(),
+            "52\n10\n115\n0",
+            "{backend} stdout mismatch"
+        );
+    }
+}
+
+#[test]
 fn runs_string_ergonomics_across_backends() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_string_ergonomics.lby");
     for backend in ["ast", "ir", "bytecode"] {

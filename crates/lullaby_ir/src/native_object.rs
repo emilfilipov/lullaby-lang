@@ -4597,6 +4597,37 @@ fn emit_imul_rax_imm(code: &mut Vec<u8>, imm: i64) {
     code.extend_from_slice(&(imm as i32).to_le_bytes());
 }
 
+// -- SSE2 integer-SIMD encoders (auto-vectorization) -------------------------
+//
+// x86-64 always provides SSE2, so these need no feature check. They operate on
+// `xmm0` (the packed accumulator) and `xmm1` (a loaded pair), which are free in
+// the i64-scalar functions that carry vectorizable array loops.
+
+/// `pxor xmm0, xmm0` — zero the packed accumulator.
+fn emit_pxor_xmm0(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x66, 0x0F, 0xEF, 0xC0]);
+}
+
+/// `movdqu xmm1, [rcx]` — load 16 unaligned bytes (two `i64`s) into `xmm1`.
+fn emit_movdqu_xmm1_from_rcx(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0xF3, 0x0F, 0x6F, 0x09]);
+}
+
+/// `paddq xmm0, xmm1` — add the two packed `i64` lanes into the accumulator.
+fn emit_paddq_xmm0_xmm1(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x66, 0x0F, 0xD4, 0xC1]);
+}
+
+/// Horizontal-add the two lanes of `xmm0` into `rax`: `movq rax, xmm0` (low
+/// lane), stash it, `psrldq xmm0, 8` (bring the high lane low), `movq rcx,
+/// xmm0`, then `add rax, rcx`. Leaves the packed sum's scalar total in `rax`.
+fn emit_hadd_xmm0_into_rax(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0 (low lane)
+    code.extend_from_slice(&[0x66, 0x0F, 0x73, 0xD8, 0x08]); // psrldq xmm0, 8
+    code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC1]); // movq rcx, xmm0 (high lane)
+    code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx
+}
+
 /// `sub rcx, imm32` (imm may be any i32; encodes the 32-bit immediate form).
 fn emit_sub_rcx_imm(code: &mut Vec<u8>, imm: i32) {
     code.extend_from_slice(&[0x48, 0x81, 0xE9]);
@@ -5095,6 +5126,14 @@ fn lower_native_for(
     code: &mut Vec<u8>,
     loops: &mut Vec<NativeLoop>,
 ) -> Result<(), String> {
+    // Auto-vectorize a recognized `for i from S to E: acc += a[i]` sum reduction
+    // over an `array<i64>` into an SSE2 packed loop. Anything that does not match
+    // the exact shape falls through to the scalar lowering below, so correctness
+    // never depends on the pattern matcher.
+    if let Some(reduction) = detect_sum_reduction(ctx, name, step, body) {
+        return lower_native_vectorized_sum(ctx, name, start, end, &reduction, code);
+    }
+
     // The counter and its two hidden slots (bound, step) were reserved during
     // frame planning, keyed by the counter name.
     let i_slot = ctx.local_slot(name)?;
@@ -5193,6 +5232,174 @@ fn emit_for_compare(code: &mut Vec<u8>, end_slot: i32, set_opcode: u8) {
     code.extend_from_slice(&(-end_slot).to_le_bytes());
     // set<cc> al
     code.extend_from_slice(&[0x0F, set_opcode, 0xC0]);
+}
+
+/// A recognized `for i from S to E: acc += a[i]` reduction over an `array<i64>`,
+/// ready to vectorize. Element `k` of the array sits at
+/// `[rbp - array_base_static - 8*k]`, matching the scalar index addressing.
+struct SumReduction {
+    acc_slot: i32,
+    array_base_static: i32,
+}
+
+/// Recognize the canonical `for counter from S to E: acc += array[counter]`
+/// sum-reduction shape, where `acc` is an `i64` local and `array` is an
+/// `array<i64>`. Returns `None` for anything else so the caller falls back to the
+/// scalar loop. Bounds `S`/`E` are lowered by the vectorizer itself.
+fn detect_sum_reduction(
+    ctx: &NativeCtx,
+    counter: &str,
+    step: Option<&BytecodeExpr>,
+    body: &[BytecodeInstruction],
+) -> Option<SumReduction> {
+    // Default ascending step of 1 only.
+    match step {
+        None => {}
+        Some(expr) => match expr.kind {
+            BytecodeExprKind::Integer(1) => {}
+            _ => return None,
+        },
+    }
+    // Exactly one body statement: `acc += <value>` with no field/index path.
+    let [
+        BytecodeInstruction::Assign {
+            name: acc,
+            path,
+            op: AssignOp::Add,
+            value,
+            ..
+        },
+    ] = body
+    else {
+        return None;
+    };
+    if !path.is_empty() {
+        return None;
+    }
+    // The value must be `array[counter]`: resolve it as a dynamic i64 element
+    // read (reusing the scalar addressing) whose index is exactly the counter.
+    let BytecodeExprKind::Index { index, .. } = &value.kind else {
+        return None;
+    };
+    let BytecodeExprKind::Variable(idx) = &index.kind else {
+        return None;
+    };
+    if idx != counter || acc == counter {
+        return None;
+    }
+    let place = resolve_read_place(ctx, value).ok()?;
+    let ScalarPlace::Dynamic {
+        base_slot,
+        const_words,
+        elem_words,
+        ..
+    } = place
+    else {
+        return None;
+    };
+    if elem_words != 1 {
+        return None; // only a contiguous i64 array is 16-byte packable
+    }
+    // The accumulator must be a plain `i64` local, distinct from the array root.
+    let acc_local = ctx.locals.get(acc)?;
+    if !matches!(acc_local.ty, NativeType::I64) {
+        return None;
+    }
+    Some(SumReduction {
+        acc_slot: acc_local.slot,
+        array_base_static: base_slot + const_words as i32 * 8,
+    })
+}
+
+/// `acc += rax`, honoring register promotion of the accumulator. Preserves the
+/// addend in `rdx` while loading/adding/storing `acc`.
+fn emit_add_rax_to_acc(ctx: &NativeCtx, acc_slot: i32, code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (save addend)
+    match ctx.promoted_reg(acc_slot) {
+        Some(reg) => reg.to_rax(code), // rax = acc
+        None => load_local(code, acc_slot),
+    }
+    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+    match ctx.promoted_reg(acc_slot) {
+        Some(reg) => reg.from_rax(code), // acc = rax
+        None => store_local(code, acc_slot),
+    }
+}
+
+/// Emit the vectorized sum reduction. Sums `a[S..=E]` two `i64`s at a time with
+/// `paddq`, horizontal-adds the packed accumulator into `acc`, then a scalar tail
+/// loop handles a final odd element. The counter and bound live on the stack for
+/// this loop (the counter is dead after it). Overflow wraps identically to the
+/// scalar path (integer addition is associative mod 2^64), so the total matches
+/// bit-for-bit regardless of the pairing order.
+fn lower_native_vectorized_sum(
+    ctx: &mut NativeCtx,
+    counter: &str,
+    start: &BytecodeExpr,
+    end: &BytecodeExpr,
+    reduction: &SumReduction,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let i_slot = ctx.local_slot(counter)?;
+    let end_slot = ctx.local_slot(&format!("{counter}__end"))?;
+    let base = reduction.array_base_static;
+
+    // i = start ; end_local = end
+    lower_native_expr(ctx, start, code)?;
+    store_local(code, i_slot);
+    lower_native_expr(ctx, end, code)?;
+    store_local(code, end_slot);
+    emit_pxor_xmm0(code); // packed accumulator = 0
+
+    // --- main SIMD loop: while i + 1 <= end, add the pair (a[i], a[i+1]) ---
+    let main_top = code.len();
+    load_local(code, i_slot); // rax = i
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1  -> rax = i+1
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg after_main (i+1 > end)
+    let after_main_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // addr of the 16-byte block = rbp - base - 8*(i+1); rax already holds i+1.
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3  -> 8*(i+1)
+    code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+    code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+    emit_sub_rcx_imm(code, base); // rcx = &a[i+1] (block start; covers a[i+1],a[i])
+    emit_movdqu_xmm1_from_rcx(code);
+    emit_paddq_xmm0_xmm1(code);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x02]); // add rax, 2
+    store_local(code, i_slot);
+    emit_jmp_to(code, main_top);
+
+    // after_main: fold the two packed lanes into acc.
+    patch_rel32(code, after_main_site);
+    emit_hadd_xmm0_into_rax(code); // rax = lane0 + lane1
+    emit_add_rax_to_acc(ctx, reduction.acc_slot, code);
+
+    // --- scalar remainder: while i <= end, add a[i] ---
+    let rem_top = code.len();
+    load_local(code, i_slot); // rax = i
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg done (i > end)
+    let done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // load a[i]: addr = rbp - base - 8*i
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
+    code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+    code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+    emit_sub_rcx_imm(code, base);
+    code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+    emit_add_rax_to_acc(ctx, reduction.acc_slot, code);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    store_local(code, i_slot);
+    emit_jmp_to(code, rem_top);
+
+    patch_rel32(code, done_site);
+    Ok(())
 }
 
 // -- Expression lowering (result left in rax) --------------------------------
