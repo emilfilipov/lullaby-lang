@@ -1,55 +1,56 @@
 # Cross-language statistics suite (Lullaby). Integer statistics over an i64
-# array and a length: sums, spread, order statistics, and a Kadane max-subarray
-# scan. Lullaby has no `%`, so product_mod goes through a `rem` helper.
+# array: sums, spread, order statistics, and a Kadane max-subarray scan. Lullaby
+# arrays carry their length, so these take just the array and iterate with
+# `for x in a` (no separate length parameter, unlike the C-style signatures).
 
 fn abs_val x i64 -> i64
     if x < 0
         return -x
     x
 
-fn total a array<i64> n i64 -> i64
+fn total a array<i64> -> i64
     let sum = 0
-    for i from 0 to n - 1
-        sum += a[i]
+    for x in a
+        sum += x
     sum
 
-fn mean_floor a array<i64> n i64 -> i64
-    total(a, n) / n
+fn mean_floor a array<i64> -> i64
+    total(a) / len(a)
 
-fn variance_scaled a array<i64> n i64 -> i64
-    let mean = mean_floor(a, n)
+fn variance_scaled a array<i64> -> i64
+    let mean = mean_floor(a)
     let sum = 0
-    for i from 0 to n - 1
-        let d = a[i] - mean
+    for x in a
+        let d = x - mean
         sum += d * d
     sum
 
-fn min_val a array<i64> n i64 -> i64
+fn min_val a array<i64> -> i64
     let m = a[0]
-    for i from 1 to n - 1
-        if a[i] < m
-            m = a[i]
+    for x in a
+        if x < m
+            m = x
     m
 
-fn max_val a array<i64> n i64 -> i64
+fn max_val a array<i64> -> i64
     let m = a[0]
-    for i from 1 to n - 1
-        if a[i] > m
-            m = a[i]
+    for x in a
+        if x > m
+            m = x
     m
 
-fn range_span a array<i64> n i64 -> i64
-    max_val(a, n) - min_val(a, n)
+fn range_span a array<i64> -> i64
+    max_val(a) - min_val(a)
 
-fn median_sorted a array<i64> n i64 -> i64
-    a[(n - 1) / 2]
+fn median_sorted a array<i64> -> i64
+    a[(len(a) - 1) / 2]
 
-fn mode_count_max a array<i64> n i64 -> i64
-    if n == 0
+fn mode_count_max a array<i64> -> i64
+    if len(a) == 0
         return 0
     let best = 1
     let run = 1
-    for i from 1 to n - 1
+    for i from 1 to len(a) - 1
         if a[i] == a[i - 1]
             run += 1
         else
@@ -58,31 +59,31 @@ fn mode_count_max a array<i64> n i64 -> i64
             best = run
     best
 
-fn count_above_mean a array<i64> n i64 -> i64
-    let mean = mean_floor(a, n)
+fn count_above_mean a array<i64> -> i64
+    let mean = mean_floor(a)
     let count = 0
-    for i from 0 to n - 1
-        if a[i] > mean
+    for x in a
+        if x > mean
             count += 1
     count
 
-fn sum_abs_dev a array<i64> n i64 -> i64
-    let mean = mean_floor(a, n)
+fn sum_abs_dev a array<i64> -> i64
+    let mean = mean_floor(a)
     let sum = 0
-    for i from 0 to n - 1
-        sum += abs_val(a[i] - mean)
+    for x in a
+        sum += abs_val(x - mean)
     sum
 
-fn product_mod a array<i64> n i64 m i64 -> i64
+fn product_mod a array<i64> m i64 -> i64
     let prod = 1
-    for i from 0 to n - 1
-        prod = prod * a[i] % m
+    for x in a
+        prod = prod * x % m
     prod
 
-fn running_max_sum a array<i64> n i64 -> i64
+fn running_max_sum a array<i64> -> i64
     let best = a[0]
     let cur = a[0]
-    for i from 1 to n - 1
+    for i from 1 to len(a) - 1
         if cur + a[i] > a[i]
             cur = cur + a[i]
         else
@@ -91,43 +92,43 @@ fn running_max_sum a array<i64> n i64 -> i64
             best = cur
     best
 
-fn zscore_sign_count a array<i64> n i64 -> i64
-    let mean = mean_floor(a, n)
+fn zscore_sign_count a array<i64> -> i64
+    let mean = mean_floor(a)
     let count = 0
-    for i from 0 to n - 1
-        if a[i] > mean
+    for x in a
+        if x > mean
             count += 1
     count
 
-fn weighted_sum a array<i64> w array<i64> n i64 -> i64
+fn weighted_sum a array<i64> w array<i64> -> i64
     let sum = 0
-    for i from 0 to n - 1
+    for i from 0 to len(a) - 1
         sum += a[i] * w[i]
     sum
 
-fn cumulative_max_last a array<i64> n i64 -> i64
+fn cumulative_max_last a array<i64> -> i64
     let m = a[0]
-    for i from 1 to n - 1
-        if a[i] > m
-            m = a[i]
+    for x in a
+        if x > m
+            m = x
     m
 
 fn main -> void
     let d array<i64> = [3, -7, 4, 8, -2, 5]
     let s array<i64> = [2, 2, 2, 5, 7, 8]
     let w array<i64> = [1, 2, 1, 3, 1, 2]
-    println("total=" + to_string(total(d, 6)))
-    println("mean_floor=" + to_string(mean_floor(d, 6)))
-    println("variance_scaled=" + to_string(variance_scaled(d, 6)))
-    println("min_val=" + to_string(min_val(d, 6)))
-    println("max_val=" + to_string(max_val(d, 6)))
-    println("range_span=" + to_string(range_span(d, 6)))
-    println("median_sorted=" + to_string(median_sorted(s, 6)))
-    println("mode_count_max=" + to_string(mode_count_max(s, 6)))
-    println("count_above_mean=" + to_string(count_above_mean(d, 6)))
-    println("sum_abs_dev=" + to_string(sum_abs_dev(d, 6)))
-    println("product_mod=" + to_string(product_mod(s, 6, 1000)))
-    println("running_max_sum=" + to_string(running_max_sum(d, 6)))
-    println("zscore_sign_count=" + to_string(zscore_sign_count(d, 6)))
-    println("weighted_sum=" + to_string(weighted_sum(d, w, 6)))
-    println("cumulative_max_last=" + to_string(cumulative_max_last(d, 6)))
+    println("total=" + to_string(total(d)))
+    println("mean_floor=" + to_string(mean_floor(d)))
+    println("variance_scaled=" + to_string(variance_scaled(d)))
+    println("min_val=" + to_string(min_val(d)))
+    println("max_val=" + to_string(max_val(d)))
+    println("range_span=" + to_string(range_span(d)))
+    println("median_sorted=" + to_string(median_sorted(s)))
+    println("mode_count_max=" + to_string(mode_count_max(s)))
+    println("count_above_mean=" + to_string(count_above_mean(d)))
+    println("sum_abs_dev=" + to_string(sum_abs_dev(d)))
+    println("product_mod=" + to_string(product_mod(s, 1000)))
+    println("running_max_sum=" + to_string(running_max_sum(d)))
+    println("zscore_sign_count=" + to_string(zscore_sign_count(d)))
+    println("weighted_sum=" + to_string(weighted_sum(d, w)))
+    println("cumulative_max_last=" + to_string(cumulative_max_last(d)))

@@ -10221,8 +10221,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 62,
-     "source": "fn count_above_mean a array<i64> n i64 -> i64\n    let mean = mean_floor(a, n)\n    let count = 0\n    for i from 0 to n - 1\n        if a[i] > mean\n            count += 1\n    count"
+     "tokens": 49,
+     "source": "fn count_above_mean a array<i64> -> i64\n    let mean = mean_floor(a)\n    let count = 0\n    for x in a\n        if x > mean\n            count += 1\n    count"
     },
     "C": {
      "tokens": 69,
@@ -10252,8 +10252,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 52,
-     "source": "fn cumulative_max_last a array<i64> n i64 -> i64\n    let m = a[0]\n    for i from 1 to n - 1\n        if a[i] > m\n            m = a[i]\n    m"
+     "tokens": 40,
+     "source": "fn cumulative_max_last a array<i64> -> i64\n    let m = a[0]\n    for x in a\n        if x > m\n            m = x\n    m"
     },
     "C": {
      "tokens": 64,
@@ -10283,8 +10283,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 51,
-     "source": "fn max_val a array<i64> n i64 -> i64\n    let m = a[0]\n    for i from 1 to n - 1\n        if a[i] > m\n            m = a[i]\n    m"
+     "tokens": 39,
+     "source": "fn max_val a array<i64> -> i64\n    let m = a[0]\n    for x in a\n        if x > m\n            m = x\n    m"
     },
     "C": {
      "tokens": 63,
@@ -10314,8 +10314,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 23,
-     "source": "fn mean_floor a array<i64> n i64 -> i64\n    total(a, n) / n"
+     "tokens": 20,
+     "source": "fn mean_floor a array<i64> -> i64\n    total(a) / len(a)"
     },
     "C": {
      "tokens": 29,
@@ -10345,8 +10345,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 27,
-     "source": "fn median_sorted a array<i64> n i64 -> i64\n    a[(n - 1) / 2]"
+     "tokens": 26,
+     "source": "fn median_sorted a array<i64> -> i64\n    a[(len(a) - 1) / 2]"
     },
     "C": {
      "tokens": 32,
@@ -10376,8 +10376,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 51,
-     "source": "fn min_val a array<i64> n i64 -> i64\n    let m = a[0]\n    for i from 1 to n - 1\n        if a[i] < m\n            m = a[i]\n    m"
+     "tokens": 39,
+     "source": "fn min_val a array<i64> -> i64\n    let m = a[0]\n    for x in a\n        if x < m\n            m = x\n    m"
     },
     "C": {
      "tokens": 63,
@@ -10407,8 +10407,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 94,
-     "source": "fn mode_count_max a array<i64> n i64 -> i64\n    if n == 0\n        return 0\n    let best = 1\n    let run = 1\n    for i from 1 to n - 1\n        if a[i] == a[i - 1]\n            run += 1\n        else\n            run = 1\n        if run > best\n            best = run\n    best"
+     "tokens": 95,
+     "source": "fn mode_count_max a array<i64> -> i64\n    if len(a) == 0\n        return 0\n    let best = 1\n    let run = 1\n    for i from 1 to len(a) - 1\n        if a[i] == a[i - 1]\n            run += 1\n        else\n            run = 1\n        if run > best\n            best = run\n    best"
     },
     "C": {
      "tokens": 104,
@@ -10438,8 +10438,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 50,
-     "source": "fn product_mod a array<i64> n i64 m i64 -> i64\n    let prod = 1\n    for i from 0 to n - 1\n        prod = prod * a[i] % m\n    prod"
+     "tokens": 39,
+     "source": "fn product_mod a array<i64> m i64 -> i64\n    let prod = 1\n    for x in a\n        prod = prod * x % m\n    prod"
     },
     "C": {
      "tokens": 65,
@@ -10469,8 +10469,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 29,
-     "source": "fn range_span a array<i64> n i64 -> i64\n    max_val(a, n) - min_val(a, n)"
+     "tokens": 22,
+     "source": "fn range_span a array<i64> -> i64\n    max_val(a) - min_val(a)"
     },
     "C": {
      "tokens": 34,
@@ -10500,8 +10500,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 85,
-     "source": "fn running_max_sum a array<i64> n i64 -> i64\n    let best = a[0]\n    let cur = a[0]\n    for i from 1 to n - 1\n        if cur + a[i] > a[i]\n            cur = cur + a[i]\n        else\n            cur = a[i]\n        if cur > best\n            best = cur\n    best"
+     "tokens": 84,
+     "source": "fn running_max_sum a array<i64> -> i64\n    let best = a[0]\n    let cur = a[0]\n    for i from 1 to len(a) - 1\n        if cur + a[i] > a[i]\n            cur = cur + a[i]\n        else\n            cur = a[i]\n        if cur > best\n            best = cur\n    best"
     },
     "C": {
      "tokens": 94,
@@ -10531,8 +10531,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 58,
-     "source": "fn sum_abs_dev a array<i64> n i64 -> i64\n    let mean = mean_floor(a, n)\n    let sum = 0\n    for i from 0 to n - 1\n        sum += abs_val(a[i] - mean)\n    sum"
+     "tokens": 45,
+     "source": "fn sum_abs_dev a array<i64> -> i64\n    let mean = mean_floor(a)\n    let sum = 0\n    for x in a\n        sum += abs_val(x - mean)\n    sum"
     },
     "C": {
      "tokens": 86,
@@ -10562,8 +10562,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 41,
-     "source": "fn total a array<i64> n i64 -> i64\n    let sum = 0\n    for i from 0 to n - 1\n        sum += a[i]\n    sum"
+     "tokens": 31,
+     "source": "fn total a array<i64> -> i64\n    let sum = 0\n    for x in a\n        sum += x\n    sum"
     },
     "C": {
      "tokens": 53,
@@ -10593,8 +10593,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 63,
-     "source": "fn variance_scaled a array<i64> n i64 -> i64\n    let mean = mean_floor(a, n)\n    let sum = 0\n    for i from 0 to n - 1\n        let d = a[i] - mean\n        sum += d * d\n    sum"
+     "tokens": 50,
+     "source": "fn variance_scaled a array<i64> -> i64\n    let mean = mean_floor(a)\n    let sum = 0\n    for x in a\n        let d = x - mean\n        sum += d * d\n    sum"
     },
     "C": {
      "tokens": 79,
@@ -10624,8 +10624,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 51,
-     "source": "fn weighted_sum a array<i64> w array<i64> n i64 -> i64\n    let sum = 0\n    for i from 0 to n - 1\n        sum += a[i] * w[i]\n    sum"
+     "tokens": 50,
+     "source": "fn weighted_sum a array<i64> w array<i64> -> i64\n    let sum = 0\n    for i from 0 to len(a) - 1\n        sum += a[i] * w[i]\n    sum"
     },
     "C": {
      "tokens": 65,
@@ -10655,8 +10655,8 @@
    "category": "statistics",
    "langs": {
     "Lullaby": {
-     "tokens": 62,
-     "source": "fn zscore_sign_count a array<i64> n i64 -> i64\n    let mean = mean_floor(a, n)\n    let count = 0\n    for i from 0 to n - 1\n        if a[i] > mean\n            count += 1\n    count"
+     "tokens": 49,
+     "source": "fn zscore_sign_count a array<i64> -> i64\n    let mean = mean_floor(a)\n    let count = 0\n    for x in a\n        if x > mean\n            count += 1\n    count"
     },
     "C": {
      "tokens": 69,
@@ -13281,7 +13281,7 @@
   }
  ],
  "totals": {
-  "Lullaby": 23350,
+  "Lullaby": 23229,
   "C": 26030,
   "C++": 26894,
   "Rust": 24867,
@@ -13450,7 +13450,7 @@
    "JavaScript": 791
   },
   "statistics": {
-   "Lullaby": 799,
+   "Lullaby": 678,
    "C": 969,
    "C++": 1097,
    "Rust": 884,
