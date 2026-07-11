@@ -1910,6 +1910,14 @@ struct Runtime<'a> {
     /// invocation looks its body up here — the runtime value stays backend-neutral
     /// and stores no AST node. Bodies borrow the program with lifetime `'a`.
     closures: HashMap<usize, (Vec<String>, &'a Expr)>,
+    /// A free-list of reusable per-call environments. Function invocation is on the
+    /// hot path and each call needs a fresh `Env`; rather than allocate one (its
+    /// scope `Vec` plus a first-scope `Vec` that grows as parameters bind) on every
+    /// call, callees borrow a reset `Env` from here and return it on a normal exit,
+    /// so a deep or repeated call reuses buffers instead of reallocating. Envs are
+    /// only returned on the success path; error/`?`-unwind paths simply drop theirs
+    /// (correctness is unaffected — a smaller pool just means a few more allocs).
+    env_pool: Vec<Env>,
 }
 
 impl<'a> Runtime<'a> {
@@ -2020,6 +2028,7 @@ impl<'a> Runtime<'a> {
             extern_functions,
             pending_try_return: None,
             closures,
+            env_pool: Vec::new(),
         })
     }
 
@@ -3433,7 +3442,16 @@ impl<'a> Runtime<'a> {
             ));
         }
 
-        let mut env = Env::default();
+        // Borrow a reset environment from the pool (or make a fresh one) instead
+        // of allocating per call; it is returned to the pool on the normal exit
+        // path below.
+        let mut env = match self.env_pool.pop() {
+            Some(mut env) => {
+                env.reset();
+                env
+            }
+            None => Env::default(),
+        };
         for (param, value) in function.params.iter().zip(args) {
             env.define(param.name.clone(), value);
         }
@@ -3481,6 +3499,9 @@ impl<'a> Runtime<'a> {
                 control
             }
         };
+        // Normal exit: return the environment to the pool for the next call. The
+        // early-return paths above simply drop theirs.
+        self.env_pool.push(env);
 
         match control {
             Control::Return(value) | Control::Value(value) => Ok(value),
@@ -6185,6 +6206,18 @@ impl Env {
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+    }
+
+    /// Reset to a single empty scope so a pooled environment can be reused for the
+    /// next call. Each scope's backing `Vec` keeps its capacity, so a repeated
+    /// call re-binds its locals without reallocating; clearing every entry means
+    /// no stale binding can leak into the reused environment.
+    fn reset(&mut self) {
+        self.scopes.truncate(1);
+        match self.scopes.first_mut() {
+            Some(first) => first.clear(),
+            None => self.scopes.push(Vec::new()),
+        }
     }
 
     fn define(&mut self, name: String, value: Value) {
