@@ -346,6 +346,8 @@ fn wasm_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Result
             Some(&compiled.source),
         )
     })?;
+    // Inline small leaf helpers before WASM codegen (see the native path).
+    let (module, _report) = optimize(&module, &OptimizationConfig::inlining());
 
     let artifact = match emit_wasm_module(&module) {
         Ok(artifact) => artifact,
@@ -464,6 +466,11 @@ fn native_file(
             Some(&compiled.source),
         )
     })?;
+    // Inline small leaf helpers (e.g. `rem`, `is_even`) before native codegen so a
+    // helper called in a hot loop becomes inline arithmetic instead of a `call`.
+    // Only the inlining pass runs here: it produces pure scalar expressions the
+    // backend already compiles, without the other alpha passes' rewrites.
+    let (module, _report) = optimize(&module, &OptimizationConfig::inlining());
     let bytecode = lower_to_bytecode(&module);
 
     // With `--debug`, emit a CodeView `.debug$S` section that maps each compiled
