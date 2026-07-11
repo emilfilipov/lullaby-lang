@@ -49,9 +49,31 @@ def workspace_version() -> str:
     return match.group(1)
 
 
+# Maturity rank baked into the MSI ProductVersion PATCH field. MSI compares only
+# the numeric ProductVersion (MAJOR.MINOR.PATCH), and our scheme parks semver's
+# patch slot at 0 for every build, so without this BOTH 1.0-preview and
+# 1.0-stable would map to ProductVersion 1.0.0 and a stable MSI would NOT upgrade
+# an installed preview (same version = no major upgrade). Encoding the status as
+# an increasing PATCH makes each successive release of the same MAJOR.PATCH
+# strictly increase: experimental < preview < stable. Values leave headroom for
+# future statuses; an unknown status falls back to the stable rank.
+STATUS_RANK = {"experimental": 10, "preview": 20, "stable": 30}
+
+
 def numeric_version(full: str) -> str:
-    # MSI ProductVersion must be numeric x.y.z — drop any pre-release suffix.
-    return full.split("-", 1)[0]
+    """Numeric MSI ProductVersion (MAJOR.MINOR.PATCH, no suffix).
+
+    MAJOR.MINOR come straight from the semver string; the PATCH field encodes
+    release maturity (see STATUS_RANK) so that preview -> stable of the same
+    number is a real, strictly-increasing upgrade rather than an identical
+    ProductVersion that Windows Installer would refuse to replace.
+    """
+    nums, _, status = full.partition("-")
+    parts = nums.split(".")
+    major = parts[0] if parts else "0"
+    minor = parts[1] if len(parts) > 1 else "0"
+    rank = STATUS_RANK.get(status or "stable", STATUS_RANK["stable"])
+    return f"{major}.{minor}.{rank}"
 
 
 def display_version(full: str) -> str:

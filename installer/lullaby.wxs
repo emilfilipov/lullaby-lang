@@ -25,7 +25,16 @@
            Scope="perMachine"
            Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Lullaby is already installed." />
+    <!-- Any newer ProductVersion uninstalls the old install first (a true
+         in-place major upgrade, never side-by-side). Scheduled
+         afterInstallInitialize so the previous version is removed up front,
+         before the new payload is laid down. The UpgradeCode above is the
+         stable identity across releases and must never change. NOTE: MSI ranks
+         only the numeric ProductVersion, so successive releases must each carry
+         a strictly-increasing numeric version — see numeric_version() in
+         scripts/build_windows_installer.py for how preview->stable is encoded. -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of Lullaby is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Branding: Add/Remove Programs icon + wizard bitmaps -->
@@ -46,6 +55,17 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="AppMenuDir" Name="Lullaby" />
     </StandardDirectory>
+
+    <!-- Working directory for the command-prompt shortcut. Resolved at install
+         time to the invoking user's profile (%USERPROFILE%) via the SetProperty
+         below, so the prompt opens in the user's home folder instead of
+         System32. Overriding the directory through its like-named property
+         before CostFinalize is the standard Windows Installer mechanism for a
+         runtime-resolved directory. -->
+    <StandardDirectory Id="TARGETDIR">
+      <Directory Id="USERPROFILEDIR" />
+    </StandardDirectory>
+    <SetProperty Id="USERPROFILEDIR" Value="[%USERPROFILE]" Before="CostFinalize" />
 
     <!-- The command-line tool + PATH entry -->
     <ComponentGroup Id="ToolComponents">
@@ -78,6 +98,7 @@
                 Description="A command prompt with lullaby on the PATH"
                 Target="[System64Folder]cmd.exe"
                 Arguments="/k lullaby --version"
+                WorkingDirectory="USERPROFILEDIR"
                 Icon="lullaby.ico" />
       <RemoveFolder Id="RemoveAppMenuDir" Directory="AppMenuDir" On="uninstall" />
       <RegistryValue Root="HKMU" Key="Software\Lullaby" Name="installed" Type="integer" Value="1" KeyPath="yes" />

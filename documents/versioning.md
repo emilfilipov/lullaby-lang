@@ -44,7 +44,18 @@ offered download automatically.
 
 The version is centralized in the workspace: `[workspace.package] version` in
 the root `Cargo.toml`, inherited by every crate via `version.workspace = true`.
-The standalone `crates/lullaby_wasm` (excluded from the workspace) and the WiX
-installer (`installer/lullaby.wxs`, which needs a numeric `MAJOR.MINOR.PATCH`
-`ProductVersion` with no suffix) carry the version literally and are updated in
-the same commit.
+The standalone `crates/lullaby_wasm` (excluded from the workspace) carries the
+version literally and is updated in the same commit.
+
+### MSI ProductVersion (upgrade encoding)
+
+The WiX installer needs a numeric `MAJOR.MINOR.PATCH` `ProductVersion` with no
+suffix, and Windows Installer ranks upgrades by that number alone. Because the
+scheme parks semver's patch slot at `0` for every build, `1.0-preview` and
+`1.0-stable` would otherwise both map to `1.0.0` and a stable MSI would refuse to
+replace an installed preview. So `scripts/build_windows_installer.py` encodes the
+**status** into the MSI's PATCH field (`experimental`=10, `preview`=20,
+`stable`=30): `1.0-preview` → ProductVersion `1.0.20`, `1.0-stable` → `1.0.30`.
+Each successive release of the same `MAJOR.PATCH` then strictly increases, so a
+`<MajorUpgrade>` replaces the prior install in place. This affects only the MSI
+ProductVersion — the display/tag form and Cargo's semver are untouched.
