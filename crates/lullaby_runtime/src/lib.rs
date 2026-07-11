@@ -2376,6 +2376,7 @@ impl<'a> Runtime<'a> {
             "wrapping_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Wrapping),
             "wrapping_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Wrapping),
             "len" => Self::builtin_len(args),
+            "array_fill" => Self::builtin_array_fill(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
             "get" => Self::builtin_get(args),
@@ -4979,6 +4980,24 @@ impl<'a> Runtime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("list_new", 0, args.len()))?;
         Ok(Value::Array(Vec::new()))
+    }
+
+    /// `array_fill(n, x) -> array<T>`: a new array of length `n` with every
+    /// element equal to `x`. `array_fill(n, 0)` is the natural runtime-sized
+    /// zeroed buffer (DP tables, matrices, BFS visited sets); a negative length
+    /// is a runtime error.
+    fn builtin_array_fill(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [count, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("array_fill", 2, args.len()))?;
+        let n = expect_i64("array_fill", count)?;
+        if n < 0 {
+            return Err(RuntimeError::new(
+                "L0433",
+                format!("array_fill length `{n}` is negative"),
+            ));
+        }
+        Ok(Value::Array(vec![value; n as usize]))
     }
 
     /// `push(l, x) -> list<T>`: a new list with `x` appended.

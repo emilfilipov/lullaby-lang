@@ -462,6 +462,14 @@ fn main -> i64
           <li>Index expressions require an <code>i64</code> index.</li>
           <li>Out-of-bounds indexes are runtime errors.</li>
         </ul>
+        <p>For a <strong>runtime-sized</strong> array, <code>array_fill(n, value)</code> builds a fresh <code>array&lt;T&gt;</code> of length <code>n</code> with every element equal to <code>value</code>. <code>array_fill(n, 0)</code> is the natural zeroed buffer for dynamic-programming tables, matrices, and BFS/visited sets; a negative length is the runtime error <code>L0433</code>. A function that uses <code>array_fill</code> runs on the interpreters &mdash; a fixed array's length is inferred at compile time for the native/WASM backends, so a runtime length is deferred there.</p>
+        <pre data-fixture="tests/fixtures/valid/docs_array_fill.lby" data-mode="run"><code>fn main -> i64
+    let n i64 = 4
+    let a array&lt;i64&gt; = array_fill(n, 0)
+    a[0] = 5
+    a[3] = 9
+    a[0] + a[3] + len(a)</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_array_fill.lby</code>.</p>
         <p>Array elements are mutable through assignment, including compound operators, and <code>len(x)</code> returns the <code>i64</code> length of an array or string.</p>
         <pre data-fixture="tests/fixtures/valid/docs_array_mutation.lby" data-mode="run"><code>fn main -> i64
     let xs array&lt;i64&gt; = [1, 2, 3]

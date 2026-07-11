@@ -1,0 +1,30 @@
+# A dynamic-programming shape that previously needed a fixed-capacity array
+# literal capped at a max size: `array_fill(n, v)` builds a runtime-sized,
+# value-filled array that indexes and mutates like any other array.
+fn fib_table n i64 -> i64
+    let dp array<i64> = array_fill(n + 1, 0)
+    dp[1] = 1
+    let i i64 = 2
+    while i <= n
+        dp[i] = dp[i - 1] + dp[i - 2]
+        i += 1
+    dp[n]
+
+fn count_ge arr array<i64> len i64 threshold i64 -> i64
+    let seen array<i64> = array_fill(len, 0)
+    let c i64 = 0
+    let i i64 = 0
+    while i < len
+        if arr[i] >= threshold
+            seen[i] = 1
+            c += 1
+        i += 1
+    c
+
+fn main -> void
+    wasm_log(fib_table(10))
+    let data array<i64> = [3, 7, 1, 9, 4]
+    wasm_log(count_ge(data, 5, 5))
+    # a fill value other than zero
+    let ones array<i64> = array_fill(4, 1)
+    wasm_log(ones[0] + ones[1] + ones[2] + ones[3])

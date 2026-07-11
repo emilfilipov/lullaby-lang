@@ -220,6 +220,31 @@ fn runs_modulo_across_backends() {
 }
 
 #[test]
+fn runs_array_fill_across_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_array_fill.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // `fib_table(10)=55` via a runtime-sized dp array; two of [3,7,1,9,4] are
+        // >= 5; and a 4-element fill of `1` sums to 4.
+        assert_eq!(
+            stdout(&output).replace("\r\n", "\n").trim(),
+            "55\n2\n4",
+            "{backend} stdout mismatch"
+        );
+    }
+}
+
+#[test]
 fn runs_negation_across_backends() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_negate.lby");
     for backend in ["ast", "ir", "bytecode"] {

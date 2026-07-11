@@ -3027,6 +3027,15 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
+            "array_fill" => {
+                // `array_fill(n i64, value T) -> array<T>`: a runtime-sized array
+                // with every element `value`. The element type is inferred from
+                // the value argument.
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
+                let element = self.check_expr(&args[1], scope, function)?;
+                Some(TypeRef::new(format!("array<{}>", element.name)))
+            }
             "push" => {
                 self.expect_arg_count(name, args, 2, function)?;
                 // `push` returns `list<T>`, so the outer expected `list<T>` flows

@@ -1,0 +1,6 @@
+fn main -> i64
+    let n i64 = 4
+    let a array<i64> = array_fill(n, 0)
+    a[0] = 5
+    a[3] = 9
+    a[0] + a[3] + len(a)

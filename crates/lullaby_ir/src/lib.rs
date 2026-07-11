@@ -4194,6 +4194,7 @@ impl<'a> IrRuntime<'a> {
             "wrapping_sub" => overflow_arith(name, args, ArithOp::Sub, OverflowMode::Wrapping),
             "wrapping_mul" => overflow_arith(name, args, ArithOp::Mul, OverflowMode::Wrapping),
             "len" => Self::builtin_len(args),
+            "array_fill" => Self::builtin_array_fill(args),
             "list_new" => Self::builtin_list_new(args),
             "push" => Self::builtin_push(args),
             "get" => Self::builtin_get(args),
@@ -6642,6 +6643,22 @@ impl<'a> IrRuntime<'a> {
         let mut values = expect_list("push", list)?;
         values.push(value);
         Ok(Value::Array(values))
+    }
+
+    /// `array_fill(n, x) -> array<T>`: a new array of length `n`, every element
+    /// `x` (matches the AST runtime; a negative length is `L0433`).
+    fn builtin_array_fill(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [count, value]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("array_fill", 2, args.len()))?;
+        let n = expect_i64("array_fill", count)?;
+        if n < 0 {
+            return Err(RuntimeError::new(
+                "L0433",
+                format!("array_fill length `{n}` is negative"),
+            ));
+        }
+        Ok(Value::Array(vec![value; n as usize]))
     }
 
     /// `get(l, i) -> T`: bounds-checked element read.
@@ -9195,6 +9212,13 @@ impl<'a> Lowerer<'a> {
                 args.first().map(|list| list.ty.clone()).ok_or_else(|| {
                     IrLoweringError::new(format!("{name} call missing list argument"), Some(span))
                 })?
+            }
+            // `array_fill(n, value)` yields `array<T>` where `T` is the value's type.
+            "array_fill" => {
+                let value = args.get(1).ok_or_else(|| {
+                    IrLoweringError::new("array_fill call missing value argument", Some(span))
+                })?;
+                TypeRef::new(format!("array<{}>", value.ty.name))
             }
             // `list_map(l list<T>, f fn(T) -> U)` yields `list<U>`, where `U` is
             // the mapping function's return type.
