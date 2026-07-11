@@ -220,6 +220,31 @@ fn runs_modulo_across_backends() {
 }
 
 #[test]
+fn runs_string_ergonomics_across_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_string_ergonomics.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // `+=`/`s[i]` reverse "abc" -> "cba"; apple<banana<cherry is sorted (1);
+        // "zoo"<"abc" is false (no 2); "hello"[1] is 'e' (code 101).
+        assert_eq!(
+            stdout(&output).replace("\r\n", "\n").trim(),
+            "cba\n1\n101",
+            "{backend} stdout mismatch"
+        );
+    }
+}
+
+#[test]
 fn runs_array_fill_across_backends() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_array_fill.lby");
     for backend in ["ast", "ir", "bytecode"] {

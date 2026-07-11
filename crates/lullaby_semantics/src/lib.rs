@@ -1486,6 +1486,18 @@ impl<'a> Checker<'a> {
                             value.span,
                         ));
                     }
+                } else if *op == AssignOp::Add && expected.name.as_str() == "string" {
+                    // `s += piece` is string concatenation (desugars to `s = s + piece`).
+                    if value_type.as_ref() != Some(&expected) {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0315",
+                            format!(
+                                "compound assignment `+=` to {target} requires a string operand"
+                            ),
+                            Some(function.name.clone()),
+                            value.span,
+                        ));
+                    }
                 } else if !matches!(expected.name.as_str(), "i64" | "f64")
                     || value_type.as_ref() != Some(&expected)
                 {
@@ -1984,16 +1996,23 @@ impl<'a> Checker<'a> {
                     ));
                 }
 
-                match target_type.and_then(|ty| ty.array_element()) {
-                    Some(element_type) => Some(element_type),
-                    None => {
-                        self.diagnostics.push(SemanticDiagnostic::at(
-                            "L0325",
-                            "index target must be an array",
-                            Some(function.name.clone()),
-                            target.span,
-                        ));
-                        None
+                // Indexing a `string` reads the char at that position (`s[i] ->
+                // char`, bounds-checked at runtime); indexing an array yields its
+                // element type.
+                if target_type.as_ref().map(|ty| ty.name.as_str()) == Some("string") {
+                    Some(TypeRef::new("char"))
+                } else {
+                    match target_type.and_then(|ty| ty.array_element()) {
+                        Some(element_type) => Some(element_type),
+                        None => {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0325",
+                                "index target must be an array or string",
+                                Some(function.name.clone()),
+                                target.span,
+                            ));
+                            None
+                        }
                     }
                 }
             }
@@ -2137,15 +2156,21 @@ impl<'a> Checker<'a> {
                     | BinaryOp::Greater
                     | BinaryOp::GreaterEqual => {
                         // Ordering compares two values of the same numeric type
-                        // (i64, f64, i32, u32), two chars (by code point), or two
-                        // bytes (numerically).
-                        if same_numeric.is_some() || same_orderable_scalar(&left_type, &right_type)
+                        // (i64, f64, i32, u32), two chars (by code point), two
+                        // bytes (numerically), or two strings (lexicographically
+                        // by Unicode code point).
+                        let both_string = left_type.as_ref().map(|t| t.name.as_str())
+                            == Some("string")
+                            && right_type.as_ref().map(|t| t.name.as_str()) == Some("string");
+                        if same_numeric.is_some()
+                            || same_orderable_scalar(&left_type, &right_type)
+                            || both_string
                         {
                             Some(TypeRef::new("bool"))
                         } else {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0327",
-                                "ordering comparison operands must both be the same numeric type, both be char, or both be byte",
+                                "ordering comparison operands must both be the same numeric type, both be char, both be byte, or both be string",
                                 Some(function.name.clone()),
                                 expr.span,
                             ));

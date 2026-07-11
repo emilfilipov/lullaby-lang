@@ -3879,6 +3879,25 @@ impl<'a> Runtime<'a> {
             ExprKind::Index { target, index } => {
                 let target = self.eval_expr(target, env)?;
                 let index = self.eval_expr(index, env)?.as_i64()?;
+                // `s[i]` on a string reads the i-th char (by Unicode scalar).
+                if let Value::String(text) = &target {
+                    if index < 0 {
+                        return Err(RuntimeError::new(
+                            "L0413",
+                            format!("string index `{index}` is out of bounds"),
+                        ));
+                    }
+                    return text
+                        .chars()
+                        .nth(index as usize)
+                        .map(Value::Char)
+                        .ok_or_else(|| {
+                            RuntimeError::new(
+                                "L0413",
+                                format!("string index `{index}` is out of bounds"),
+                            )
+                        });
+                }
                 let Value::Array(values) = target else {
                     return Err(RuntimeError::new("L0412", "index target is not an array"));
                 };
@@ -4221,6 +4240,20 @@ impl<'a> Runtime<'a> {
             }
             BinaryOp::Equal => Ok(Value::Bool(left == right)),
             BinaryOp::NotEqual => Ok(Value::Bool(left != right)),
+            // String ordering is lexicographic by Unicode code point (Rust's
+            // `str` Ord over UTF-8 bytes, which is code-point order).
+            BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
+                if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
+            {
+                let (l, r) = (left.as_string()?, right.as_string()?);
+                Ok(Value::Bool(match op {
+                    BinaryOp::Less => l < r,
+                    BinaryOp::LessEqual => l <= r,
+                    BinaryOp::Greater => l > r,
+                    BinaryOp::GreaterEqual => l >= r,
+                    _ => unreachable!("guarded to ordering operators"),
+                }))
+            }
             // Char ordering compares by Unicode code point; byte ordering is
             // numeric. Both fall through to i64 ordering otherwise.
             BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
@@ -5989,6 +6022,11 @@ enum Control {
 /// Apply a compound assignment operator (`+=` etc.) to `current` and `rhs`,
 /// supporting i64 and f64.
 pub fn apply_compound(current: Value, op: &AssignOp, rhs: Value) -> Result<Value, RuntimeError> {
+    // `s += piece` is string concatenation (semantics allows `+=` only when both
+    // sides are strings). Reuse the left buffer so a `s += x` loop stays O(n).
+    if let (Value::String(_), AssignOp::Add) = (&current, op) {
+        return Ok(Value::String(current.into_string()? + &rhs.as_string()?));
+    }
     if let (Value::F64(a), Value::F64(b)) = (&current, &rhs) {
         let (a, b) = (*a, *b);
         return Ok(Value::F64(match op {

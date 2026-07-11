@@ -1,0 +1,23 @@
+# String ergonomics: in-place `+=` concatenation, `s[i]` char indexing, and
+# lexicographic `<`/`>` ordering — previously each needed a workaround.
+fn str_reverse s string n i64 -> string
+    let out string = ""
+    let i i64 = n - 1
+    while i >= 0
+        out += to_string(s[i])
+        i -= 1
+    out
+
+fn is_sorted a string b string c string -> bool
+    a < b and b < c
+
+fn main -> void
+    # `+=` builds a string; `s[i]` reads chars by position
+    println(str_reverse("abc", 3))
+    # ordering: lexicographic, so this is true
+    if is_sorted("apple", "banana", "cherry")
+        wasm_log(1)
+    # and a false ordering
+    if "zoo" < "abc"
+        wasm_log(2)
+    wasm_log(char_code("hello"[1]))

@@ -4740,6 +4740,25 @@ impl<'a> IrRuntime<'a> {
             IrExprKind::Index { target, index } => {
                 let target = self.eval_expr(target, env)?;
                 let index = self.eval_expr(index, env)?.as_i64()?;
+                // `s[i]` on a string reads the i-th char (by Unicode scalar).
+                if let Value::String(text) = &target {
+                    if index < 0 {
+                        return Err(RuntimeError::new(
+                            "L0413",
+                            format!("string index `{index}` is out of bounds"),
+                        ));
+                    }
+                    return text
+                        .chars()
+                        .nth(index as usize)
+                        .map(Value::Char)
+                        .ok_or_else(|| {
+                            RuntimeError::new(
+                                "L0413",
+                                format!("string index `{index}` is out of bounds"),
+                            )
+                        });
+                }
                 let Value::Array(values) = target else {
                     return Err(RuntimeError::new("L0412", "index target is not an array"));
                 };
@@ -5003,6 +5022,20 @@ impl<'a> IrRuntime<'a> {
             }
             BinaryOp::Equal => Ok(Value::Bool(left == right)),
             BinaryOp::NotEqual => Ok(Value::Bool(left != right)),
+            // String ordering is lexicographic by Unicode code point, matching
+            // the AST runtime.
+            BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
+                if matches!((&left, &right), (Value::String(_), Value::String(_))) =>
+            {
+                let (l, r) = (left.as_string()?, right.as_string()?);
+                Ok(Value::Bool(match op {
+                    BinaryOp::Less => l < r,
+                    BinaryOp::LessEqual => l <= r,
+                    BinaryOp::Greater => l > r,
+                    BinaryOp::GreaterEqual => l >= r,
+                    _ => unreachable!("guarded to ordering operators"),
+                }))
+            }
             // Char ordering compares by Unicode code point; byte ordering is
             // numeric. Both fall through to i64 ordering otherwise.
             BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
@@ -8472,9 +8505,17 @@ impl<'a> Lowerer<'a> {
             ExprKind::Index { target, index } => {
                 let target = self.lower_expr(target, scope)?;
                 let index = self.lower_expr(index, scope)?;
-                let ty = target.ty.array_element().ok_or_else(|| {
-                    IrLoweringError::new("index target is not an array", Some(target.span))
-                })?;
+                // `s[i]` on a string yields a `char`; otherwise the array element.
+                let ty = if target.ty.name == "string" {
+                    TypeRef::new("char")
+                } else {
+                    target.ty.array_element().ok_or_else(|| {
+                        IrLoweringError::new(
+                            "index target is not an array or string",
+                            Some(target.span),
+                        )
+                    })?
+                };
                 (
                     IrExprKind::Index {
                         target: Box::new(target),

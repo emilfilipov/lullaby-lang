@@ -1,0 +1,7 @@
+fn main -> void
+    let s string = ""
+    s += "lu"
+    s += "llaby"
+    println(s)
+    if "apple" < "banana"
+        println(to_string(char_code(s[0])))

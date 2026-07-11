@@ -5997,6 +5997,19 @@ fn lower_native_binary(
     right: &BytecodeExpr,
     code: &mut Vec<u8>,
 ) -> Result<(), String> {
+    // String ordering (`< <= > >=`) is lexicographic by content; the scalar
+    // backend would compare heap pointers, so defer the whole function to the
+    // interpreters (which compare correctly). Concatenation `+` and equality are
+    // handled by their own paths.
+    if matches!(
+        op,
+        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
+    ) && (left.ty.name == "string" || right.ty.name == "string")
+    {
+        return Err(
+            "string ordering comparison is not supported on the native backend".to_string(),
+        );
+    }
     match op {
         BinaryOp::And => {
             // rax = left ? (right != 0 ? 1 : 0) : 0

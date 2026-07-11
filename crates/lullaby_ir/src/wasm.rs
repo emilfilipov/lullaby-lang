@@ -1333,6 +1333,14 @@ fn lower_local_assign(
             // uses the width-normalizing path so `+=`/`-=`/`*=`/`/=` wrap and
             // divide exactly like the interpreters.
             let ir_name = ctx.local_ir_type(name).map(|t| t.name);
+            // `s += piece` is string concatenation, not a scalar op; the scalar
+            // backend would `i32.add` two heap pointers, so defer the function.
+            if ir_name.as_deref() == Some("string") {
+                return Err(
+                    "compound assignment on a string is not supported on the wasm backend"
+                        .to_string(),
+                );
+            }
             get_local(out, local.index);
             lower_expr(ctx, value, out)?;
             let bop = assign_binop(other);
@@ -2399,6 +2407,16 @@ fn lower_binary(
     right: &IrExpr,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
+    // String ordering (`< <= > >=`) is lexicographic by content; the scalar
+    // backend would compare heap pointers, so defer the function to the
+    // interpreters. Concatenation `+` and equality use their own paths.
+    if matches!(
+        op,
+        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
+    ) && (left.ty.name == "string" || right.ty.name == "string")
+    {
+        return Err("string ordering comparison is not supported on the wasm backend".to_string());
+    }
     // Short-circuit `and`/`or` via WASM `if`/`else` producing i32.
     match op {
         BinaryOp::And => {

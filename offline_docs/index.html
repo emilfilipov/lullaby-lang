@@ -1067,6 +1067,15 @@ fn main -> i64
 
       <section id="string-builtins">
         <h2>String Builtins</h2>
+        <p>Beyond the library below, strings support three operators directly: <code>s += piece</code> concatenates in place, <code>s[i]</code> reads the <code>i</code>-th character as a <code>char</code> (bounds-checked, character-indexed), and <code>&lt;</code>/<code>&lt;=</code>/<code>&gt;</code>/<code>&gt;=</code> compare two strings lexicographically by Unicode code point. These run on the interpreters; a function using them is deferred to the interpreters on the native/WASM backends.</p>
+        <pre data-fixture="tests/fixtures/valid/docs_string_ops.lby" data-mode="run"><code>fn main -> void
+    let s string = ""
+    s += "lu"
+    s += "llaby"
+    println(s)
+    if "apple" &lt; "banana"
+        println(to_string(char_code(s[0])))</code></pre>
+        <p class="example-status">Executable fixture: <code>tests/fixtures/valid/docs_string_ops.lby</code>.</p>
         <p>Lullaby's runtime includes a small character-indexed string library. All indices are character indices (like <code>len</code> on a <code>string</code>), not byte offsets. Wrong argument types report <code>L0375</code>.</p>
         <table>
           <thead>
