@@ -40,13 +40,28 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=REPO_ROOT, check=True, **kw)
 
 
-def crate_version() -> str:
-    text = CLI_MANIFEST.read_text(encoding="utf-8")
+def workspace_version() -> str:
+    """The full semver version from the root [workspace.package] (e.g. 1.0.0-preview)."""
+    text = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
     match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
     if not match:
-        sys.exit("could not read version from crates/lullaby_cli/Cargo.toml")
+        sys.exit("could not read [workspace.package] version from Cargo.toml")
+    return match.group(1)
+
+
+def numeric_version(full: str) -> str:
     # MSI ProductVersion must be numeric x.y.z — drop any pre-release suffix.
-    return match.group(1).split("-", 1)[0]
+    return full.split("-", 1)[0]
+
+
+def display_version(full: str) -> str:
+    # The MAJOR.PATCH-STATUS display/tag form (see documents/versioning.md): PATCH
+    # is semver's minor, status is the prerelease (or "stable" when there is none).
+    nums, _, status = full.partition("-")
+    parts = nums.split(".")
+    major = parts[0] if parts else "0"
+    minor = parts[1] if len(parts) > 1 else "0"
+    return f"{major}.{minor}-{status or 'stable'}"
 
 
 def find_wix() -> str:
@@ -68,7 +83,9 @@ def main() -> int:
     parser.add_argument("--skip-docs", action="store_true", help="reuse the existing generated docs")
     args = parser.parse_args()
 
-    version = crate_version()
+    full_version = workspace_version()
+    version = numeric_version(full_version)  # numeric MSI ProductVersion
+    disp_version = display_version(full_version)  # MAJOR.PATCH-STATUS for the filename
     wix = find_wix()
     py = sys.executable
 
@@ -89,7 +106,7 @@ def main() -> int:
     run([py, "installer/render_installer_art.py"])
 
     DIST.mkdir(exist_ok=True)
-    out = DIST / f"lullaby-{version}-x64.msi"
+    out = DIST / f"lullaby-{disp_version}-x64.msi"
     if out.exists():
         out.unlink()
     run([wix, "build", str(WXS), "-arch", "x64",

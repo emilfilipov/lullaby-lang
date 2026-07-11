@@ -8,12 +8,13 @@
 
   Build (from the repo root):
     wix build installer/lullaby.wxs -arch x64 \
-      -ext WixToolset.UI.wixext -d Version=0.1.0 -o dist/lullaby-0.1.0-x64.msi
+      -ext WixToolset.UI.wixext -d Version=1.0.0 -o dist/lullaby-1.0-preview-x64.msi
   The build is normally driven by scripts/build_windows_installer.py, which stages
   the payload (release exe, generated docs, examples) and passes the version.
+  MSI ProductVersion is numeric only (MAJOR.MINOR.PATCH, no status suffix).
 -->
 <?ifndef Version ?>
-<?define Version = "0.1.0" ?>
+<?define Version = "1.0.0" ?>
 <?endif?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">

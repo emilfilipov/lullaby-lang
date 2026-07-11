@@ -1,6 +1,6 @@
 [package]
 name = "lullaby_wasm"
-version = "0.1.0-alpha.2"
+version = "1.0.0-preview"
 edition = "2024"
 license = "MIT"
 

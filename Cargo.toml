@@ -15,6 +15,9 @@ members = [
 exclude = ["crates/lullaby_wasm"]
 
 [workspace.package]
+# See documents/versioning.md. Display/tag form is MAJOR.PATCH-STATUS
+# (e.g. 1.0-preview); semver keeps PATCH in the minor slot with a 0 filler patch.
+version = "1.0.0-preview"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/emilfilipov/lullaby"
