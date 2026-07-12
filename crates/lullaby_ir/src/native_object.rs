@@ -4621,6 +4621,21 @@ fn emit_paddq_xmm0_xmm1(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0x66, 0x0F, 0xD4, 0xC1]);
 }
 
+/// `psubq xmm0, xmm1` — subtract the two packed `i64` lanes (`xmm0 -= xmm1`).
+fn emit_psubq_xmm0_xmm1(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x66, 0x0F, 0xFB, 0xC1]);
+}
+
+/// `movdqu xmm0, [rcx]` — load 16 unaligned bytes (two `i64`s) into `xmm0`.
+fn emit_movdqu_xmm0_from_rcx(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0xF3, 0x0F, 0x6F, 0x01]);
+}
+
+/// `movdqu [rcx], xmm0` — store the two packed `i64` lanes of `xmm0` to `[rcx]`.
+fn emit_movdqu_rcx_from_xmm0(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0xF3, 0x0F, 0x7F, 0x01]);
+}
+
 /// Horizontal-add the two lanes of `xmm0` into `rax`: `movq rax, xmm0` (low
 /// lane), stash it, `psrldq xmm0, 8` (bring the high lane low), `movq rcx,
 /// xmm0`, then `add rax, rcx`. Leaves the packed sum's scalar total in `rax`.
@@ -5136,6 +5151,11 @@ fn lower_native_for(
     if let Some(reduction) = detect_sum_reduction(ctx, name, step, body) {
         return lower_native_vectorized_sum(ctx, name, start, end, &reduction, code);
     }
+    // Auto-vectorize `for i: c[i] = a[i] (+|-) b[i]` element-wise map. Same exact
+    // matcher-with-scalar-fallback discipline as the sum reduction.
+    if let Some(map) = detect_elementwise_map(ctx, name, step, body) {
+        return lower_native_vectorized_map(ctx, name, start, end, &map, code);
+    }
 
     // The counter and its two hidden slots (bound, step) were reserved during
     // frame planning, keyed by the counter name.
@@ -5312,6 +5332,208 @@ fn detect_sum_reduction(
         acc_slot: acc_local.slot,
         array_base_static: base_slot + const_words as i32 * 8,
     })
+}
+
+/// A recognized `for i from S to E: c[i] = a[i] <op> b[i]` element-wise map over
+/// contiguous `array<i64>`s (`op` is `+` or `-`). Element `k` of each array sits
+/// at `[rbp - base - 8*k]`, matching the scalar index addressing.
+struct ElementwiseMap {
+    dest_base: i32,
+    lhs_base: i32,
+    rhs_base: i32,
+    subtract: bool,
+}
+
+/// True when `expr` is exactly the loop counter `counter`.
+fn index_is_counter(expr: &BytecodeExpr, counter: &str) -> bool {
+    matches!(&expr.kind, BytecodeExprKind::Variable(v) if v == counter)
+}
+
+/// If `expr` is `array[counter]` over a contiguous `i64` array, return the
+/// array's static element-0 base (`base_slot + 8*const_words`).
+fn indexed_i64_base(ctx: &NativeCtx, expr: &BytecodeExpr, counter: &str) -> Option<i32> {
+    let BytecodeExprKind::Index { index, .. } = &expr.kind else {
+        return None;
+    };
+    if !index_is_counter(index, counter) {
+        return None;
+    }
+    let ScalarPlace::Dynamic {
+        base_slot,
+        const_words,
+        elem_words,
+        ..
+    } = resolve_read_place(ctx, expr).ok()?
+    else {
+        return None;
+    };
+    if elem_words != 1 {
+        return None;
+    }
+    Some(base_slot + const_words as i32 * 8)
+}
+
+/// Recognize `for counter from S to E: dest[counter] = lhs[counter] (+|-)
+/// rhs[counter]` over contiguous `array<i64>`s (default step 1). Returns `None`
+/// for anything else so the caller falls back to the scalar loop.
+fn detect_elementwise_map(
+    ctx: &NativeCtx,
+    counter: &str,
+    step: Option<&BytecodeExpr>,
+    body: &[BytecodeInstruction],
+) -> Option<ElementwiseMap> {
+    match step {
+        None => {}
+        Some(expr) => match expr.kind {
+            BytecodeExprKind::Integer(1) => {}
+            _ => return None,
+        },
+    }
+    let [
+        BytecodeInstruction::Assign {
+            name: dest,
+            path,
+            op: AssignOp::Replace,
+            value,
+            ..
+        },
+    ] = body
+    else {
+        return None;
+    };
+    // The destination is `dest[counter]`.
+    let [BytecodePlace::Index(dest_index)] = path.as_slice() else {
+        return None;
+    };
+    if !index_is_counter(dest_index, counter) {
+        return None;
+    }
+    // The value is `lhs[counter] (+|-) rhs[counter]`.
+    let BytecodeExprKind::Binary { left, op, right } = &value.kind else {
+        return None;
+    };
+    let subtract = match op {
+        BinaryOp::Add => false,
+        BinaryOp::Subtract => true,
+        _ => return None,
+    };
+    let lhs_base = indexed_i64_base(ctx, left, counter)?;
+    let rhs_base = indexed_i64_base(ctx, right, counter)?;
+    let dest_place = resolve_scalar_place(ctx, dest, path).ok()?;
+    let ScalarPlace::Dynamic {
+        base_slot,
+        const_words,
+        elem_words,
+        ..
+    } = dest_place
+    else {
+        return None;
+    };
+    if elem_words != 1 {
+        return None;
+    }
+    Some(ElementwiseMap {
+        dest_base: base_slot + const_words as i32 * 8,
+        lhs_base,
+        rhs_base,
+        subtract,
+    })
+}
+
+/// Vectorize an element-wise map `dest[i] = lhs[i] (+|-) rhs[i]` into an SSE2
+/// packed loop (two `i64` lanes per iteration) with a scalar tail for the odd
+/// element. Lane order is preserved because all three arrays share the same
+/// reverse `[rbp - base - 8*k]` addressing, so this is bit-for-bit identical to
+/// the scalar loop (and correct under `dest` aliasing `lhs`/`rhs`).
+fn lower_native_vectorized_map(
+    ctx: &mut NativeCtx,
+    counter: &str,
+    start: &BytecodeExpr,
+    end: &BytecodeExpr,
+    map: &ElementwiseMap,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let i_slot = ctx.local_slot(counter)?;
+    let end_slot = ctx.local_slot(&format!("{counter}__end"))?;
+
+    lower_native_expr(ctx, start, code)?;
+    store_local(code, i_slot);
+    lower_native_expr(ctx, end, code)?;
+    store_local(code, end_slot);
+
+    // `rcx = &array[i+1]` given `rdx = 8*(i+1)`: rcx = rbp - rdx - base.
+    let block_addr = |code: &mut Vec<u8>, base: i32| {
+        code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+        code.extend_from_slice(&[0x48, 0x29, 0xD1]); // sub rcx, rdx
+        emit_sub_rcx_imm(code, base);
+    };
+
+    // --- main SIMD loop: while i + 1 <= end, map the pair (i, i+1) ---
+    let main_top = code.len();
+    load_local(code, i_slot); // rax = i
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg after_main
+    let after_main_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3  -> 8*(i+1)
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (block offset)
+    block_addr(code, map.lhs_base);
+    emit_movdqu_xmm0_from_rcx(code);
+    block_addr(code, map.rhs_base);
+    emit_movdqu_xmm1_from_rcx(code);
+    if map.subtract {
+        emit_psubq_xmm0_xmm1(code);
+    } else {
+        emit_paddq_xmm0_xmm1(code);
+    }
+    block_addr(code, map.dest_base);
+    emit_movdqu_rcx_from_xmm0(code);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x02]); // add rax, 2
+    store_local(code, i_slot);
+    emit_jmp_to(code, main_top);
+
+    // --- scalar remainder: while i <= end, dest[i] = lhs[i] (+|-) rhs[i] ---
+    patch_rel32(code, after_main_site);
+    let rem_top = code.len();
+    load_local(code, i_slot); // rax = i
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg done
+    let done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // rdx = 8*i (element offset; the scalar addressing uses &array[i]).
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+    // rax = lhs[i]
+    block_addr(code, map.lhs_base);
+    code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+    code.push(0x50); // push rax (lhs)
+    // rax = rhs[i]
+    block_addr(code, map.rhs_base);
+    code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+    code.push(0x59); // pop rcx (rcx = lhs)
+    if map.subtract {
+        code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax (lhs - rhs)
+        code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+    } else {
+        code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx (lhs + rhs)
+    }
+    // dest[i] = rax
+    code.push(0x50); // push rax (result)
+    block_addr(code, map.dest_base);
+    code.push(0x58); // pop rax (result)
+    code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    store_local(code, i_slot);
+    emit_jmp_to(code, rem_top);
+
+    patch_rel32(code, done_site);
+    Ok(())
 }
 
 /// `acc += rax`, honoring register promotion of the accumulator. Preserves the

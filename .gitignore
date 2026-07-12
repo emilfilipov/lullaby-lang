@@ -35,3 +35,7 @@ crates/lullaby_wasm/target/
 
 # Native/C/C++ benchmark build artifacts
 *.obj
+
+# Python bytecode cache (benchmark/tooling scripts)
+__pycache__/
+*.pyc

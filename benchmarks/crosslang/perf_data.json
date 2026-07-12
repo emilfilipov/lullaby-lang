@@ -36,6 +36,17 @@
         {"lang": "Lullaby (ir)", "value": 160.6, "vsC": 1245.0},
         {"lang": "Lullaby (ast)", "value": 160.7, "vsC": 1246.0}
       ]
+    },
+    {
+      "name": "element-wise map c[i]=a[i]+b[i] (i64 array)",
+      "kind": "auto-vectorization (SSE2 packed loop)",
+      "unit": "ms (whole-program wall time, best-of-6)",
+      "checksum": 48,
+      "note": "The native backend recognizes `for i: c[i] = a[i] +/- b[i]` over `array<i64>` and emits an SSE2 packed loop (movdqu/paddq/psubq/movdqu, two i64 lanes per iteration) with a scalar tail. Measured against the identical loop forced scalar (two-statement body defeats the matcher). Output is bit-for-bit identical to every interpreter (parity-tested).",
+      "results": [
+        {"lang": "Lullaby (native, SSE2 vectorized)", "value": 146.1, "vsScalar": 1.0},
+        {"lang": "Lullaby (native, scalar)", "value": 490.9, "vsScalar": 3.36}
+      ]
     }
   ],
   "optimization_history": {
@@ -43,6 +54,7 @@
     "native_fib_vs_c": [{"stage": "baseline", "vsC": 1.72}, {"stage": "compare-fusion + imm-fold", "vsC": 1.35}, {"stage": "+register promotion", "vsC": 1.2}],
     "native_loop_vs_c": [{"stage": "compare-fusion + imm-fold", "vsC": 5.6}, {"stage": "+register promotion", "vsC": 2.1}],
     "native_primes_vs_c": [{"stage": "before (call per iter)", "vsC": 1.57}, {"stage": "+for-loop reg promotion", "vsC": 1.53}, {"stage": "+leaf-helper inlining", "vsC": 1.04}, {"stage": "+native % (idiv remainder)", "vsC": 1.01}],
+    "native_vectorization_speedup": [{"stage": "sum reduction s+=a[i] (SSE2 paddq)", "vsScalar": 3.3}, {"stage": "element-wise map c[i]=a[i]+/-b[i] (SSE2 packed load/store)", "vsScalar": 3.36}],
     "interpreter_fib_ns": [{"stage": "baseline", "value": 435}, {"stage": "+release profile", "value": 383}, {"stage": "+env pooling", "value": 230}]
   }
 }

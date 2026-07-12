@@ -132,21 +132,31 @@ After Phases A–C, Lullaby should cross under Python's 19,120.
 ## Performance gap: closing 1.04× / 1.20× to ≤ 1.0× C
 
 The native backend is already essentially at C on the arithmetic-and-loops
-workload. The remaining margin is call/arithmetic overhead:
+workload — `count_primes_below` is at **1.01× C** after adopting the native `%`
+operator. The remaining margin is per-call overhead in deep recursion:
 
-1. **Overflow-check elision via range analysis.** Native integer arithmetic is
-   checked to stay bit-for-bit with the interpreters; that costs cycles in hot
-   loops. Elide the check where the operand range provably cannot overflow (or
-   offer a release/wrapping mode). Primary lever for `count_primes_below`.
-2. **Leaf-frame omission.** Small all-`i64` leaf functions (e.g. `fib` base
-   cases, helpers) still emit a full Win64 prologue/epilogue and reserve shadow
-   space. Omit the frame when a function makes no calls and fits in registers —
-   the main lever for the `fib` 1.20×.
-3. **Broaden SIMD auto-vectorization.** Phase-1 covers `i64` sum reductions;
-   extend to `min`/`max`/count/product reductions and `f64` accumulation, and to
-   strided array scans.
-4. **Tail-call / self-recursion optimization** and tighter register allocation
-   (fewer spills) for the recursive and loop-carried cases.
+Two levers guessed here earlier were checked against the emitted machine code and
+**ruled out**:
+
+- *Overflow-check elision* is a non-issue: the native backend already emits plain
+  `add`/`imul` for `i64` arithmetic (bit-for-bit with the interpreters by the
+  two's-complement semantics, not a runtime check) — there is nothing to elide.
+- *Leaf-frame omission* already happens: the prologue self-omits the frame and
+  shadow space when a function makes no calls and needs no stack (`stack_size == 0`).
+
+The real remaining levers are:
+
+1. **Recursive-call codegen.** `fib(35)` runs 1.26× C: the residual is per-call
+   overhead (C keeps the argument in a callee-saved register across the two
+   recursive calls and tightens the prologue). Needs self-tail / argument-in-register
+   handling and tighter register allocation for the recursive case.
+2. **Broaden SIMD auto-vectorization.** Phase-1 (`i64` sum reduction, 3.3× the
+   scalar loop) and phase-2 (element-wise map `c[i] = a[i] ± b[i]`, 3.36×) are
+   shipped — both emit an SSE2 packed loop (`movdqu`/`paddq`/`psubq`/`movdqu`, two
+   `i64` lanes per iteration) with a scalar tail, verified bit-for-bit identical
+   to every interpreter. Extend to `min`/`max`/count/product reductions, `f64`
+   accumulation, and dot product (the `i64` dot product needs an SSE2 64-bit
+   multiply workaround).
 
 ## How to refresh this analysis
 

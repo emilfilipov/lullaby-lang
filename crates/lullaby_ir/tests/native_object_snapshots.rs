@@ -101,6 +101,42 @@ fn sum_reduction_over_i64_array_is_auto_vectorized() {
     );
 }
 
+#[test]
+fn elementwise_map_over_i64_arrays_is_auto_vectorized() {
+    // `for i: c[i] = a[i] + b[i]` emits SSE2 packed load/add/store.
+    let add = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let c array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]\n    for i from 0 to 7\n        c[i] = a[i] + b[i]\n    c[0]\n",
+    );
+    assert!(
+        contains(&add, &[0x66, 0x0F, 0xD4, 0xC1]), // paddq xmm0, xmm1
+        "expected a paddq in the vectorized element-wise add"
+    );
+    assert!(
+        contains(&add, &[0xF3, 0x0F, 0x7F, 0x01]), // movdqu [rcx], xmm0 (the store)
+        "expected a movdqu store in the vectorized map"
+    );
+
+    // Subtraction vectorizes with `psubq`.
+    let sub = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let c array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]\n    for i from 0 to 7\n        c[i] = a[i] - b[i]\n    c[0]\n",
+    );
+    assert!(
+        contains(&sub, &[0x66, 0x0F, 0xFB, 0xC1]), // psubq xmm0, xmm1
+        "expected a psubq in the vectorized element-wise subtract"
+    );
+
+    // A body that is not a bare `c[i] = a[i] (+|-) b[i]` (here `* b[i]`) must NOT
+    // vectorize — the detector is specific and falls back to the scalar loop.
+    let scalar = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let c array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]\n    for i from 0 to 7\n        c[i] = a[i] * b[i]\n    c[0]\n",
+    );
+    assert!(
+        !contains(&scalar, &[0x66, 0x0F, 0xD4, 0xC1])
+            && !contains(&scalar, &[0x66, 0x0F, 0xFB, 0xC1]),
+        "a non-add/sub map body must not be vectorized"
+    );
+}
+
 fn snapshot_for(source: &str) -> String {
     let tokens = lex(source).expect("lex native object snapshot source");
     let program = parse(&tokens).expect("parse native object snapshot source");

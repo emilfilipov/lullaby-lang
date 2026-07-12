@@ -570,6 +570,48 @@ fn runs_conditional_fixture_on_all_backends() {
     }
 }
 
+/// The SSE2-vectorized element-wise map (`c[i]=a[i]±b[i]`) is bit-for-bit
+/// identical to the scalar loop: when linkable, the native `.exe` exit equals the
+/// interpreter result (560 mod 256).
+#[test]
+fn native_simd_map_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_simd_map.lby");
+    let out = std::env::temp_dir().join("lullaby_native_simd_map.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out"),
+            fixture.to_str().expect("fixture"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture")])
+        .output()
+        .expect("run cli");
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 560);
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("linker unavailable; skipping native SIMD-map parity");
+        return;
+    }
+    assert!(out.is_file());
+    let exe = Command::new(&out).output().expect("run exe");
+    // Windows preserves the full 32-bit process exit code; Unix truncates the
+    // wait status to the low 8 bits. The value (560) is chosen above a byte so
+    // this parity check actually exercises the wide native result.
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(exe.status.code().expect("exit"), expected);
+}
+
 /// The inline conditional desugars to a plain `if` statement, so the native
 /// backend compiles it; when the platform can link, the `.exe` exit code equals
 /// the interpreter result (115 mod 256).
