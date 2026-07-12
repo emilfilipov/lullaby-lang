@@ -1,0 +1,15 @@
+fn count_vowels s string -> i64
+    let n = 0
+    for c in s
+        n += 1 if c in "aeiou" else 0
+    n
+
+fn main -> i64
+    let a = count_vowels("education")
+    let b = 1 if "o w" in "hello world" else 0
+    let xs list<i64> = list_new()
+    xs = push(xs, 3)
+    xs = push(xs, 7)
+    let c = 1 if 7 in xs else 0
+    let d = 1 if 4 in xs else 0
+    a * 1000 + b * 100 + c * 10 + d

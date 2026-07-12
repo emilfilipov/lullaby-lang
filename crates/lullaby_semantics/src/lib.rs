@@ -1961,6 +1961,10 @@ impl<'a> Checker<'a> {
                 self.check_freed_uses(then_branch, freed, function);
                 self.check_freed_uses(else_branch, freed, function);
             }
+            ExprKind::In { value, collection } => {
+                self.check_freed_uses(value, freed, function);
+                self.check_freed_uses(collection, freed, function);
+            }
             ExprKind::Integer(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
@@ -2441,6 +2445,64 @@ impl<'a> Checker<'a> {
                         }
                     }
                     _ => None,
+                }
+            }
+            // Membership `VALUE in COLLECTION` yields `bool`. The collection is a
+            // `string` (value is a `char`/`string`) or a `list<T>` (value is a
+            // `T`); anything else is `L0437`.
+            ExprKind::In { value, collection } => {
+                let coll_type = self.check_expr(collection, scope, function);
+                match coll_type.as_ref() {
+                    Some(ct) if ct.name == "string" => {
+                        let value_type = self.check_expr(value, scope, function);
+                        let ok = matches!(
+                            value_type.as_ref().map(|t| t.name.as_str()),
+                            Some("string") | Some("char")
+                        );
+                        if !ok {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0437",
+                                format!(
+                                    "the left operand of `in` on a string must be a `char` or `string`, but got `{}`",
+                                    value_type.as_ref().map_or("?", |t| t.name.as_str())
+                                ),
+                                Some(function.name.clone()),
+                                value.span,
+                            ));
+                        }
+                        Some(TypeRef::new("bool"))
+                    }
+                    Some(ct) if ct.generic_arg("list").is_some() => {
+                        let element = ct.generic_arg("list").expect("list element");
+                        let value_type =
+                            self.check_expr_expected(value, Some(&element), scope, function);
+                        if value_type.as_ref() != Some(&element) {
+                            self.diagnostics.push(SemanticDiagnostic::at(
+                                "L0437",
+                                format!(
+                                    "the left operand of `in` on a `{}` must be `{}`, but got `{}`",
+                                    ct.name,
+                                    element.name,
+                                    value_type.as_ref().map_or("?", |t| t.name.as_str())
+                                ),
+                                Some(function.name.clone()),
+                                value.span,
+                            ));
+                        }
+                        Some(TypeRef::new("bool"))
+                    }
+                    other => {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0437",
+                            format!(
+                                "`in` needs a `string` or `list<T>` collection, but got `{}`",
+                                other.map_or("?", |t| t.name.as_str())
+                            ),
+                            Some(function.name.clone()),
+                            collection.span,
+                        ));
+                        None
+                    }
                 }
             }
         };

@@ -691,6 +691,16 @@ pub enum ExprKind {
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
     },
+    /// Membership test `VALUE in COLLECTION`, yielding `bool`. The collection is
+    /// a `string` (with a `char` or `string` value — character/substring
+    /// containment) or a `list<T>` (with a `T` value). It sits at comparison
+    /// precedence, so `x in xs and y in ys` is `(x in xs) and (y in ys)`. The
+    /// AST interpreter evaluates it directly; the IR lowerer desugars it to a
+    /// `contains`/`list_contains` builtin call, so no backend needs an `in` node.
+    In {
+        value: Box<Expr>,
+        collection: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2496,7 +2506,31 @@ impl<'a> ExprParser<'a> {
     fn parse_binary(&mut self, min_precedence: u8) -> Result<Expr, String> {
         let mut left = self.parse_unary()?;
 
-        while let Some((op, precedence)) = self.peek_binary_op() {
+        loop {
+            // `in` is the membership operator at comparison precedence (3). It is
+            // non-associative in practice (the result is `bool`), so its
+            // right-hand collection is parsed above that precedence.
+            if self.peek_keyword(Keyword::In) {
+                const IN_PRECEDENCE: u8 = 3;
+                if IN_PRECEDENCE < min_precedence {
+                    break;
+                }
+                self.cursor += 1;
+                let collection = self.parse_binary(IN_PRECEDENCE + 1)?;
+                let span = left.span;
+                left = Expr {
+                    kind: ExprKind::In {
+                        value: Box::new(left),
+                        collection: Box::new(collection),
+                    },
+                    span,
+                };
+                continue;
+            }
+
+            let Some((op, precedence)) = self.peek_binary_op() else {
+                break;
+            };
             if precedence < min_precedence {
                 break;
             }

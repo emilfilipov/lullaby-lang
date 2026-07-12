@@ -9185,6 +9185,31 @@ impl<'a> Lowerer<'a> {
                 )?;
                 (temp.kind, temp.ty)
             }
+            // Membership `VALUE in COLLECTION` desugars to a builtin call, so no
+            // backend needs an `in` node: `contains(collection, value)` for a
+            // string (a char value coerced via `to_string`), or
+            // `list_contains(collection, value)` for a `list<T>`.
+            ExprKind::In { value, collection } => {
+                let coll = self.lower_expr(collection, scope)?;
+                let val = self.lower_expr(value, scope)?;
+                let call = if coll.ty.name == "string" {
+                    let needle = if val.ty.name == "char" {
+                        self.to_string_wrap(val)
+                    } else {
+                        val
+                    };
+                    IrExprKind::Call {
+                        name: "contains".to_string(),
+                        args: vec![coll, needle],
+                    }
+                } else {
+                    IrExprKind::Call {
+                        name: "list_contains".to_string(),
+                        args: vec![coll, val],
+                    }
+                };
+                (call, TypeRef::new("bool"))
+            }
             // Lower a closure literal: lower its body in a child scope that layers
             // the closure parameters over the enclosing scope, register the lowered
             // `(param names, body)` in the module's closure table keyed by the

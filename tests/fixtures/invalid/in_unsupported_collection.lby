@@ -1,0 +1,2 @@
+fn main -> i64
+    1 if 5 in 3 else 0

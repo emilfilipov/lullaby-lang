@@ -573,6 +573,47 @@ fn runs_string_char_concat_fixture_on_all_backends() {
     }
 }
 
+/// `VALUE in COLLECTION` — char-in-string, substring-in-string, and list
+/// membership — computes 5110 identically on all three interpreter backends.
+#[test]
+fn runs_in_operator_fixture_on_all_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_in_operator.lby");
+    for backend in [None, Some("ir"), Some("bytecode")] {
+        let mut args = vec!["run".to_string()];
+        if let Some(b) = backend {
+            args.push("--backend".to_string());
+            args.push(b.to_string());
+        }
+        args.push(fixture.to_str().expect("fixture path").to_string());
+        let output = lullaby().args(&args).output().expect("run cli");
+        assert!(output.status.success(), "{backend:?}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "5110",
+            "backend {backend:?}"
+        );
+    }
+}
+
+/// `in` requires a `string`/`list<T>` collection with a matching value type,
+/// else `L0437`.
+#[test]
+fn rejects_in_incompatible_operands() {
+    for name in ["in_unsupported_collection", "in_value_type_mismatch"] {
+        let fixture = workspace_root().join(format!("tests/fixtures/invalid/{name}.lby"));
+        let output = lullaby()
+            .args(["check", fixture.to_str().expect("fixture path")])
+            .output()
+            .expect("run cli");
+        assert!(!output.status.success(), "{name}: {output:?}");
+        assert!(
+            stderr(&output).contains("L0437"),
+            "{name}: {}",
+            stderr(&output)
+        );
+    }
+}
+
 /// `string + <non-char scalar>` is still a type error (`L0307`); only
 /// string+string and string+char concatenate.
 #[test]

@@ -1861,6 +1861,10 @@ fn collect_closures_in_expr<'a>(
             collect_closures_in_expr(then_branch, table);
             collect_closures_in_expr(else_branch, table);
         }
+        ExprKind::In { value, collection } => {
+            collect_closures_in_expr(value, table);
+            collect_closures_in_expr(collection, table);
+        }
     }
 }
 
@@ -4130,6 +4134,21 @@ impl<'a> Runtime<'a> {
                     self.eval_expr(else_branch, env)
                 }
             }
+            // Membership `VALUE in COLLECTION`. Reuse the same builtins the IR
+            // desugar targets so every backend agrees: `contains` for a string
+            // (a char value is coerced to a one-char string) and
+            // `list_contains` for a `list<T>`.
+            ExprKind::In { value, collection } => {
+                let coll = self.eval_expr(collection, env)?;
+                let val = self.eval_expr(value, env)?;
+                match &coll {
+                    Value::String(_) => {
+                        let needle = Value::String(val.as_concat_string()?);
+                        Self::builtin_contains(vec![coll, needle])
+                    }
+                    _ => Self::builtin_list_contains(vec![coll, val]),
+                }
+            }
         };
         result.map_err(|error| self.annotate_error(error, expr.span))
     }
@@ -6310,6 +6329,9 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
             expr_mentions_var(cond, name)
                 || expr_mentions_var(then_branch, name)
                 || expr_mentions_var(else_branch, name)
+        }
+        ExprKind::In { value, collection } => {
+            expr_mentions_var(value, name) || expr_mentions_var(collection, name)
         }
     }
 }

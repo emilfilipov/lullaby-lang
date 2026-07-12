@@ -179,7 +179,7 @@ Expression precedence, from lowest to highest:
 1. inline conditional (ternary): `THEN if COND else ELSE`
 2. `or`
 3. `and`
-4. equality and ordering: `==`, `!=`, `<`, `<=`, `>`, `>=`
+4. equality, ordering, and membership: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`
 5. addition and subtraction: `+`, `-`
 6. multiplication, division, and remainder: `*`, `/`, `%`
 7. unary: `not`, unary `-`
@@ -206,7 +206,7 @@ and_expr =
     comparison_expr { "and" comparison_expr } ;
 
 comparison_expr =
-    additive_expr { comparison_op additive_expr } ;
+    additive_expr { ( comparison_op | "in" ) additive_expr } ;
 
 comparison_op =
     "==" | "!=" | "<" | "<=" | ">" | ">=" ;

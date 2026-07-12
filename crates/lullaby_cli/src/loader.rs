@@ -640,6 +640,10 @@ fn collect_expr_references(expr: &Expr, out: &mut Vec<(String, Span)>) {
             collect_expr_references(then_branch, out);
             collect_expr_references(else_branch, out);
         }
+        ExprKind::In { value, collection } => {
+            collect_expr_references(value, out);
+            collect_expr_references(collection, out);
+        }
     }
 }
 

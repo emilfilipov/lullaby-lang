@@ -519,14 +519,28 @@ fn render_expr(expr: &Expr) -> String {
                 render_expr(else_branch),
             )
         }
+        // Membership `VALUE in COLLECTION`. Both operands are parenthesized when
+        // they are themselves low-precedence (`in`/ternary) so the source
+        // re-parses with the same structure.
+        ExprKind::In { value, collection } => {
+            format!(
+                "{} in {}",
+                render_ternary_branch(value),
+                render_ternary_branch(collection),
+            )
+        }
     }
 }
 
-/// Render a `then`/`cond` position of an inline conditional, parenthesizing a
-/// nested ternary so it does not merge into the surrounding one on re-parse.
+/// Render a low-precedence operand (a `then`/`cond` of a ternary, or either side
+/// of `in`), parenthesizing a nested ternary or `in` so it does not merge into
+/// the surrounding expression on re-parse.
 fn render_ternary_branch(child: &Expr) -> String {
     let rendered = render_expr(child);
-    if matches!(child.kind, ExprKind::Conditional { .. }) {
+    if matches!(
+        child.kind,
+        ExprKind::Conditional { .. } | ExprKind::In { .. }
+    ) {
         format!("({rendered})")
     } else {
         rendered
@@ -538,13 +552,17 @@ fn render_ternary_branch(child: &Expr) -> String {
 /// all operators are left-associative).
 fn render_operand(child: &Expr, parent_prec: u8, is_right: bool) -> String {
     let rendered = render_expr(child);
-    // A ternary binds looser than every binary operator, so it always needs
-    // parentheses as a binary operand.
-    if matches!(child.kind, ExprKind::Conditional { .. }) {
-        return format!("({rendered})");
-    }
-    if let ExprKind::Binary { op, .. } = &child.kind {
-        let child_prec = binary_precedence(op);
+    // Precedence of the child on the shared binary scale: a ternary is the
+    // loosest form (0), `in` sits at comparison level (3). Parenthesize only
+    // when the child binds as loosely or (on a right operand) equally, so no
+    // redundant parentheses are emitted (e.g. `x in a and y in b` stays flat).
+    let child_prec = match &child.kind {
+        ExprKind::Conditional { .. } => Some(0),
+        ExprKind::In { .. } => Some(3),
+        ExprKind::Binary { op, .. } => Some(binary_precedence(op)),
+        _ => None,
+    };
+    if let Some(child_prec) = child_prec {
         let needs = if is_right {
             child_prec <= parent_prec
         } else {
@@ -561,7 +579,7 @@ fn render_unary_operand(child: &Expr) -> String {
     let rendered = render_expr(child);
     if matches!(
         child.kind,
-        ExprKind::Binary { .. } | ExprKind::Conditional { .. }
+        ExprKind::Binary { .. } | ExprKind::Conditional { .. } | ExprKind::In { .. }
     ) {
         format!("({rendered})")
     } else {
@@ -578,6 +596,7 @@ fn render_postfix_target(target: &Expr) -> String {
             | ExprKind::Match { .. }
             | ExprKind::Await { .. }
             | ExprKind::Conditional { .. }
+            | ExprKind::In { .. }
     ) {
         format!("({rendered})")
     } else {
@@ -715,6 +734,25 @@ mod tests {
     #[test]
     fn conditional_fixture_is_idempotent() {
         assert_fixture_idempotent("run_conditional");
+    }
+
+    #[test]
+    fn formats_membership_operator() {
+        // `in` renders bare in tail position.
+        assert_eq!(
+            fmt("fn f c char -> bool\n    c in \"aeiou\"\n"),
+            "fn f c char -> bool\n    c in \"aeiou\"\n"
+        );
+        // `in` binds tighter than `and`, so its operands need no parentheses.
+        assert_eq!(
+            fmt("fn f c char -> bool\n    c in \"ab\" and c in \"bc\"\n"),
+            "fn f c char -> bool\n    c in \"ab\" and c in \"bc\"\n"
+        );
+    }
+
+    #[test]
+    fn in_operator_fixture_is_idempotent() {
+        assert_fixture_idempotent("run_in_operator");
     }
 
     #[test]
