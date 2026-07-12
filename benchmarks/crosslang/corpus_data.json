@@ -5704,8 +5704,8 @@
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 70,
-     "source": "fn common_neighbors_count g array<i64> n, a, b i64\n    let count = 0\n    for k from 0 to n - 1\n        if g[a * n + k] == 1\n            if g[b * n + k] == 1\n                count += 1\n    count"
+     "tokens": 68,
+     "source": "fn common_neighbors_count g array<i64> n, a, b i64\n    let count = 0\n    for k from 0 to n - 1\n        if g[a * n + k] == 1 and g[b * n + k] == 1\n            count += 1\n    count"
     },
     "C": {
      "tokens": 84,
@@ -5735,8 +5735,8 @@
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 193,
-     "source": "fn connected_components_count g array<i64> n i64\n    let visited array<i64> = array_fill(64, 0)\n    let queue array<i64> = array_fill(64, 0)\n    let components = 0\n    for s from 0 to n - 1\n        if visited[s] == 0\n            components += 1\n            let head = 0\n            let tail = 0\n            visited[s] = 1\n            queue[0] = s\n            tail = 1\n            while head < tail\n                let v = queue[head]\n                head += 1\n                for c from 0 to n - 1\n                    if g[v * n + c] == 1\n                        if visited[c] == 0\n                            visited[c] = 1\n                            queue[tail] = c\n                            tail += 1\n    components"
+     "tokens": 191,
+     "source": "fn connected_components_count g array<i64> n i64\n    let visited array<i64> = array_fill(64, 0)\n    let queue array<i64> = array_fill(64, 0)\n    let components = 0\n    for s from 0 to n - 1\n        if visited[s] == 0\n            components += 1\n            let head = 0\n            let tail = 0\n            visited[s] = 1\n            queue[0] = s\n            tail = 1\n            while head < tail\n                let v = queue[head]\n                head += 1\n                for c from 0 to n - 1\n                    if g[v * n + c] == 1 and visited[c] == 0\n                        visited[c] = 1\n                        queue[tail] = c\n                        tail += 1\n    components"
     },
     "C": {
      "tokens": 188,
@@ -5859,8 +5859,8 @@
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 107,
-     "source": "fn count_triangles g array<i64> n i64\n    let count = 0\n    for i from 0 to n - 1\n        for j from i + 1 to n - 1\n            for k from j + 1 to n - 1\n                if g[i * n + j] == 1\n                    if g[j * n + k] == 1\n                        if g[i * n + k] == 1\n                            count += 1\n    count"
+     "tokens": 103,
+     "source": "fn count_triangles g array<i64> n i64\n    let count = 0\n    for i from 0 to n - 1\n        for j from i + 1 to n - 1\n            for k from j + 1 to n - 1\n                if g[i * n + j] == 1 and g[j * n + k] == 1 and g[i * n + k] == 1\n                    count += 1\n    count"
     },
     "C": {
      "tokens": 123,
@@ -6014,8 +6014,8 @@
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 64,
-     "source": "fn is_complete_graph g array<i64> n i64\n    for i from 0 to n - 1\n        for j from 0 to n - 1\n            if i != j\n                if g[i * n + j] != 1\n                    return 0\n    1"
+     "tokens": 62,
+     "source": "fn is_complete_graph g array<i64> n i64\n    for i from 0 to n - 1\n        for j from 0 to n - 1\n            if i != j and g[i * n + j] != 1\n                return 0\n    1"
     },
     "C": {
      "tokens": 77,
@@ -6169,8 +6169,8 @@
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 64,
-     "source": "fn path_exists_len2 g array<i64> n, s, t i64\n    for k from 0 to n - 1\n        if g[s * n + k] == 1\n            if g[k * n + t] == 1\n                return 1\n    0"
+     "tokens": 62,
+     "source": "fn path_exists_len2 g array<i64> n, s, t i64\n    for k from 0 to n - 1\n        if g[s * n + k] == 1 and g[k * n + t] == 1\n            return 1\n    0"
     },
     "C": {
      "tokens": 77,
@@ -6200,8 +6200,8 @@
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 175,
-     "source": "fn reachable_count_bfs g array<i64> n, start i64\n    let visited array<i64> = array_fill(64, 0)\n    let queue array<i64> = array_fill(64, 0)\n    let head = 0\n    let tail = 0\n    visited[start] = 1\n    queue[tail] = start\n    tail += 1\n    let count = 0\n    while head < tail\n        let v = queue[head]\n        head += 1\n        count += 1\n        for c from 0 to n - 1\n            if g[v * n + c] == 1\n                if visited[c] == 0\n                    visited[c] = 1\n                    queue[tail] = c\n                    tail += 1\n    count"
+     "tokens": 173,
+     "source": "fn reachable_count_bfs g array<i64> n, start i64\n    let visited array<i64> = array_fill(64, 0)\n    let queue array<i64> = array_fill(64, 0)\n    let head = 0\n    let tail = 0\n    visited[start] = 1\n    queue[tail] = start\n    tail += 1\n    let count = 0\n    while head < tail\n        let v = queue[head]\n        head += 1\n        count += 1\n        for c from 0 to n - 1\n            if g[v * n + c] == 1 and visited[c] == 0\n                visited[c] = 1\n                queue[tail] = c\n                tail += 1\n    count"
     },
     "C": {
      "tokens": 161,
@@ -13637,7 +13637,7 @@
   }
  ],
  "totals": {
-  "Lullaby": 21058,
+  "Lullaby": 21044,
   "C": 27472,
   "C++": 28423,
   "Rust": 26329,
@@ -13734,7 +13734,7 @@
    "JavaScript": 513
   },
   "graph_algos": {
-   "Lullaby": 1288,
+   "Lullaby": 1274,
    "C": 1470,
    "C++": 1529,
    "Rust": 1462,
