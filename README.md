@@ -55,8 +55,11 @@ Lullaby already beats Python.
   dependency limit; only multi-accumulator ILP unrolling would close it further.
 
 **Interpreter performance**: the AST / IR / bytecode tiers are development tools
-(~200–1200× C), but range `for`-loops run **~2× faster** across all three after
-binding the loop variable once instead of per-iteration.
+(~200–1200× C). Range `for`-loops run **~2× faster** across all three after
+binding the loop variable once instead of per-iteration, and **slot-based
+variable resolution** now indexes each local read by `(depth, slot)` on the IR
+and bytecode tiers instead of scanning names — so those tiers run **faster than
+the AST tree-walker** (which still name-scans) on numeric code.
 
 <sub>Measured on Windows/MSVC; compiled tiers at `-O2`/release, CPython for
 Python. Regenerate with `benchmarks/crosslang/run_benchmark.ps1`.</sub>
