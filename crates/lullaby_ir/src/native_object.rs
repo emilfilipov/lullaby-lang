@@ -4606,24 +4606,9 @@ fn emit_imul_rax_imm(code: &mut Vec<u8>, imm: i64) {
 // `xmm0` (the packed accumulator) and `xmm1` (a loaded pair), which are free in
 // the i64-scalar functions that carry vectorizable array loops.
 
-/// `pxor xmm0, xmm0` — zero the packed accumulator.
-fn emit_pxor_xmm0(code: &mut Vec<u8>) {
-    code.extend_from_slice(&[0x66, 0x0F, 0xEF, 0xC0]);
-}
-
 /// `movdqu xmm1, [rcx]` — load 16 unaligned bytes (two `i64`s) into `xmm1`.
 fn emit_movdqu_xmm1_from_rcx(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0xF3, 0x0F, 0x6F, 0x09]);
-}
-
-/// `paddq xmm0, xmm1` — add the two packed `i64` lanes into the accumulator.
-fn emit_paddq_xmm0_xmm1(code: &mut Vec<u8>) {
-    code.extend_from_slice(&[0x66, 0x0F, 0xD4, 0xC1]);
-}
-
-/// `psubq xmm0, xmm1` — subtract the two packed `i64` lanes (`xmm0 -= xmm1`).
-fn emit_psubq_xmm0_xmm1(code: &mut Vec<u8>) {
-    code.extend_from_slice(&[0x66, 0x0F, 0xFB, 0xC1]);
 }
 
 /// `movdqu xmm0, [rcx]` — load 16 unaligned bytes (two `i64`s) into `xmm0`.
@@ -4636,14 +4621,112 @@ fn emit_movdqu_rcx_from_xmm0(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0xF3, 0x0F, 0x7F, 0x01]);
 }
 
-/// Horizontal-add the two lanes of `xmm0` into `rax`: `movq rax, xmm0` (low
-/// lane), stash it, `psrldq xmm0, 8` (bring the high lane low), `movq rcx,
-/// xmm0`, then `add rax, rcx`. Leaves the packed sum's scalar total in `rax`.
-fn emit_hadd_xmm0_into_rax(code: &mut Vec<u8>) {
+/// Horizontally fold the two lanes of `xmm0` into `rax` with `op`: `movq rax,
+/// xmm0` (low lane), `psrldq xmm0, 8` (bring the high lane low), `movq rcx,
+/// xmm0`, then `rax = rax <op> rcx`. Leaves the packed reduction's scalar total
+/// in `rax`.
+fn emit_hfold_xmm0_into_rax(op: ReduceOp, code: &mut Vec<u8>) {
     code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0 (low lane)
     code.extend_from_slice(&[0x66, 0x0F, 0x73, 0xD8, 0x08]); // psrldq xmm0, 8
     code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC1]); // movq rcx, xmm0 (high lane)
-    code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx
+    op.emit_rax_rcx(code); // rax = rax <op> rcx
+}
+
+/// The associative-and-commutative reductions that vectorize into an SSE2 packed
+/// loop. Each is exact on `i64` — `+` is associative mod 2^64, and bitwise
+/// `& | ^` are associative and commutative bit-for-bit — so the packed result is
+/// identical to the scalar fold regardless of pairing order. (Multiplication is
+/// also associative mod 2^64, but SSE2 has no 64-bit packed multiply, so it is
+/// not offered here.)
+#[derive(Clone, Copy, PartialEq)]
+enum ReduceOp {
+    Add,
+    And,
+    Or,
+    Xor,
+}
+
+impl ReduceOp {
+    /// Seed the packed accumulator (`xmm0`) with this operator's identity: all
+    /// ones for `AND` (`pcmpeqd`), zero for `+`/`OR`/`XOR` (`pxor`).
+    fn emit_packed_identity(self, code: &mut Vec<u8>) {
+        match self {
+            ReduceOp::And => code.extend_from_slice(&[0x66, 0x0F, 0x76, 0xC0]), // pcmpeqd xmm0,xmm0
+            _ => code.extend_from_slice(&[0x66, 0x0F, 0xEF, 0xC0]),             // pxor xmm0,xmm0
+        }
+    }
+
+    /// Combine the loaded pair (`xmm1`) into the packed accumulator: `xmm0 <op>= xmm1`.
+    fn emit_packed(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            ReduceOp::Add => &[0x66, 0x0F, 0xD4, 0xC1], // paddq
+            ReduceOp::And => &[0x66, 0x0F, 0xDB, 0xC1], // pand
+            ReduceOp::Or => &[0x66, 0x0F, 0xEB, 0xC1],  // por
+            ReduceOp::Xor => &[0x66, 0x0F, 0xEF, 0xC1], // pxor
+        });
+    }
+
+    /// `rax = rax <op> rcx`.
+    fn emit_rax_rcx(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            ReduceOp::Add => &[0x48, 0x01, 0xC8], // add rax, rcx
+            ReduceOp::And => &[0x48, 0x21, 0xC8], // and rax, rcx
+            ReduceOp::Or => &[0x48, 0x09, 0xC8],  // or  rax, rcx
+            ReduceOp::Xor => &[0x48, 0x31, 0xC8], // xor rax, rcx
+        });
+    }
+
+    /// `rax = rax <op> rdx`.
+    fn emit_rax_rdx(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            ReduceOp::Add => &[0x48, 0x01, 0xD0], // add rax, rdx
+            ReduceOp::And => &[0x48, 0x21, 0xD0], // and rax, rdx
+            ReduceOp::Or => &[0x48, 0x09, 0xD0],  // or  rax, rdx
+            ReduceOp::Xor => &[0x48, 0x31, 0xD0], // xor rax, rdx
+        });
+    }
+}
+
+/// The element-wise map operators that vectorize into an SSE2 packed loop. `+`/`-`
+/// are exact mod 2^64; `& | ^` are exact bit-for-bit. All are per-lane, so the
+/// packed store is identical to the scalar loop (including under destination
+/// aliasing). Multiplication is excluded (no 64-bit packed multiply in SSE2).
+#[derive(Clone, Copy, PartialEq)]
+enum MapOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+}
+
+impl MapOp {
+    /// Combine the two loaded pairs: `xmm0 <op>= xmm1` (with `xmm0` = lhs, `xmm1` = rhs).
+    fn emit_packed(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            MapOp::Add => &[0x66, 0x0F, 0xD4, 0xC1], // paddq
+            MapOp::Sub => &[0x66, 0x0F, 0xFB, 0xC1], // psubq
+            MapOp::And => &[0x66, 0x0F, 0xDB, 0xC1], // pand
+            MapOp::Or => &[0x66, 0x0F, 0xEB, 0xC1],  // por
+            MapOp::Xor => &[0x66, 0x0F, 0xEF, 0xC1], // pxor
+        });
+    }
+
+    /// Scalar-tail combine `lhs <op> rhs` given `rcx` = lhs, `rax` = rhs, leaving
+    /// the result in `rax`. The commutative ops fold in place; `-` (non-commutative)
+    /// computes `rcx - rax` then moves it into `rax`.
+    fn emit_scalar_tail(self, code: &mut Vec<u8>) {
+        match self {
+            MapOp::Add => code.extend_from_slice(&[0x48, 0x01, 0xC8]), // add rax, rcx
+            MapOp::And => code.extend_from_slice(&[0x48, 0x21, 0xC8]), // and rax, rcx
+            MapOp::Or => code.extend_from_slice(&[0x48, 0x09, 0xC8]),  // or  rax, rcx
+            MapOp::Xor => code.extend_from_slice(&[0x48, 0x31, 0xC8]), // xor rax, rcx
+            MapOp::Sub => {
+                code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax (lhs - rhs)
+                code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+            }
+        }
+    }
 }
 
 /// `sub rcx, imm32` (imm may be any i32; encodes the 32-bit immediate form).
@@ -5148,11 +5231,11 @@ fn lower_native_for(
     // over an `array<i64>` into an SSE2 packed loop. Anything that does not match
     // the exact shape falls through to the scalar lowering below, so correctness
     // never depends on the pattern matcher.
-    if let Some(reduction) = detect_sum_reduction(ctx, name, step, body) {
-        return lower_native_vectorized_sum(ctx, name, start, end, &reduction, code);
+    if let Some(reduction) = detect_reduction(ctx, name, step, body) {
+        return lower_native_vectorized_reduction(ctx, name, start, end, &reduction, code);
     }
-    // Auto-vectorize `for i: c[i] = a[i] (+|-) b[i]` element-wise map. Same exact
-    // matcher-with-scalar-fallback discipline as the sum reduction.
+    // Auto-vectorize `for i: c[i] = a[i] <op> b[i]` element-wise map. Same exact
+    // matcher-with-scalar-fallback discipline as the reduction.
     if let Some(map) = detect_elementwise_map(ctx, name, step, body) {
         return lower_native_vectorized_map(ctx, name, start, end, &map, code);
     }
@@ -5257,24 +5340,27 @@ fn emit_for_compare(code: &mut Vec<u8>, end_slot: i32, set_opcode: u8) {
     code.extend_from_slice(&[0x0F, set_opcode, 0xC0]);
 }
 
-/// A recognized `for i from S to E: acc += a[i]` reduction over an `array<i64>`,
+/// A recognized `for i from S to E: acc <op>= a[i]` reduction over an `array<i64>`,
 /// ready to vectorize. Element `k` of the array sits at
 /// `[rbp - array_base_static - 8*k]`, matching the scalar index addressing.
-struct SumReduction {
+struct Reduction {
     acc_slot: i32,
     array_base_static: i32,
+    op: ReduceOp,
 }
 
-/// Recognize the canonical `for counter from S to E: acc += array[counter]`
-/// sum-reduction shape, where `acc` is an `i64` local and `array` is an
-/// `array<i64>`. Returns `None` for anything else so the caller falls back to the
+/// Recognize a `for counter from S to E: acc <op>= array[counter]` reduction,
+/// where `acc` is an `i64` local, `array` is an `array<i64>`, and `<op>` is one of
+/// the vectorizable reductions: `+` (spelled `acc += array[i]`) or bitwise
+/// `& | ^` (spelled `acc = acc <op> array[i]`, either operand order — they are
+/// commutative). Returns `None` for anything else so the caller falls back to the
 /// scalar loop. Bounds `S`/`E` are lowered by the vectorizer itself.
-fn detect_sum_reduction(
+fn detect_reduction(
     ctx: &NativeCtx,
     counter: &str,
     step: Option<&BytecodeExpr>,
     body: &[BytecodeInstruction],
-) -> Option<SumReduction> {
+) -> Option<Reduction> {
     // Default ascending step of 1 only.
     match step {
         None => {}
@@ -5283,12 +5369,12 @@ fn detect_sum_reduction(
             _ => return None,
         },
     }
-    // Exactly one body statement: `acc += <value>` with no field/index path.
+    // Exactly one body statement, assigning a plain local (no field/index path).
     let [
         BytecodeInstruction::Assign {
             name: acc,
             path,
-            op: AssignOp::Add,
+            op: assign_op,
             value,
             ..
         },
@@ -5296,21 +5382,52 @@ fn detect_sum_reduction(
     else {
         return None;
     };
-    if !path.is_empty() {
+    if !path.is_empty() || acc == counter {
         return None;
     }
-    // The value must be `array[counter]`: resolve it as a dynamic i64 element
+    // Determine the reduction operator and the `array[counter]` element read.
+    // `+` uses the compound `acc += array[i]` (value is the bare element read);
+    // bitwise ops use `acc = acc <op> array[i]` (value is a binary with `acc` as
+    // one operand and the element read as the other, in either order).
+    let (op, element) = match assign_op {
+        AssignOp::Add => (ReduceOp::Add, value),
+        AssignOp::Replace => {
+            let BytecodeExprKind::Binary { left, op, right } = &value.kind else {
+                return None;
+            };
+            let reduce_op = match op {
+                BinaryOp::BitAnd => ReduceOp::And,
+                BinaryOp::BitOr => ReduceOp::Or,
+                BinaryOp::BitXor => ReduceOp::Xor,
+                _ => return None,
+            };
+            // One operand must be exactly the accumulator variable; the other is
+            // the element read. Bitwise ops are commutative, so accept both orders.
+            let is_acc =
+                |e: &BytecodeExpr| matches!(&e.kind, BytecodeExprKind::Variable(v) if v == acc);
+            let element = if is_acc(left) {
+                right
+            } else if is_acc(right) {
+                left
+            } else {
+                return None;
+            };
+            (reduce_op, element.as_ref())
+        }
+        _ => return None,
+    };
+    // The element must be `array[counter]`: resolve it as a dynamic i64 element
     // read (reusing the scalar addressing) whose index is exactly the counter.
-    let BytecodeExprKind::Index { index, .. } = &value.kind else {
+    let BytecodeExprKind::Index { index, .. } = &element.kind else {
         return None;
     };
     let BytecodeExprKind::Variable(idx) = &index.kind else {
         return None;
     };
-    if idx != counter || acc == counter {
+    if idx != counter {
         return None;
     }
-    let place = resolve_read_place(ctx, value).ok()?;
+    let place = resolve_read_place(ctx, element).ok()?;
     let ScalarPlace::Dynamic {
         base_slot,
         const_words,
@@ -5328,20 +5445,21 @@ fn detect_sum_reduction(
     if !matches!(acc_local.ty, NativeType::I64) {
         return None;
     }
-    Some(SumReduction {
+    Some(Reduction {
         acc_slot: acc_local.slot,
         array_base_static: base_slot + const_words as i32 * 8,
+        op,
     })
 }
 
 /// A recognized `for i from S to E: c[i] = a[i] <op> b[i]` element-wise map over
-/// contiguous `array<i64>`s (`op` is `+` or `-`). Element `k` of each array sits
+/// contiguous `array<i64>`s (`op` is `+ - & | ^`). Element `k` of each array sits
 /// at `[rbp - base - 8*k]`, matching the scalar index addressing.
 struct ElementwiseMap {
     dest_base: i32,
     lhs_base: i32,
     rhs_base: i32,
-    subtract: bool,
+    op: MapOp,
 }
 
 /// True when `expr` is exactly the loop counter `counter`.
@@ -5408,13 +5526,16 @@ fn detect_elementwise_map(
     if !index_is_counter(dest_index, counter) {
         return None;
     }
-    // The value is `lhs[counter] (+|-) rhs[counter]`.
+    // The value is `lhs[counter] <op> rhs[counter]` for a vectorizable `op`.
     let BytecodeExprKind::Binary { left, op, right } = &value.kind else {
         return None;
     };
-    let subtract = match op {
-        BinaryOp::Add => false,
-        BinaryOp::Subtract => true,
+    let map_op = match op {
+        BinaryOp::Add => MapOp::Add,
+        BinaryOp::Subtract => MapOp::Sub,
+        BinaryOp::BitAnd => MapOp::And,
+        BinaryOp::BitOr => MapOp::Or,
+        BinaryOp::BitXor => MapOp::Xor,
         _ => return None,
     };
     let lhs_base = indexed_i64_base(ctx, left, counter)?;
@@ -5436,7 +5557,7 @@ fn detect_elementwise_map(
         dest_base: base_slot + const_words as i32 * 8,
         lhs_base,
         rhs_base,
-        subtract,
+        op: map_op,
     })
 }
 
@@ -5483,11 +5604,7 @@ fn lower_native_vectorized_map(
     emit_movdqu_xmm0_from_rcx(code);
     block_addr(code, map.rhs_base);
     emit_movdqu_xmm1_from_rcx(code);
-    if map.subtract {
-        emit_psubq_xmm0_xmm1(code);
-    } else {
-        emit_paddq_xmm0_xmm1(code);
-    }
+    map.op.emit_packed(code);
     block_addr(code, map.dest_base);
     emit_movdqu_rcx_from_xmm0(code);
     load_local(code, i_slot);
@@ -5516,12 +5633,7 @@ fn lower_native_vectorized_map(
     block_addr(code, map.rhs_base);
     code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
     code.push(0x59); // pop rcx (rcx = lhs)
-    if map.subtract {
-        code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax (lhs - rhs)
-        code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
-    } else {
-        code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx (lhs + rhs)
-    }
+    map.op.emit_scalar_tail(code); // rax = lhs <op> rhs
     // dest[i] = rax
     code.push(0x50); // push rax (result)
     block_addr(code, map.dest_base);
@@ -5536,47 +5648,50 @@ fn lower_native_vectorized_map(
     Ok(())
 }
 
-/// `acc += rax`, honoring register promotion of the accumulator. Preserves the
-/// addend in `rdx` while loading/adding/storing `acc`.
-fn emit_add_rax_to_acc(ctx: &NativeCtx, acc_slot: i32, code: &mut Vec<u8>) {
-    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (save addend)
+/// `acc = acc <op> rax`, honoring register promotion of the accumulator.
+/// Preserves the operand (the loaded element or packed total) in `rdx` while
+/// loading/combining/storing `acc`.
+fn emit_reduce_into_acc(ctx: &NativeCtx, acc_slot: i32, op: ReduceOp, code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (save operand)
     match ctx.promoted_reg(acc_slot) {
         Some(reg) => reg.to_rax(code), // rax = acc
         None => load_local(code, acc_slot),
     }
-    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+    op.emit_rax_rdx(code); // rax = acc <op> rdx
     match ctx.promoted_reg(acc_slot) {
         Some(reg) => reg.from_rax(code), // acc = rax
         None => store_local(code, acc_slot),
     }
 }
 
-/// Emit the vectorized sum reduction. Sums `a[S..=E]` two `i64`s at a time with
-/// `paddq`, horizontal-adds the packed accumulator into `acc`, then a scalar tail
-/// loop handles a final odd element. The counter and bound live on the stack for
-/// this loop (the counter is dead after it). Overflow wraps identically to the
-/// scalar path (integer addition is associative mod 2^64), so the total matches
+/// Emit the vectorized reduction `acc <op>= a[S..=E]`. Combines the array two
+/// `i64`s at a time with the packed op (`paddq`/`pand`/`por`/`pxor`), horizontally
+/// folds the packed accumulator into `acc`, then a scalar tail loop handles a
+/// final odd element. The counter and bound live on the stack for this loop (the
+/// counter is dead after it). Every offered op is associative (and, for bitwise,
+/// commutative) and exact on `i64`, so the total matches the scalar fold
 /// bit-for-bit regardless of the pairing order.
-fn lower_native_vectorized_sum(
+fn lower_native_vectorized_reduction(
     ctx: &mut NativeCtx,
     counter: &str,
     start: &BytecodeExpr,
     end: &BytecodeExpr,
-    reduction: &SumReduction,
+    reduction: &Reduction,
     code: &mut Vec<u8>,
 ) -> Result<(), String> {
     let i_slot = ctx.local_slot(counter)?;
     let end_slot = ctx.local_slot(&format!("{counter}__end"))?;
     let base = reduction.array_base_static;
+    let op = reduction.op;
 
     // i = start ; end_local = end
     lower_native_expr(ctx, start, code)?;
     store_local(code, i_slot);
     lower_native_expr(ctx, end, code)?;
     store_local(code, end_slot);
-    emit_pxor_xmm0(code); // packed accumulator = 0
+    op.emit_packed_identity(code); // packed accumulator = identity
 
-    // --- main SIMD loop: while i + 1 <= end, add the pair (a[i], a[i+1]) ---
+    // --- main SIMD loop: while i + 1 <= end, combine the pair (a[i], a[i+1]) ---
     let main_top = code.len();
     load_local(code, i_slot); // rax = i
     code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1  -> rax = i+1
@@ -5591,7 +5706,7 @@ fn lower_native_vectorized_sum(
     code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
     emit_sub_rcx_imm(code, base); // rcx = &a[i+1] (block start; covers a[i+1],a[i])
     emit_movdqu_xmm1_from_rcx(code);
-    emit_paddq_xmm0_xmm1(code);
+    op.emit_packed(code);
     load_local(code, i_slot);
     code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x02]); // add rax, 2
     store_local(code, i_slot);
@@ -5599,10 +5714,10 @@ fn lower_native_vectorized_sum(
 
     // after_main: fold the two packed lanes into acc.
     patch_rel32(code, after_main_site);
-    emit_hadd_xmm0_into_rax(code); // rax = lane0 + lane1
-    emit_add_rax_to_acc(ctx, reduction.acc_slot, code);
+    emit_hfold_xmm0_into_rax(op, code); // rax = lane0 <op> lane1
+    emit_reduce_into_acc(ctx, reduction.acc_slot, op, code);
 
-    // --- scalar remainder: while i <= end, add a[i] ---
+    // --- scalar remainder: while i <= end, combine a[i] ---
     let rem_top = code.len();
     load_local(code, i_slot); // rax = i
     code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
@@ -5617,7 +5732,7 @@ fn lower_native_vectorized_sum(
     code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
     emit_sub_rcx_imm(code, base);
     code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-    emit_add_rax_to_acc(ctx, reduction.acc_slot, code);
+    emit_reduce_into_acc(ctx, reduction.acc_slot, op, code);
     load_local(code, i_slot);
     code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
     store_local(code, i_slot);
@@ -7544,10 +7659,30 @@ fn emit_i64_binop_from_stack(code: &mut Vec<u8>, op: BinaryOp) -> Result<(), Str
         BinaryOp::And | BinaryOp::Or => {
             return Err("logical and/or must be short-circuited".to_string());
         }
-        // Integer bitwise operators are deferred on the native backend; a
-        // function using them is skipped and still runs on the interpreters.
-        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
-            return Err("bitwise operators are not supported on the native backend".to_string());
+        BinaryOp::BitAnd => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x21, 0xC8]); // and rax, rcx
+        }
+        BinaryOp::BitOr => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x09, 0xC8]); // or rax, rcx
+        }
+        BinaryOp::BitXor => {
+            code.push(0x59); // pop rcx (left)
+            code.extend_from_slice(&[0x48, 0x31, 0xC8]); // xor rax, rcx
+        }
+        BinaryOp::Shl | BinaryOp::Shr => {
+            // `i64` is signed, so `>>` is an arithmetic shift (`sar`). The count is
+            // masked to 63 (matching `int_shl`/`int_shr`'s `& (width-1)`). Stack
+            // holds the left value; rax holds the right (count).
+            code.extend_from_slice(&[0x48, 0x83, 0xE0, 0x3F]); // and rax, 63
+            code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (count in cl)
+            code.push(0x58); // pop rax (left = value to shift)
+            match op {
+                BinaryOp::Shl => code.extend_from_slice(&[0x48, 0xD3, 0xE0]), // shl rax, cl
+                BinaryOp::Shr => code.extend_from_slice(&[0x48, 0xD3, 0xF8]), // sar rax, cl
+                _ => unreachable!(),
+            }
         }
     }
     Ok(())

@@ -137,6 +137,75 @@ fn elementwise_map_over_i64_arrays_is_auto_vectorized() {
     );
 }
 
+#[test]
+fn bitwise_reduction_over_i64_array_is_auto_vectorized() {
+    // `for i: acc = acc ^ a[i]` emits an SSE2 packed XOR loop (`pxor` on packed
+    // lanes, encoded C1 — distinct from the C0 identity-zeroing form).
+    let xor = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let acc i64 = 0\n    for i from 0 to 7\n        acc = acc ^ a[i]\n    acc\n",
+    );
+    assert!(
+        contains(&xor, &[0x66, 0x0F, 0xEF, 0xC1]), // pxor xmm0, xmm1 (packed combine)
+        "expected a packed pxor in the vectorized XOR reduction"
+    );
+
+    // `acc = acc & a[i]` seeds the accumulator with all-ones (`pcmpeqd`) and
+    // combines with `pand`.
+    let and = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let acc i64 = -1\n    for i from 0 to 7\n        acc = acc & a[i]\n    acc\n",
+    );
+    assert!(
+        contains(&and, &[0x66, 0x0F, 0x76, 0xC0]), // pcmpeqd xmm0, xmm0 (all-ones identity)
+        "expected a pcmpeqd all-ones seed in the vectorized AND reduction"
+    );
+    assert!(
+        contains(&and, &[0x66, 0x0F, 0xDB, 0xC1]), // pand xmm0, xmm1
+        "expected a pand in the vectorized AND reduction"
+    );
+
+    // `acc = a[i] | acc` (operand order reversed — bitwise ops are commutative)
+    // combines with `por`.
+    let or = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let acc i64 = 0\n    for i from 0 to 7\n        acc = a[i] | acc\n    acc\n",
+    );
+    assert!(
+        contains(&or, &[0x66, 0x0F, 0xEB, 0xC1]), // por xmm0, xmm1
+        "expected a por in the vectorized OR reduction"
+    );
+}
+
+#[test]
+fn bitwise_elementwise_map_over_i64_arrays_is_auto_vectorized() {
+    // `for i: c[i] = a[i] & b[i]` emits a packed `pand` plus a `movdqu` store.
+    let and = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let c array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]\n    for i from 0 to 7\n        c[i] = a[i] & b[i]\n    c[0]\n",
+    );
+    assert!(
+        contains(&and, &[0x66, 0x0F, 0xDB, 0xC1]), // pand xmm0, xmm1
+        "expected a pand in the vectorized element-wise AND map"
+    );
+    assert!(
+        contains(&and, &[0xF3, 0x0F, 0x7F, 0x01]), // movdqu [rcx], xmm0
+        "expected a movdqu store in the vectorized bitwise map"
+    );
+
+    // `|` uses `por`, `^` uses `pxor` (packed C1 form).
+    let or = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let c array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]\n    for i from 0 to 7\n        c[i] = a[i] | b[i]\n    c[0]\n",
+    );
+    assert!(
+        contains(&or, &[0x66, 0x0F, 0xEB, 0xC1]), // por xmm0, xmm1
+        "expected a por in the vectorized element-wise OR map"
+    );
+    let xor = object_bytes(
+        "fn main -> i64\n    let a array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let b array<i64> = [1, 2, 3, 4, 5, 6, 7, 8]\n    let c array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]\n    for i from 0 to 7\n        c[i] = a[i] ^ b[i]\n    c[0]\n",
+    );
+    assert!(
+        contains(&xor, &[0x66, 0x0F, 0xEF, 0xC1]), // pxor xmm0, xmm1 (packed)
+        "expected a packed pxor in the vectorized element-wise XOR map"
+    );
+}
+
 fn snapshot_for(source: &str) -> String {
     let tokens = lex(source).expect("lex native object snapshot source");
     let program = parse(&tokens).expect("parse native object snapshot source");

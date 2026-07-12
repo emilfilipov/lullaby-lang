@@ -612,6 +612,84 @@ fn native_simd_map_execution_parity_when_linkable() {
     assert_eq!(exe.status.code().expect("exit"), expected);
 }
 
+/// The SSE2-vectorized bitwise reductions (`acc = acc ^ a[i]`, `& |`) and bitwise
+/// element-wise maps (`c[i] = a[i] ^ b[i]`), plus scalar `i64` bitwise operators,
+/// are bit-for-bit identical to the interpreters. When linkable, the native `.exe`
+/// exit equals the interpreter result (35, chosen below a byte so the check is
+/// portable across Windows/Unix exit-code truncation).
+#[test]
+fn native_bitwise_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_simd_bitwise.lby");
+    let out = std::env::temp_dir().join("lullaby_native_bitwise.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out"),
+            fixture.to_str().expect("fixture"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture")])
+        .output()
+        .expect("run cli");
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 35);
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("linker unavailable; skipping native bitwise parity");
+        return;
+    }
+    assert!(out.is_file());
+    let exe = Command::new(&out).output().expect("run exe");
+    assert_eq!(exe.status.code().expect("exit"), interp as i32);
+}
+
+/// Scalar `i64` bitwise codegen edge cases (`~` one's complement, arithmetic
+/// `-8 >> 1 == -4`, shift-amount masking `1 << 65 == 2` / `1 << -63 == 2`, and the
+/// C-like precedence chain) compile natively and match the interpreters bit-for-bit.
+/// The `run_bitwise.lby` fixture returns 586; this exercises the tricky operators
+/// the SIMD fixture does not.
+#[test]
+fn native_scalar_bitwise_edge_cases_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_bitwise.lby");
+    let out = std::env::temp_dir().join("lullaby_native_scalar_bitwise.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out"),
+            fixture.to_str().expect("fixture"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture")])
+        .output()
+        .expect("run cli");
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 586);
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("linker unavailable; skipping native scalar-bitwise parity");
+        return;
+    }
+    assert!(out.is_file());
+    let exe = Command::new(&out).output().expect("run exe");
+    // 586 exceeds a byte: Windows keeps the full exit code, Unix truncates.
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(exe.status.code().expect("exit"), expected);
+}
+
 /// The inline conditional desugars to a plain `if` statement, so the native
 /// backend compiles it; when the platform can link, the `.exe` exit code equals
 /// the interpreter result (115 mod 256).

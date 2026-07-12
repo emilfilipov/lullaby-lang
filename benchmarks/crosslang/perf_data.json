@@ -6,13 +6,13 @@
       "kind": "compute (trial division, function calls + loops)",
       "unit": "ms (whole-program wall time, best-of-9; Python best-of-1)",
       "checksum": 25997,
-      "note": "Lullaby uses the native `%` operator for the trial-division remainder (matching C's `n % d`); the prior `rem(a,b)=a-(a/b)*b` helper measured 1.04x.",
+      "note": "Lullaby uses the native `%` operator for the trial-division remainder (matching C's `n % d`); the prior `rem(a,b)=a-(a/b)*b` helper measured 1.04x. At parity with C/C++ (drifts 0.99-1.01x run to run).",
       "results": [
-        {"lang": "Rust (rustc -O)", "value": 26.3, "vsC": 0.92},
-        {"lang": "C (cl /O2)", "value": 28.6, "vsC": 1.0},
-        {"lang": "C++ (cl /O2)", "value": 28.5, "vsC": 1.0},
-        {"lang": "Lullaby (native)", "value": 28.9, "vsC": 1.01},
-        {"lang": "Python (CPython)", "value": 790.3, "vsC": 27.6}
+        {"lang": "Rust (rustc -O)", "value": 25.6, "vsC": 0.91},
+        {"lang": "C (cl /O2)", "value": 28.0, "vsC": 1.0},
+        {"lang": "C++ (cl /O2)", "value": 27.8, "vsC": 0.99},
+        {"lang": "Lullaby (native)", "value": 27.8, "vsC": 0.99},
+        {"lang": "Python (CPython)", "value": 761.3, "vsC": 27.2}
       ]
     },
     {
@@ -47,6 +47,16 @@
         {"lang": "Lullaby (native, SSE2 vectorized)", "value": 146.1, "vsScalar": 1.0},
         {"lang": "Lullaby (native, scalar)", "value": 490.9, "vsScalar": 3.36}
       ]
+    },
+    {
+      "name": "bitwise reduction acc = acc ^ a[i] (i64 array)",
+      "kind": "auto-vectorization (SSE2 packed loop)",
+      "unit": "ms (whole-program wall time, best-of-6)",
+      "note": "The native backend recognizes `for i: acc = acc <op> a[i]` for `& | ^` (and `acc += a[i]` for `+`) over `array<i64>` and emits an SSE2 packed loop (`pand`/`por`/`pxor`, seeded with the operator identity, two i64 lanes per iteration, horizontal fold, scalar tail). Measured on XOR against the identical loop forced scalar. Output is bit-for-bit identical to every interpreter (bitwise ops are associative and commutative). Element-wise bitwise maps `c[i] = a[i] <op> b[i]` vectorize the same way.",
+      "results": [
+        {"lang": "Lullaby (native, SSE2 vectorized)", "value": 188.7, "vsScalar": 1.0},
+        {"lang": "Lullaby (native, scalar)", "value": 545.4, "vsScalar": 2.89}
+      ]
     }
   ],
   "optimization_history": {
@@ -54,7 +64,7 @@
     "native_fib_vs_c": [{"stage": "baseline", "vsC": 1.72}, {"stage": "compare-fusion + imm-fold", "vsC": 1.35}, {"stage": "+register promotion", "vsC": 1.2}],
     "native_loop_vs_c": [{"stage": "compare-fusion + imm-fold", "vsC": 5.6}, {"stage": "+register promotion", "vsC": 2.1}],
     "native_primes_vs_c": [{"stage": "before (call per iter)", "vsC": 1.57}, {"stage": "+for-loop reg promotion", "vsC": 1.53}, {"stage": "+leaf-helper inlining", "vsC": 1.04}, {"stage": "+native % (idiv remainder)", "vsC": 1.01}],
-    "native_vectorization_speedup": [{"stage": "sum reduction s+=a[i] (SSE2 paddq)", "vsScalar": 3.3}, {"stage": "element-wise map c[i]=a[i]+/-b[i] (SSE2 packed load/store)", "vsScalar": 3.36}],
+    "native_vectorization_speedup": [{"stage": "sum reduction s+=a[i] (SSE2 paddq)", "vsScalar": 3.3}, {"stage": "element-wise map c[i]=a[i]+/-b[i] (paddq/psubq)", "vsScalar": 3.36}, {"stage": "bitwise reduction acc=acc^a[i] (pand/por/pxor)", "vsScalar": 2.89}, {"stage": "bitwise map c[i]=a[i]&b[i] (pand/por/pxor)", "vsScalar": 2.89}],
     "interpreter_fib_ns": [{"stage": "baseline", "value": 435}, {"stage": "+release profile", "value": 383}, {"stage": "+env pooling", "value": 230}]
   }
 }

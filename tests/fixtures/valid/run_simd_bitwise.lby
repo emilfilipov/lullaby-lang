@@ -1,0 +1,44 @@
+# SSE2-vectorized bitwise reductions (`acc = acc <op> a[i]` for `& | ^`) and
+# bitwise element-wise maps (`c[i] = a[i] ^ b[i]`), plus scalar `i64` bitwise
+# operators — all bit-for-bit identical across every backend and the native
+# auto-vectorizer. Returns 35 (chosen below a byte so the native exit code is
+# portable across Windows/Unix truncation).
+
+fn xor_reduce -> i64
+    let a array<i64> = [5, 9, 12, 3, 7, 8, 1, 15, 22]
+    let acc = 0
+    for i from 0 to 8
+        acc = acc ^ a[i]
+    acc
+
+fn and_reduce -> i64
+    let a array<i64> = [15, 7, 13, 31, 6, 14, 255, 63, 12]
+    let acc = -1
+    for i from 0 to 8
+        acc = acc & a[i]
+    acc
+
+fn or_reduce -> i64
+    let a array<i64> = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    let acc = 0
+    for i from 0 to 8
+        acc = a[i] | acc
+    acc
+
+fn bitmap_sum -> i64
+    let a array<i64> = [5, 9, 12, 3, 7, 8, 1]
+    let b array<i64> = [3, 6, 10, 1, 4, 9, 2]
+    let c array<i64> = [0, 0, 0, 0, 0, 0, 0]
+    for i from 0 to 6
+        c[i] = a[i] ^ b[i]
+    let s = 0
+    for i from 0 to 6
+        s = s + c[i]
+    s
+
+fn main -> i64
+    let r = xor_reduce()
+    r = r ^ and_reduce()
+    r = r | or_reduce()
+    r = (r + bitmap_sum()) & 255
+    r

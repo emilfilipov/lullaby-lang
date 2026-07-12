@@ -150,13 +150,29 @@ The real remaining levers are:
    overhead (C keeps the argument in a callee-saved register across the two
    recursive calls and tightens the prologue). Needs self-tail / argument-in-register
    handling and tighter register allocation for the recursive case.
-2. **Broaden SIMD auto-vectorization.** Phase-1 (`i64` sum reduction, 3.3× the
-   scalar loop) and phase-2 (element-wise map `c[i] = a[i] ± b[i]`, 3.36×) are
-   shipped — both emit an SSE2 packed loop (`movdqu`/`paddq`/`psubq`/`movdqu`, two
-   `i64` lanes per iteration) with a scalar tail, verified bit-for-bit identical
-   to every interpreter. Extend to `min`/`max`/count/product reductions, `f64`
-   accumulation, and dot product (the `i64` dot product needs an SSE2 64-bit
-   multiply workaround).
+2. **Broaden SIMD auto-vectorization.** Three phases are shipped, all emitting an
+   SSE2 packed loop (two `i64` lanes per iteration, scalar tail, verified bit-for-bit
+   identical to every interpreter): (1) `i64` sum reduction (3.3× the scalar loop),
+   (2) element-wise map `c[i] = a[i] ± b[i]` (3.36×), (3) bitwise reductions
+   `acc = acc <op> a[i]` and bitwise maps `c[i] = a[i] <op> b[i]` for `& | ^`
+   (2.89×), via `pand`/`por`/`pxor` seeded with the operator identity. Native
+   scalar `i64` bitwise operators (`& | ^ << >>`) shipped alongside, which the
+   bitwise reductions build on.
+
+   The remaining requested patterns are **blocked by the x86-64 baseline ISA, not
+   by effort** — shipping an emulation would be a measured regression:
+   - *Dot product / product reduction* need a 64-bit packed multiply. SSE2 has
+     none; the `pmuludq` schoolbook emulation is ~6 SSE ops/element versus one
+     scalar `imul`, so it measures slower than the scalar loop.
+   - *Min/max reductions* need a 64-bit packed compare (`pcmpgtq`), which is SSE4.2,
+     not part of the guaranteed x86-64 baseline.
+   - *`f64` accumulation* would break bit-exact interpreter parity: floating-point
+     addition is not associative, so a two-lane packed sum rounds differently from
+     the scalar left-to-right fold.
+
+   Unlocking these needs runtime CPU-feature detection (CPUID) selecting a widened
+   SSE4.2/AVX2 code path, or an opt-in fast-math mode that relaxes the `f64`
+   parity contract. Both are separate multi-session epics.
 
 ## How to refresh this analysis
 
