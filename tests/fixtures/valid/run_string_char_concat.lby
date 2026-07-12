@@ -1,0 +1,9 @@
+fn upper s string -> string
+    let out string = ""
+    for c in s
+        let code = char_code(c)
+        out += char_from(code - 32) if code >= 97 and code <= 122 else c
+    out
+
+fn main -> string
+    upper("hi") + "!" + '?'

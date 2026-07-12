@@ -4272,6 +4272,18 @@ impl<'a> Runtime<'a> {
                 // instead of reallocating a fresh buffer on every concat.
                 Ok(Value::String(left.into_string()? + &right.as_string()?))
             }
+            // `string + char` (either order) concatenates the char as a
+            // one-character string.
+            BinaryOp::Add
+                if matches!(
+                    (&left, &right),
+                    (Value::String(_), Value::Char(_)) | (Value::Char(_), Value::String(_))
+                ) =>
+            {
+                Ok(Value::String(
+                    left.as_concat_string()? + &right.as_concat_string()?,
+                ))
+            }
             BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
             BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
             BinaryOp::Multiply => Ok(Value::I64(left.as_i64()? * right.as_i64()?)),
@@ -6083,7 +6095,11 @@ pub fn apply_compound(current: Value, op: &AssignOp, rhs: Value) -> Result<Value
     // `s += piece` is string concatenation (semantics allows `+=` only when both
     // sides are strings). Reuse the left buffer so a `s += x` loop stays O(n).
     if let (Value::String(_), AssignOp::Add) = (&current, op) {
-        return Ok(Value::String(current.into_string()? + &rhs.as_string()?));
+        // `s += piece` where `piece` is a `string` or a `char` (coerced to a
+        // one-character string).
+        return Ok(Value::String(
+            current.into_string()? + &rhs.as_concat_string()?,
+        ));
     }
     if let (Value::F64(a), Value::F64(b)) = (&current, &rhs) {
         let (a, b) = (*a, *b);
@@ -6646,6 +6662,17 @@ impl Value {
         match self {
             Self::String(value) => Ok(value.clone()),
             _ => Err(RuntimeError::new("L0417", "expected string value")),
+        }
+    }
+
+    /// A concatenation operand for `+`/`+=`: a `String` as-is, or a `char`
+    /// rendered as a one-character string. Semantics restricts `string`
+    /// concatenation operands to `string`/`char`, so nothing else reaches here.
+    pub fn as_concat_string(&self) -> Result<String, RuntimeError> {
+        match self {
+            Self::String(value) => Ok(value.clone()),
+            Self::Char(c) => Ok(c.to_string()),
+            _ => Err(RuntimeError::new("L0417", "expected string or char value")),
         }
     }
 

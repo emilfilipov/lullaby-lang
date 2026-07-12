@@ -1498,12 +1498,17 @@ impl<'a> Checker<'a> {
                         ));
                     }
                 } else if *op == AssignOp::Add && expected.name.as_str() == "string" {
-                    // `s += piece` is string concatenation (desugars to `s = s + piece`).
-                    if value_type.as_ref() != Some(&expected) {
+                    // `s += piece` is string concatenation. `piece` is a `string`,
+                    // or a `char` coerced to a one-character string (like `s + c`).
+                    let ok = matches!(
+                        value_type.as_ref().map(|t| t.name.as_str()),
+                        Some("string") | Some("char")
+                    );
+                    if !ok {
                         self.diagnostics.push(SemanticDiagnostic::at(
                             "L0315",
                             format!(
-                                "compound assignment `+=` to {target} requires a string operand"
+                                "compound assignment `+=` to {target} requires a string or char operand"
                             ),
                             Some(function.name.clone()),
                             value.span,
@@ -2137,17 +2142,25 @@ impl<'a> Checker<'a> {
                 match op {
                     BinaryOp::Add => {
                         let string_type = TypeRef::new("string");
+                        let char_type = TypeRef::new("char");
+                        let is_str = |t: &Option<TypeRef>| t.as_ref() == Some(&string_type);
+                        let is_chr = |t: &Option<TypeRef>| t.as_ref() == Some(&char_type);
                         if let Some(numeric) = same_numeric {
                             Some(numeric)
-                        } else if left_type.as_ref() == Some(&string_type)
-                            && right_type.as_ref() == Some(&string_type)
-                        {
+                        } else if is_str(&left_type) && is_str(&right_type) {
                             // `+` concatenates two strings.
+                            Some(string_type)
+                        } else if (is_str(&left_type) && is_chr(&right_type))
+                            || (is_chr(&left_type) && is_str(&right_type))
+                        {
+                            // `string + char` (either order) concatenates the
+                            // char as a one-character string; lowering coerces the
+                            // char via `to_string`.
                             Some(string_type)
                         } else {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0307",
-                                "operands of `+` must both be the same numeric type or both be string",
+                                "operands of `+` must both be the same numeric type, both be string, or be a string and a char",
                                 Some(function.name.clone()),
                                 expr.span,
                             ));

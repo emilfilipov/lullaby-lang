@@ -56,11 +56,13 @@ type; the result must be a scalar or `string` (use a block `if` for aggregates).
   it silently.)
 - Comparison `== != < <= > >=`; boolean `and or not`.
 - `+=` `-=` `*=` `/=` compound assignment on a bound variable.
-- No `++`/`--`. No ternary — use `if/else`.
-- String concatenation is `+`. Numbers to string: `to_string(x)`.
+- No `++`/`--`. Inline conditional `A if C else B` IS available (see Control flow) — prefer it over a block `if/else` for value selection.
+- String concatenation is `+`. A `char` concatenates onto a string directly —
+  `s + c` and `s += c` work (the char becomes a one-char string); numbers still
+  need `to_string(x)`.
 - **String literals do NOT interpret escapes** (`"\n"` is backslash-n, not a
-  newline). For control chars use `char_from(code)` (10 = LF, 13 = CR, 9 = tab)
-  and `to_string(char_from(10))`.
+  newline). For control chars use `char_from(code)` (10 = LF, 13 = CR, 9 = tab);
+  a `char` appends to a string directly (`s += char_from(10)`), no `to_string`.
 - Empty array literal `[]` is rejected — an array literal needs ≥1 element.
 - Params are mutable locals (you may reassign `n = n - 1`).
 

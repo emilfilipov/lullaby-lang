@@ -551,6 +551,41 @@ fn rejects_conditional_aggregate_result() {
     assert!(stderr(&output).contains("L0436"), "{}", stderr(&output));
 }
 
+/// `string + char` / `string += char` concatenate the char as a one-character
+/// string, identically on all three interpreter backends (fixture prints HI!?).
+#[test]
+fn runs_string_char_concat_fixture_on_all_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_string_char_concat.lby");
+    for backend in [None, Some("ir"), Some("bytecode")] {
+        let mut args = vec!["run".to_string()];
+        if let Some(b) = backend {
+            args.push("--backend".to_string());
+            args.push(b.to_string());
+        }
+        args.push(fixture.to_str().expect("fixture path").to_string());
+        let output = lullaby().args(&args).output().expect("run cli");
+        assert!(output.status.success(), "{backend:?}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "HI!?",
+            "backend {backend:?}"
+        );
+    }
+}
+
+/// `string + <non-char scalar>` is still a type error (`L0307`); only
+/// string+string and string+char concatenate.
+#[test]
+fn rejects_string_plus_int_concat() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/string_plus_int.lby");
+    let output = lullaby()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr(&output).contains("L0307"), "{}", stderr(&output));
+}
+
 #[test]
 fn runs_parallel_map_fixture_on_all_backends() {
     // `parallel_map` runs `sq` on separate OS threads and returns the mapped

@@ -8495,11 +8495,22 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|place| self.lower_place(place, scope))
                     .collect::<Result<Vec<_>, _>>()?;
+                let mut value = self.lower_expr(value, scope)?;
+                // `s += c` where `s: string` and `c: char` coerces the char to a
+                // string, matching `s + c`. Only the bare-local string target
+                // needs this here; the AST interpreter handles it directly.
+                if *op == AssignOp::Add
+                    && path.is_empty()
+                    && value.ty == TypeRef::new("char")
+                    && scope.get(name).map(|t| t.name.as_str()) == Some("string")
+                {
+                    value = self.to_string_wrap(value);
+                }
                 Ok(IrStmt::Assign {
                     name: name.clone(),
                     path,
                     op: *op,
-                    value: self.lower_expr(value, scope)?,
+                    value,
                     span: *span,
                 })
             }
@@ -8988,6 +8999,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::Binary { left, op, right } => {
                 let left = self.lower_expr(left, scope)?;
                 let right = self.lower_expr(right, scope)?;
+                // `string + char` (either order) coerces the char to a string via
+                // `to_string`, so every backend sees a plain two-string `+`.
+                let (left, right) = self.coerce_string_char_add(*op, left, right);
                 let ty = match op {
                     // `+` on two strings concatenates and yields a string.
                     BinaryOp::Add
@@ -9445,6 +9459,44 @@ impl<'a> Lowerer<'a> {
             ty: result_ty,
             span,
         })
+    }
+
+    /// Wrap an expression in a `to_string(...)` call typed `string`. Used to
+    /// coerce a `char` operand of string concatenation into a one-character
+    /// string so every backend sees a plain string-valued operand.
+    fn to_string_wrap(&self, expr: IrExpr) -> IrExpr {
+        let span = expr.span;
+        IrExpr {
+            kind: IrExprKind::Call {
+                name: "to_string".to_string(),
+                args: vec![expr],
+            },
+            ty: TypeRef::new("string"),
+            span,
+        }
+    }
+
+    /// Coerce a `string + char` / `char + string` addition so the char operand
+    /// becomes a `to_string(...)` string; any other operands pass through
+    /// unchanged. Semantics has already accepted the operand types.
+    fn coerce_string_char_add(
+        &self,
+        op: BinaryOp,
+        left: IrExpr,
+        right: IrExpr,
+    ) -> (IrExpr, IrExpr) {
+        if !matches!(op, BinaryOp::Add) {
+            return (left, right);
+        }
+        let string = TypeRef::new("string");
+        let char_ty = TypeRef::new("char");
+        if left.ty == string && right.ty == char_ty {
+            (left, self.to_string_wrap(right))
+        } else if left.ty == char_ty && right.ty == string {
+            (self.to_string_wrap(left), right)
+        } else {
+            (left, right)
+        }
     }
 
     /// Lower an expression while capturing exactly the statement-prelude entries
