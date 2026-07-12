@@ -3431,6 +3431,51 @@ impl PReg {
             PReg::Rsi => &[0x48, 0x29, 0xC6],
         });
     }
+    /// `add <self>, <src>` / `sub <self>, <src>` (both promoted registers), for
+    /// `acc = acc + i` where the right operand is itself a promoted-register local
+    /// — skips the `mov rax, <src>` round-trip through the scratch register.
+    /// `add/sub r/m64, r64` is REX.W 01/29 /r; ModRM = 11 <src> <self>.
+    fn add_reg(self, code: &mut Vec<u8>, src: PReg) {
+        code.extend_from_slice(&[0x48, 0x01, modrm_reg_reg(src, self)]);
+    }
+    fn sub_reg(self, code: &mut Vec<u8>, src: PReg) {
+        code.extend_from_slice(&[0x48, 0x29, modrm_reg_reg(src, self)]);
+    }
+    /// `cmp <self>, imm32` (sign-extended) — a fused-comparison left operand that
+    /// is a promoted register compares directly instead of `mov rax, <reg>` first.
+    fn cmp_imm(self, code: &mut Vec<u8>, imm: i32) {
+        // cmp r/m64, imm32 -> REX.W 81 /7 id ; ModRM = 11 111 <reg>.
+        code.extend_from_slice(match self {
+            PReg::Rbx => &[0x48, 0x81, 0xFB],
+            PReg::Rsi => &[0x48, 0x81, 0xFE],
+        });
+        code.extend_from_slice(&imm.to_le_bytes());
+    }
+    /// The register's 3-bit encoding in a ModRM field.
+    fn code3(self) -> u8 {
+        match self {
+            PReg::Rbx => 3,
+            PReg::Rsi => 6,
+        }
+    }
+}
+
+/// ModRM byte for a register-direct `op r/m64, r64`: mod=11, reg=source (the
+/// `/r` field), rm=destination.
+fn modrm_reg_reg(src: PReg, dst: PReg) -> u8 {
+    0xC0 | (src.code3() << 3) | dst.code3()
+}
+
+/// If `expr` is a bare local variable currently promoted into a callee-saved
+/// register, return that register so a consumer can read it directly instead of
+/// materializing it into `rax` first. Any non-variable, unresolvable, or
+/// stack-resident local returns `None` (the unchanged `mov rax, …` path).
+fn promoted_var_reg(ctx: &NativeCtx, expr: &BytecodeExpr) -> Option<PReg> {
+    if let BytecodeExprKind::Variable(name) = &expr.kind {
+        let slot = ctx.local_slot(name).ok()?;
+        return ctx.promoted_reg(slot);
+    }
+    None
 }
 
 /// Whether an expression lowers entirely within the scalar register set (never
@@ -4030,11 +4075,21 @@ fn lower_native_stmt(
                                         Some(imm) if is_add => reg.add_imm(code, imm),
                                         Some(imm) => reg.sub_imm(code, imm),
                                         None => {
-                                            lower_native_expr(ctx, right, code)?; // rhs → rax
-                                            if is_add {
-                                                reg.add_rax(code)
-                                            } else {
-                                                reg.sub_rax(code)
+                                            // `acc = acc + rhs`: if `rhs` is itself a
+                                            // promoted-register local, add/sub the two
+                                            // registers directly, skipping the `mov rax,
+                                            // <rhs>` round-trip.
+                                            match promoted_var_reg(ctx, right) {
+                                                Some(src) if is_add => reg.add_reg(code, src),
+                                                Some(src) => reg.sub_reg(code, src),
+                                                None => {
+                                                    lower_native_expr(ctx, right, code)?; // rhs → rax
+                                                    if is_add {
+                                                        reg.add_rax(code)
+                                                    } else {
+                                                        reg.sub_rax(code)
+                                                    }
+                                                }
                                             }
                                         }
                                     },
@@ -5075,8 +5130,16 @@ fn try_emit_fused_i64_condition_branch(
     // materializes a full i64 into rcx). `cmp rax, imm` computes left - right,
     // so the same inverted jump applies.
     if let BytecodeExprKind::Integer(rhs) = &right.kind {
-        lower_native_expr(ctx, left, code)?;
-        emit_cmp_rax_imm(code, *rhs); // cmp rax(left), right
+        // When the left operand is a promoted-register local and the immediate
+        // fits imm32, compare the register directly (`cmp <reg>, imm`) instead of
+        // `mov rax, <reg>; cmp rax, imm` — the common `i < len` loop-guard idiom.
+        match (promoted_var_reg(ctx, left), i32::try_from(*rhs).ok()) {
+            (Some(reg), Some(imm32)) => reg.cmp_imm(code, imm32),
+            _ => {
+                lower_native_expr(ctx, left, code)?;
+                emit_cmp_rax_imm(code, *rhs); // cmp rax(left), right
+            }
+        }
         code.extend_from_slice(&[0x0F, jump_when_false]); // j<!cc> rel32 (patched by caller)
         let site = code.len();
         code.extend_from_slice(&[0, 0, 0, 0]);
@@ -12056,18 +12119,27 @@ mod native_program_tests {
         );
 
         // The `if n < 2` condition lowers as a fused compare-and-branch against
-        // the immediate: `cmp rax, 2` (48 3D 02 00 00 00) then `jge rel32`
-        // (0F 8D ..) — the inverse of `<`, taken when the condition is false.
-        // This replaces the old `setl al; movzx; test rax,rax; jz` sequence, so
-        // the boolean is never materialized: there is no `setl al` for this `<`.
+        // the immediate, then `jge rel32` (0F 8D ..) — the inverse of `<`, taken
+        // when the condition is false. This replaces the old `setl al; movzx;
+        // test rax,rax; jz` sequence, so the boolean is never materialized.
+        // `fib` is a purely-i64-scalar function, so its parameter `n` is promoted
+        // into the first callee-saved register (rbx): the compare reads the
+        // register directly (`cmp rbx, 2` = 48 81 FB 02 00 00 00) rather than
+        // round-tripping through `mov rax, rbx; cmp rax, 2` — the promoted-operand
+        // fold firing on the fused-comparison path.
         let sec = COFF_HEADER_SIZE as usize;
         let text_offset = read_u32(&program.bytes, sec + 20) as usize;
         let text_size = read_u32(&program.bytes, sec + 16) as usize;
         let text = &program.bytes[text_offset..text_offset + text_size];
         assert!(
-            text.windows(6)
+            text.windows(7)
+                .any(|w| w == [0x48, 0x81, 0xFB, 0x02, 0x00, 0x00, 0x00]),
+            "expected a fused `cmp rbx, 2` reading the promoted register directly"
+        );
+        assert!(
+            !text.windows(6)
                 .any(|w| w == [0x48, 0x3D, 0x02, 0x00, 0x00, 0x00]),
-            "expected a fused `cmp rax, 2` against the immediate"
+            "the promoted operand should not be reloaded into rax before the compare"
         );
         assert!(
             text.windows(2).any(|w| w == [0x0F, 0x8D]),
