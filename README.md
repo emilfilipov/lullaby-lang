@@ -49,7 +49,10 @@ Lullaby already beats Python.
   faster than CPython**.
 - SIMD auto-vectorization of `i64` array reductions and maps (`+`, `-`,
   `& | ^`): **2.89–3.36× faster** than the scalar loop, bit-for-bit identical.
-- Deep recursion (`fib(35)`): 1.26× C — the one workload still above C.
+- Deep recursion (`fib(35)`): **1.09× C** (from 1.26× — the per-call `if n < 2`
+  now compares the promoted register directly, no `rax` reload).
+- Tight scalar `sum` loop: **1.96× C** — at the ~1-cycle serial-`acc`
+  dependency limit; only multi-accumulator ILP unrolling would close it further.
 
 **Interpreter performance**: the AST / IR / bytecode tiers are development tools
 (~200–1200× C), but range `for`-loops run **~2× faster** across all three after
