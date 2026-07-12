@@ -20,8 +20,11 @@ def main():
     html = template.read_text(encoding="utf-8")
 
     font_b64 = base64.b64encode((REPO / "assets" / "brand" / "nunito.woff2").read_bytes()).decode("ascii")
-    corpus = (ROOT / "corpus_data.json").read_text(encoding="utf-8")
-    perf = (ROOT / "perf_data.json").read_text(encoding="utf-8")
+    # utf-8-sig tolerates a BOM (PowerShell 5.1's `Set-Content -Encoding utf8`
+    # writes one) so the injected JSON never carries a stray U+FEFF.
+    corpus = (ROOT / "corpus_data.json").read_text(encoding="utf-8-sig")
+    perf = (ROOT / "perf_data.json").read_text(encoding="utf-8-sig")
+    compile_ = (ROOT / "compile_data.json").read_text(encoding="utf-8-sig")
 
     def safe(js):  # keep valid JSON, but never emit a literal </script>
         return js.replace("</", "<\\/")
@@ -29,6 +32,7 @@ def main():
     html = html.replace("/*FONT_DATA*/", f"data:font/woff2;base64,{font_b64}")
     html = html.replace("/*CORPUS_DATA*/", safe(corpus))
     html = html.replace("/*PERF_DATA*/", safe(perf))
+    html = html.replace("/*COMPILE_DATA*/", safe(compile_))
 
     out.write_text(html, encoding="utf-8")
     kb = len(html.encode("utf-8")) // 1024

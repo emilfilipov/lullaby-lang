@@ -49,6 +49,8 @@ Lullaby already beats Python.
   faster than CPython**.
 - SIMD auto-vectorization of `i64` array reductions and maps (`+`, `-`,
   `& | ^`): **2.89–3.36× faster** than the scalar loop, bit-for-bit identical.
+  `min`/`max` reductions vectorize via SSE4.2 `pcmpgtq` behind a **runtime CPUID
+  probe** (scalar `cmp`/`cmov` fallback on older CPUs): **1.60× faster**, portable.
 - Deep recursion (`fib(35)`): **~1.00× C — at parity** (from 1.26×): the per-call
   `if n < 2` compares the promoted register directly (no `rax` reload), and the
   recursive args `fib(n-1)`/`fib(n-2)` form with one `lea rcx,[rbx-k]`, as C does.
@@ -70,8 +72,19 @@ slot-indexed locals, instead of the recursive tree-walk — making it **2× fast
 than the tree-walkers** on tight loops and **~23% faster across the whole
 corpus**, distinctly the fastest interpreter tier.
 
+**Compile speed** (whole program to runnable form, same programs, incl. start + link):
+
+- Lullaby **~14 ms** vs C `cl /O2` **~192 ms (14×)** and Rust `rustc -O`
+  **~341 ms (25×)** — and still ~10–17× faster than C/Rust *debug* builds.
+- The cause is architectural: Lullaby's native backend is a **direct x86-64 byte
+  emitter with no LLVM**, and its frontend has no macro expansion, trait
+  resolution, or whole-program inference. The same choice that keeps native at
+  ~1× C (not far below) buys a **sub-15 ms edit-compile-run loop** — fast to run
+  *and* fast to iterate.
+
 <sub>Measured on Windows/MSVC; compiled tiers at `-O2`/release, CPython for
-Python. Regenerate with `benchmarks/crosslang/run_benchmark.ps1`.</sub>
+Python. Regenerate with `benchmarks/crosslang/run_benchmark.ps1` (tokens + runtime)
+and `benchmarks/crosslang/run_compile_speed.ps1` (compile speed).</sub>
 
 ## Language At A Glance
 
