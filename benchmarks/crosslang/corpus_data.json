@@ -5706,20 +5706,60 @@
     "Lullaby": {
      "tokens": 72,
      "source": "fn common_neighbors_count g array<i64> n i64 a i64 b i64\n    let count = 0\n    for k from 0 to n - 1\n        if g[a * n + k] == 1\n            if g[b * n + k] == 1\n                count += 1\n    count"
+    },
+    "C": {
+     "tokens": 84,
+     "source": "static long long common_neighbors_count(const long long *g, long long n, long long a, long long b) {\n    long long count = 0;\n    for (long long k = 0; k < n; k++)\n        if (g[a * n + k] == 1 && g[b * n + k] == 1) count += 1;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 89,
+     "source": "static int64_t common_neighbors_count(const Graph &g, int64_t n, int64_t a, int64_t b) {\n    int64_t count = 0;\n    for (int64_t k = 0; k < n; k++)\n        if (g[a * n + k] == 1 && g[b * n + k] == 1) count += 1;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 92,
+     "source": "fn common_neighbors_count(g: &[i64], n: i64, a: i64, b: i64) -> i64 {\n    let mut count = 0;\n    for k in 0..n {\n        if g[(a * n + k) as usize] == 1 && g[(b * n + k) as usize] == 1 {\n            count += 1;\n        }\n    }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 58,
+     "source": "def common_neighbors_count(g, n, a, b):\n    count = 0\n    for k in range(n):\n        if g[a * n + k] == 1 and g[b * n + k] == 1:\n            count += 1\n    return count"
+    },
+    "JavaScript": {
+     "tokens": 70,
+     "source": "function common_neighbors_count(g, n, a, b) {\n    let count = 0;\n    for (let k = 0; k < n; k++)\n        if (g[a * n + k] === 1 && g[b * n + k] === 1) count += 1;\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "connected_components_count",
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 561,
-     "source": "fn connected_components_count g array<i64> n i64\n    let visited array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\n    let queue array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\n    let components = 0\n    for s from 0 to n - 1\n        if visited[s] == 0\n            components += 1\n            let head = 0\n            let tail = 0\n            visited[s] = 1\n            queue[0] = s\n            tail = 1\n            while head < tail\n                let v = queue[head]\n                head += 1\n                for c from 0 to n - 1\n                    if g[v * n + c] == 1\n                        if visited[c] == 0\n                            visited[c] = 1\n                            queue[tail] = c\n                            tail += 1\n    components"
+     "tokens": 193,
+     "source": "fn connected_components_count g array<i64> n i64\n    let visited array<i64> = array_fill(64, 0)\n    let queue array<i64> = array_fill(64, 0)\n    let components = 0\n    for s from 0 to n - 1\n        if visited[s] == 0\n            components += 1\n            let head = 0\n            let tail = 0\n            visited[s] = 1\n            queue[0] = s\n            tail = 1\n            while head < tail\n                let v = queue[head]\n                head += 1\n                for c from 0 to n - 1\n                    if g[v * n + c] == 1\n                        if visited[c] == 0\n                            visited[c] = 1\n                            queue[tail] = c\n                            tail += 1\n    components"
+    },
+    "C": {
+     "tokens": 188,
+     "source": "static long long connected_components_count(const long long *g, long long n) {\n    long long visited[64] = {0}, queue[64] = {0};\n    long long components = 0;\n    for (long long s = 0; s < n; s++) {\n        if (visited[s] == 0) {\n            components += 1;\n            long long head = 0, tail = 1;\n            visited[s] = 1;\n            queue[0] = s;\n            while (head < tail) {\n                long long v = queue[head++];\n                for (long long c = 0; c < n; c++)\n                    if (g[v * n + c] == 1 && visited[c] == 0) { visited[c] = 1; queue[tail++] = c; }\n            }\n        }\n    }\n    return components;\n}"
+    },
+    "C++": {
+     "tokens": 190,
+     "source": "static int64_t connected_components_count(const Graph &g, int64_t n) {\n    std::array<int64_t, 64> visited{}, queue{};\n    int64_t components = 0;\n    for (int64_t s = 0; s < n; s++) {\n        if (visited[s] == 0) {\n            components += 1;\n            int64_t head = 0, tail = 1;\n            visited[s] = 1;\n            queue[0] = s;\n            while (head < tail) {\n                int64_t v = queue[head++];\n                for (int64_t c = 0; c < n; c++)\n                    if (g[v * n + c] == 1 && visited[c] == 0) { visited[c] = 1; queue[tail++] = c; }\n            }\n        }\n    }\n    return components;\n}"
+    },
+    "Rust": {
+     "tokens": 206,
+     "source": "fn connected_components_count(g: &[i64], n: i64) -> i64 {\n    let mut visited = [0i64; 64];\n    let mut queue = [0i64; 64];\n    let mut components = 0;\n    for s in 0..n {\n        if visited[s as usize] == 0 {\n            components += 1;\n            let mut head = 0;\n            let mut tail = 1;\n            visited[s as usize] = 1;\n            queue[0] = s;\n            while head < tail {\n                let v = queue[head];\n                head += 1;\n                for c in 0..n {\n                    if g[(v * n + c) as usize] == 1 && visited[c as usize] == 0 {\n                        visited[c as usize] = 1;\n                        queue[tail] = c;\n                        tail += 1;\n                    }\n                }\n            }\n        }\n    }\n    components\n}"
+    },
+    "Python": {
+     "tokens": 155,
+     "source": "def connected_components_count(g, n):\n    visited = [0] * 64\n    queue = [0] * 64\n    components = 0\n    for s in range(n):\n        if visited[s] == 0:\n            components += 1\n            head = 0\n            visited[s] = 1\n            queue[0] = s\n            tail = 1\n            while head < tail:\n                v = queue[head]\n                head += 1\n                for c in range(n):\n                    if g[v * n + c] == 1 and visited[c] == 0:\n                        visited[c] = 1\n                        queue[tail] = c\n                        tail += 1\n    return components"
+    },
+    "JavaScript": {
+     "tokens": 184,
+     "source": "function connected_components_count(g, n) {\n    const visited = new Array(64).fill(0);\n    const queue = new Array(64).fill(0);\n    let components = 0;\n    for (let s = 0; s < n; s++) {\n        if (visited[s] === 0) {\n            components += 1;\n            let head = 0;\n            let tail = 1;\n            visited[s] = 1;\n            queue[0] = s;\n            while (head < tail) {\n                const v = queue[head++];\n                for (let c = 0; c < n; c++)\n                    if (g[v * n + c] === 1 && visited[c] === 0) { visited[c] = 1; queue[tail++] = c; }\n            }\n        }\n    }\n    return components;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "count_isolated_vertices",
@@ -5728,9 +5768,29 @@
     "Lullaby": {
      "tokens": 55,
      "source": "fn count_isolated_vertices g array<i64> n i64\n    let count = 0\n    for v from 0 to n - 1\n        if total_degree(g, n, v) == 0\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 66,
+     "source": "static long long count_isolated_vertices(const long long *g, long long n) {\n    long long count = 0;\n    for (long long v = 0; v < n; v++) if (total_degree(g, n, v) == 0) count += 1;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 69,
+     "source": "static int64_t count_isolated_vertices(const Graph &g, int64_t n) {\n    int64_t count = 0;\n    for (int64_t v = 0; v < n; v++) if (total_degree(g, n, v) == 0) count += 1;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 50,
+     "source": "fn count_isolated_vertices(g: &[i64], n: i64) -> i64 {\n    (0..n).filter(|&v| total_degree(g, n, v) == 0).count() as i64\n}"
+    },
+    "Python": {
+     "tokens": 33,
+     "source": "def count_isolated_vertices(g, n):\n    return sum(1 for v in range(n) if total_degree(g, n, v) == 0)"
+    },
+    "JavaScript": {
+     "tokens": 56,
+     "source": "function count_isolated_vertices(g, n) {\n    let count = 0;\n    for (let v = 0; v < n; v++) if (total_degree(g, n, v) === 0) count += 1;\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "count_leaves",
@@ -5739,9 +5799,29 @@
     "Lullaby": {
      "tokens": 54,
      "source": "fn count_leaves g array<i64> n i64\n    let count = 0\n    for v from 0 to n - 1\n        if out_degree(g, n, v) == 1\n            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 65,
+     "source": "static long long count_leaves(const long long *g, long long n) {\n    long long count = 0;\n    for (long long v = 0; v < n; v++) if (out_degree(g, n, v) == 1) count += 1;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 68,
+     "source": "static int64_t count_leaves(const Graph &g, int64_t n) {\n    int64_t count = 0;\n    for (int64_t v = 0; v < n; v++) if (out_degree(g, n, v) == 1) count += 1;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 49,
+     "source": "fn count_leaves(g: &[i64], n: i64) -> i64 {\n    (0..n).filter(|&v| out_degree(g, n, v) == 1).count() as i64\n}"
+    },
+    "Python": {
+     "tokens": 32,
+     "source": "def count_leaves(g, n):\n    return sum(1 for v in range(n) if out_degree(g, n, v) == 1)"
+    },
+    "JavaScript": {
+     "tokens": 55,
+     "source": "function count_leaves(g, n) {\n    let count = 0;\n    for (let v = 0; v < n; v++) if (out_degree(g, n, v) === 1) count += 1;\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "count_self_loops",
@@ -5750,9 +5830,29 @@
     "Lullaby": {
      "tokens": 45,
      "source": "fn count_self_loops g array<i64> n i64\n    let count = 0\n    for i from 0 to n - 1\n        count += g[i * n + i]\n    count"
+    },
+    "C": {
+     "tokens": 56,
+     "source": "static long long count_self_loops(const long long *g, long long n) {\n    long long count = 0;\n    for (long long i = 0; i < n; i++) count += g[i * n + i];\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 59,
+     "source": "static int64_t count_self_loops(const Graph &g, int64_t n) {\n    int64_t count = 0;\n    for (int64_t i = 0; i < n; i++) count += g[i * n + i];\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 44,
+     "source": "fn count_self_loops(g: &[i64], n: i64) -> i64 {\n    (0..n).map(|i| g[(i * n + i) as usize]).sum()\n}"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def count_self_loops(g, n):\n    return sum(g[i * n + i] for i in range(n))"
+    },
+    "JavaScript": {
+     "tokens": 46,
+     "source": "function count_self_loops(g, n) {\n    let count = 0;\n    for (let i = 0; i < n; i++) count += g[i * n + i];\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "count_triangles",
@@ -5761,9 +5861,29 @@
     "Lullaby": {
      "tokens": 107,
      "source": "fn count_triangles g array<i64> n i64\n    let count = 0\n    for i from 0 to n - 1\n        for j from i + 1 to n - 1\n            for k from j + 1 to n - 1\n                if g[i * n + j] == 1\n                    if g[j * n + k] == 1\n                        if g[i * n + k] == 1\n                            count += 1\n    count"
+    },
+    "C": {
+     "tokens": 123,
+     "source": "static long long count_triangles(const long long *g, long long n) {\n    long long count = 0;\n    for (long long i = 0; i < n; i++)\n        for (long long j = i + 1; j < n; j++)\n            for (long long k = j + 1; k < n; k++)\n                if (g[i * n + j] == 1 && g[j * n + k] == 1 && g[i * n + k] == 1) count += 1;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 128,
+     "source": "static int64_t count_triangles(const Graph &g, int64_t n) {\n    int64_t count = 0;\n    for (int64_t i = 0; i < n; i++)\n        for (int64_t j = i + 1; j < n; j++)\n            for (int64_t k = j + 1; k < n; k++)\n                if (g[i * n + j] == 1 && g[j * n + k] == 1 && g[i * n + k] == 1) count += 1;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 129,
+     "source": "fn count_triangles(g: &[i64], n: i64) -> i64 {\n    let mut count = 0;\n    for i in 0..n {\n        for j in i + 1..n {\n            for k in j + 1..n {\n                if g[(i * n + j) as usize] == 1\n                    && g[(j * n + k) as usize] == 1\n                    && g[(i * n + k) as usize] == 1\n                {\n                    count += 1;\n                }\n            }\n        }\n    }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 89,
+     "source": "def count_triangles(g, n):\n    count = 0\n    for i in range(n):\n        for j in range(i + 1, n):\n            for k in range(j + 1, n):\n                if g[i * n + j] == 1 and g[j * n + k] == 1 and g[i * n + k] == 1:\n                    count += 1\n    return count"
+    },
+    "JavaScript": {
+     "tokens": 111,
+     "source": "function count_triangles(g, n) {\n    let count = 0;\n    for (let i = 0; i < n; i++)\n        for (let j = i + 1; j < n; j++)\n            for (let k = j + 1; k < n; k++)\n                if (g[i * n + j] === 1 && g[j * n + k] === 1 && g[i * n + k] === 1) count += 1;\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "edge_count_directed",
@@ -5772,9 +5892,29 @@
     "Lullaby": {
      "tokens": 43,
      "source": "fn edge_count_directed g array<i64> n i64\n    let count = 0\n    for i from 0 to n * n - 1\n        count += g[i]\n    count"
+    },
+    "C": {
+     "tokens": 54,
+     "source": "static long long edge_count_directed(const long long *g, long long n) {\n    long long count = 0;\n    for (long long i = 0; i < n * n; i++) count += g[i];\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 57,
+     "source": "static int64_t edge_count_directed(const Graph &g, int64_t n) {\n    int64_t count = 0;\n    for (int64_t i = 0; i < n * n; i++) count += g[i];\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 40,
+     "source": "fn edge_count_directed(g: &[i64], n: i64) -> i64 {\n    (0..n * n).map(|i| g[i as usize]).sum()\n}"
+    },
+    "Python": {
+     "tokens": 23,
+     "source": "def edge_count_directed(g, n):\n    return sum(g[i] for i in range(n * n))"
+    },
+    "JavaScript": {
+     "tokens": 44,
+     "source": "function edge_count_directed(g, n) {\n    let count = 0;\n    for (let i = 0; i < n * n; i++) count += g[i];\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "edge_count_undirected",
@@ -5783,9 +5923,29 @@
     "Lullaby": {
      "tokens": 69,
      "source": "fn edge_count_undirected g array<i64> n i64\n    let count = 0\n    for i from 0 to n - 1\n        for j from i + 1 to n - 1\n            if g[i * n + j] == 1\n                count += 1\n    count"
+    },
+    "C": {
+     "tokens": 85,
+     "source": "static long long edge_count_undirected(const long long *g, long long n) {\n    long long count = 0;\n    for (long long i = 0; i < n; i++)\n        for (long long j = i + 1; j < n; j++)\n            if (g[i * n + j] == 1) count += 1;\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 89,
+     "source": "static int64_t edge_count_undirected(const Graph &g, int64_t n) {\n    int64_t count = 0;\n    for (int64_t i = 0; i < n; i++)\n        for (int64_t j = i + 1; j < n; j++)\n            if (g[i * n + j] == 1) count += 1;\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 82,
+     "source": "fn edge_count_undirected(g: &[i64], n: i64) -> i64 {\n    let mut count = 0;\n    for i in 0..n {\n        for j in i + 1..n {\n            if g[(i * n + j) as usize] == 1 {\n                count += 1;\n            }\n        }\n    }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 57,
+     "source": "def edge_count_undirected(g, n):\n    count = 0\n    for i in range(n):\n        for j in range(i + 1, n):\n            if g[i * n + j] == 1:\n                count += 1\n    return count"
+    },
+    "JavaScript": {
+     "tokens": 74,
+     "source": "function edge_count_undirected(g, n) {\n    let count = 0;\n    for (let i = 0; i < n; i++)\n        for (let j = i + 1; j < n; j++)\n            if (g[i * n + j] === 1) count += 1;\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "has_edge",
@@ -5794,9 +5954,29 @@
     "Lullaby": {
      "tokens": 26,
      "source": "fn has_edge g array<i64> n i64 r i64 c i64\n    g[r * n + c]"
+    },
+    "C": {
+     "tokens": 34,
+     "source": "static long long has_edge(const long long *g, long long n, long long r, long long c) {\n    return g[r * n + c];\n}"
+    },
+    "C++": {
+     "tokens": 36,
+     "source": "static int64_t has_edge(const Graph &g, int64_t n, int64_t r, int64_t c) { return g[r * n + c]; }"
+    },
+    "Rust": {
+     "tokens": 41,
+     "source": "fn has_edge(g: &[i64], n: i64, r: i64, c: i64) -> i64 {\n    g[(r * n + c) as usize]\n}"
+    },
+    "Python": {
+     "tokens": 20,
+     "source": "def has_edge(g, n, r, c):\n    return g[r * n + c]"
+    },
+    "JavaScript": {
+     "tokens": 22,
+     "source": "function has_edge(g, n, r, c) {\n    return g[r * n + c];\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "in_degree",
@@ -5805,9 +5985,29 @@
     "Lullaby": {
      "tokens": 46,
      "source": "fn in_degree g array<i64> n i64 v i64\n    let sum = 0\n    for r from 0 to n - 1\n        sum += g[r * n + v]\n    sum"
+    },
+    "C": {
+     "tokens": 58,
+     "source": "static long long in_degree(const long long *g, long long n, long long v) {\n    long long sum = 0;\n    for (long long r = 0; r < n; r++) sum += g[r * n + v];\n    return sum;\n}"
+    },
+    "C++": {
+     "tokens": 62,
+     "source": "static int64_t in_degree(const Graph &g, int64_t n, int64_t v) {\n    int64_t sum = 0;\n    for (int64_t r = 0; r < n; r++) sum += g[r * n + v];\n    return sum;\n}"
+    },
+    "Rust": {
+     "tokens": 47,
+     "source": "fn in_degree(g: &[i64], n: i64, v: i64) -> i64 {\n    (0..n).map(|r| g[(r * n + v) as usize]).sum()\n}"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def in_degree(g, n, v):\n    return sum(g[r * n + v] for r in range(n))"
+    },
+    "JavaScript": {
+     "tokens": 46,
+     "source": "function in_degree(g, n, v) {\n    let sum = 0;\n    for (let r = 0; r < n; r++) sum += g[r * n + v];\n    return sum;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "is_complete_graph",
@@ -5816,9 +6016,29 @@
     "Lullaby": {
      "tokens": 64,
      "source": "fn is_complete_graph g array<i64> n i64\n    for i from 0 to n - 1\n        for j from 0 to n - 1\n            if i != j\n                if g[i * n + j] != 1\n                    return 0\n    1"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "static long long is_complete_graph(const long long *g, long long n) {\n    for (long long i = 0; i < n; i++)\n        for (long long j = 0; j < n; j++)\n            if (i != j && g[i * n + j] != 1) return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 80,
+     "source": "static int64_t is_complete_graph(const Graph &g, int64_t n) {\n    for (int64_t i = 0; i < n; i++)\n        for (int64_t j = 0; j < n; j++)\n            if (i != j && g[i * n + j] != 1) return 0;\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 74,
+     "source": "fn is_complete_graph(g: &[i64], n: i64) -> i64 {\n    for i in 0..n {\n        for j in 0..n {\n            if i != j && g[(i * n + j) as usize] != 1 {\n                return 0;\n            }\n        }\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def is_complete_graph(g, n):\n    for i in range(n):\n        for j in range(n):\n            if i != j and g[i * n + j] != 1:\n                return 0\n    return 1"
+    },
+    "JavaScript": {
+     "tokens": 67,
+     "source": "function is_complete_graph(g, n) {\n    for (let i = 0; i < n; i++)\n        for (let j = 0; j < n; j++)\n            if (i !== j && g[i * n + j] !== 1) return 0;\n    return 1;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "is_regular",
@@ -5827,9 +6047,29 @@
     "Lullaby": {
      "tokens": 60,
      "source": "fn is_regular g array<i64> n i64\n    let d0 = out_degree(g, n, 0)\n    for v from 1 to n - 1\n        if out_degree(g, n, v) != d0\n            return 0\n    1"
+    },
+    "C": {
+     "tokens": 71,
+     "source": "static long long is_regular(const long long *g, long long n) {\n    long long d0 = out_degree(g, n, 0);\n    for (long long v = 1; v < n; v++) if (out_degree(g, n, v) != d0) return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 74,
+     "source": "static int64_t is_regular(const Graph &g, int64_t n) {\n    int64_t d0 = out_degree(g, n, 0);\n    for (int64_t v = 1; v < n; v++) if (out_degree(g, n, v) != d0) return 0;\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 69,
+     "source": "fn is_regular(g: &[i64], n: i64) -> i64 {\n    let d0 = out_degree(g, n, 0);\n    for v in 1..n {\n        if out_degree(g, n, v) != d0 {\n            return 0;\n        }\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 53,
+     "source": "def is_regular(g, n):\n    d0 = out_degree(g, n, 0)\n    for v in range(1, n):\n        if out_degree(g, n, v) != d0:\n            return 0\n    return 1"
+    },
+    "JavaScript": {
+     "tokens": 61,
+     "source": "function is_regular(g, n) {\n    const d0 = out_degree(g, n, 0);\n    for (let v = 1; v < n; v++) if (out_degree(g, n, v) !== d0) return 0;\n    return 1;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "is_symmetric",
@@ -5838,9 +6078,29 @@
     "Lullaby": {
      "tokens": 62,
      "source": "fn is_symmetric g array<i64> n i64\n    for i from 0 to n - 1\n        for j from 0 to n - 1\n            if g[i * n + j] != g[j * n + i]\n                return 0\n    1"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "static long long is_symmetric(const long long *g, long long n) {\n    for (long long i = 0; i < n; i++)\n        for (long long j = 0; j < n; j++)\n            if (g[i * n + j] != g[j * n + i]) return 0;\n    return 1;\n}"
+    },
+    "C++": {
+     "tokens": 80,
+     "source": "static int64_t is_symmetric(const Graph &g, int64_t n) {\n    for (int64_t i = 0; i < n; i++)\n        for (int64_t j = 0; j < n; j++)\n            if (g[i * n + j] != g[j * n + i]) return 0;\n    return 1;\n}"
+    },
+    "Rust": {
+     "tokens": 79,
+     "source": "fn is_symmetric(g: &[i64], n: i64) -> i64 {\n    for i in 0..n {\n        for j in 0..n {\n            if g[(i * n + j) as usize] != g[(j * n + i) as usize] {\n                return 0;\n            }\n        }\n    }\n    1\n}"
+    },
+    "Python": {
+     "tokens": 48,
+     "source": "def is_symmetric(g, n):\n    for i in range(n):\n        for j in range(n):\n            if g[i * n + j] != g[j * n + i]:\n                return 0\n    return 1"
+    },
+    "JavaScript": {
+     "tokens": 67,
+     "source": "function is_symmetric(g, n) {\n    for (let i = 0; i < n; i++)\n        for (let j = 0; j < n; j++)\n            if (g[i * n + j] !== g[j * n + i]) return 0;\n    return 1;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "max_degree_vertex",
@@ -5849,9 +6109,29 @@
     "Lullaby": {
      "tokens": 81,
      "source": "fn max_degree_vertex g array<i64> n i64\n    let best_v = 0\n    let best_d = out_degree(g, n, 0)\n    for v from 1 to n - 1\n        let d = out_degree(g, n, v)\n        if d > best_d\n            best_d = d\n            best_v = v\n    best_v"
+    },
+    "C": {
+     "tokens": 96,
+     "source": "static long long max_degree_vertex(const long long *g, long long n) {\n    long long best_v = 0, best_d = out_degree(g, n, 0);\n    for (long long v = 1; v < n; v++) {\n        long long d = out_degree(g, n, v);\n        if (d > best_d) { best_d = d; best_v = v; }\n    }\n    return best_v;\n}"
+    },
+    "C++": {
+     "tokens": 100,
+     "source": "static int64_t max_degree_vertex(const Graph &g, int64_t n) {\n    int64_t best_v = 0, best_d = out_degree(g, n, 0);\n    for (int64_t v = 1; v < n; v++) {\n        int64_t d = out_degree(g, n, v);\n        if (d > best_d) { best_d = d; best_v = v; }\n    }\n    return best_v;\n}"
+    },
+    "Rust": {
+     "tokens": 92,
+     "source": "fn max_degree_vertex(g: &[i64], n: i64) -> i64 {\n    let mut best_v = 0;\n    let mut best_d = out_degree(g, n, 0);\n    for v in 1..n {\n        let d = out_degree(g, n, v);\n        if d > best_d {\n            best_d = d;\n            best_v = v;\n        }\n    }\n    best_v\n}"
+    },
+    "Python": {
+     "tokens": 72,
+     "source": "def max_degree_vertex(g, n):\n    best_v = 0\n    best_d = out_degree(g, n, 0)\n    for v in range(1, n):\n        d = out_degree(g, n, v)\n        if d > best_d:\n            best_d = d\n            best_v = v\n    return best_v"
+    },
+    "JavaScript": {
+     "tokens": 87,
+     "source": "function max_degree_vertex(g, n) {\n    let best_v = 0;\n    let best_d = out_degree(g, n, 0);\n    for (let v = 1; v < n; v++) {\n        const d = out_degree(g, n, v);\n        if (d > best_d) { best_d = d; best_v = v; }\n    }\n    return best_v;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "out_degree",
@@ -5860,9 +6140,29 @@
     "Lullaby": {
      "tokens": 46,
      "source": "fn out_degree g array<i64> n i64 v i64\n    let sum = 0\n    for c from 0 to n - 1\n        sum += g[v * n + c]\n    sum"
+    },
+    "C": {
+     "tokens": 58,
+     "source": "static long long out_degree(const long long *g, long long n, long long v) {\n    long long sum = 0;\n    for (long long c = 0; c < n; c++) sum += g[v * n + c];\n    return sum;\n}"
+    },
+    "C++": {
+     "tokens": 62,
+     "source": "static int64_t out_degree(const Graph &g, int64_t n, int64_t v) {\n    int64_t sum = 0;\n    for (int64_t c = 0; c < n; c++) sum += g[v * n + c];\n    return sum;\n}"
+    },
+    "Rust": {
+     "tokens": 47,
+     "source": "fn out_degree(g: &[i64], n: i64, v: i64) -> i64 {\n    (0..n).map(|c| g[(v * n + c) as usize]).sum()\n}"
+    },
+    "Python": {
+     "tokens": 25,
+     "source": "def out_degree(g, n, v):\n    return sum(g[v * n + c] for c in range(n))"
+    },
+    "JavaScript": {
+     "tokens": 46,
+     "source": "function out_degree(g, n, v) {\n    let sum = 0;\n    for (let c = 0; c < n; c++) sum += g[v * n + c];\n    return sum;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "path_exists_len2",
@@ -5871,20 +6171,60 @@
     "Lullaby": {
      "tokens": 66,
      "source": "fn path_exists_len2 g array<i64> n i64 s i64 t i64\n    for k from 0 to n - 1\n        if g[s * n + k] == 1\n            if g[k * n + t] == 1\n                return 1\n    0"
+    },
+    "C": {
+     "tokens": 77,
+     "source": "static long long path_exists_len2(const long long *g, long long n, long long s, long long t) {\n    for (long long k = 0; k < n; k++)\n        if (g[s * n + k] == 1 && g[k * n + t] == 1) return 1;\n    return 0;\n}"
+    },
+    "C++": {
+     "tokens": 81,
+     "source": "static int64_t path_exists_len2(const Graph &g, int64_t n, int64_t s, int64_t t) {\n    for (int64_t k = 0; k < n; k++)\n        if (g[s * n + k] == 1 && g[k * n + t] == 1) return 1;\n    return 0;\n}"
+    },
+    "Rust": {
+     "tokens": 85,
+     "source": "fn path_exists_len2(g: &[i64], n: i64, s: i64, t: i64) -> i64 {\n    for k in 0..n {\n        if g[(s * n + k) as usize] == 1 && g[(k * n + t) as usize] == 1 {\n            return 1;\n        }\n    }\n    0\n}"
+    },
+    "Python": {
+     "tokens": 53,
+     "source": "def path_exists_len2(g, n, s, t):\n    for k in range(n):\n        if g[s * n + k] == 1 and g[k * n + t] == 1:\n            return 1\n    return 0"
+    },
+    "JavaScript": {
+     "tokens": 64,
+     "source": "function path_exists_len2(g, n, s, t) {\n    for (let k = 0; k < n; k++)\n        if (g[s * n + k] === 1 && g[k * n + t] === 1) return 1;\n    return 0;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "reachable_count_bfs",
    "category": "graph_algos",
    "langs": {
     "Lullaby": {
-     "tokens": 544,
-     "source": "fn reachable_count_bfs g array<i64> n i64 start i64\n    let visited array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\n    let queue array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]\n    let head = 0\n    let tail = 0\n    visited[start] = 1\n    queue[tail] = start\n    tail += 1\n    let count = 0\n    while head < tail\n        let v = queue[head]\n        head += 1\n        count += 1\n        for c from 0 to n - 1\n            if g[v * n + c] == 1\n                if visited[c] == 0\n                    visited[c] = 1\n                    queue[tail] = c\n                    tail += 1\n    count"
+     "tokens": 176,
+     "source": "fn reachable_count_bfs g array<i64> n i64 start i64\n    let visited array<i64> = array_fill(64, 0)\n    let queue array<i64> = array_fill(64, 0)\n    let head = 0\n    let tail = 0\n    visited[start] = 1\n    queue[tail] = start\n    tail += 1\n    let count = 0\n    while head < tail\n        let v = queue[head]\n        head += 1\n        count += 1\n        for c from 0 to n - 1\n            if g[v * n + c] == 1\n                if visited[c] == 0\n                    visited[c] = 1\n                    queue[tail] = c\n                    tail += 1\n    count"
+    },
+    "C": {
+     "tokens": 161,
+     "source": "static long long reachable_count_bfs(const long long *g, long long n, long long start) {\n    long long visited[64] = {0}, queue[64] = {0};\n    long long head = 0, tail = 0;\n    visited[start] = 1;\n    queue[tail++] = start;\n    long long count = 0;\n    while (head < tail) {\n        long long v = queue[head++];\n        count += 1;\n        for (long long c = 0; c < n; c++)\n            if (g[v * n + c] == 1 && visited[c] == 0) { visited[c] = 1; queue[tail++] = c; }\n    }\n    return count;\n}"
+    },
+    "C++": {
+     "tokens": 163,
+     "source": "static int64_t reachable_count_bfs(const Graph &g, int64_t n, int64_t start) {\n    std::array<int64_t, 64> visited{}, queue{};\n    int64_t head = 0, tail = 0;\n    visited[start] = 1;\n    queue[tail++] = start;\n    int64_t count = 0;\n    while (head < tail) {\n        int64_t v = queue[head++];\n        count += 1;\n        for (int64_t c = 0; c < n; c++)\n            if (g[v * n + c] == 1 && visited[c] == 0) { visited[c] = 1; queue[tail++] = c; }\n    }\n    return count;\n}"
+    },
+    "Rust": {
+     "tokens": 194,
+     "source": "fn reachable_count_bfs(g: &[i64], n: i64, start: i64) -> i64 {\n    let mut visited = [0i64; 64];\n    let mut queue = [0i64; 64];\n    let mut head = 0;\n    let mut tail = 0;\n    visited[start as usize] = 1;\n    queue[tail] = start;\n    tail += 1;\n    let mut count = 0;\n    while head < tail {\n        let v = queue[head];\n        head += 1;\n        count += 1;\n        for c in 0..n {\n            if g[(v * n + c) as usize] == 1 && visited[c as usize] == 0 {\n                visited[c as usize] = 1;\n                queue[tail] = c;\n                tail += 1;\n            }\n        }\n    }\n    count\n}"
+    },
+    "Python": {
+     "tokens": 148,
+     "source": "def reachable_count_bfs(g, n, start):\n    visited = [0] * 64\n    queue = [0] * 64\n    head = 0\n    tail = 0\n    visited[start] = 1\n    queue[tail] = start\n    tail += 1\n    count = 0\n    while head < tail:\n        v = queue[head]\n        head += 1\n        count += 1\n        for c in range(n):\n            if g[v * n + c] == 1 and visited[c] == 0:\n                visited[c] = 1\n                queue[tail] = c\n                tail += 1\n    return count"
+    },
+    "JavaScript": {
+     "tokens": 156,
+     "source": "function reachable_count_bfs(g, n, start) {\n    const visited = new Array(64).fill(0);\n    const queue = new Array(64).fill(0);\n    let head = 0;\n    let tail = 0;\n    visited[start] = 1;\n    queue[tail++] = start;\n    let count = 0;\n    while (head < tail) {\n        const v = queue[head++];\n        count += 1;\n        for (let c = 0; c < n; c++)\n            if (g[v * n + c] === 1 && visited[c] === 0) { visited[c] = 1; queue[tail++] = c; }\n    }\n    return count;\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "total_degree",
@@ -5893,9 +6233,29 @@
     "Lullaby": {
      "tokens": 33,
      "source": "fn total_degree g array<i64> n i64 v i64\n    out_degree(g, n, v) + in_degree(g, n, v)"
+    },
+    "C": {
+     "tokens": 40,
+     "source": "static long long total_degree(const long long *g, long long n, long long v) {\n    return out_degree(g, n, v) + in_degree(g, n, v);\n}"
+    },
+    "C++": {
+     "tokens": 42,
+     "source": "static int64_t total_degree(const Graph &g, int64_t n, int64_t v) {\n    return out_degree(g, n, v) + in_degree(g, n, v);\n}"
+    },
+    "Rust": {
+     "tokens": 42,
+     "source": "fn total_degree(g: &[i64], n: i64, v: i64) -> i64 {\n    out_degree(g, n, v) + in_degree(g, n, v)\n}"
+    },
+    "Python": {
+     "tokens": 28,
+     "source": "def total_degree(g, n, v):\n    return out_degree(g, n, v) + in_degree(g, n, v)"
+    },
+    "JavaScript": {
+     "tokens": 30,
+     "source": "function total_degree(g, n, v) {\n    return out_degree(g, n, v) + in_degree(g, n, v);\n}"
     }
    },
-   "present": 1
+   "present": 6
   },
   {
    "name": "digit_hash",
@@ -13277,12 +13637,12 @@
   }
  ],
  "totals": {
-  "Lullaby": 19960,
-  "C": 26002,
-  "C++": 26894,
-  "Rust": 24867,
-  "Python": 19120,
-  "JavaScript": 22146
+  "Lullaby": 21258,
+  "C": 27472,
+  "C++": 28423,
+  "Rust": 26329,
+  "Python": 20112,
+  "JavaScript": 23432
  },
  "categories": {
   "arrays": {
@@ -13374,12 +13734,12 @@
    "JavaScript": 513
   },
   "graph_algos": {
-   "Lullaby": 0,
-   "C": 0,
-   "C++": 0,
-   "Rust": 0,
-   "Python": 0,
-   "JavaScript": 0
+   "Lullaby": 1298,
+   "C": 1470,
+   "C++": 1529,
+   "Rust": 1462,
+   "Python": 992,
+   "JavaScript": 1286
   },
   "hashing": {
    "Lullaby": 976,
@@ -13494,5 +13854,5 @@
    "JavaScript": 797
   }
  },
- "n_functions": 416
+ "n_functions": 434
 }
