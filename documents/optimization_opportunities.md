@@ -13,13 +13,23 @@ changes.
 
 | Metric | Lullaby | Target | Gap |
 |---|---|---|---|
-| Corpus tokens | 21,535 | < 19,120 (Python) | **+12.6% over Python** |
+| Corpus tokens | 20,321 | < 19,120 (Python) | **+6.3% over Python** |
 | `count_primes_below` native | 29.3 ms | ≤ 28.3 ms (C) | **1.04× C** |
 | `fib(40)` native | 1.53 ns/call | ≤ 1.28 ns (C) | **1.20× C** |
 
-Lullaby is terser than C (1.21×), C++ (1.25×), Rust (1.16×) and now **beats
-JavaScript** (Lullaby is 0.97× of JS). Python is the only language it loses to on
-tokens, and only C/Rust beat it on native speed — both by a hair.
+Lullaby is now **terser than every language except Python**: ~22% ahead of C,
+~24% ahead of C++, ~18% ahead of Rust, ~8% ahead of JavaScript. Python is the
+only language still ahead on tokens (by +6.3%, down from +16.9% after return-type
+inference and the four inline-syntax features shipped and were adopted). On
+speed, only C/Rust beat it on native — both by a hair.
+
+**The last token lever to go under Python is parameter-type inference** (~1,841
+tokens, the only remaining structural cost now that return types infer) — a
+genuine design decision, not a desugar. Two other candidates were **measured and
+ruled out**: string interpolation saves ~0 *counted* tokens (the tokenizer strips
+the `main` driver, and there are zero `to_string` calls in counted functions),
+and dropping redundant array-length params (`n`→`len(a)`) is net-neutral to worse
+(`len(a)` is more tokens than `n`). See the artifact's Open-gaps tab.
 
 ### Shipped: the four token gaps (2026-07-12)
 
