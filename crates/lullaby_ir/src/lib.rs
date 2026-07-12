@@ -565,6 +565,40 @@ pub fn run_main_with_args(module: &IrModule, args: Vec<String>) -> Result<Value,
 
 /// Shared-module entry: build an interpreter borrowing `&*arc` while retaining an
 /// owned `Arc<IrModule>` clone for detached-thread spawning.
+/// Read one element from an indexable value (`string` char or `array` element) by
+/// **borrowing** the container and cloning only the element, so a bare-variable
+/// `a[i]` does not clone the whole container on every access.
+fn index_into(container: &Value, index: i64) -> Result<Value, RuntimeError> {
+    match container {
+        Value::String(text) => {
+            if index < 0 {
+                return Err(RuntimeError::new(
+                    "L0413",
+                    format!("string index `{index}` is out of bounds"),
+                ));
+            }
+            text.chars()
+                .nth(index as usize)
+                .map(Value::Char)
+                .ok_or_else(|| {
+                    RuntimeError::new("L0413", format!("string index `{index}` is out of bounds"))
+                })
+        }
+        Value::Array(values) => {
+            if index < 0 {
+                return Err(RuntimeError::new(
+                    "L0413",
+                    format!("array index `{index}` is out of bounds"),
+                ));
+            }
+            values.get(index as usize).cloned().ok_or_else(|| {
+                RuntimeError::new("L0413", format!("array index `{index}` is out of bounds"))
+            })
+        }
+        _ => Err(RuntimeError::new("L0412", "index target is not an array")),
+    }
+}
+
 fn run_main_shared(arc: Arc<IrModule>, args: Vec<String>) -> Result<Value, RuntimeError> {
     let mut runtime = IrRuntime::new(&arc, Arc::clone(&arc))?;
     runtime.program_args = args;
@@ -5073,39 +5107,20 @@ impl<'a> IrRuntime<'a> {
                 }
             },
             IrExprKind::Index { target, index } => {
+                // Fast path: a bare-variable target is borrowed (clone only the
+                // element), so `a[i]` does not clone the whole array/string every
+                // access (which is O(len) per read).
+                if let IrExprKind::Variable(name) = &target.kind {
+                    let idx = self.eval_expr(index, env)?.as_i64()?;
+                    if let Some(container) = env.get_ref(name) {
+                        return index_into(container, idx);
+                    }
+                    let owned = self.eval_expr(target, env)?;
+                    return index_into(&owned, idx);
+                }
                 let target = self.eval_expr(target, env)?;
                 let index = self.eval_expr(index, env)?.as_i64()?;
-                // `s[i]` on a string reads the i-th char (by Unicode scalar).
-                if let Value::String(text) = &target {
-                    if index < 0 {
-                        return Err(RuntimeError::new(
-                            "L0413",
-                            format!("string index `{index}` is out of bounds"),
-                        ));
-                    }
-                    return text
-                        .chars()
-                        .nth(index as usize)
-                        .map(Value::Char)
-                        .ok_or_else(|| {
-                            RuntimeError::new(
-                                "L0413",
-                                format!("string index `{index}` is out of bounds"),
-                            )
-                        });
-                }
-                let Value::Array(values) = target else {
-                    return Err(RuntimeError::new("L0412", "index target is not an array"));
-                };
-                if index < 0 {
-                    return Err(RuntimeError::new(
-                        "L0413",
-                        format!("array index `{index}` is out of bounds"),
-                    ));
-                }
-                values.get(index as usize).cloned().ok_or_else(|| {
-                    RuntimeError::new("L0413", format!("array index `{index}` is out of bounds"))
-                })
+                index_into(&target, index)
             }
             IrExprKind::Field { target, field } => match self.eval_expr(target, env)? {
                 Value::Struct(s) => s

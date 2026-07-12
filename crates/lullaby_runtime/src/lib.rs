@@ -1291,6 +1291,40 @@ pub fn gcd_i64(a: i64, b: i64) -> i64 {
 /// empty list yields `0`/`0.0` (defaulting to `i64` `0`, which the semantic
 /// type check pins to the element type). A non-numeric element is a runtime
 /// type error (`L0417`).
+/// Read one element from an indexable value (`string` char or `array` element)
+/// by **borrowing** the container and cloning only the element. Used on the
+/// `a[i]` hot path so a bare-variable index does not clone the whole container.
+fn index_into(container: &Value, index: i64) -> Result<Value, RuntimeError> {
+    match container {
+        Value::String(text) => {
+            if index < 0 {
+                return Err(RuntimeError::new(
+                    "L0413",
+                    format!("string index `{index}` is out of bounds"),
+                ));
+            }
+            text.chars()
+                .nth(index as usize)
+                .map(Value::Char)
+                .ok_or_else(|| {
+                    RuntimeError::new("L0413", format!("string index `{index}` is out of bounds"))
+                })
+        }
+        Value::Array(values) => {
+            if index < 0 {
+                return Err(RuntimeError::new(
+                    "L0413",
+                    format!("array index `{index}` is out of bounds"),
+                ));
+            }
+            values.get(index as usize).cloned().ok_or_else(|| {
+                RuntimeError::new("L0413", format!("array index `{index}` is out of bounds"))
+            })
+        }
+        _ => Err(RuntimeError::new("L0412", "index target is not an array")),
+    }
+}
+
 pub fn list_sum_values(name: &str, values: Vec<Value>) -> Result<Value, RuntimeError> {
     let mut iter = values.into_iter();
     let Some(first) = iter.next() else {
@@ -3952,39 +3986,24 @@ impl<'a> Runtime<'a> {
                 }
             },
             ExprKind::Index { target, index } => {
+                // Fast path: when the target is a bare variable, borrow the
+                // container and clone only the element read, instead of cloning the
+                // whole array/string on every `a[i]` (which is O(len) per access).
+                if let ExprKind::Variable(name) = &target.kind {
+                    let idx = self.eval_expr(index, env)?.as_i64()?;
+                    if let Some(container) = env.get_ref(name) {
+                        return index_into(container, idx);
+                    }
+                    // A bare name that is not a local (enum variant / function
+                    // value) is not indexable; evaluate it and let `index_into`
+                    // report the type error on the owned value.
+                    let owned = self.eval_expr(target, env)?;
+                    return index_into(&owned, idx);
+                }
+                // Computed target: preserve target-before-index evaluation order.
                 let target = self.eval_expr(target, env)?;
                 let index = self.eval_expr(index, env)?.as_i64()?;
-                // `s[i]` on a string reads the i-th char (by Unicode scalar).
-                if let Value::String(text) = &target {
-                    if index < 0 {
-                        return Err(RuntimeError::new(
-                            "L0413",
-                            format!("string index `{index}` is out of bounds"),
-                        ));
-                    }
-                    return text
-                        .chars()
-                        .nth(index as usize)
-                        .map(Value::Char)
-                        .ok_or_else(|| {
-                            RuntimeError::new(
-                                "L0413",
-                                format!("string index `{index}` is out of bounds"),
-                            )
-                        });
-                }
-                let Value::Array(values) = target else {
-                    return Err(RuntimeError::new("L0412", "index target is not an array"));
-                };
-                if index < 0 {
-                    return Err(RuntimeError::new(
-                        "L0413",
-                        format!("array index `{index}` is out of bounds"),
-                    ));
-                }
-                values.get(index as usize).cloned().ok_or_else(|| {
-                    RuntimeError::new("L0413", format!("array index `{index}` is out of bounds"))
-                })
+                index_into(&target, index)
             }
             ExprKind::Unary { op, expr } => {
                 let value = self.eval_expr(expr, env)?;
