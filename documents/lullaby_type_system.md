@@ -78,318 +78,196 @@ let text = "hello"              # inferred from the literal
 
 ### Composite Types
 
-**Structs (Record Layout):**
-Fixed-size collections with named fields, stored contiguously in memory:
+**Structs (record layout):** nominal types with named fields declared `name Type`
+(space-separated, no colon). Construction is positional or named; fields are read
+and mutated with dot notation.
 
 ```lullaby
-// Struct definition
 struct Point
-    x: float64
-    y: float64
-    label: string
+    x f64
+    y f64
+    label string
 
-// Struct instance (field access without brackets)
-let p: struct Point
-    x: 3.14, y: 2.71, label: "origin"
-
-// Field access
-p.x          // dot notation (no brackets)
-p.y
-
-// Type-aware field access
-point.x       // type checking ensures 'x' exists in Point struct
+let p Point = Point(3.14, 2.71, "origin")   # positional
+let q = Point(x: 1.0, y: 2.0, label: "q")   # named; type inferred
+p.x                                         # field read
+p.x = 5.0                                   # field mutation
 ```
 
-**Unions:**
-Disjoint alternative values with explicit variant tags:
+**Enums (tagged unions):** disjoint variants, optionally carrying payloads,
+consumed by exhaustive `match`. (There is no `union` keyword — `union` is reserved
+and rejected with `L0211`.)
 
 ```lullaby
-union Status
-    success: int32,
-    error_code: uint16,
-    timeout: bool
+enum Status
+    active
+    failed i64
+    timeout
 
-var state: Status = union
-    variant: error_code = 404
-
-// Variant access (explicit naming)
-state.success   // returns None if not success variant
-state.error_code    // returns value if error_code is active
+let s = failed(404)           # bare variant construction
+match s
+    active -> 0
+    failed(code) -> code      # payload bound with parentheses
+    timeout -> -1
 ```
 
-**Arrays:**
-Fixed-size homogeneous collections:
+**Built-in generic enums:** `option<T>` (`some(v)`/`none`) and `result<T, E>`
+(`ok(v)`/`err(e)`), with the postfix `?` propagation operator.
+
+**Collections:** fixed `array<T>` (`[1, 2, 3]` literals, or `array_fill(n, v)` for a
+sized buffer), growable `list<T>`, and `map<K, V>`. Indexing is `xs[i]` with a
+runtime bounds check.
 
 ```lullaby
-// Array type declaration
-array<int32>              // array of 32-bit integers
-
-// Array instantiation
-let nums = array(5) init [1, 2, 3, 4, 5]
-
-// Indexed access (bracket notation retained for arrays only)
-nums[0]                  // first element
-nums[i where i < len(nums)]   // bounds-checked access
+let nums array<i64> = [1, 2, 3, 4, 5]
+let buf array<i64> = array_fill(64, 0)     # 64-element zeroed buffer
+nums[0]                                     # first element (bounds-checked)
 ```
 
-**Strings:**
-Byte sequences with optional encoding metadata:
-
-```lullaby
-type Text = array<uint8>  # byte-oriented strings
-
-let msg: Text = "Hello" as utf8
-```
+**Strings:** `string` is UTF-8 text (not a byte array). Decompose to bytes with
+`to_bytes`/`from_bytes` or to characters with `chars`/`string_from_chars`.
 
 ### Reference Types
 
-**Typed Pointers:**
-Explicitly typed memory references with allocation tracking:
+Explicit reference and pointer types for heap values and low-level memory.
 
 ```lullaby
-// Pointer declaration and typing
-ptr<int32>*              // pointer to int32
-ref<array<uint8>>        // reference (alias) to byte array
+rc<i64>       # reference-counted shared pointer (rc_new/rc_clone/rc_release/rc_get)
+ref<i64>      # a borrow/alias to a value (ref_get)
+ptr<i64>      # a raw pointer (unsafe read/write)
 
-// Allocation with type inference
-let num_ptr = alloc(int32*, 42)      # value stored at address
-var buf_ref: ref<Text> = alloc(Text, capacity=1024)
-
-// Access through pointers/references
-num_ptr.load()         // dereference and access
-buf_ref.data[i]        # bracket notation for array contents
+let cell rc<i64> = rc_new(42)
+let value = rc_get(cell)          # read through the rc
+rc_release(cell)                  # drop a reference
 ```
 
-**Smart References:**
-Reference counting wrappers (for heap objects):
-
-```lullaby
-rc<array<uint8>> create_buffer(size)   # reference-counted pointer
-shared<Point> clone(p)                 # increments refcount
-release(rc_obj)                        # decrements refcount, frees if 0
-
-// Usage patterns:
-var data = rc_create(buffer_ptr)      # explicit type + allocation
-use data.data                         # dereference for access
-dec_ref(data)                         # manual cleanup when needed
-```
+Heap slots use the `alloc`/`load`/`store`/`dealloc` builtins; raw pointer
+dereferencing is gated behind `unsafe`.
 
 ### Function Types
 
-Functions treated as first-class types with explicit signatures:
+Functions are first-class values. A function type is spelled `fn(T1, T2) -> R`
+(zero or more parameter types, an arrow, a return type). A bare top-level function
+name is a value of its type, so functions can be stored, passed, and returned.
 
 ```lullaby
-# Basic function type signature
+fn(i64, i64) -> i64        # two i64 in, one i64 out
+fn(string) -> bool
+fn() -> void
 
-fn<int32, int32> -> int32             # takes two ints, returns int
-fn(string) -> bool                   # string input, boolean output
+fn add a, b i64 -> i64
+    a + b
 
-# With named parameters
-
-fn ProcessImage(
-    image: ref<Text>,
-    quality: float64 = 0.8,
-    output_format: string = "png"
-) -> bool
-
-// Type-checked call
-fn_call(ProcessImage, img_ref, 0.95, png_fmt): bool result
+let op fn(i64, i64) -> i64 = add    # name-as-value
+op(2, 3)                            # call through the local -> 5
 ```
 
-## Type Inference Rules
+Parameters are always explicitly typed (no defaults or named-argument syntax at
+the call site). Capturing closures / lambda literals are on the roadmap.
 
-### Declaration-Based Inference
-Types inferred from explicit declarations and initial values:
+## Type Inference
+
+Inference is local and initializer-directed — it never crosses function
+boundaries (parameter types are always explicit; return types infer from the body).
 
 ```lullaby
-let x = 42                    # inferred as int32 (literal type)
-var y: int64 = 1000           # declared type overrides inference
-z = "hello"                  # inferred as string (text literal)
-w: array<uint8> = [1, 2, 3]   # type from both declaration and values
-
-// Type consistency check:
-let mismatched: int32 = "text"   # ERROR: type incompatibility
+let x = 42            # i64 (integer literal default)
+let y i32 = 1000i32   # explicit annotation + typed suffix
+let pi = 3.14         # f64 (a decimal literal is f64)
+let s = "text"        # string
+let b = true          # bool
+let sum = a + b       # the operand type (both operands must already agree)
 ```
 
-### Literal-Based Inference
-Types inferred from literals when no declaration present:
+A binding whose annotation and initializer disagree is a compile error
+(`L0303`); an empty array or a `void` initializer cannot provide an inferred type.
+There is **no implicit numeric coercion** — mixing widths or int/float in an
+operator is rejected (`L0307`); convert explicitly with `to_<T>`/`to_i64`/`to_f32`/
+`to_f64`.
+
+## Type Safety
+
+- **Nominal typing.** Two structs with identical fields but different names are
+  **not** interchangeable — there is no structural coercion. Assignment and
+  argument passing require matching declared types.
+- **Compile-time checks.** Type mismatches (`L0303`/`L0313`), unknown struct fields,
+  non-exhaustive `match`, and operand-type errors (`L0307`) are caught before
+  execution. Diagnostics carry stable `L####` codes (see
+  [diagnostic_registry.md](diagnostic_registry.md)).
+- **Runtime checks.** Array/list indexing is bounds-checked at runtime; absence and
+  failure are modeled in the type system with `option<T>`/`result<T, E>` and the
+  `?` operator rather than null.
 
 ```lullaby
-auto v1 = 42          # inferred as integer (context determines precision)
-auto v2 = 3.14        # inferred as float64 (decimal point indicates float)
-auto s = "text"       # inferred as string
-auto b = true         # inferred as bool
+fn safe_div n, d i64 -> result<i64, string>
+    if d == 0
+        return err("division by zero")
+    ok(n / d)
 
-// Type coercion (with explicit conversion):
-large_num: int64 = small_val   # automatic promotion
-small_int = large_num          # implicit truncation with warning flag
+let q = safe_div(10, 2)      # result<i64, string>
+match q
+    ok v -> v
+    err message -> -1
 ```
 
-### Expression-Based Inference
-Types inferred from computed values:
+## Generics and Bounds
+
+Generic *functions* declare type parameters in angle brackets after the name and
+use each as an ordinary type; type arguments are inferred at the call site.
+Constraints are trait **bounds** (`<T: Trait>` / `<T: A + B>`), not `where`-style
+value predicates.
 
 ```lullaby
-let result = a + b           # inferred as common supertype of a and b
-sum_val = sum(numbers)       # returns type of elements (or their supertype)
-computed = process(x)        # inferred from function return type annotation
+fn identity<T> x T -> T
+    x
+
+identity(41)        # T = i64
+identity("hi")      # T = string
+
+trait Show
+    fn show self -> string
+
+# Inside a bounded generic, a value of type T may call the bound trait's methods:
+fn describe<T: Show> value T -> string
+    value.show()
 ```
 
-## Type System Features
+A bare `T` value supports only universal operations — binding, passing, returning,
+`==`/`!=` between two same-`T` values, and use as a payload to a built-in generic
+(`some(x)`). Arithmetic and ordering (`+`, `<`, …) on a bare `T` are rejected
+(`L0327`) until a trait provides them; a `<T: Trait>` bound lets the body call that
+trait's methods. Generic *user types* (parameterized `struct`/`enum` you declare),
+trait objects (`dyn`), and associated types are on the roadmap; the built-in
+generics `option`, `result`, `list`, `map`, `array`, `rc`, `ref`, and `ptr` are
+available today.
 
-### 1. Structural Coercion
-Types compatible if they have matching structure, even without identical names:
+## Type Aliases
+
+`alias Name = Type` introduces a synonym with no runtime cost.
 
 ```lullaby
-struct A  x: int32; y: string
-struct B
-    x: int32
-    label: string   # renamed field (still structurally compatible)
-
-// These are compatible for assignment:
-let a: A = create_struct_B()  # coercion applied automatically
+alias Bytes = array<i64>
+let data Bytes = [1, 2, 3]
 ```
 
-### 2. Type Bounds Checking
-Compile-time validation of array and pointer operations:
+## Types for Systems / OS Development
+
+The scalar and struct types map directly onto kernel data structures — fixed-width
+integers for hardware registers and bit fields, `struct` for records laid out in
+memory, and the raw-memory builtins (`alloc`/`load`/`store`, `sizeof`/`alignof`/
+`offsetof`, `unsafe` pointer access) for direct manipulation.
 
 ```lullaby
-safe_access arr[i]    # compile error if i's type doesn't match index range
-bounds_checked(safe_read(arr, i))
+struct Pte
+    address i64        # physical page address
+    permissions u8     # read/write/execute bits
+    present bool
 
-unchecked
-    unsafe_arr[raw_index]  # runtime check disabled (programmer risk)
+struct Inode
+    file_id i32
+    refcount u16
+    data_offset i64
 ```
-
-### 3. Type Aliasing
-Type synonyms without memory overhead:
-
-```lullaby
-type struct pixel r: uint8, g: uint8, b: uint8
-# 'pixel' becomes alias for the full Point RGB structure
-
-
-use_pixel(p)          # treated as use_Point() semantically
-```
-
-### 4. Type Parameters (Generics-Simple)
-Parameterized types with explicit constraints:
-
-```lullaby
-list<T> of [e1, e2] where T is int32 or float64
-map<K,V> of "key": val where K is string, V is number type
-
-// Constrained usage:
-items: list<int32> = create_list(10, 20, 30)
-mixed: list<string> = ["a", "b"]   # ERROR: T must be int32 or float64
-```
-
-## Type Safety Mechanisms
-
-### Compile-Time Checks
-Errors detected before runtime execution:
-
-```lullaby
-// Type mismatch error
-let x: int32 = "text"
-# ERROR: Cannot assign string to integer type
-
-
-// Uninitialized reference error
-var ptr: ptr<int32>*
-use ptr.load()
-# ERROR: ptr not allocated (null pointer)
-
-
-// Struct field access error
-struct Point  x: float64; y: float64
-p.invalid_field = 1.0
-# ERROR: Field 'invalid_field' not in struct 'Point'
-
-
-// Array bounds violation
-arr: array(5)
-unsafe_read(arr, 10)
-# ERROR: Index 10 >= array length 5 (in unchecked mode only)
-
-```
-
-### Runtime Safety
-Checks performed during execution for edge cases:
-
-```lullaby
-// Optional type handling
-var opt_ref = try_alloc()
-if opt_ref.is_valid then
-    process(opt_ref.data)
-else
-    handle_null_pointer()
-end_if
-
-// Result-based error propagation
-fn_divide(a: float64, b: float64) -> result: Option<float64>
-let quot = divide(10.0, 2.0)
-if quot.is_some then
-    use quot.unwrap()
-else
-    handle_error("division by zero")
-end_if
-```
-
-## Type System for OS Development
-
-### Memory Layout Types
-Types optimized for kernel data structures:
-
-```lullaby
-// Process descriptor structure
-struct process
-    pid: int32
-    memory_start: ptr<void>*
-    memory_end: ptr<void>*
-    refcount: uint16  # reference counting for process objects
-    state: enum<process_state>
-
-// Page table entry (kernel virtual memory)
-struct pte
-    address: ptr<void>*
-    permissions: uint8  # read/write/execute bits
-    present: bool
-
-// File system inode
-struct inode
-    file_id: int32
-    refcount: uint16
-    data_offset: int64
-    type_tag: enum<file_type>
-```
-
-### Kernel Type Optimizations
-Special types for performance-critical systems code:
-
-```lullaby
-// Zero-copy buffers (avoid memcpy)
-struct zero_copy_buffer
-    ptr: ptr<void>*
-    length: uint32
-    offset: int64  # memory region within larger buffer
-
-// Ring buffers for inter-process communication
-struct ring_buffer<T>
-    head: uint16, tail: uint16
-    data: array<T, capacity>,
-    read_count: uint16, write_count: uint16
-```
-
-## Type System Comparison to Existing Languages
-
-| Feature | Lullaby | Rust | C++ | Go/Java |
-|---------|-----------|------|-----|---------|
-| **Type declaration** | Explicit `type X = ...` or inferred | Explicit with generics | Templates (compile-time) | Interfaces + explicit |
-| **Struct field access** | Dot notation `.field` | Dot notation `.field` | Dot/bracket syntax | Dot notation .Field |
-| **Array access** | `arr[i]` (with bounds check) | `arr[i]` with checks | `arr[i]` optional checks | `arr[i]` unchecked |
-| **Pointers** | Explicit typed ptr/references | Smart pointers Box/Rc/Arc | Raw ptr*, references & | Pointers only * |
-| **Functions as types** | Yes: `fn<int32> -> int64` | Yes (traits) | Yes with templates | No |
-| **Type inference** | Hybrid (explicit or auto) | Extensive inference | Limited inference | Type inference limited |
 
 ---
 **Document Purpose:** Define the complete type system for Lullaby, covering all type categories, inference rules, safety mechanisms, and OS-specific adaptations. This complements the syntax and memory documentation to provide a comprehensive understanding of how types work in the language.
