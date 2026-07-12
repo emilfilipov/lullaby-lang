@@ -191,5 +191,8 @@ pwsh benchmarks/crosslang/run_benchmark.ps1        # tokens + reassemble
 pwsh benchmarks/crosslang/run_benchmark.ps1 -Perf  # also re-time the workloads
 ```
 
-Then update the standing table above and republish the artifact
-(`benchmarks/crosslang/report.html`).
+Then update the standing table above, republish the artifact
+(`benchmarks/crosslang/report.html`), **and refresh the Benchmarks table in the
+repository [`README.md`](../README.md)** — the README's token totals and native
+performance figures are the project's headline sell and must move with every
+re-benchmark, not drift behind the report.

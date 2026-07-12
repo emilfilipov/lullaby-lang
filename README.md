@@ -19,6 +19,39 @@ freestanding / no-std builds, and inline assembly) — plus a versioned `.lbc`
 bytecode artifact path, an editor language server, a test runner, and a
 self-contained offline documentation bundle.
 
+## Benchmarks
+
+Lullaby is measured against a **417-function cross-language corpus** (the same
+programs written idiomatically in six languages) for token efficiency, plus
+C-referenced workloads for native performance. Full methodology and an
+interactive report live in [`benchmarks/crosslang/`](benchmarks/crosslang/).
+
+**Token efficiency** — Lullaby is the tersest language measured except Python,
+and the tersest *statically-typed* one (o200k_base tokens, definitions only):
+
+| Language    | Tokens | vs Lullaby |
+| ----------- | -----: | ---------: |
+| Python      | 19,120 |      −5.9% |
+| **Lullaby** | **20,321** |      — |
+| JavaScript  | 22,146 |      +9.0% |
+| Rust        | 24,867 |     +22.4% |
+| C           | 26,030 |     +28.1% |
+| C++         | 26,894 |     +32.3% |
+
+That is ~8% terser than JavaScript, ~18% than Rust, ~22% than C, and ~24% than
+C++ — within +6.3% of Python while keeping full static typing.
+
+**Native performance** (x86-64, best-of-N whole-program wall time vs `cl /O2`):
+
+- Prime sieve: **at parity with C** (0.99–1.01×, at/below C++) and **17–27×
+  faster than CPython**.
+- SIMD auto-vectorization of `i64` array reductions and maps (`+`, `-`,
+  `& | ^`): **2.89–3.36× faster** than the scalar loop, bit-for-bit identical.
+- Deep recursion (`fib(35)`): 1.26× C — the one workload still above C.
+
+<sub>Measured on Windows/MSVC; compiled tiers at `-O2`/release, CPython for
+Python. Regenerate with `benchmarks/crosslang/run_benchmark.ps1`.</sub>
+
 ## Language At A Glance
 
 The implemented surface runs identically on the interpreter backends (with the
