@@ -146,10 +146,20 @@ Two levers guessed here earlier were checked against the emitted machine code an
 
 The real remaining levers are:
 
-1. **Recursive-call codegen.** `fib(35)` runs 1.26× C: the residual is per-call
-   overhead (C keeps the argument in a callee-saved register across the two
-   recursive calls and tightens the prologue). Needs self-tail / argument-in-register
-   handling and tighter register allocation for the recursive case.
+1. **Recursive-call codegen.** `fib(35)` runs 1.26× C. Disassembly narrows the
+   residual precisely: the argument is *already* register-promoted to callee-saved
+   `rbx` and survives both recursive calls (the earlier "C keeps the arg in a
+   register, we don't" guess was wrong). What remains is finer — computing an
+   argument emits `mov rax,rbx; sub rax,1; mov rcx,rax` (3 insns) where C emits one
+   `lea rcx,[rbx-1]`, and `fib(n-1)` is spilled across the second call via
+   `push`/`pop` where C uses a second callee-saved register. Both are near-free on
+   an out-of-order core (register-renamed movs, L1-hot stack), and this is a
+   *call-bound* workload, so the benchmark's own lesson (immediate-folds measure as
+   noise on call-bound code) predicts a small payoff. Closing it well needs a real
+   register allocator (a second promoted slot for the intermediate result + `lea`
+   address-arithmetic for arguments) — a substantial change to a stack-machine
+   emitter with no instruction IR, scoped as a deliberate follow-up rather than
+   rushed into the correctness-critical backend.
 2. **Broaden SIMD auto-vectorization.** Three phases are shipped, all emitting an
    SSE2 packed loop (two `i64` lanes per iteration, scalar tail, verified bit-for-bit
    identical to every interpreter): (1) `i64` sum reduction (3.3× the scalar loop),
