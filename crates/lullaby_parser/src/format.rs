@@ -169,7 +169,11 @@ fn render_function(function: &Function) -> String {
     for param in &function.params {
         header.push_str(&format!(" {} {}", param.name, param.ty.name));
     }
-    header.push_str(&format!(" -> {}", function.return_type.name));
+    // An omitted (inferred) return type renders without a `->` clause, so
+    // `fn f x i64` round-trips; an explicit type keeps its `-> T`.
+    if function.return_type.name != crate::INFERRED_RETURN {
+        header.push_str(&format!(" -> {}", function.return_type.name));
+    }
     let mut out = header;
     // An extern declaration is body-less; render only the signature line.
     if !function.is_extern {
@@ -708,6 +712,16 @@ mod tests {
     fn formats_function_with_canonical_spacing() {
         let source = "fn add a i64 b i64 -> i64\n    a + b\n";
         assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn formats_inferred_return_without_arrow() {
+        // A function with no `-> T` clause round-trips without one (the return
+        // type is inferred); an explicit return type keeps its clause.
+        let inferred = "fn add a i64 b i64\n    a + b\n";
+        assert_eq!(fmt(inferred), inferred);
+        let explicit = "fn add a i64 b i64 -> i64\n    a + b\n";
+        assert_eq!(fmt(explicit), explicit);
     }
 
     #[test]

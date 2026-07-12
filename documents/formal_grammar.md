@@ -87,7 +87,7 @@ Only functions are valid top-level declarations in this grammar.
 
 ```ebnf
 function_decl =
-    "fn" IDENT { parameter } "->" type NEWLINE block ;
+    "fn" IDENT { parameter } [ "->" type ] NEWLINE block ;
 
 parameter =
     IDENT type ;
@@ -102,6 +102,8 @@ fn add x i64 y i64 -> i64
 fn main -> i64
     add(40, 2)
 ```
+
+The `-> type` return clause is optional: when it is omitted the return type is inferred from the function body during semantic analysis (a body that produces no value infers `void`). A function whose inferred return type is reached through its own (mutually) recursive call must state the type explicitly (`L0439`).
 
 Executable commands such as `lullaby run`, `lullaby compile`, and `lullaby build` require a zero-argument `main`, but that is a semantic/executable validation rule rather than grammar.
 

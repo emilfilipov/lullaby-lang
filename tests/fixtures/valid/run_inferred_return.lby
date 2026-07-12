@@ -1,0 +1,8 @@
+fn max2 a i64 b i64
+    a if a > b else b
+
+fn add x i64 y i64
+    x + y
+
+fn main
+    max2(add(20, 1), 9)

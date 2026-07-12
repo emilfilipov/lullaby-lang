@@ -368,6 +368,13 @@ impl TypeRef {
 /// single source of truth for function-type text so string-based `TypeRef`
 /// equality holds across the parser, semantics, runtime, and IR. Parameter
 /// types are joined with `", "`.
+/// Sentinel `TypeRef` name for a function whose return type was omitted
+/// (`fn f params` with no `-> T`) and is to be inferred from its body during
+/// semantic analysis. It uses characters no real type name can contain, so it
+/// never collides with a user type; the formatter renders such a function
+/// without a `->` clause, and semantics replaces it with the inferred type.
+pub const INFERRED_RETURN: &str = "<infer>";
+
 pub fn function_type(params: &[TypeRef], return_type: &TypeRef) -> TypeRef {
     let joined = params
         .iter()
@@ -1455,16 +1462,14 @@ impl<'a> Parser<'a> {
             });
         }
 
-        if !self.eat(TokenKindRef::Arrow) {
-            self.error(
-                "L0202",
-                "expected `->` before function return type",
-                self.peek().span,
-            );
-            return None;
-        }
-
-        let return_type = self.expect_type("expected function return type after `->`")?;
+        // The `-> T` return-type clause is optional: when it is omitted the
+        // return type is inferred from the function body during semantic
+        // analysis (recorded here as the `INFERRED_RETURN` sentinel).
+        let return_type = if self.eat(TokenKindRef::Arrow) {
+            self.expect_type("expected function return type after `->`")?
+        } else {
+            TypeRef::new(INFERRED_RETURN)
+        };
         self.expect_newline("expected newline after function signature");
         self.expect(TokenKindRef::Indent, "expected indented function body")?;
         let body = self.parse_block(&[BlockEnd::Dedent]);

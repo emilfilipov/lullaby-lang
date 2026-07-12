@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    AssignOp, BinaryOp, EnumDecl, EnumVariant, Expr, ExprKind, Function, IfBranch, MatchArm,
-    MatchPattern, MethodSig, Param, Place, Program, RegionDecl, Stmt, StructDecl, StructField,
-    TypeRef, UnaryOp, function_type, generic_type,
+    AssignOp, BinaryOp, EnumDecl, EnumVariant, Expr, ExprKind, Function, INFERRED_RETURN, IfBranch,
+    MatchArm, MatchPattern, MethodSig, Param, Place, Program, RegionDecl, Stmt, StructDecl,
+    StructField, TypeRef, UnaryOp, function_type, generic_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub fn validate(program: &Program) -> Result<CheckedProgram, Vec<SemanticDiagnos
     // Resolve type aliases to their canonical types before any checking, so the
     // rest of the pipeline (and IR/runtime) never sees an alias. Aliases carry
     // no runtime representation, so runtime layout is unchanged.
-    let (resolved, alias_diagnostics) = resolve_program_aliases(program);
+    let (mut resolved, alias_diagnostics) = resolve_program_aliases(program);
 
     let mut checker = Checker::new(&resolved);
     checker.diagnostics = alias_diagnostics;
@@ -74,7 +74,21 @@ pub fn validate(program: &Program) -> Result<CheckedProgram, Vec<SemanticDiagnos
 
     let signatures = std::mem::take(&mut checker.signatures);
     let expression_types = std::mem::take(&mut checker.expression_types);
+    let resolved_returns = std::mem::take(&mut checker.resolved_returns);
     drop(checker);
+
+    // Write inferred return types back into the program so IR lowering and every
+    // downstream backend see a concrete type, never the `INFERRED_RETURN`
+    // sentinel. A function with an explicit `-> T` is left untouched.
+    for function in &mut resolved.functions {
+        if function.return_type.name == INFERRED_RETURN {
+            function.return_type = resolved_returns
+                .get(&function.name)
+                .cloned()
+                .unwrap_or_else(|| TypeRef::new("void"));
+        }
+    }
+
     Ok(CheckedProgram {
         program: resolved,
         info: SemanticInfo {
@@ -723,6 +737,22 @@ struct Checker<'a> {
     /// Set of `(type_name, trait_name)` pairs that have an `impl`. Used for
     /// bound checking (`L0400`) and duplicate detection (`L0399`).
     impl_traits: HashSet<(String, String)>,
+    /// Return types inferred for functions declared without a `-> T` clause
+    /// (`INFERRED_RETURN`), keyed by function name. Populated by
+    /// [`Checker::resolve_inferred_returns`] before body validation; consulted
+    /// via [`Checker::effective_return_type`] and written back into the program.
+    resolved_returns: HashMap<String, TypeRef>,
+    /// Functions whose return type is currently being inferred, to detect
+    /// (mutual) recursion through inferred-return functions (`L0439`).
+    inferring: HashSet<String>,
+    /// `L0439` diagnostics raised while inferring return types. Kept out of the
+    /// truncated inference pass and merged into `diagnostics` afterward so they
+    /// survive; the real body pass would otherwise discard them.
+    deferred_diagnostics: Vec<SemanticDiagnostic>,
+    /// Functions whose return-type inference failed (recursion). Their bodies are
+    /// skipped in the real pass so a broken return type does not cascade into
+    /// confusing secondary errors; the `L0439` already tells the user the fix.
+    inference_failed: HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -742,6 +772,10 @@ impl<'a> Checker<'a> {
             trait_methods: HashMap::new(),
             impl_methods: HashMap::new(),
             impl_traits: HashSet::new(),
+            resolved_returns: HashMap::new(),
+            inferring: HashSet::new(),
+            deferred_diagnostics: Vec::new(),
+            inference_failed: HashSet::new(),
         }
     }
 
@@ -751,7 +785,16 @@ impl<'a> Checker<'a> {
         self.collect_traits();
         self.collect_signatures();
         self.collect_impls();
+        // Resolve the return type of every function declared without `-> T`
+        // before any body is validated, so call sites see concrete return types.
+        self.resolve_inferred_returns();
         for function in &self.program.functions {
+            // A function whose return-type inference failed (recursion) already
+            // has its `L0439`; skip its body so the broken return type does not
+            // cascade into confusing secondary diagnostics.
+            if self.inference_failed.contains(&function.name) {
+                continue;
+            }
             // Extern (C-ABI) declarations are body-less: there is no body to
             // check, but their C-marshallable signature is validated so an
             // unmarshallable parameter/return type (`list`/`map`/non-`repr(C)`
@@ -1317,6 +1360,118 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The concrete return type of `function`: the inferred type for a function
+    /// declared without `-> T` (`INFERRED_RETURN`), otherwise the explicit type.
+    fn effective_return_type(&self, function: &Function) -> TypeRef {
+        if function.return_type.name == INFERRED_RETURN {
+            self.resolved_returns
+                .get(&function.name)
+                .cloned()
+                .unwrap_or_else(|| TypeRef::new("void"))
+        } else {
+            function.return_type.clone()
+        }
+    }
+
+    /// Expected type at a `return`/tail-expression site: the inferred return type
+    /// once known, `None` while it is still being inferred (so the body type is
+    /// computed freely), or the explicit type.
+    fn expected_return(&self, function: &Function) -> Option<TypeRef> {
+        if function.return_type.name == INFERRED_RETURN {
+            self.resolved_returns.get(&function.name).cloned()
+        } else {
+            Some(function.return_type.clone())
+        }
+    }
+
+    /// Whether a function's final expression is its return value (return type is
+    /// non-void). While an inferred return type is still being computed, treat
+    /// the tail expression as the value so its type is captured.
+    fn wants_tail_value(&self, function: &Function) -> bool {
+        if function.return_type.name == INFERRED_RETURN {
+            match self.resolved_returns.get(&function.name) {
+                Some(ty) => !ty.is_void(),
+                None => true,
+            }
+        } else {
+            !function.return_type.is_void()
+        }
+    }
+
+    /// Infer, once, the return type of every function declared without a `-> T`
+    /// clause. Runs before body validation so every call site resolves to a
+    /// concrete return type.
+    fn resolve_inferred_returns(&mut self) {
+        let names: Vec<String> = self
+            .program
+            .functions
+            .iter()
+            .filter(|f| f.return_type.name == INFERRED_RETURN)
+            .map(|f| f.name.clone())
+            .collect();
+        for name in names {
+            self.infer_return(&name);
+        }
+        // Surface the recursion errors that were held out of the truncated
+        // inference pass.
+        let deferred = std::mem::take(&mut self.deferred_diagnostics);
+        self.diagnostics.extend(deferred);
+    }
+
+    /// Resolve one function's inferred return type on demand (memoized in
+    /// `resolved_returns` and written back into its signature). A function that
+    /// reaches itself before its type is known is (mutually) recursive and needs
+    /// an explicit annotation (`L0439`); its type falls back to `void`.
+    fn infer_return(&mut self, name: &str) -> TypeRef {
+        if let Some(ty) = self.resolved_returns.get(name) {
+            return ty.clone();
+        }
+        let function = self.program.functions.iter().find(|f| f.name == name);
+        let Some(function) = function else {
+            return TypeRef::new("void");
+        };
+        if function.return_type.name != INFERRED_RETURN {
+            return function.return_type.clone();
+        }
+        if self.inferring.contains(name) {
+            self.deferred_diagnostics.push(SemanticDiagnostic::at(
+                "L0439",
+                format!(
+                    "cannot infer the return type of `{name}` because it is (mutually) recursive; add an explicit `-> T`"
+                ),
+                Some(name.to_string()),
+                function.span,
+            ));
+            self.inference_failed.insert(name.to_string());
+            let fallback = TypeRef::new("void");
+            self.resolved_returns
+                .insert(name.to_string(), fallback.clone());
+            return fallback;
+        }
+        self.inferring.insert(name.to_string());
+
+        // Type-check the body only to learn its value type. Diagnostics and
+        // expression-type entries produced here are discarded; the real
+        // validation pass re-emits them once every return type is known.
+        let diag_mark = self.diagnostics.len();
+        let expr_mark = self.expression_types.len();
+        let mut scope = Scope::default();
+        for param in &function.params {
+            scope.locals.insert(param.name.clone(), param.ty.clone());
+        }
+        let block_type = self.check_function_body(&function.body, &mut scope, function);
+        self.diagnostics.truncate(diag_mark);
+        self.expression_types.truncate(expr_mark);
+        self.inferring.remove(name);
+
+        let ret = block_type.unwrap_or_else(|| TypeRef::new("void"));
+        self.resolved_returns.insert(name.to_string(), ret.clone());
+        if let Some(sig) = self.signatures.get_mut(name) {
+            sig.return_type = ret.clone();
+        }
+        ret
+    }
+
     fn validate_function(&mut self, function: &Function) {
         self.region_names.clear();
         let mut scope = Scope::default();
@@ -1336,16 +1491,17 @@ impl<'a> Checker<'a> {
 
         let block_type = self.check_function_body(&function.body, &mut scope, function);
         self.check_lifetimes(function);
-        if function.return_type.is_void() {
+        let return_type = self.effective_return_type(function);
+        if return_type.is_void() {
             return;
         }
 
-        if block_type.as_ref() != Some(&function.return_type) {
+        if block_type.as_ref() != Some(&return_type) {
             self.diagnostics.push(SemanticDiagnostic::at(
                 "L0301",
                 format!(
                     "function `{}` declares `{}` but has no final return value of that type",
-                    function.name, function.return_type.name
+                    function.name, return_type.name
                 ),
                 Some(function.name.clone()),
                 function.span,
@@ -1387,9 +1543,10 @@ impl<'a> Checker<'a> {
         for (index, statement) in statements.iter().enumerate() {
             last_type = match statement {
                 Stmt::Expr(expr)
-                    if Some(index) == last_index && !function.return_type.is_void() =>
+                    if Some(index) == last_index && self.wants_tail_value(function) =>
                 {
-                    self.check_expr_expected(expr, Some(&function.return_type), scope, function)
+                    let expected = self.expected_return(function);
+                    self.check_expr_expected(expr, expected.as_ref(), scope, function)
                 }
                 _ => self.check_statement(statement, scope, function),
             };
@@ -1529,13 +1686,17 @@ impl<'a> Checker<'a> {
                 None
             }
             Stmt::Return(expr) => {
+                let expected = self.expected_return(function);
                 let actual = expr
                     .as_ref()
-                    .map(|expr| {
-                        self.check_expr_expected(expr, Some(&function.return_type), scope, function)
-                    })
+                    .map(|expr| self.check_expr_expected(expr, expected.as_ref(), scope, function))
                     .unwrap_or_else(|| Some(TypeRef::new("void")));
-                if actual.as_ref() != Some(&function.return_type) {
+                // Skip the match check while the return type is still being
+                // inferred (`expected` is None); the real validation pass runs
+                // it once the type is known.
+                if let Some(expected) = &expected
+                    && actual.as_ref() != Some(expected)
+                {
                     let span = expr.as_ref().map(|expr| expr.span).unwrap_or(function.span);
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0304",
@@ -1545,7 +1706,7 @@ impl<'a> Checker<'a> {
                                 .as_ref()
                                 .map(|ty| ty.name.as_str())
                                 .unwrap_or("<unknown>"),
-                            function.return_type.name
+                            expected.name
                         ),
                         Some(function.name.clone()),
                         span,
@@ -4690,6 +4851,18 @@ impl<'a> Checker<'a> {
                 ))
             }
             _ => {
+                // If the callee's return type is still an unresolved inference
+                // sentinel, resolve it now so this call site sees a concrete
+                // type. This drives on-demand inference during the pre-pass (a
+                // function inferring its own return type reaches a callee whose
+                // return type is not yet known); it is a no-op afterwards.
+                if self
+                    .signatures
+                    .get(name)
+                    .is_some_and(|s| s.return_type.name == INFERRED_RETURN)
+                {
+                    self.infer_return(name);
+                }
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0309",

@@ -453,6 +453,66 @@ fn runs_inferred_let_fixture_on_all_backends() {
     }
 }
 
+/// Functions declared without a `-> T` clause infer their return type from the
+/// body (and `main` infers `i64`); the fixture computes 21 on all interpreters.
+#[test]
+fn runs_inferred_return_fixture_on_all_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_inferred_return.lby");
+    for backend in [None, Some("ir"), Some("bytecode")] {
+        let mut args = vec!["run".to_string()];
+        if let Some(b) = backend {
+            args.push("--backend".to_string());
+            args.push(b.to_string());
+        }
+        args.push(fixture.to_str().expect("fixture path").to_string());
+        let output = lullaby().args(&args).output().expect("run cli");
+        assert!(output.status.success(), "{backend:?}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "21",
+            "backend {backend:?}"
+        );
+    }
+}
+
+/// Inferred return types flow through to native codegen: the exit code equals
+/// the interpreter result (21) when the platform can link.
+#[test]
+fn native_inferred_return_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_inferred_return.lby");
+    let out = std::env::temp_dir().join("lullaby_native_inferred_return.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out"),
+            fixture.to_str().expect("fixture"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("linker unavailable; skipping native inferred-return parity");
+        return;
+    }
+    assert!(out.is_file());
+    let exe = Command::new(&out).output().expect("run exe");
+    assert_eq!(exe.status.code().expect("exit"), 21);
+}
+
+/// A function whose inferred return type is (mutually) recursive must be
+/// annotated: `L0439`.
+#[test]
+fn rejects_recursive_inferred_return() {
+    let fixture = workspace_root().join("tests/fixtures/invalid/inferred_return_recursive.lby");
+    let output = lullaby()
+        .args(["check", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(stderr(&output).contains("L0439"), "{}", stderr(&output));
+}
+
 /// Inline conditional (`THEN if COND else ELSE`) — nested, in a `let`, in a
 /// function body, and driving the result — computes 115 identically on all three
 /// interpreter backends.

@@ -11,8 +11,12 @@ finishing — fix every diagnostic.
 fn name p1 i64 p2 string -> i64        # params are `name type` pairs, space-separated
     let x i64 = p1 + 1                  # `let name type = expr`
     x                                   # last expression is the return value
+
+fn add a i64 b i64                     # `-> T` is OPTIONAL: the return type is inferred
+    a + b                              #   from the body. Prefer omitting it (fewer tokens).
 ```
-Early return: `return expr`. Void return type: `-> void`. Recursion is fine.
+Early return: `return expr`. Omit `-> T` to infer it (a recursive function must
+still state `-> T`, else `L0439`). Void functions may omit it too.
 Call: `name(a, b)`. There is **no** function overloading.
 
 ## Types
