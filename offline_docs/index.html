@@ -1086,6 +1086,8 @@ fn main -> i64
             <tr><td><code>find(s, needle)</code></td><td>Returns the first character index of <code>needle</code> as an <code>i64</code>, or <code>-1</code> when absent.</td></tr>
             <tr><td><code>contains(s, needle)</code></td><td>Returns a <code>bool</code> for whether <code>needle</code> occurs in <code>s</code>.</td></tr>
             <tr><td><code>split(s, sep)</code></td><td>Splits on a non-empty separator into <code>array&lt;string&gt;</code>; an empty separator is a runtime error.</td></tr>
+            <tr><td><code>words(s)</code></td><td>Splits on runs of whitespace into <code>array&lt;string&gt;</code>, dropping empty fields (like a zero-argument split).</td></tr>
+            <tr><td><code>count(s, sub)</code></td><td>Counts non-overlapping occurrences of <code>sub</code> in <code>s</code> (an empty <code>sub</code> yields <code>0</code>).</td></tr>
             <tr><td><code>join(parts, sep)</code></td><td>Joins an <code>array&lt;string&gt;</code> with <code>sep</code> into a <code>string</code>.</td></tr>
             <tr><td><code>trim(s)</code></td><td>Removes leading and trailing ASCII whitespace.</td></tr>
             <tr><td><code>replace(s, from, to)</code></td><td>Replaces every occurrence of <code>from</code>; an empty <code>from</code> is a runtime error.</td></tr>

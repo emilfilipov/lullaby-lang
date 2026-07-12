@@ -3811,6 +3811,24 @@ impl<'a> Checker<'a> {
                 self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
                 Some(TypeRef::new("array<string>"))
             }
+            // `words`/`count` are common identifiers, so a user-defined function of
+            // that name shadows the builtin (the guard yields to the `_ =>` user-call
+            // path). Adding these stdlib names must never break existing user code.
+            "words" if !self.signatures.contains_key("words") => {
+                // `words(s string) -> array<string>`: split on runs of whitespace,
+                // dropping empty fields (like Python's zero-argument `str.split()`).
+                self.expect_arg_count(name, args, 1, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                Some(TypeRef::new("array<string>"))
+            }
+            "count" if !self.signatures.contains_key("count") => {
+                // `count(s string, sub string) -> i64`: non-overlapping occurrences
+                // of `sub` in `s` (an empty `sub` yields `0`).
+                self.expect_arg_count(name, args, 2, function)?;
+                self.expect_string_builtin_arg(name, 1, &args[0], "string", scope, function)?;
+                self.expect_string_builtin_arg(name, 2, &args[1], "string", scope, function)?;
+                Some(TypeRef::new("i64"))
+            }
             "join" => {
                 self.expect_arg_count(name, args, 2, function)?;
                 self.expect_string_builtin_arg(

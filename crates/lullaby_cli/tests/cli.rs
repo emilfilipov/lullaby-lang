@@ -245,6 +245,27 @@ fn runs_for_in_across_backends() {
 }
 
 #[test]
+fn runs_words_count_across_backends() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_words_count.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(output.status.success(), "{backend}: {output:?}");
+        // words -> 4; count(banana,a)=3; count(a.b.c.d,.)=3; empty needle=0;
+        // count(aaaa,aa)=2 non-overlapping; all-whitespace words=0.
+        // 4*100 + 3*10 + 3 + 0 + 2 + 0 = 435.
+        assert_eq!(stdout(&output).trim(), "435", "{backend} stdout mismatch");
+    }
+}
+
+#[test]
 fn runs_sum_reduction_across_backends() {
     let fixture = workspace_root().join("tests/fixtures/valid/run_sum_reduction.lby");
     for backend in ["ast", "ir", "bytecode"] {

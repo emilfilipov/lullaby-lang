@@ -1,35 +1,20 @@
-# Cross-language text-processing suite (Lullaby). Real-world string utilities.
-# Strings are walked directly with `for c in s` / `s[i]` and built up with `+=`
-# (a `char` appends to a string directly). Boolean 1/0 results use the inline
-# conditional `A if C else B`; membership uses `c in "..."`; substrings use the
-# slice `s[i:j]`. ASCII case folding keeps explicit code ranges. See ../SPEC.md.
+# Cross-language text-processing suite (Lullaby). Real-world string utilities
+# using the string prelude idiomatically: `words(s)` (whitespace tokens),
+# `count(s, sub)` (occurrences), `trim`, slices `s[i:j]`, and `+=` char append.
+# Boolean 1/0 results use the inline conditional `A if C else B`; membership uses
+# `c in "..."`. ASCII case folding keeps explicit code ranges. See ../SPEC.md.
 
 fn word_count s string
-    let count = 0
-    let in_word = 0
-    for c in s
-        if is_whitespace(c)
-            in_word = 0
-        elif in_word == 0
-            count += 1
-            in_word = 1
-    count
+    len(words(s))
 
 fn char_count s string
     len(s)
 
 fn count_char s string c string
-    let target = c[0]
-    let count = 0
-    for ch in s
-        count += 1 if ch == target else 0
-    count
+    count(s, c)
 
 fn is_blank s string
-    for c in s
-        if not is_whitespace(c)
-            return 0
-    1
+    1 if trim(s) == "" else 0
 
 fn starts_with_prefix s string p string
     1 if starts_with(s, p) else 0
@@ -80,14 +65,9 @@ fn count_vowels s string
 
 fn initials name string
     let out string = ""
-    let in_word = 0
-    for c in name
-        if is_whitespace(c)
-            in_word = 0
-        elif in_word == 0
-            in_word = 1
-            let code = char_code(c)
-            out += char_from(code - 32) if code >= 97 and code <= 122 else c
+    for w in words(name)
+        let code = char_code(w[0])
+        out += char_from(code - 32) if code >= 97 and code <= 122 else w[0]
     out
 
 fn main

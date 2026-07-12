@@ -49,12 +49,7 @@ fn is_valid_int s string
     1
 
 fn count_fields s string sep string
-    let target = sep[0]
-    let count = 1
-    for c in s
-        if c == target
-            count += 1
-    count
+    count(s, sep) + 1
 
 fn nth_field_len s string sep string nth i64
     let target = sep[0]
@@ -74,14 +69,7 @@ fn nth_field_len s string sep string nth i64
     result
 
 fn count_lines s string
-    if len(s) == 0
-        return 0
-    let nl = char_from(10)
-    let count = 1
-    for c in s
-        if c == nl
-            count += 1
-    count
+    0 if len(s) == 0 else count(s, "\n") + 1
 
 fn strip_leading_zeros_len s string
     let n = len(s)
@@ -127,15 +115,7 @@ fn count_digits_in s string
     count
 
 fn count_words s string
-    let count = 0
-    let in_word = 0
-    for c in s
-        if is_whitespace(c)
-            in_word = 0
-        elif in_word == 0
-            in_word = 1
-            count += 1
-    count
+    len(words(s))
 
 fn hex_to_int s string
     if len(s) == 0

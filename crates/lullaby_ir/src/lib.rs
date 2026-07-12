@@ -4542,6 +4542,10 @@ impl<'a> IrRuntime<'a> {
             "ends_with" => Self::builtin_ends_with(args),
             "repeat" => Self::builtin_repeat(args),
             "split" => Self::builtin_split(args),
+            // `words`/`count` yield to a user-defined function of the same name, so
+            // adding these common stdlib names never breaks existing user code.
+            "words" if !self.functions.contains_key("words") => Self::builtin_words(args),
+            "count" if !self.functions.contains_key("count") => Self::builtin_count(args),
             "join" => Self::builtin_join(args),
             "trim" => Self::builtin_trim(args),
             "replace" => Self::builtin_replace(args),
@@ -7399,6 +7403,33 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::Array(parts))
     }
 
+    fn builtin_words(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("words", 1, args.len()))?;
+        let text = expect_string("words", text)?;
+        let parts = text
+            .split_whitespace()
+            .map(|part| Value::String(part.to_string()))
+            .collect();
+        Ok(Value::Array(parts))
+    }
+
+    fn builtin_count(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [text, sub]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("count", 2, args.len()))?;
+        let text = expect_string("count", text)?;
+        let sub = expect_string("count", sub)?;
+        // An empty needle has no well-defined non-overlapping count; define it as 0.
+        let n = if sub.is_empty() {
+            0
+        } else {
+            text.matches(sub.as_str()).count() as i64
+        };
+        Ok(Value::I64(n))
+    }
+
     fn builtin_join(args: Vec<Value>) -> Result<Value, RuntimeError> {
         let [parts, sep]: [Value; 2] = args
             .try_into()
@@ -9940,9 +9971,9 @@ impl<'a> Lowerer<'a> {
             "file_exists" | "is_file" | "is_dir" | "contains" | "starts_with" | "ends_with"
             | "map_has" | "is_digit" | "is_alpha" | "is_alnum" | "is_whitespace" | "is_upper"
             | "is_lower" | "list_contains" => TypeRef::new("bool"),
-            "sys_status" | "file_size" | "len" | "find" | "map_len" | "char_code" | "byte_val"
-            | "byte_len" | "mono_now" | "wall_now" | "list_index_of" | "to_i64" | "sign"
-            | "gcd" => TypeRef::new("i64"),
+            "sys_status" | "file_size" | "len" | "find" | "count" | "map_len" | "char_code"
+            | "byte_val" | "byte_len" | "mono_now" | "wall_now" | "list_index_of" | "to_i64"
+            | "sign" | "gcd" => TypeRef::new("i64"),
             "to_i8" => TypeRef::new("i8"),
             "to_u8" => TypeRef::new("u8"),
             "to_i16" => TypeRef::new("i16"),
@@ -10067,7 +10098,7 @@ impl<'a> Lowerer<'a> {
                 };
                 generic_type("list", std::slice::from_ref(&element))
             }
-            "split" => TypeRef::new("array<string>"),
+            "split" | "words" => TypeRef::new("array<string>"),
             "chars" => generic_type("list", std::slice::from_ref(&TypeRef::new("char"))),
             "string_from_chars" => TypeRef::new("string"),
             // `env(name)` yields `option<string>`; `args()` yields `list<string>`.

@@ -1,0 +1,11 @@
+# The `words(s)` (whitespace tokenizer) and `count(s, sub)` (occurrence count)
+# string builtins, identical across every backend.
+
+fn main -> i64
+    let a i64 = len(words("  the quick  brown   fox "))   # 4 tokens
+    let b i64 = count("banana", "a")                       # 3
+    let c i64 = count("a.b.c.d", ".")                      # 3
+    let d i64 = count("hello", "")                         # 0 (empty needle)
+    let e i64 = count("aaaa", "aa")                        # 2 (non-overlapping)
+    let f i64 = len(words("     "))                        # 0 (all whitespace)
+    a * 100 + b * 10 + c + d + e + f

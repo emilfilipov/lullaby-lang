@@ -7578,8 +7578,8 @@
    "category": "parsing",
    "langs": {
     "Lullaby": {
-     "tokens": 43,
-     "source": "fn count_fields s string sep string\n    let target = sep[0]\n    let count = 1\n    for c in s\n        if c == target\n            count += 1\n    count"
+     "tokens": 17,
+     "source": "fn count_fields s string sep string\n    count(s, sep) + 1"
     },
     "C": {
      "tokens": 60,
@@ -7609,8 +7609,8 @@
    "category": "parsing",
    "langs": {
     "Lullaby": {
-     "tokens": 56,
-     "source": "fn count_lines s string\n    if len(s) == 0\n        return 0\n    let nl = char_from(10)\n    let count = 1\n    for c in s\n        if c == nl\n            count += 1\n    count"
+     "tokens": 26,
+     "source": "fn count_lines s string\n    0 if len(s) == 0 else count(s, \"\\n\") + 1"
     },
     "C": {
      "tokens": 71,
@@ -7640,8 +7640,8 @@
    "category": "parsing",
    "langs": {
     "Lullaby": {
-     "tokens": 64,
-     "source": "fn count_words s string\n    let count = 0\n    let in_word = 0\n    for c in s\n        if is_whitespace(c)\n            in_word = 0\n        elif in_word == 0\n            in_word = 1\n            count += 1\n    count"
+     "tokens": 11,
+     "source": "fn count_words s string\n    len(words(s))"
     },
     "C": {
      "tokens": 99,
@@ -8508,8 +8508,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 32,
-     "source": "fn cache_ttl_valid now i64 created i64 ttl i64\n    if now - created < ttl\n        return 1\n    return 0"
+     "tokens": 27,
+     "source": "fn cache_ttl_valid now i64 created i64 ttl i64\n    1 if now - created < ttl else 0"
     },
     "C": {
      "tokens": 40,
@@ -8539,8 +8539,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 78,
-     "source": "fn content_type_class ext_code i64\n    if ext_code == 0\n        return 0\n    if ext_code == 1\n        return 1\n    if ext_code == 2\n        return 2\n    if ext_code == 3\n        return 2\n    if ext_code == 4\n        return 2\n    return 3"
+     "tokens": 45,
+     "source": "fn content_type_class ext_code i64\n    0 if ext_code == 0 else 1 if ext_code == 1 else 2 if ext_code >= 2 and ext_code <= 4 else 3"
     },
     "C": {
      "tokens": 84,
@@ -8570,8 +8570,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 37,
-     "source": "fn http_status_class code i64\n    let cls = code / 100\n    if cls >= 2 and cls <= 5\n        return cls\n    return 0"
+     "tokens": 32,
+     "source": "fn http_status_class code i64\n    let cls = code / 100\n    cls if cls >= 2 and cls <= 5 else 0"
     },
     "C": {
      "tokens": 43,
@@ -8601,8 +8601,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 29,
-     "source": "fn jitter_backoff attempt i64 base i64 seed i64\n    return retry_backoff_ms(attempt, base) + seed % base"
+     "tokens": 28,
+     "source": "fn jitter_backoff attempt i64 base i64 seed i64\n    retry_backoff_ms(attempt, base) + seed % base"
     },
     "C": {
      "tokens": 39,
@@ -8632,8 +8632,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 23,
-     "source": "fn lru_new_position hits i64\n    return min2(hits + 1, 1024)"
+     "tokens": 21,
+     "source": "fn lru_new_position hits i64\n    min(hits + 1, 1024)"
     },
     "C": {
      "tokens": 28,
@@ -8663,8 +8663,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 30,
-     "source": "fn method_is_safe_code m i64\n    if m == 0 or m == 1\n        return 1\n    return 0"
+     "tokens": 25,
+     "source": "fn method_is_safe_code m i64\n    1 if m == 0 or m == 1 else 0"
     },
     "C": {
      "tokens": 34,
@@ -8693,24 +8693,20 @@
    "name": "min2",
    "category": "services",
    "langs": {
-    "Lullaby": {
-     "tokens": 23,
-     "source": "fn min2 a i64 b i64\n    if a < b\n        return a\n    return b"
-    },
     "C": {
      "tokens": 28,
      "source": "static int64_t min2(int64_t a, int64_t b) {\n    return a < b ? a : b;\n}"
     }
    },
-   "present": 2
+   "present": 1
   },
   {
    "name": "pagination_has_next",
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 31,
-     "source": "fn pagination_has_next page i64 per i64 total i64\n    if page * per < total\n        return 1\n    return 0"
+     "tokens": 26,
+     "source": "fn pagination_has_next page i64 per i64 total i64\n    1 if page * per < total else 0"
     },
     "C": {
      "tokens": 39,
@@ -8740,8 +8736,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 20,
-     "source": "fn pagination_offset page i64 per i64\n    return (page - 1) * per"
+     "tokens": 19,
+     "source": "fn pagination_offset page i64 per i64\n    (page - 1) * per"
     },
     "C": {
      "tokens": 28,
@@ -8771,8 +8767,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 35,
-     "source": "fn pagination_total_pages total i64 per i64\n    if per <= 0\n        return 0\n    return (total + per - 1) / per"
+     "tokens": 30,
+     "source": "fn pagination_total_pages total i64 per i64\n    0 if per <= 0 else (total + per - 1) / per"
     },
     "C": {
      "tokens": 43,
@@ -8802,8 +8798,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 57,
-     "source": "fn priority_from_code code i64\n    let cls = http_status_class(code)\n    if cls == 5\n        return 0\n    if cls == 4\n        return 1\n    if cls == 3\n        return 2\n    return 3"
+     "tokens": 44,
+     "source": "fn priority_from_code code i64\n    let cls = http_status_class(code)\n    0 if cls == 5 else 1 if cls == 4 else 2 if cls == 3 else 3"
     },
     "C": {
      "tokens": 65,
@@ -8833,8 +8829,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 21,
-     "source": "fn queue_next_index head i64 cap i64\n    return (head + 1) % cap"
+     "tokens": 20,
+     "source": "fn queue_next_index head i64 cap i64\n    (head + 1) % cap"
     },
     "C": {
      "tokens": 29,
@@ -8864,8 +8860,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 26,
-     "source": "fn rate_limit_allow tokens i64 cost i64\n    if tokens >= cost\n        return 1\n    return 0"
+     "tokens": 21,
+     "source": "fn rate_limit_allow tokens i64 cost i64\n    1 if tokens >= cost else 0"
     },
     "C": {
      "tokens": 30,
@@ -8895,8 +8891,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 78,
-     "source": "fn retry_backoff_ms attempt i64 base i64\n    let d = base\n    let i = 0\n    while i < attempt\n        d = d * 2\n        if d >= 60000\n            return 60000\n        i = i + 1\n    if d > 60000\n        return 60000\n    return d"
+     "tokens": 73,
+     "source": "fn retry_backoff_ms attempt i64 base i64\n    let d = base\n    let i = 0\n    while i < attempt\n        d = d * 2\n        if d >= 60000\n            return 60000\n        i = i + 1\n    60000 if d > 60000 else d"
     },
     "C": {
      "tokens": 81,
@@ -8926,8 +8922,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 28,
-     "source": "fn retry_should_give_up attempt i64 max i64\n    if attempt >= max\n        return 1\n    return 0"
+     "tokens": 23,
+     "source": "fn retry_should_give_up attempt i64 max i64\n    1 if attempt >= max else 0"
     },
     "C": {
      "tokens": 32,
@@ -8957,8 +8953,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 30,
-     "source": "fn session_valid now i64 last i64 timeout i64\n    if now - last < timeout\n        return 1\n    return 0"
+     "tokens": 25,
+     "source": "fn session_valid now i64 last i64 timeout i64\n    1 if now - last < timeout else 0"
     },
     "C": {
      "tokens": 38,
@@ -8988,8 +8984,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 24,
-     "source": "fn status_is_error code i64\n    if code >= 400\n        return 1\n    return 0"
+     "tokens": 19,
+     "source": "fn status_is_error code i64\n    1 if code >= 400 else 0"
     },
     "C": {
      "tokens": 26,
@@ -9019,8 +9015,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 21,
-     "source": "fn throttle_delay_ms requests i64 window_ms i64\n    return requests * window_ms / 100"
+     "tokens": 20,
+     "source": "fn throttle_delay_ms requests i64 window_ms i64\n    requests * window_ms / 100"
     },
     "C": {
      "tokens": 29,
@@ -9050,8 +9046,8 @@
    "category": "services",
    "langs": {
     "Lullaby": {
-     "tokens": 28,
-     "source": "fn tokens_after tokens i64 cost i64 refill i64 cap i64\n    return min2(cap, tokens - cost + refill)"
+     "tokens": 26,
+     "source": "fn tokens_after tokens i64 cost i64 refill i64 cap i64\n    min(cap, tokens - cost + refill)"
     },
     "C": {
      "tokens": 39,
@@ -11306,8 +11302,8 @@
    "category": "text_processing",
    "langs": {
     "Lullaby": {
-     "tokens": 44,
-     "source": "fn count_char s string c string\n    let target = c[0]\n    let count = 0\n    for ch in s\n        count += 1 if ch == target else 0\n    count"
+     "tokens": 14,
+     "source": "fn count_char s string c string\n    count(s, c)"
     },
     "C": {
      "tokens": 54,
@@ -11399,8 +11395,8 @@
    "category": "text_processing",
    "langs": {
     "Lullaby": {
-     "tokens": 87,
-     "source": "fn initials name string\n    let out string = \"\"\n    let in_word = 0\n    for c in name\n        if is_whitespace(c)\n            in_word = 0\n        elif in_word == 0\n            in_word = 1\n            let code = char_code(c)\n            out += char_from(code - 32) if code >= 97 and code <= 122 else c\n    out"
+     "tokens": 55,
+     "source": "fn initials name string\n    let out string = \"\"\n    for w in words(name)\n        let code = char_code(w[0])\n        out += char_from(code - 32) if code >= 97 and code <= 122 else w[0]\n    out"
     },
     "C": {
      "tokens": 138,
@@ -11430,8 +11426,8 @@
    "category": "text_processing",
    "langs": {
     "Lullaby": {
-     "tokens": 28,
-     "source": "fn is_blank s string\n    for c in s\n        if not is_whitespace(c)\n            return 0\n    1"
+     "tokens": 18,
+     "source": "fn is_blank s string\n    1 if trim(s) == \"\" else 0"
     },
     "C": {
      "tokens": 56,
@@ -11689,8 +11685,8 @@
    "category": "text_processing",
    "langs": {
     "Lullaby": {
-     "tokens": 64,
-     "source": "fn word_count s string\n    let count = 0\n    let in_word = 0\n    for c in s\n        if is_whitespace(c)\n            in_word = 0\n        elif in_word == 0\n            count += 1\n            in_word = 1\n    count"
+     "tokens": 11,
+     "source": "fn word_count s string\n    len(words(s))"
     },
     "C": {
      "tokens": 105,
@@ -13281,8 +13277,8 @@
   }
  ],
  "totals": {
-  "Lullaby": 20321,
-  "C": 26030,
+  "Lullaby": 19960,
+  "C": 26002,
   "C++": 26894,
   "Rust": 24867,
   "Python": 19120,
@@ -13410,7 +13406,7 @@
    "JavaScript": 1027
   },
   "parsing": {
-   "Lullaby": 1221,
+   "Lullaby": 1112,
    "C": 1553,
    "C++": 1424,
    "Rust": 1439,
@@ -13426,8 +13422,8 @@
    "JavaScript": 383
   },
   "services": {
-   "Lullaby": 651,
-   "C": 775,
+   "Lullaby": 524,
+   "C": 747,
    "C++": 870,
    "Rust": 736,
    "Python": 520,
@@ -13466,7 +13462,7 @@
    "JavaScript": 1528
   },
   "text_processing": {
-   "Lullaby": 568,
+   "Lullaby": 443,
    "C": 1028,
    "C++": 863,
    "Rust": 584,
@@ -13498,5 +13494,5 @@
    "JavaScript": 797
   }
  },
- "n_functions": 417
+ "n_functions": 416
 }

@@ -168,6 +168,9 @@ argument is a compile-time `L0389` type error.
 
 `substring(s, start, end)`, `find(s, needle) -> i64` (`-1` if absent),
 `contains(s, needle) -> bool`, `split(s, sep) -> array<string>`,
+`words(s) -> array<string>` (split on runs of whitespace, dropping empty fields —
+like a zero-argument split), `count(s, sub) -> i64` (non-overlapping occurrences
+of `sub`; an empty `sub` yields `0`),
 `join(parts array<string>, sep) -> string`, `trim(s) -> string`,
 `replace(s, from, to) -> string`, `upper(s) -> string`, `lower(s) -> string`,
 `starts_with(s, prefix) -> bool`, `ends_with(s, suffix) -> bool`,
