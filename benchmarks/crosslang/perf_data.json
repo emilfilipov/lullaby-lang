@@ -19,10 +19,10 @@
       "name": "fib(35) recursive",
       "kind": "call/recursion-bound",
       "unit": "ms (whole-program wall time, best-of-9)",
-      "note": "`fib` is a purely-i64-scalar function, so its argument stays in a callee-saved register across both recursive calls (like C at /O2). The per-call `if n < 2` now compares that register directly (`cmp rbx, 2`) instead of reloading it into rax first, shaving a `mov` from every call. The residual gap is the remaining fixed per-call overhead (prologue/epilogue, shadow-space).",
+      "note": "Now at parity with C. `fib` is purely i64-scalar, so its argument stays in a callee-saved register across both recursive calls (like C at /O2). Two codegen fixes closed the gap: the per-call `if n < 2` compares that register directly (`cmp rbx, 2`, no rax reload), and the recursive arguments `fib(n-1)`/`fib(n-2)` form with a single `lea rcx, [rbx - k]` exactly as C does (was `mov rax,rbx; sub rax,k; mov rcx,rax`). Progression: 1.26x -> 1.09x -> ~1.00x C.",
       "results": [
-        {"lang": "C (cl /O2)", "value": 43.7, "vsC": 1.0},
-        {"lang": "Lullaby (native)", "value": 47.8, "vsC": 1.09}
+        {"lang": "C (cl /O2)", "value": 43.4, "vsC": 1.0},
+        {"lang": "Lullaby (native)", "value": 43.6, "vsC": 1.0}
       ]
     },
     {
@@ -76,7 +76,7 @@
   ],
   "optimization_history": {
     "note": "Native backend progression this campaign (fib ns/call vs C, and loop ns/iter vs C).",
-    "native_fib_vs_c": [{"stage": "baseline", "vsC": 1.72}, {"stage": "compare-fusion + imm-fold", "vsC": 1.35}, {"stage": "+register promotion", "vsC": 1.2}, {"stage": "+promoted-operand fold", "vsC": 1.09}],
+    "native_fib_vs_c": [{"stage": "baseline", "vsC": 1.72}, {"stage": "compare-fusion + imm-fold", "vsC": 1.35}, {"stage": "+register promotion", "vsC": 1.2}, {"stage": "+promoted-operand fold", "vsC": 1.09}, {"stage": "+lea arg arithmetic (at parity)", "vsC": 1.0}],
     "native_loop_vs_c": [{"stage": "compare-fusion + imm-fold", "vsC": 5.6}, {"stage": "+register promotion", "vsC": 2.1}, {"stage": "+promoted-operand fold (dependency-bound)", "vsC": 1.96}, {"stage": "+ILP block-sum unroll (beats C)", "vsC": 0.52}],
     "native_primes_vs_c": [{"stage": "before (call per iter)", "vsC": 1.57}, {"stage": "+for-loop reg promotion", "vsC": 1.53}, {"stage": "+leaf-helper inlining", "vsC": 1.04}, {"stage": "+native % (idiv remainder)", "vsC": 1.01}],
     "native_vectorization_speedup": [{"stage": "sum reduction s+=a[i] (SSE2 paddq)", "vsScalar": 3.3}, {"stage": "element-wise map c[i]=a[i]+/-b[i] (paddq/psubq)", "vsScalar": 3.36}, {"stage": "bitwise reduction acc=acc^a[i] (pand/por/pxor)", "vsScalar": 2.89}, {"stage": "bitwise map c[i]=a[i]&b[i] (pand/por/pxor)", "vsScalar": 2.89}],
