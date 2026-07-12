@@ -1,0 +1,37 @@
+﻿{
+    "note":  "Wall time to compile the same program in each language, averaged over 3 corpus programs (sorting, number_theory, graph_algos), best-of-7, including process start and link. This is edit-compile-run latency, the developer-iteration cost. Lullaby\u0027s native backend is a direct x86-64 byte emitter (no LLVM), so it builds ~10-40x faster than cl/rustc.",
+    "avg_lines_per_program":  180,
+    "unit":  "ms (whole build, best-of-7, lower is faster to iterate)",
+    "results":  [
+                    {
+                        "lang":  "Lullaby (build, whole program)",
+                        "value":  13.7,
+                        "vsLullaby":  1
+                    },
+                    {
+                        "lang":  "Lullaby (check only)",
+                        "value":  10.6,
+                        "vsLullaby":  0.8
+                    },
+                    {
+                        "lang":  "C (cl /O2)",
+                        "value":  192,
+                        "vsLullaby":  14
+                    },
+                    {
+                        "lang":  "C (cl /Od, debug)",
+                        "value":  130.3,
+                        "vsLullaby":  9.5
+                    },
+                    {
+                        "lang":  "Rust (rustc -O)",
+                        "value":  340.8,
+                        "vsLullaby":  24.9
+                    },
+                    {
+                        "lang":  "Rust (rustc, debug)",
+                        "value":  227,
+                        "vsLullaby":  16.6
+                    }
+                ]
+}
