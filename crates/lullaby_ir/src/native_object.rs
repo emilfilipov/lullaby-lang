@@ -5210,6 +5210,182 @@ fn lower_native_if(
 
 /// Lower `while cond: body` as: top: eval cond; `test`; `jz end`; body;
 /// `jmp top`; end:. `break` targets `end`, `continue` targets `top`.
+/// A detected `while i < BOUND { acc = acc + i; i = i + 1 }` counting-sum loop,
+/// with `acc` and `i` both promoted into callee-saved registers and `BOUND` a
+/// positive `i32`-range constant. This is the ILP target: the serial `acc += i`
+/// chain (one dependent add per iteration, so the loop is latency-bound at ~1
+/// cycle/iter) is broken by summing a block of `K` consecutive iterations in a
+/// single `acc` add — `acc += K*i + K*(K-1)/2` — which is exact under wrapping
+/// arithmetic (`sum(i..i+K) mod 2^64` equals `K*i + K*(K-1)/2 mod 2^64`), so the
+/// dependent add is paid once per `K` iterations instead of once per iteration.
+struct SumReductionLoop {
+    acc: PReg,
+    counter: PReg,
+    bound: i64,
+}
+
+/// The promoted register a bare `i64` local occupies, by name, or `None`.
+fn promoted_reg_of_name(ctx: &NativeCtx, name: &str) -> Option<PReg> {
+    ctx.promoted_reg(ctx.local_slot(name).ok()?)
+}
+
+/// True when `stmt` is `target = target <Add> addend` (via `=` with a `+` RHS or
+/// via `+=`), i.e. an in-place add of `addend` into the promoted local `target`.
+fn is_promoted_self_add(stmt: &BytecodeInstruction, target: &str, addend: &AddendCheck) -> bool {
+    let BytecodeInstruction::Assign {
+        name,
+        path,
+        op,
+        value,
+        ..
+    } = stmt
+    else {
+        return false;
+    };
+    if name != target || !path.is_empty() {
+        return false;
+    }
+    match op {
+        // `target += addend`
+        AssignOp::Add => addend.matches(&value.kind),
+        // `target = target + addend`
+        AssignOp::Replace => matches!(
+            &value.kind,
+            BytecodeExprKind::Binary { left, op: BinaryOp::Add, right }
+                if matches!(&left.kind, BytecodeExprKind::Variable(v) if v == target)
+                    && addend.matches(&right.kind)
+        ),
+        _ => false,
+    }
+}
+
+/// What the added value must be: either the counter variable, or the literal `1`.
+enum AddendCheck<'a> {
+    Var(&'a str),
+    One,
+}
+
+impl AddendCheck<'_> {
+    fn matches(&self, kind: &BytecodeExprKind) -> bool {
+        match (self, kind) {
+            (AddendCheck::Var(name), BytecodeExprKind::Variable(v)) => v == name,
+            (AddendCheck::One, BytecodeExprKind::Integer(1)) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Recognize the counting-sum loop `while i < CONST { acc = acc + i; i = i + 1 }`
+/// where `acc` and `i` are distinct promoted `i64` locals and `CONST` is a
+/// positive `i32`-range constant large enough (≥ 8) that the blocked main loop is
+/// worthwhile and its guard arithmetic (`bound - (K-1)`) cannot underflow. Any
+/// deviation returns `None`, so the caller emits the ordinary loop unchanged.
+fn detect_sum_reduction(
+    ctx: &NativeCtx,
+    condition: &BytecodeExpr,
+    body: &[BytecodeInstruction],
+) -> Option<SumReductionLoop> {
+    // Condition: `i < BOUND`, `i` a promoted i64, BOUND a positive i32 constant.
+    let BytecodeExprKind::Binary {
+        left,
+        op: BinaryOp::Less,
+        right,
+    } = &condition.kind
+    else {
+        return None;
+    };
+    let BytecodeExprKind::Variable(counter_name) = &left.kind else {
+        return None;
+    };
+    let BytecodeExprKind::Integer(bound) = &right.kind else {
+        return None;
+    };
+    if *bound < 8 || i32::try_from(*bound).is_err() {
+        return None;
+    }
+    if left.ty.name != "i64" {
+        return None;
+    }
+
+    // Body: exactly `[ acc = acc + i, i = i + 1 ]`.
+    let [acc_stmt, step_stmt] = body else {
+        return None;
+    };
+    let BytecodeInstruction::Assign { name: acc_name, .. } = acc_stmt else {
+        return None;
+    };
+    if acc_name == counter_name {
+        return None;
+    }
+    if !is_promoted_self_add(acc_stmt, acc_name, &AddendCheck::Var(counter_name)) {
+        return None;
+    }
+    if !is_promoted_self_add(step_stmt, counter_name, &AddendCheck::One) {
+        return None;
+    }
+
+    let acc = promoted_reg_of_name(ctx, acc_name)?;
+    let counter = promoted_reg_of_name(ctx, counter_name)?;
+    if acc == counter {
+        return None;
+    }
+    Some(SumReductionLoop {
+        acc,
+        counter,
+        bound: *bound,
+    })
+}
+
+/// `lea rax, [<index>*4 + disp]` — the block sum `4*i + 6` in one instruction.
+fn emit_lea_rax_index4_plus(code: &mut Vec<u8>, index: PReg, disp: i32) {
+    // REX.W 8D /r ; ModRM mod=00 reg=rax(000) rm=100(SIB) ; SIB scale=4 index base=none(disp32).
+    let sib = 0x80 | (index.code3() << 3) | 0x05;
+    code.extend_from_slice(&[0x48, 0x8D, 0x04, sib]);
+    code.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// Emit the ILP-unrolled counting-sum loop: a blocked main loop summing `K`
+/// consecutive counter values per iteration into `acc` (one dependent add per
+/// block), then a scalar remainder loop for the final `< K` iterations.
+fn emit_sum_reduction(plan: &SumReductionLoop, code: &mut Vec<u8>) {
+    const K: i64 = 4;
+    const BLOCK_ADD: i64 = K * (K - 1) / 2; // 0+1+2+3 = 6
+    let SumReductionLoop {
+        acc,
+        counter,
+        bound,
+    } = *plan;
+
+    // Main loop: while i < bound-(K-1), fold the whole block `i..i+K-1` in one
+    // `acc` add. `bound-(K-1)` fits i32 (bound does and is ≥ 8), and the guard
+    // never `lea`s before testing, so the counter cannot overflow into the block
+    // computation. `4*i + 6` wrapping equals four wrapping `+= i` steps.
+    let main_bound = (bound - (K - 1)) as i32;
+    let main_top = code.len();
+    counter.cmp_imm(code, main_bound); // cmp i, bound-3
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end
+    let main_exit = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    emit_lea_rax_index4_plus(code, counter, BLOCK_ADD as i32); // rax = 4*i + 6
+    acc.add_rax(code); // acc += rax
+    counter.add_imm(code, K as i32); // i += 4
+    emit_jmp_to(code, main_top);
+    let main_end = code.len();
+    patch_rel32_to(code, main_exit, main_end);
+
+    // Remainder: the ordinary scalar loop for the final < K iterations.
+    let rem_top = code.len();
+    counter.cmp_imm(code, bound as i32); // cmp i, bound
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge rem_end
+    let rem_exit = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    acc.add_reg(code, counter); // acc += i
+    counter.add_imm(code, 1); // i += 1
+    emit_jmp_to(code, rem_top);
+    let rem_end = code.len();
+    patch_rel32_to(code, rem_exit, rem_end);
+}
+
 fn lower_native_while(
     ctx: &mut NativeCtx,
     condition: &BytecodeExpr,
@@ -5217,6 +5393,14 @@ fn lower_native_while(
     code: &mut Vec<u8>,
     loops: &mut Vec<NativeLoop>,
 ) -> Result<(), String> {
+    // ILP fast path: a promoted counting-sum loop folds a block of iterations per
+    // step, breaking the serial `acc += i` dependency chain. Any deviation from
+    // the exact shape falls through to the general loop lowering below.
+    if let Some(plan) = detect_sum_reduction(ctx, condition, body) {
+        emit_sum_reduction(&plan, code);
+        return Ok(());
+    }
+
     let top = code.len();
     // Fused `cmp`+conditional-jump for an i64 comparison; else the generic
     // "evaluate to 0/1 in rax, `test rax,rax`, `jz`" path. Both jump to `end`
@@ -12173,6 +12357,46 @@ mod native_program_tests {
         assert!(
             has_backward_jmp(text),
             "expected a backward `jmp` closing the while loop"
+        );
+    }
+
+    #[test]
+    fn ilp_unrolls_counting_sum_loop() {
+        // `while i < N { acc = acc + i; i = i + 1 }` with `acc`/`i` promoted i64 is
+        // recognized as a counting-sum reduction and lowered with a blocked main
+        // loop that folds four iterations per step — `lea rax, [i*4 + 6]` (the
+        // block sum `4*i + (0+1+2+3)`) then a single `acc += rax` — so the serial
+        // `acc += i` dependency chain advances once per four iterations. A scalar
+        // remainder loop handles the final `< 4` iterations.
+        let program = emit_native_program(&module_for(
+            "fn main -> i64\n    let acc i64 = 0\n    let i i64 = 0\n    while i < 1000\n        acc = acc + i\n        i = i + 1\n    return acc\n",
+        ))
+        .expect("emit native program");
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        // `lea rax, [<i>*4 + 6]`: 48 8D 04 <SIB> 06 00 00 00, where the SIB has
+        // scale=4/base=none and index rbx (0x9D) or rsi (0xB5) — whichever register
+        // `i` promoted into.
+        let has_block_sum = text.windows(8).any(|w| {
+            w[0..3] == [0x48, 0x8D, 0x04]
+                && (w[3] == 0x9D || w[3] == 0xB5)
+                && w[4..8] == [0x06, 0x00, 0x00, 0x00]
+        });
+        assert!(
+            has_block_sum,
+            "expected the block-sum `lea rax, [i*4 + 6]` of the ILP unroll"
+        );
+        // The blocked main loop and the scalar remainder loop each close with a
+        // backward `jmp`, so at least two appear.
+        let backward = text
+            .windows(5)
+            .filter(|w| w[0] == 0xE9 && i32::from_le_bytes([w[1], w[2], w[3], w[4]]) < 0)
+            .count();
+        assert!(
+            backward >= 2,
+            "expected main + remainder backward jumps, got {backward}"
         );
     }
 
