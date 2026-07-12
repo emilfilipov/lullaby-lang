@@ -8,10 +8,7 @@
 #   add_days_year returns the YEAR of the date n days after y-m-d.
 
 fn is_leap_year y i64 -> i64
-    if y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
-        1
-    else
-        0
+    1 if y % 4 == 0 and (y % 100 != 0 or y % 400 == 0) else 0
 
 fn days_in_month y i64 m i64 -> i64
     if m == 2
@@ -29,10 +26,7 @@ fn day_of_year y i64 m i64 d i64 -> i64
     total
 
 fn is_weekend dow i64 -> i64
-    if dow == 0 or dow == 6
-        1
-    else
-        0
+    1 if dow == 0 or dow == 6 else 0
 
 fn zeller_dow y i64 m i64 d i64 -> i64
     if m < 3
@@ -101,10 +95,7 @@ fn quarter_of_month m i64 -> i64
     (m - 1) / 3 + 1
 
 fn is_valid_time h i64 mi i64 s i64 -> i64
-    if h >= 0 and h <= 23 and mi >= 0 and mi <= 59 and s >= 0 and s <= 59
-        1
-    else
-        0
+    1 if h >= 0 and h <= 23 and mi >= 0 and mi <= 59 and s >= 0 and s <= 59 else 0
 
 fn clock_add_minutes h i64 mi i64 add i64 -> i64
     let total = (h * 60 + mi + add) % 1440

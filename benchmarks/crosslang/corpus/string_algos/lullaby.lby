@@ -4,17 +4,14 @@
 # do not distort the comparison. Arrays pass by value, so each function receives
 # a private copy.
 #
-# LANGUAGE GAP (dynamic programming buffer): edit_distance and lcs_length need a
-# rolling DP row of length lb+1. Lullaby has no sized-array allocation
-# (`array<i64>` of a runtime length) and rejects the empty literal `[]`, so the
-# idiomatic `vec![0; lb+1]` / `int dp[lb+1]` of the other languages has no direct
-# equivalent. The workaround is a fixed-capacity 64-element array literal indexed
-# up to lb; it is correct for lb <= 63. A real sized-array or fill builtin
-# (e.g. `array_fill(n, 0)`) would remove the 64-element literal entirely.
+# edit_distance and lcs_length need a rolling DP row of length lb+1.
+# `array_fill(n, value)` builds a zero-initialized fixed-capacity row (64 here,
+# correct for lb <= 63), matching the `vec![0; lb+1]` / `int dp[lb+1]` idiom of
+# the other languages without a long literal.
 
 fn edit_distance a array<i64> la i64 b array<i64> lb i64 -> i64
     # Levenshtein distance via a single rolling row (capacity 64; needs lb <= 63).
-    let dp array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let dp array<i64> = array_fill(64, 0)
     for j from 0 to lb
         dp[j] = j
     for i from 1 to la
@@ -36,7 +33,7 @@ fn edit_distance a array<i64> la i64 b array<i64> lb i64 -> i64
 
 fn lcs_length a array<i64> la i64 b array<i64> lb i64 -> i64
     # Longest common subsequence length via a single rolling row (needs lb <= 63).
-    let dp array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let dp array<i64> = array_fill(64, 0)
     for j from 0 to lb
         dp[j] = 0
     for i from 1 to la

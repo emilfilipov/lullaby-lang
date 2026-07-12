@@ -1,7 +1,8 @@
 # Cross-language text-processing suite (Lullaby). Real-world string utilities.
-# Strings are walked directly with `for c in s` / `s[i]` and built up with `+=`.
-# ASCII case folding uses explicit code ranges (char_code/char_from) so it stays
-# ASCII-only, unlike the Unicode-aware is_upper/is_lower predicates. See ../SPEC.md.
+# Strings are walked directly with `for c in s` / `s[i]` and built up with `+=`
+# (a `char` appends to a string directly). Boolean 1/0 results use the inline
+# conditional `A if C else B`; membership uses `c in "..."`; substrings use the
+# slice `s[i:j]`. ASCII case folding keeps explicit code ranges. See ../SPEC.md.
 
 fn word_count s string -> i64
     let count = 0
@@ -21,8 +22,7 @@ fn count_char s string c string -> i64
     let target = c[0]
     let count = 0
     for ch in s
-        if ch == target
-            count += 1
+        count += 1 if ch == target else 0
     count
 
 fn is_blank s string -> i64
@@ -32,74 +32,50 @@ fn is_blank s string -> i64
     1
 
 fn starts_with_prefix s string p string -> i64
-    if starts_with(s, p)
-        1
-    else
-        0
+    1 if starts_with(s, p) else 0
 
 fn ends_with_suffix s string p string -> i64
-    if ends_with(s, p)
-        1
-    else
-        0
+    1 if ends_with(s, p) else 0
 
 fn contains_sub s string sub string -> i64
-    if contains(s, sub)
-        1
-    else
-        0
+    1 if sub in s else 0
 
 fn to_upper_ascii s string -> string
     let out string = ""
     for c in s
         let code = char_code(c)
-        if code >= 97 and code <= 122
-            out += to_string(char_from(code - 32))
-        else
-            out += to_string(c)
+        out += char_from(code - 32) if code >= 97 and code <= 122 else c
     out
 
 fn to_lower_ascii s string -> string
     let out string = ""
     for c in s
         let code = char_code(c)
-        if code >= 65 and code <= 90
-            out += to_string(char_from(code + 32))
-        else
-            out += to_string(c)
+        out += char_from(code + 32) if code >= 65 and code <= 90 else c
     out
 
 fn reverse_str s string -> string
     let out string = ""
     let i = len(s) - 1
     while i >= 0
-        out += to_string(s[i])
+        out += s[i]
         i -= 1
     out
 
 fn repeat_str s string n i64 -> string
-    let out string = ""
-    for i from 1 to n
-        out += s
-    out
+    repeat(s, n) if n > 0 else ""
 
 fn left_pad s string width i64 c string -> string
     let pad = width - len(s)
-    let out string = ""
-    for i from 1 to pad
-        out += c
-    out + s
+    repeat(c, pad) + s if pad > 0 else s
 
 fn truncate_ellipsis s string max i64 -> string
-    if len(s) <= max
-        return s
-    substring(s, 0, max - 3) + "..."
+    s if len(s) <= max else s[0:max - 3] + "..."
 
 fn count_vowels s string -> i64
     let count = 0
     for c in s
-        if c == 'a' or c == 'e' or c == 'i' or c == 'o' or c == 'u'
-            count += 1
+        count += 1 if c in "aeiou" else 0
     count
 
 fn initials name string -> string
@@ -111,10 +87,7 @@ fn initials name string -> string
         elif in_word == 0
             in_word = 1
             let code = char_code(c)
-            if code >= 97 and code <= 122
-                out += to_string(char_from(code - 32))
-            else
-                out += to_string(c)
+            out += char_from(code - 32) if code >= 97 and code <= 122 else c
     out
 
 fn main -> void

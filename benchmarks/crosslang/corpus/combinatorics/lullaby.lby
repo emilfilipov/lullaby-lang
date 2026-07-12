@@ -87,10 +87,9 @@ fn bell_number n i64 -> i64
     sum
 
 fn partition_count n i64 -> i64
-    # DP over parts. Lullaby has no sized-array alloc (no `array<i64>(len)`), so
-    # this seeds a fixed 41-element literal covering indices 0..40 (n <= 40). A
-    # growable-then-indexable structure would remove this workaround.
-    let dp array<i64> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # DP over parts. `array_fill(n, value)` seeds a fixed 41-element zero row
+    # (covering indices 0..40, so n <= 40).
+    let dp array<i64> = array_fill(41, 0)
     dp[0] = 1
     for p from 1 to n
         for j from p to n

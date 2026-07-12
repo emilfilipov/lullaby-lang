@@ -50,10 +50,7 @@ fn divisor_sum n i64 -> i64
     sum
 
 fn is_perfect n i64 -> i64
-    if divisor_sum(n) - n == n
-        1
-    else
-        0
+    1 if divisor_sum(n) - n == n else 0
 
 fn euler_totient n i64 -> i64
     let result = n
@@ -91,10 +88,7 @@ fn is_armstrong n i64 -> i64
     while m > 0
         sum += int_pow(m % 10, d)
         m = m / 10
-    if sum == n
-        1
-    else
-        0
+    1 if sum == n else 0
 
 fn reverse_digits n i64 -> i64
     let r = 0
@@ -104,10 +98,7 @@ fn reverse_digits n i64 -> i64
     r
 
 fn is_palindrome_number n i64 -> i64
-    if reverse_digits(n) == n
-        1
-    else
-        0
+    1 if reverse_digits(n) == n else 0
 
 fn sum_of_squares_digits n i64 -> i64
     let sum = 0
@@ -122,10 +113,7 @@ fn is_happy n i64 -> i64
     while n != 1 and steps < 1000
         n = sum_of_squares_digits(n)
         steps += 1
-    if n == 1
-        1
-    else
-        0
+    1 if n == 1 else 0
 
 fn to_base_digit_sum n i64 b i64 -> i64
     let sum = 0

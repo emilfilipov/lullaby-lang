@@ -32,10 +32,7 @@ fn manhattan a Point b Point -> i64
 fn chebyshev a Point b Point -> i64
     let dx = abs_val(a.x - b.x)
     let dy = abs_val(a.y - b.y)
-    if dx > dy
-        dx
-    else
-        dy
+    dx if dx > dy else dy
 
 fn rect_area r Rect -> i64
     r.w * r.h
@@ -44,10 +41,7 @@ fn rect_perimeter r Rect -> i64
     2 * (r.w + r.h)
 
 fn rect_contains r Rect px i64 py i64 -> i64
-    if px >= 0 and py >= 0 and px <= r.w and py <= r.h
-        1
-    else
-        0
+    1 if px >= 0 and py >= 0 and px <= r.w and py <= r.h else 0
 
 fn money_add a Money b Money -> Money
     Money(a.cents + b.cents)
@@ -59,10 +53,7 @@ fn money_cents_part m Money -> i64
     m.cents % 100
 
 fn interval_overlaps a Interval b Interval -> i64
-    if a.lo < b.hi and b.lo < a.hi
-        1
-    else
-        0
+    1 if a.lo < b.hi and b.lo < a.hi else 0
 
 fn interval_length a Interval -> i64
     let n = a.hi - a.lo

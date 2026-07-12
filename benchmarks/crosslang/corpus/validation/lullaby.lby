@@ -1,8 +1,9 @@
 # Cross-language validation suite (Lullaby). Real-world validators: checksums,
 # calendar/date rules, character classes, and range checks. Arrays carry their
-# length, so array validators take just the array and iterate with `for x in a`;
-# strings are walked with `for c in s` / `s[i]`. `is_digit` is ASCII; the hex and
-# case checks keep explicit code ranges to stay ASCII-strict. See ../../SPEC.md.
+# length, so array validators iterate with `for x in a`; strings are walked with
+# `for c in s` / `s[i]`. Boolean 1/0 results use the inline conditional
+# `A if C else B`. `is_digit` is ASCII; hex/case checks keep explicit code
+# ranges to stay ASCII-strict. See ../../SPEC.md.
 
 fn luhn_check digits array<i64> -> i64
     let n = len(digits)
@@ -15,10 +16,7 @@ fn luhn_check digits array<i64> -> i64
             if d > 9
                 d = d - 9
         sum += d
-    if sum % 10 == 0
-        1
-    else
-        0
+    1 if sum % 10 == 0 else 0
 
 fn is_valid_isbn10 digits array<i64> -> i64
     if len(digits) != 10
@@ -26,37 +24,20 @@ fn is_valid_isbn10 digits array<i64> -> i64
     let sum = 0
     for i from 0 to 9
         sum += (10 - i) * digits[i]
-    if sum % 11 == 0
-        1
-    else
-        0
+    1 if sum % 11 == 0 else 0
 
 fn in_range x i64 lo i64 hi i64 -> i64
-    if x >= lo and x <= hi
-        1
-    else
-        0
+    1 if x >= lo and x <= hi else 0
 
 fn is_leap_year y i64 -> i64
-    if y % 400 == 0
-        return 1
-    if y % 100 == 0
-        return 0
-    if y % 4 == 0
-        return 1
-    0
+    1 if y % 400 == 0 else 0 if y % 100 == 0 else 1 if y % 4 == 0 else 0
 
 fn is_valid_month m i64 -> i64
-    if m >= 1 and m <= 12
-        1
-    else
-        0
+    1 if m >= 1 and m <= 12 else 0
 
 fn days_in_month y i64 m i64 -> i64
     if m == 2
-        if is_leap_year(y) == 1
-            return 29
-        return 28
+        return 29 if is_leap_year(y) == 1 else 28
     if m == 4 or m == 6 or m == 9 or m == 11
         return 30
     if m >= 1 and m <= 12
@@ -71,17 +52,11 @@ fn is_valid_day y i64 m i64 d i64 -> i64
     1
 
 fn is_ascii_digit c string -> i64
-    if is_digit(c[0])
-        1
-    else
-        0
+    1 if is_digit(c[0]) else 0
 
 fn is_ascii_alpha c string -> i64
     let code = char_code(c[0])
-    if (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
-        1
-    else
-        0
+    1 if (code >= 65 and code <= 90) or (code >= 97 and code <= 122) else 0
 
 fn all_digits s string -> i64
     if len(s) == 0
@@ -113,14 +88,7 @@ fn is_hex_string s string -> i64
         return 0
     for c in s
         let code = char_code(c)
-        let ok = 0
-        if code >= 48 and code <= 57
-            ok = 1
-        if code >= 97 and code <= 102
-            ok = 1
-        if code >= 65 and code <= 70
-            ok = 1
-        if ok == 0
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102) or (code >= 65 and code <= 70))
             return 0
     1
 
@@ -131,26 +99,16 @@ fn checksum_mod10 digits array<i64> -> i64
     sum % 10
 
 fn valid_percentage x i64 -> i64
-    if x >= 0 and x <= 100
-        1
-    else
-        0
+    1 if x >= 0 and x <= 100 else 0
 
 fn is_valid_rgb r i64 g i64 b i64 -> i64
-    if r >= 0 and r <= 255 and g >= 0 and g <= 255 and b >= 0 and b <= 255
-        1
-    else
-        0
+    1 if r >= 0 and r <= 255 and g >= 0 and g <= 255 and b >= 0 and b <= 255 else 0
 
 fn even_parity bits array<i64> -> i64
     let ones = 0
     for b in bits
-        if b == 1
-            ones += 1
-    if ones % 2 == 0
-        1
-    else
-        0
+        ones += 1 if b == 1 else 0
+    1 if ones % 2 == 0 else 0
 
 fn main -> void
     let card array<i64> = [7, 9, 9, 2, 7, 3, 9, 8, 7, 1, 3]

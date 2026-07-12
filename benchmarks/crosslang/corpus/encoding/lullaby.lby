@@ -85,10 +85,7 @@ fn luhn_from_array a array<i64> n i64 -> i64
             if d > 9
                 d = d - 9
         sum += d
-    if sum % 10 == 0
-        1
-    else
-        0
+    1 if sum % 10 == 0 else 0
 
 fn parity_bit a array<i64> n i64 -> i64
     let ones = 0
