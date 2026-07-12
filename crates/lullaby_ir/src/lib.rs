@@ -5122,18 +5122,32 @@ impl<'a> IrRuntime<'a> {
                 let index = self.eval_expr(index, env)?.as_i64()?;
                 index_into(&target, index)
             }
-            IrExprKind::Field { target, field } => match self.eval_expr(target, env)? {
-                Value::Struct(s) => s
-                    .fields
-                    .into_iter()
-                    .find(|(name, _)| name == field)
-                    .map(|(_, value)| value)
-                    .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`"))),
-                _ => Err(RuntimeError::new(
-                    "L0371",
-                    format!("cannot access field `{field}` on non-struct value"),
-                )),
-            },
+            IrExprKind::Field { target, field } => {
+                // Fast path: borrow a bare-variable struct and clone only the field
+                // read, instead of cloning the whole struct on every `s.field`.
+                if let IrExprKind::Variable(name) = &target.kind {
+                    if let Some(Value::Struct(s)) = env.get_ref(name) {
+                        return s
+                            .fields
+                            .iter()
+                            .find(|(n, _)| n == field)
+                            .map(|(_, value)| value.clone())
+                            .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`")));
+                    }
+                }
+                match self.eval_expr(target, env)? {
+                    Value::Struct(s) => s
+                        .fields
+                        .into_iter()
+                        .find(|(name, _)| name == field)
+                        .map(|(_, value)| value)
+                        .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`"))),
+                    _ => Err(RuntimeError::new(
+                        "L0371",
+                        format!("cannot access field `{field}` on non-struct value"),
+                    )),
+                }
+            }
             IrExprKind::Unary { op, expr } => {
                 let value = self.eval_expr(expr, env)?;
                 match op {

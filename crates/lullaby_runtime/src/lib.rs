@@ -3941,8 +3941,19 @@ impl<'a> Runtime<'a> {
     fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         let result = match &expr.kind {
             ExprKind::Field { target, field } => {
-                let target = self.eval_expr(target, env)?;
-                match target {
+                // Fast path: borrow a bare-variable struct and clone only the field
+                // read, instead of cloning the whole struct on every `s.field`.
+                if let ExprKind::Variable(name) = &target.kind {
+                    if let Some(Value::Struct(s)) = env.get_ref(name) {
+                        return s
+                            .fields
+                            .iter()
+                            .find(|(n, _)| n == field)
+                            .map(|(_, value)| value.clone())
+                            .ok_or_else(|| RuntimeError::new("L0371", format!("no field `{field}`")));
+                    }
+                }
+                match self.eval_expr(target, env)? {
                     Value::Struct(s) => s
                         .fields
                         .into_iter()
