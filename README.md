@@ -21,25 +21,25 @@ self-contained offline documentation bundle.
 
 ## Benchmarks
 
-Lullaby is measured against a **417-function cross-language corpus** (the same
-programs written idiomatically in six languages) for token efficiency, plus
-C-referenced workloads for native performance. Full methodology and an
-interactive report live in [`benchmarks/crosslang/`](benchmarks/crosslang/).
+Lullaby is measured against a **434-function cross-language corpus** (26
+categories, the same programs written idiomatically in six languages) for token
+efficiency, plus C-referenced workloads for native performance. Full methodology
+and an interactive report live in [`benchmarks/crosslang/`](benchmarks/crosslang/).
 
 **Token efficiency** — Lullaby is the tersest language measured except Python,
 and the tersest *statically-typed* one (o200k_base tokens, definitions only):
 
 | Language    | Tokens | vs Lullaby |
 | ----------- | -----: | ---------: |
-| Python      | 19,120 |      −4.2% |
-| **Lullaby** | **19,960** |      — |
-| JavaScript  | 22,146 |     +11.0% |
-| Rust        | 24,867 |     +24.6% |
-| C           | 26,002 |     +30.3% |
-| C++         | 26,894 |     +34.7% |
+| Python      | 20,112 |      −4.5% |
+| **Lullaby** | **21,058** |      — |
+| JavaScript  | 23,432 |     +11.3% |
+| Rust        | 26,329 |     +25.0% |
+| C           | 27,472 |     +30.5% |
+| C++         | 28,423 |     +35.0% |
 
 That is ~10% terser than JavaScript, ~20% than Rust, ~23% than C, and ~26% than
-C++ — within +4.4% of Python while keeping full static typing. The remaining gap
+C++ — within +4.7% of Python while keeping full static typing. The remaining gap
 is concentrated in string/parse-heavy code; on structured and numeric code
 Lullaby already beats Python.
 
