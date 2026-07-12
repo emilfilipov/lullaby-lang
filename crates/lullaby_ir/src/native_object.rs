@@ -4687,6 +4687,108 @@ fn emit_hfold_xmm0_into_rax(op: ReduceOp, code: &mut Vec<u8>) {
     op.emit_rax_rcx(code); // rax = rax <op> rcx
 }
 
+// -- SSE4.2 min/max vectorization with runtime CPUID dispatch -----------------
+//
+// 64-bit packed integer min/max needs a 64-bit packed compare (`pcmpgtq`), which
+// is SSE4.2 — NOT in the SSE2 baseline every x86-64 CPU guarantees. So a min/max
+// reduction emits BOTH a packed SSE4.2 path and a scalar fallback, and a one-time
+// `cpuid` at loop entry picks between them at runtime: the produced binary uses
+// the vector path on SSE4.2 hardware and the scalar path on an older CPU, staying
+// correct everywhere. (`cpuid` runs once per loop entry, never per iteration, so
+// its cost is amortized to nothing over the array.)
+
+/// Emit a one-time CPUID SSE4.2 probe and a `jz` taken when SSE4.2 is ABSENT.
+/// Returns the rel32 patch site of that jump for the caller to point at its scalar
+/// fallback. `cpuid` clobbers eax/ebx/ecx/edx; rbx is callee-saved and may hold a
+/// promoted local, so it is preserved around the probe. The SSE4.2 feature bit is
+/// CPUID leaf 1, ECX bit 20; the ZF from `test` survives the `pop` (pop leaves
+/// flags untouched).
+fn emit_cpuid_sse42_probe(code: &mut Vec<u8>) -> usize {
+    code.push(0x53); // push rbx (preserve a possibly-promoted local across cpuid)
+    emit_mov_rax_imm(code, 1); // eax = 1 (feature leaf)
+    code.extend_from_slice(&[0x0F, 0xA2]); // cpuid
+    code.extend_from_slice(&[0x89, 0xC8]); // mov eax, ecx (feature bits -> scratch eax)
+    code.push(0x5B); // pop rbx (restores the local; leaves ZF untouched)
+    // test eax, 1<<20 (SSE4.2) ; jz fallback.
+    code.extend_from_slice(&[0xA9]); // test eax, imm32
+    code.extend_from_slice(&(1u32 << 20).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x84]); // jz rel32 (patched to the scalar fallback)
+    let site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    site
+}
+
+/// A vectorizable integer min/max reduction (`acc = max(acc, a[i])` /
+/// `min(acc, a[i])`). Both are associative and commutative, so the two-lane packed
+/// fold matches the scalar fold exactly.
+#[derive(Clone, Copy, PartialEq)]
+enum MinMaxOp {
+    Min,
+    Max,
+}
+
+impl MinMaxOp {
+    /// The reduction identity, broadcast into both lanes of `xmm0` as the packed
+    /// seed: `i64::MIN` for max, `i64::MAX` for min (so any real element wins).
+    fn emit_packed_seed(self, code: &mut Vec<u8>) {
+        let ident = match self {
+            MinMaxOp::Max => i64::MIN,
+            MinMaxOp::Min => i64::MAX,
+        };
+        emit_mov_rax_imm(code, ident);
+        code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0]); // movq xmm0, rax
+        code.extend_from_slice(&[0x66, 0x0F, 0x6C, 0xC0]); // punpcklqdq xmm0,xmm0 (broadcast)
+    }
+
+    /// `xmm0 = minmax(xmm0, xmm1)` per lane, via the SSE4.2 `pcmpgtq` mask-blend.
+    /// mask = (xmm0 > xmm1). Max keeps xmm0 where mask, xmm1 elsewhere; min is the
+    /// mirror. Uses xmm2/xmm3 as scratch (free — these functions have no float
+    /// locals).
+    fn emit_packed(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x66, 0x0F, 0x6F, 0xD0]); // movdqa xmm2, xmm0
+        code.extend_from_slice(&[0x66, 0x0F, 0x38, 0x37, 0xD1]); // pcmpgtq xmm2, xmm1 (mask = xmm0>xmm1)
+        code.extend_from_slice(&[0x66, 0x0F, 0x6F, 0xDA]); // movdqa xmm3, xmm2 (copy mask)
+        match self {
+            MinMaxOp::Max => {
+                code.extend_from_slice(&[0x66, 0x0F, 0xDB, 0xD8]); // pand  xmm3, xmm0 (mask & xmm0)
+                code.extend_from_slice(&[0x66, 0x0F, 0xDF, 0xD1]); // pandn xmm2, xmm1 (~mask & xmm1)
+            }
+            MinMaxOp::Min => {
+                code.extend_from_slice(&[0x66, 0x0F, 0xDB, 0xD9]); // pand  xmm3, xmm1 (mask & xmm1)
+                code.extend_from_slice(&[0x66, 0x0F, 0xDF, 0xD0]); // pandn xmm2, xmm0 (~mask & xmm0)
+            }
+        }
+        code.extend_from_slice(&[0x66, 0x0F, 0xEB, 0xDA]); // por xmm3, xmm2
+        code.extend_from_slice(&[0x66, 0x0F, 0x6F, 0xC3]); // movdqa xmm0, xmm3 (result)
+    }
+
+    /// `rax = minmax(rax, rcx)` via `cmp`+`cmov` (branchless, exact for signed i64).
+    fn emit_scalar_rax_rcx(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+        match self {
+            // max: if rax < rcx, take rcx  -> cmovl rax, rcx
+            MinMaxOp::Max => code.extend_from_slice(&[0x48, 0x0F, 0x4C, 0xC1]),
+            // min: if rax > rcx, take rcx  -> cmovg rax, rcx
+            MinMaxOp::Min => code.extend_from_slice(&[0x48, 0x0F, 0x4F, 0xC1]),
+        }
+    }
+
+    /// `acc = minmax(acc, rax)`, honoring register promotion of `acc`. Preserves
+    /// the loaded element (in rax) by moving it to rcx first.
+    fn emit_reduce_into_acc(self, ctx: &NativeCtx, acc_slot: i32, code: &mut Vec<u8>) {
+        code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (element)
+        match ctx.promoted_reg(acc_slot) {
+            Some(reg) => reg.to_rax(code),
+            None => load_local(code, acc_slot),
+        }
+        self.emit_scalar_rax_rcx(code); // rax = minmax(acc, element)
+        match ctx.promoted_reg(acc_slot) {
+            Some(reg) => reg.from_rax(code),
+            None => store_local(code, acc_slot),
+        }
+    }
+}
+
 /// The associative-and-commutative reductions that vectorize into an SSE2 packed
 /// loop. Each is exact on `i64` — `+` is associative mod 2^64, and bitwise
 /// `& | ^` are associative and commutative bit-for-bit — so the packed result is
@@ -5513,6 +5615,11 @@ fn lower_native_for(
     if let Some(reduction) = detect_reduction(ctx, name, step, body) {
         return lower_native_vectorized_reduction(ctx, name, start, end, &reduction, code);
     }
+    // Auto-vectorize `for i: acc = max(acc, a[i])` / `min(...)` via SSE4.2 with a
+    // runtime CPUID gate (scalar fallback on older CPUs). Same matcher discipline.
+    if let Some(minmax) = detect_minmax_reduction(ctx, name, step, body) {
+        return lower_native_minmax_reduction(ctx, name, start, end, &minmax, code);
+    }
     // Auto-vectorize `for i: c[i] = a[i] <op> b[i]` element-wise map. Same exact
     // matcher-with-scalar-fallback discipline as the reduction.
     if let Some(map) = detect_elementwise_map(ctx, name, step, body) {
@@ -5725,6 +5832,100 @@ fn detect_reduction(
         return None;
     }
     Some(Reduction {
+        acc_slot: acc_local.slot,
+        array_base_static: base_slot + const_words as i32 * 8,
+        op,
+    })
+}
+
+/// A recognized `for i from S to E: acc = max(acc, a[i])` / `min(acc, a[i])`
+/// reduction over a contiguous `array<i64>`. Vectorized via SSE4.2 with a runtime
+/// CPUID gate and scalar fallback (see [`lower_native_minmax_reduction`]).
+struct MinMaxReduction {
+    acc_slot: i32,
+    array_base_static: i32,
+    op: MinMaxOp,
+}
+
+/// Recognize `for counter from S to E: acc = max(acc, array[counter])` (or `min`),
+/// where `acc` is an `i64` local and `array` is a contiguous `array<i64>`. `max`/
+/// `min` are commutative, so the accumulator may be either argument. Returns `None`
+/// for anything else so the caller falls back to the scalar loop.
+fn detect_minmax_reduction(
+    ctx: &NativeCtx,
+    counter: &str,
+    step: Option<&BytecodeExpr>,
+    body: &[BytecodeInstruction],
+) -> Option<MinMaxReduction> {
+    match step {
+        None => {}
+        Some(expr) => match expr.kind {
+            BytecodeExprKind::Integer(1) => {}
+            _ => return None,
+        },
+    }
+    let [
+        BytecodeInstruction::Assign {
+            name: acc,
+            path,
+            op: AssignOp::Replace,
+            value,
+            ..
+        },
+    ] = body
+    else {
+        return None;
+    };
+    if !path.is_empty() || acc == counter {
+        return None;
+    }
+    // value must be `max(_, _)` / `min(_, _)` with exactly two args.
+    let BytecodeExprKind::Call { name, args } = &value.kind else {
+        return None;
+    };
+    let op = match name.as_str() {
+        "max" => MinMaxOp::Max,
+        "min" => MinMaxOp::Min,
+        _ => return None,
+    };
+    let [a0, a1] = args.as_slice() else {
+        return None;
+    };
+    // One argument is exactly the accumulator; the other is `array[counter]`.
+    let is_acc = |e: &BytecodeExpr| matches!(&e.kind, BytecodeExprKind::Variable(v) if v == acc);
+    let element = if is_acc(a0) {
+        a1
+    } else if is_acc(a1) {
+        a0
+    } else {
+        return None;
+    };
+    let BytecodeExprKind::Index { index, .. } = &element.kind else {
+        return None;
+    };
+    let BytecodeExprKind::Variable(idx) = &index.kind else {
+        return None;
+    };
+    if idx != counter {
+        return None;
+    }
+    let ScalarPlace::Dynamic {
+        base_slot,
+        const_words,
+        elem_words,
+        ..
+    } = resolve_read_place(ctx, element).ok()?
+    else {
+        return None;
+    };
+    if elem_words != 1 {
+        return None;
+    }
+    let acc_local = ctx.locals.get(acc)?;
+    if !matches!(acc_local.ty, NativeType::I64) {
+        return None;
+    }
+    Some(MinMaxReduction {
         acc_slot: acc_local.slot,
         array_base_static: base_slot + const_words as i32 * 8,
         op,
@@ -6019,6 +6220,115 @@ fn lower_native_vectorized_reduction(
 
     patch_rel32(code, done_site);
     Ok(())
+}
+
+/// Emit a min/max reduction `acc = max(acc, a[S..=E])` (or `min`) with runtime
+/// CPUID dispatch: an SSE4.2 packed path (`pcmpgtq` mask-blend, two `i64` lanes per
+/// iteration + scalar tail) when the CPU has SSE4.2, else a plain scalar fold. Both
+/// paths fold the array into `acc`, so the result is identical (min/max is
+/// associative and commutative). The `cpuid` probe runs once at loop entry.
+fn lower_native_minmax_reduction(
+    ctx: &mut NativeCtx,
+    counter: &str,
+    start: &BytecodeExpr,
+    end: &BytecodeExpr,
+    red: &MinMaxReduction,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let i_slot = ctx.local_slot(counter)?;
+    let end_slot = ctx.local_slot(&format!("{counter}__end"))?;
+    let base = red.array_base_static;
+    let op = red.op;
+
+    // i = start ; end_local = end  (set before the probe so the scalar fallback,
+    // which the probe jumps to BEFORE any SIMD code runs, starts from `start`).
+    lower_native_expr(ctx, start, code)?;
+    store_local(code, i_slot);
+    lower_native_expr(ctx, end, code)?;
+    store_local(code, end_slot);
+
+    // Runtime CPUID gate: jump to the scalar fallback when SSE4.2 is absent.
+    let fallback_site = emit_cpuid_sse42_probe(code);
+
+    // --- SSE4.2 packed path ---
+    op.emit_packed_seed(code); // xmm0 = identity broadcast to both lanes
+    let main_top = code.len();
+    load_local(code, i_slot); // rax = i
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1  (i+1)
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg after_main
+    let after_main_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3  -> 8*(i+1)
+    code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+    code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+    emit_sub_rcx_imm(code, base); // rcx = &a[i+1] (block start)
+    emit_movdqu_xmm1_from_rcx(code);
+    op.emit_packed(code);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x02]); // add rax, 2
+    store_local(code, i_slot);
+    emit_jmp_to(code, main_top);
+
+    // Fold the two packed lanes, then into acc.
+    patch_rel32(code, after_main_site);
+    code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]); // movq rax, xmm0 (lane0)
+    code.extend_from_slice(&[0x66, 0x0F, 0x73, 0xD8, 0x08]); // psrldq xmm0, 8
+    code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x7E, 0xC1]); // movq rcx, xmm0 (lane1)
+    op.emit_scalar_rax_rcx(code); // rax = minmax(lane0, lane1)
+    op.emit_reduce_into_acc(ctx, red.acc_slot, code);
+
+    // Scalar tail for the odd final element (SSE4.2 path).
+    let tail_top = code.len();
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg simd_done
+    let simd_done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    emit_load_array_elem(code, i_slot, base); // rax = a[i]
+    op.emit_reduce_into_acc(ctx, red.acc_slot, code);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    store_local(code, i_slot);
+    emit_jmp_to(code, tail_top);
+    patch_rel32(code, simd_done_site);
+    // Skip the scalar fallback.
+    code.push(0xE9);
+    let done_jmp_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+
+    // --- scalar fallback (no SSE4.2): fold every element into acc ---
+    patch_rel32(code, fallback_site);
+    let scalar_top = code.len();
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp-end_slot]
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg done
+    let scalar_done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    emit_load_array_elem(code, i_slot, base); // rax = a[i]
+    op.emit_reduce_into_acc(ctx, red.acc_slot, code);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    store_local(code, i_slot);
+    emit_jmp_to(code, scalar_top);
+
+    patch_rel32(code, scalar_done_site);
+    patch_rel32(code, done_jmp_site); // both fallthroughs land here
+    Ok(())
+}
+
+/// `rax = a[i]` for a contiguous i64 array whose element 0 sits at `rbp - base`:
+/// addr = rbp - base - 8*i.
+fn emit_load_array_elem(code: &mut Vec<u8>, i_slot: i32, base: i32) {
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
+    code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+    code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+    emit_sub_rcx_imm(code, base);
+    code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
 }
 
 // -- Expression lowering (result left in rax) --------------------------------
@@ -12521,6 +12831,47 @@ mod native_program_tests {
         assert!(
             text.windows(4).any(|w| w == [0x48, 0x0F, 0xAF, 0xC1]),
             "expected an `imul rax, rcx` for the product loop"
+        );
+    }
+
+    #[test]
+    fn vectorizes_minmax_reduction_with_cpuid_dispatch() {
+        // `acc = max(acc, a[i])` over an `array<i64>` vectorizes via SSE4.2 behind a
+        // runtime CPUID gate: the `.text` must contain `cpuid` (0F A2), the SSE4.2
+        // `pcmpgtq` (66 0F 38 37), and a `cmov` (the branchless scalar fallback /
+        // fold) — direct evidence both the feature probe and the packed path emitted.
+        let program = emit_native_program(&module_for(concat!(
+            "fn arr_max a array<i64> n i64 -> i64\n",
+            "    let m = a[0]\n",
+            "    for i from 1 to n - 1\n",
+            "        m = max(m, a[i])\n",
+            "    m\n\n",
+            "fn main -> i64\n",
+            "    let a array<i64> = [3, 7, 1, 9, 2]\n",
+            "    arr_max(a, 5)\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"arr_max".to_string()),
+            "the min/max reduction function should compile natively: {:?}",
+            program.skipped
+        );
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        assert!(
+            text.windows(2).any(|w| w == [0x0F, 0xA2]),
+            "expected a `cpuid` runtime feature probe"
+        );
+        assert!(
+            text.windows(4).any(|w| w == [0x66, 0x0F, 0x38, 0x37]),
+            "expected an SSE4.2 `pcmpgtq` in the packed min/max path"
+        );
+        // `cmovl rax, rcx` (48 0F 4C C1) — the branchless scalar max fold.
+        assert!(
+            text.windows(4).any(|w| w == [0x48, 0x0F, 0x4C, 0xC1]),
+            "expected a `cmovl` scalar max fold"
         );
     }
 
