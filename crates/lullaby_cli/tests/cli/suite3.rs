@@ -2,7 +2,6 @@
 //! aggregates, strings, RC reclamation, FFI). Split out of tests/cli.rs.
 
 use crate::*;
-use std::path::Path;
 use std::process::Command;
 
 #[test]
@@ -1073,6 +1072,54 @@ pub(crate) fn native_string_case_execution_parity_when_linkable() {
     assert_eq!(
         exit, expected,
         "native upper/lower must match the interpreters"
+    );
+}
+
+/// Native `sqrt` (a single SSE2 `sqrtsd`) execution parity: `sqrt(a*a+b*b)` and
+/// `sqrt(2.0)` compiled to machine code must agree bit-for-bit with the
+/// interpreters' `f64::sqrt`. Also exercises f64 parameters routed through XMM.
+#[test]
+pub(crate) fn native_sqrt_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_sqrt.lby");
+    let out = std::env::temp_dir().join("lullaby_native_sqrt_parity.exe");
+    ensure_msvc_env();
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    assert!(
+        stdout(&emit).contains("compiled main"),
+        "sqrt-using main must compile natively: {}",
+        stdout(&emit)
+    );
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 11, "sqrt fixture main computes 11");
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native sqrt parity");
+        return;
+    }
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(
+        exit,
+        interp.rem_euclid(256) as i32,
+        "native sqrt must match the interpreters' f64::sqrt"
     );
 }
 

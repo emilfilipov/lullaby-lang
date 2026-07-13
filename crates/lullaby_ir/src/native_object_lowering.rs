@@ -77,6 +77,20 @@ pub(crate) fn lower_native_float_expr(
                 code.extend_from_slice(&[0xF3, 0x0F, 0x5A, 0xC0]);
                 return Ok(FloatWidth::F64);
             }
+            // `sqrt(x f64) -> f64`: a single SSE2 `sqrtsd` (baseline, no CPUID),
+            // bit-for-bit `f64::sqrt` — matches the interpreters' `n.sqrt()` (a
+            // negative operand yields NaN, like IEEE-754). f64-only, like the
+            // interpreter builtin. The other transcendental/rounding math builtins
+            // (`sin`/`floor`/…) stay deferred (they need a library or SSE4.1).
+            if name == "sqrt" && args.len() == 1 {
+                let arg_width = lower_native_float_expr(ctx, &args[0], code)?;
+                if arg_width != FloatWidth::F64 {
+                    return Err("native `sqrt` expects an f64 argument".to_string());
+                }
+                // sqrtsd xmm0, xmm0  (F2 0F 51 C0)
+                code.extend_from_slice(&[0xF2, 0x0F, 0x51, 0xC0]);
+                return Ok(FloatWidth::F64);
+            }
             // `get(l, i)` on a float-element list: load the raw 8-byte element
             // word into `rax`, then move its bits into `xmm0` at the element's
             // width (the low four bytes of the word for f32).
@@ -301,7 +315,7 @@ pub(crate) fn float_width_of_expr(ctx: &NativeCtx, expr: &BytecodeExpr) -> Optio
         },
         BytecodeExprKind::Call { name, .. } => match name.as_str() {
             "to_f32" => Some(FloatWidth::F32),
-            "to_f64" => Some(FloatWidth::F64),
+            "to_f64" | "sqrt" => Some(FloatWidth::F64),
             _ => None,
         },
         // Float arithmetic propagates its operands' width; a comparison yields a

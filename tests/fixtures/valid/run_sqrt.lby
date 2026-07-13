@@ -1,0 +1,16 @@
+fn hypot_int a f64 b f64 -> i64
+    let h f64 = sqrt(a * a + b * b)
+    let r i64 = 0
+    if h > 4.99
+        if h < 5.01
+            r = 1
+    r
+
+fn main -> i64
+    let ok i64 = hypot_int(3.0, 4.0)
+    let s f64 = sqrt(2.0)
+    let two i64 = 0
+    if s > 1.414
+        if s < 1.415
+            two = 1
+    ok * 10 + two

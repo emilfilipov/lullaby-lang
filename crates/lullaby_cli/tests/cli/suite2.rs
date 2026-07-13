@@ -2,7 +2,6 @@
 //! WASM). Split out of tests/cli.rs; shares its helpers via `use crate::*`.
 
 use crate::*;
-use std::path::Path;
 use std::process::Command;
 
 #[test]

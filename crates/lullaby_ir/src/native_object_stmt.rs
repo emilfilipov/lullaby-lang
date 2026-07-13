@@ -28,6 +28,10 @@ pub(crate) enum PReg {
     Rsi,
 }
 
+// The `to_rax`/`from_rax`/`from_arg` names are the byte emitter's intentional
+// direction-of-move vocabulary (rax←reg vs reg←rax), not a fallible constructor
+// convention, so the `wrong_self_convention` heuristic does not apply here.
+#[allow(clippy::wrong_self_convention)]
 impl PReg {
     /// `mov rax, <reg>`.
     pub(crate) fn to_rax(self, code: &mut Vec<u8>) {
@@ -311,6 +315,7 @@ pub(crate) fn plan_register_promotion(
     (promoted, saved)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_native_function(
     function: &BytecodeFunction,
     callable: &std::collections::HashSet<&str>,

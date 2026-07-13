@@ -806,13 +806,13 @@ fn signed_division_guards_min_over_neg_one_overflow() {
 
 #[test]
 fn skips_float_math_builtin_gracefully() {
-    // f64/f32 arithmetic, comparison, and `to_f32`/`to_f64` are now native,
-    // but the transcendental/math builtins (`sqrt`, `sin`, `floor`, …) remain
-    // deferred. A `-> i64` function that calls one must skip gracefully and
+    // f64/f32 arithmetic, comparison, `to_f32`/`to_f64`, and `sqrt` are now native,
+    // but the remaining transcendental/rounding math builtins (`sin`, `floor`, …)
+    // remain deferred. A `-> i64` function that calls one must skip gracefully and
     // report why, leaving nothing eligible.
     let err = emit_native_program(&module_for(concat!(
         "fn main -> i64\n",
-        "    let r f64 = sqrt(16.0)\n",
+        "    let r f64 = floor(16.7)\n",
         "    let flag i64 = 0\n",
         "    if r > 3.0\n",
         "        flag = 1\n",
@@ -821,6 +821,33 @@ fn skips_float_math_builtin_gracefully() {
     .expect_err("float math builtin is deferred");
     assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
     assert!(err.skipped.iter().any(|s| s.name == "main"));
+}
+
+#[test]
+fn compiles_sqrt_as_sqrtsd() {
+    // `sqrt(x f64)` lowers to a single SSE2 `sqrtsd xmm0, xmm0` (F2 0F 51 C0), so a
+    // function using it (with f64 locals but an i64 result) compiles natively.
+    let program = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let r f64 = sqrt(2.0)\n",
+        "    let flag i64 = 0\n",
+        "    if r > 1.41\n",
+        "        flag = 1\n",
+        "    flag\n",
+    )))
+    .expect("emit sqrt program");
+    assert!(
+        program.compiled.contains(&"main".to_string()),
+        "a sqrt-using function must compile natively: {:?}",
+        program.skipped
+    );
+    assert!(
+        program
+            .bytes
+            .windows(4)
+            .any(|w| w == [0xF2, 0x0F, 0x51, 0xC0]),
+        "sqrt must emit `sqrtsd xmm0, xmm0`"
+    );
 }
 
 #[test]
