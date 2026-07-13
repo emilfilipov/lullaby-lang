@@ -1,0 +1,12 @@
+fn clip lo i64 hi i64 x i64 -> i64
+    clamp(x, lo, hi)
+
+fn main -> i64
+    let s1 i64 = sign(42)
+    let s2 i64 = sign(0 - 7)
+    let s3 i64 = sign(0)
+    let c1 i64 = clamp(150, 0, 100)
+    let c2 i64 = clamp(0 - 5, 0, 100)
+    let c3 i64 = clamp(50, 0, 100)
+    let c4 i64 = clip(5, 3, 4)
+    (s1 + 1) + (s2 + 1) + (s3 + 1) + c1 + c2 + c3 + c4

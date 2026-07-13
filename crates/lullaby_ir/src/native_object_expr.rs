@@ -485,6 +485,53 @@ pub(crate) fn lower_native_expr(
                 ]);
                 return Ok(());
             }
+            // `sign(x)` on `i64` -> `i64` (`-1`/`0`/`1`): a branchless
+            // `test` + two signed `cmov`s, matching the interpreters' `i64::signum`.
+            // Only the i64 arg lowers here; a `sign(f64)` (which needs float
+            // comparisons and returns i64) skips gracefully.
+            if name == "sign" && args.len() == 1 && args[0].ty.name == "i64" {
+                lower_native_expr(ctx, &args[0], code)?; // x in rax
+                code.extend_from_slice(&[
+                    0x48, 0x89, 0xC1, // mov rcx, rax   (save x)
+                    0x48, 0x31, 0xC0, // xor rax, rax   (result = 0)
+                    0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00, // mov rdx, 1
+                    0x48, 0x85, 0xC9, // test rcx, rcx
+                    0x48, 0x0F, 0x4F, 0xC2, // cmovg rax, rdx  (x>0 -> 1)
+                    0x48, 0xC7, 0xC2, 0xFF, 0xFF, 0xFF, 0xFF, // mov rdx, -1
+                    0x48, 0x0F, 0x4C, 0xC2, // cmovl rax, rdx  (x<0 -> -1)
+                ]);
+                return Ok(());
+            }
+            // `clamp(x, lo, hi)` on `i64`: branchless, applying the upper clamp
+            // then the lower clamp (lower wins), both comparing the *original* x —
+            // matching the interpreters' `if x < lo { lo } else if x > hi { hi }
+            // else { x }` for every ordering of `lo`/`hi` (including `lo > hi`).
+            // Only the i64 case lowers here; an f64 `clamp` skips gracefully.
+            if name == "clamp" && args.len() == 3 && args[0].ty.name == "i64" {
+                lower_native_expr(ctx, &args[0], code)?; // x
+                code.push(0x50); // push rax (x)
+                lower_native_expr(ctx, &args[1], code)?; // lo
+                code.push(0x50); // push rax (lo)
+                lower_native_expr(ctx, &args[2], code)?; // hi in rax
+                code.extend_from_slice(&[
+                    0x48, 0x89, 0xC2, // mov rdx, rax   (hi)
+                    0x59, // pop rcx        (lo)
+                    0x58, // pop rax        (x -> result seed)
+                    0x49, 0x89, 0xC1, // mov r9, rax    (r9 = original x, preserved)
+                    // upper clamp: `cmp rdx, r9` sets flags for (hi - x); the `l`
+                    // (less) condition is hi < x, i.e. x > hi, so take hi.
+                    0x49, 0x89, 0xD0, // mov r8, rdx    (r8 = hi)
+                    0x4C, 0x39, 0xCA, // cmp rdx, r9    (hi vs original x)
+                    0x49, 0x0F, 0x4C, 0xC0, // cmovl rax, r8  (hi < x -> take hi)
+                    // lower clamp (wins, applied last): `cmp rcx, r9` sets flags
+                    // for (lo - x); the `g` (greater) condition is lo > x, i.e.
+                    // x < lo, so take lo.
+                    0x49, 0x89, 0xC8, // mov r8, rcx    (r8 = lo)
+                    0x4C, 0x39, 0xC9, // cmp rcx, r9    (lo vs original x)
+                    0x49, 0x0F, 0x4F, 0xC0, // cmovg rax, r8  (lo > x -> take lo)
+                ]);
+                return Ok(());
+            }
             if !ctx.callable.contains(name.as_str()) {
                 return Err(format!(
                     "call to non-i64-scalar or unknown function `{name}`"

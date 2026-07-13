@@ -957,6 +957,68 @@ fn compiles_gcd_i64_inline() {
 }
 
 #[test]
+fn compiles_sign_and_clamp_i64() {
+    // `sign(x)` on i64 lowers to `test` + two signed cmovs (cmovg/cmovl rax, rdx
+    // = 48 0F 4F C2 / 48 0F 4C C2). `clamp(x, lo, hi)` on i64 applies an upper
+    // then a lower clamp via cmovl/cmovg rax, r8 (49 0F 4C C0 / 49 0F 4F C0).
+    let program = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let a i64 = sign(0 - 3)\n",
+        "    let b i64 = clamp(150, 0, 100)\n",
+        "    a + b\n",
+    )))
+    .expect("emit sign/clamp program");
+    assert!(
+        program.compiled.contains(&"main".to_string()),
+        "a sign/clamp-using function must compile natively: {:?}",
+        program.skipped
+    );
+    assert!(
+        program
+            .bytes
+            .windows(4)
+            .any(|w| w == [0x48, 0x0F, 0x4F, 0xC2])
+            && program
+                .bytes
+                .windows(4)
+                .any(|w| w == [0x48, 0x0F, 0x4C, 0xC2]),
+        "sign must emit `cmovg`/`cmovl rax, rdx`"
+    );
+    assert!(
+        program
+            .bytes
+            .windows(4)
+            .any(|w| w == [0x49, 0x0F, 0x4C, 0xC0])
+            && program
+                .bytes
+                .windows(4)
+                .any(|w| w == [0x49, 0x0F, 0x4F, 0xC0]),
+        "clamp must emit `cmovl`/`cmovg rax, r8`"
+    );
+}
+
+#[test]
+fn sign_clamp_f64_defer_gracefully() {
+    // Only the i64 case of `sign`/`clamp` is lowered natively; the f64 cases
+    // (which need float comparisons) skip the whole function to the interpreters.
+    for src in [
+        concat!("fn main -> i64\n", "    let s i64 = sign(1.5)\n", "    s\n",),
+        concat!(
+            "fn main -> i64\n",
+            "    let c f64 = clamp(1.5, 0.0, 1.0)\n",
+            "    let flag i64 = 0\n",
+            "    if c < 1.1\n",
+            "        flag = 1\n",
+            "    flag\n",
+        ),
+    ] {
+        let err = emit_native_program(&module_for(src)).expect_err("f64 sign/clamp is deferred");
+        assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+        assert!(err.skipped.iter().any(|s| s.name == "main"));
+    }
+}
+
+#[test]
 fn min_max_f64_defers_gracefully() {
     // Only the `i64` case of `min`/`max` is lowered natively; an `f64` `min`/`max`
     // (whose SSE `minsd`/`maxsd` NaN/±0.0 rules diverge from `f64::min`) skips the
