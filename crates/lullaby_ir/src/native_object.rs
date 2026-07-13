@@ -1265,6 +1265,19 @@ const STR_CHAR_AT_SYMBOL: &str = "__lullaby_str_char_at";
 /// interpreters' `text.matches(sub).count()`). An empty needle yields `0`.
 const STR_COUNT_SYMBOL: &str = "__lullaby_str_count";
 
+/// The string-repeat helper emitted in `.text`. Signature: the source record
+/// pointer in `rcx`, the repeat count (i64) in `rdx`; returns in `rax` a fresh
+/// record that is the source concatenated `count` times (`count <= 0` yields the
+/// empty string), matching the interpreters' `text.repeat(count)`.
+const STR_REPEAT_SYMBOL: &str = "__lullaby_str_repeat";
+
+/// The string-trim helper emitted in `.text`. Signature: the source record pointer
+/// in `rcx`; returns in `rax` a fresh record with leading/trailing ASCII
+/// whitespace removed (matching `trim_matches(is_ascii_whitespace)`). Computes the
+/// trimmed byte bounds and delegates to `__lullaby_str_substring` (byte offsets ==
+/// char indices for the ASCII strings the native subset builds).
+const STR_TRIM_SYMBOL: &str = "__lullaby_str_trim";
+
 /// The `find` helper emitted in `.text`. Signature: the haystack record pointer
 /// in `rcx`, the needle record pointer in `rdx`; returns in `rax` the CHAR index
 /// (i64) of the first byte-level occurrence of the needle, or `-1` if absent. An
@@ -6852,6 +6865,18 @@ fn lower_native_expr(
             {
                 return lower_string_binary_op(ctx, &args[0], &args[1], STR_COUNT_SYMBOL, code);
             }
+            // `repeat(text, count)`: text repeated `count` times (a fresh record).
+            if name == "repeat"
+                && args.len() == 2
+                && is_string_type(&args[0].ty)
+                && args[1].ty.name == "i64"
+            {
+                return lower_string_repeat(ctx, &args[0], &args[1], code);
+            }
+            // `trim(text)`: leading/trailing ASCII whitespace removed (fresh record).
+            if name == "trim" && args.len() == 1 && is_string_type(&args[0].ty) {
+                return lower_string_trim(ctx, &args[0], code);
+            }
             if name == "contains"
                 && args.len() == 2
                 && is_string_type(&args[0].ty)
@@ -8711,6 +8736,36 @@ fn lower_string_char_at(
     Ok(())
 }
 
+/// Lower `repeat(s, count)`: stage the source record into `rcx` and the count
+/// into `rdx`, then call the repeat helper (result record in `rax`).
+fn lower_string_repeat(
+    ctx: &mut NativeCtx,
+    s: &BytecodeExpr,
+    count: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    lower_native_expr(ctx, s, code)?; // record pointer -> rax
+    code.push(0x50); // push rax (record)
+    lower_native_expr(ctx, count, code)?; // count -> rax
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (count)
+    code.push(0x59); // pop rcx (record)
+    emit_call_symbol(ctx, STR_REPEAT_SYMBOL, code);
+    Ok(())
+}
+
+/// Lower `trim(s)`: stage the source record into `rcx` and call the trim helper
+/// (result record in `rax`).
+fn lower_string_trim(
+    ctx: &mut NativeCtx,
+    s: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    lower_native_expr(ctx, s, code)?; // record pointer -> rax
+    code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+    emit_call_symbol(ctx, STR_TRIM_SYMBOL, code);
+    Ok(())
+}
+
 /// Lower a two-string operation (`find`/`contains`/`starts_with`/`ends_with`):
 /// evaluate the first string record pointer into `rcx` and the second into `rdx`,
 /// then call the named `.text` helper, which leaves its result (an `i64` char
@@ -10005,6 +10060,8 @@ fn heap_runtime_helpers() -> Vec<HelperFunction> {
         emit_str_substring_helper(),
         emit_str_char_at_helper(),
         emit_str_count_helper(),
+        emit_str_repeat_helper(),
+        emit_str_trim_helper(),
         emit_str_find_helper(),
         emit_str_contains_helper(),
         emit_str_starts_with_helper(),
@@ -10038,6 +10095,8 @@ fn program_uses_heap_helpers(functions: &[LoweredNativeFunction]) -> bool {
                     | STR_SUBSTRING_SYMBOL
                     | STR_CHAR_AT_SYMBOL
                     | STR_COUNT_SYMBOL
+                    | STR_REPEAT_SYMBOL
+                    | STR_TRIM_SYMBOL
                     | STR_FIND_SYMBOL
                     | STR_CONTAINS_SYMBOL
                     | STR_STARTS_WITH_SYMBOL
@@ -11889,6 +11948,192 @@ fn emit_str_count_helper() -> HelperFunction {
     }
 }
 
+/// `__lullaby_str_trim(rcx = s) -> rax = record`.
+///
+/// Scans off leading/trailing ASCII whitespace (`0x20`, or `0x09..=0x0D`) to a
+/// `[start, end)` byte range, then delegates to `__lullaby_str_substring` (passing
+/// the byte offsets as char indices — equal for ASCII strings). An all-whitespace
+/// input yields the empty string (`start == end`). One `call`, so `rsp` is aligned
+/// with `sub rsp,8` first; uses only volatile scratch (rax/rdx/r8/r9/r10/r11) plus
+/// the incoming `rcx` (the source, forwarded to substring), so no callee-saved
+/// register needs preserving here.
+fn emit_str_trim_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x08]); // sub rsp, 8 (align the substring call)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x49, 0x08]); // mov r9, [rcx+8] (byte_len)
+    code.extend_from_slice(&[0x4C, 0x8D, 0x51, 0x10]); // lea r10, [rcx+16] (data)
+
+    // A whitespace test on the byte in `dl`: two rel32 conditional jumps to
+    // `on_ws`. Caller passes the two patch-site vectors to fill.
+    // Forward scan: rax = start = first non-whitespace byte.
+    code.extend_from_slice(&[0x48, 0x31, 0xC0]); // xor rax, rax (start = 0)
+    let fwd = code.len();
+    code.extend_from_slice(&[0x4C, 0x39, 0xC8]); // cmp rax, r9
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge fwd_done
+    let fwd_done_a = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x41, 0x0F, 0xB6, 0x14, 0x02]); // movzx edx, byte [r10+rax]
+    code.extend_from_slice(&[0x80, 0xFA, 0x20]); // cmp dl, 0x20
+    code.extend_from_slice(&[0x0F, 0x84]); // je is_ws_f
+    let ws_f1 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x44, 0x8D, 0x5A, 0xF7]); // lea r11d, [rdx-9]
+    code.extend_from_slice(&[0x41, 0x83, 0xFB, 0x04]); // cmp r11d, 4
+    code.extend_from_slice(&[0x0F, 0x86]); // jbe is_ws_f
+    let ws_f2 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.push(0xE9); // jmp fwd_done (non-ws found)
+    let fwd_done_b = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // is_ws_f: inc rax; loop.
+    patch_rel32(&mut code, ws_f1);
+    patch_rel32(&mut code, ws_f2);
+    code.extend_from_slice(&[0x48, 0xFF, 0xC0]); // inc rax
+    emit_jmp_to(&mut code, fwd);
+    // fwd_done:
+    patch_rel32(&mut code, fwd_done_a);
+    patch_rel32(&mut code, fwd_done_b);
+
+    // Backward scan: r8 = end, shrink while data[end-1] is whitespace.
+    code.extend_from_slice(&[0x4D, 0x89, 0xC8]); // mov r8, r9 (end = byte_len)
+    let bwd = code.len();
+    code.extend_from_slice(&[0x49, 0x39, 0xC0]); // cmp r8, rax
+    code.extend_from_slice(&[0x0F, 0x8E]); // jle bwd_done (end <= start)
+    let bwd_done_a = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x43, 0x0F, 0xB6, 0x54, 0x02, 0xFF]); // movzx edx, byte [r10+r8-1]
+    code.extend_from_slice(&[0x80, 0xFA, 0x20]); // cmp dl, 0x20
+    code.extend_from_slice(&[0x0F, 0x84]); // je is_ws_b
+    let ws_b1 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x44, 0x8D, 0x5A, 0xF7]); // lea r11d, [rdx-9]
+    code.extend_from_slice(&[0x41, 0x83, 0xFB, 0x04]); // cmp r11d, 4
+    code.extend_from_slice(&[0x0F, 0x86]); // jbe is_ws_b
+    let ws_b2 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.push(0xE9); // jmp bwd_done (non-ws at end-1)
+    let bwd_done_b = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // is_ws_b: dec r8; loop.
+    patch_rel32(&mut code, ws_b1);
+    patch_rel32(&mut code, ws_b2);
+    code.extend_from_slice(&[0x49, 0xFF, 0xC8]); // dec r8
+    emit_jmp_to(&mut code, bwd);
+    // bwd_done:
+    patch_rel32(&mut code, bwd_done_a);
+    patch_rel32(&mut code, bwd_done_b);
+
+    // substring(rcx = text, rdx = start, r8 = end). rcx still holds the source.
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (start)
+    code.push(0xE8); // call __lullaby_str_substring
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: STR_SUBSTRING_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8
+    code.push(0xC3); // ret
+
+    HelperFunction {
+        name: STR_TRIM_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
+/// `__lullaby_str_repeat(rcx = s, rdx = count) -> rax = record`.
+///
+/// Builds a fresh `[char_len][byte_len][utf8]` record equal to the source repeated
+/// `count` times (`count <= 0` → the empty string). Allocates `DATA + byte_len*
+/// count` bytes and `rep movsb`-copies the source `count` times. Preserves the
+/// callee-saved registers held across the internal `__lullaby_alloc` call and
+/// keeps `rsp` 16-byte aligned at that call (8 pushes + return addr = even, then
+/// `sub rsp,8`).
+fn emit_str_repeat_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+
+    code.push(0x53); // push rbx
+    code.push(0x55); // push rbp
+    code.push(0x56); // push rsi
+    code.push(0x57); // push rdi
+    code.extend_from_slice(&[0x41, 0x54]); // push r12
+    code.extend_from_slice(&[0x41, 0x55]); // push r13
+    code.extend_from_slice(&[0x41, 0x56]); // push r14
+    code.extend_from_slice(&[0x41, 0x57]); // push r15
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x08]); // sub rsp, 8
+
+    // count <= 0 -> empty string.
+    code.extend_from_slice(&[0x48, 0x85, 0xD2]); // test rdx, rdx
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg nonempty
+    let nonempty_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // Empty record: alloc DATA bytes, char_len = byte_len = 0.
+    code.extend_from_slice(&[0x48, 0xC7, 0xC1]); // mov rcx, imm32
+    code.extend_from_slice(&STR_DATA_OFF.to_le_bytes());
+    emit_helper_call_alloc(&mut code, &mut relocations); // rax = record
+    code.extend_from_slice(&[0x48, 0xC7, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00]); // mov qword [rax+0], 0
+    code.extend_from_slice(&[0x48, 0xC7, 0x40, 0x08, 0x00, 0x00, 0x00, 0x00]); // mov qword [rax+8], 0
+    code.extend_from_slice(&[0xE9]); // jmp epilogue
+    let empty_done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+
+    // nonempty:
+    patch_rel32(&mut code, nonempty_site);
+    code.extend_from_slice(&[0x49, 0x89, 0xCC]); // mov r12, rcx (source)
+    code.extend_from_slice(&[0x49, 0x89, 0xD5]); // mov r13, rdx (count)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x71, 0x00]); // mov r14, [rcx+0] (orig char_len)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x79, 0x08]); // mov r15, [rcx+8] (orig byte_len)
+    // new_byte_len = orig_byte_len * count.
+    code.extend_from_slice(&[0x4C, 0x89, 0xF8]); // mov rax, r15
+    code.extend_from_slice(&[0x49, 0x0F, 0xAF, 0xC5]); // imul rax, r13
+    code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax (new_byte_len)
+    // alloc(DATA + new_byte_len).
+    code.extend_from_slice(&[0x48, 0x8D, 0x48, STR_DATA_OFF as u8]); // lea rcx, [rax+16]
+    emit_helper_call_alloc(&mut code, &mut relocations); // rax = record
+    code.extend_from_slice(&[0x48, 0x89, 0xC5]); // mov rbp, rax (record base)
+    // char_len = orig_char_len * count = r14 * r13.
+    code.extend_from_slice(&[0x4C, 0x89, 0xF0]); // mov rax, r14
+    code.extend_from_slice(&[0x49, 0x0F, 0xAF, 0xC5]); // imul rax, r13
+    code.extend_from_slice(&[0x48, 0x89, 0x45, 0x00]); // mov [rbp+0], rax (char_len)
+    code.extend_from_slice(&[0x48, 0x89, 0x5D, 0x08]); // mov [rbp+8], rbx (byte_len)
+    // Copy loop: dest cursor rdi = &record.data; for k=count..0 copy orig bytes.
+    code.extend_from_slice(&[0x48, 0x8D, 0x7D, STR_DATA_OFF as u8]); // lea rdi, [rbp+16]
+    let copy_top = code.len();
+    code.extend_from_slice(&[0x4D, 0x85, 0xED]); // test r13, r13
+    code.extend_from_slice(&[0x0F, 0x84]); // jz copy_done
+    let copy_done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x49, 0x8D, 0x74, 0x24, STR_DATA_OFF as u8]); // lea rsi, [r12+16] (src reset each iter)
+    code.extend_from_slice(&[0x4C, 0x89, 0xF9]); // mov rcx, r15 (orig byte_len)
+    code.extend_from_slice(&[0xF3, 0xA4]); // rep movsb (rdi advances, persists)
+    code.extend_from_slice(&[0x49, 0xFF, 0xCD]); // dec r13
+    emit_jmp_to(&mut code, copy_top);
+    // copy_done: rax = record.
+    patch_rel32(&mut code, copy_done_site);
+    code.extend_from_slice(&[0x48, 0x89, 0xE8]); // mov rax, rbp
+
+    // epilogue:
+    patch_rel32(&mut code, empty_done_site);
+    code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x08]); // add rsp, 8
+    code.extend_from_slice(&[0x41, 0x5F]); // pop r15
+    code.extend_from_slice(&[0x41, 0x5E]); // pop r14
+    code.extend_from_slice(&[0x41, 0x5D]); // pop r13
+    code.extend_from_slice(&[0x41, 0x5C]); // pop r12
+    code.push(0x5F); // pop rdi
+    code.push(0x5E); // pop rsi
+    code.push(0x5D); // pop rbp
+    code.push(0x5B); // pop rbx
+    code.push(0xC3); // ret
+
+    HelperFunction {
+        name: STR_REPEAT_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
 /// `__lullaby_str_starts_with(rcx = s, rdx = prefix) -> rax = 0/1`.
 ///
 /// If `prefix_len > s_len` the result is `0`; otherwise it is whether the prefix
@@ -12369,6 +12614,8 @@ fn write_object_with_data(
         emit_str_substring_helper(),
         emit_str_char_at_helper(),
         emit_str_count_helper(),
+        emit_str_repeat_helper(),
+        emit_str_trim_helper(),
         emit_str_find_helper(),
         emit_str_contains_helper(),
         emit_str_starts_with_helper(),
@@ -12439,6 +12686,8 @@ fn write_object_with_data(
         STR_SUBSTRING_SYMBOL,
         STR_CHAR_AT_SYMBOL,
         STR_COUNT_SYMBOL,
+        STR_REPEAT_SYMBOL,
+        STR_TRIM_SYMBOL,
         STR_FIND_SYMBOL,
         STR_CONTAINS_SYMBOL,
         STR_STARTS_WITH_SYMBOL,
@@ -13433,6 +13682,34 @@ mod native_program_tests {
             text.windows(4).any(|w| w == [0xF2, 0x0F, 0x11, 0x01]),
             "expected a `movsd [rcx], xmm0` dynamic float-element store"
         );
+    }
+
+    #[test]
+    fn compiles_string_repeat_and_trim_builtins() {
+        // `repeat(text, count)` and `trim(text)` compile natively (fresh records).
+        let program = emit_native_program(&module_for(concat!(
+            "fn f -> i64\n",
+            "    let a string = repeat(\"ab\", 3)\n",
+            "    let b string = trim(\"  x  \")\n",
+            "    len(a) + len(b)\n\n",
+            "fn main -> i64\n",
+            "    f()\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"f".to_string()),
+            "repeat/trim should compile natively: {:?}",
+            program.skipped
+        );
+        for sym in [STR_REPEAT_SYMBOL, STR_TRIM_SYMBOL] {
+            assert!(
+                program
+                    .bytes
+                    .windows(sym.len())
+                    .any(|w| w == sym.as_bytes()),
+                "expected helper `{sym}` in the object"
+            );
+        }
     }
 
     #[test]
@@ -15743,6 +16020,8 @@ mod native_program_tests {
             STR_SUBSTRING_SYMBOL,
             STR_CHAR_AT_SYMBOL,
             STR_COUNT_SYMBOL,
+            STR_REPEAT_SYMBOL,
+            STR_TRIM_SYMBOL,
             STR_FIND_SYMBOL,
             STR_CONTAINS_SYMBOL,
             STR_STARTS_WITH_SYMBOL,
@@ -15817,6 +16096,8 @@ mod native_program_tests {
             STR_SUBSTRING_SYMBOL,
             STR_CHAR_AT_SYMBOL,
             STR_COUNT_SYMBOL,
+            STR_REPEAT_SYMBOL,
+            STR_TRIM_SYMBOL,
             STR_FIND_SYMBOL,
             STR_CONTAINS_SYMBOL,
             STR_STARTS_WITH_SYMBOL,
