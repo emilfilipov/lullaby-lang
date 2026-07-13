@@ -1,0 +1,4448 @@
+//! WASM expression/operation lowering: expressions, binary ops, string concat,
+//! the index-based string-op codegen, and struct/enum/array construction. Split
+//! out of wasm.rs; sees the module-assembly types and encoders via `use super::*`.
+
+use super::*;
+
+// -- Expression lowering -----------------------------------------------------
+
+pub(crate) fn lower_expr(
+    ctx: &mut LowerCtx,
+    expr: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match &expr.kind {
+        IrExprKind::Integer(value) => {
+            out.push(0x42); // i64.const
+            write_sleb(out, *value);
+            Ok(())
+        }
+        IrExprKind::Float(value) => {
+            // A float literal's static type pins it to `f32` or `f64` (the type
+            // checker resolves every literal to a concrete float type). An `f32`
+            // literal rounds `value` to single precision first so its bits match
+            // the interpreter's real `f32` store, then emits `f32.const`.
+            if expr.ty.name == "f32" {
+                out.push(0x43); // f32.const
+                out.extend_from_slice(&(*value as f32).to_le_bytes());
+            } else {
+                out.push(0x44); // f64.const
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(())
+        }
+        IrExprKind::Bool(value) => {
+            out.push(0x41); // i32.const
+            write_sleb(out, if *value { 1 } else { 0 });
+            Ok(())
+        }
+        IrExprKind::Char(value) => {
+            out.push(0x41); // i32.const
+            write_sleb(out, *value as i64);
+            Ok(())
+        }
+        // A `Local` only exists in the interpreter's resolved copy of the IR, so
+        // it never reaches WASM lowering in practice; handle it identically to a
+        // named `Variable` for match completeness and defensive correctness.
+        IrExprKind::Variable(name) | IrExprKind::Local { name, .. } => {
+            let local = ctx
+                .locals
+                .get(name)
+                .ok_or_else(|| format!("unknown variable `{name}`"))?;
+            get_local(out, local.index);
+            Ok(())
+        }
+        IrExprKind::Unary { op, expr: inner } => match op {
+            UnaryOp::Not => {
+                lower_expr(ctx, inner, out)?;
+                out.push(0x45); // i32.eqz (bool not)
+                Ok(())
+            }
+            // Integer bitwise NOT (`~`): one's complement, implemented as
+            // `x xor -1` (WASM has no `i64.not`). On a fixed-width kind the result
+            // is re-normalized to the width, matching the interpreter's
+            // `Value::int(!v, ty)`; on plain `i64` the full-width complement is
+            // exact. Any other operand type is rejected (falls back to the
+            // interpreters).
+            UnaryOp::BitNot => {
+                let kind = fixed_int_kind(inner.ty.name.as_str());
+                if kind.is_none() && inner.ty.name != "i64" {
+                    return Err(format!(
+                        "bitwise `~` on unsupported type `{}` (wasm backend)",
+                        inner.ty.name
+                    ));
+                }
+                lower_expr(ctx, inner, out)?;
+                out.push(0x42); // i64.const -1
+                write_sleb(out, -1);
+                out.push(0x85); // i64.xor
+                if let Some(kind) = kind {
+                    emit_normalize_i64(kind, out);
+                }
+                Ok(())
+            }
+            // Arithmetic negation (`-x`). A float operand uses `f64.neg`/`f32.neg`
+            // (IEEE sign-bit flip, matching the interpreters); an integer operand
+            // has no WASM `neg`, so it is `0 - x`, re-normalized on a fixed-width
+            // kind. Detected structurally because float arithmetic nodes are
+            // IR-annotated `i64`.
+            UnaryOp::Negate => {
+                if let Some(fty) = float_val_type_of(ctx, inner) {
+                    lower_expr(ctx, inner, out)?;
+                    out.push(match fty {
+                        WasmValType::F64 => 0x9a, // f64.neg
+                        WasmValType::F32 => 0x8c, // f32.neg
+                        _ => return Err("negate float detector returned non-float".to_string()),
+                    });
+                    return Ok(());
+                }
+                let kind = fixed_int_kind(inner.ty.name.as_str());
+                if kind.is_none() && inner.ty.name != "i64" {
+                    return Err(format!(
+                        "unary `-` on unsupported type `{}` (wasm backend)",
+                        inner.ty.name
+                    ));
+                }
+                out.push(0x42); // i64.const 0
+                write_sleb(out, 0);
+                lower_expr(ctx, inner, out)?;
+                out.push(0x7d); // i64.sub -> 0 - x
+                if let Some(kind) = kind {
+                    emit_normalize_i64(kind, out);
+                }
+                Ok(())
+            }
+        },
+        IrExprKind::Binary { left, op, right } => lower_binary(ctx, left, *op, right, out),
+        IrExprKind::String(text) => {
+            // A string literal is a constant pointer to its interned Data-section
+            // layout `[len i32][utf8 bytes]`.
+            let offset = ctx.pool.intern(text);
+            out.push(0x41); // i32.const
+            write_sleb(out, offset as i64);
+            Ok(())
+        }
+        IrExprKind::Array(elements) => lower_array_literal(ctx, expr, elements, out),
+        IrExprKind::Index { target, index } => lower_index_read(ctx, target, index, out),
+        IrExprKind::Field { target, field } => lower_field_read(ctx, target, field, out),
+        IrExprKind::Call { name, args } => {
+            // The host log builtin lowers to a `call` of the imported
+            // `env.log_i64` (WASM function index `LOG_I64_FUNC_INDEX`).
+            if name == WASM_LOG {
+                if args.len() != 1 {
+                    return Err(format!("wasm_log expects 1 argument, got {}", args.len()));
+                }
+                lower_expr(ctx, &args[0], out)?;
+                out.push(0x10); // call
+                write_uleb(out, LOG_I64_FUNC_INDEX as u64);
+                return Ok(());
+            }
+            // `console_log(s)` lowers to `env.console_log(ptr, len)`: push the
+            // string's linear-memory pointer and its length header, then call the
+            // imported host function. A browser host implements it as
+            // `console.log` over the (ptr, len) slice of `memory`.
+            if name == CONSOLE_LOG {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "console_log expects 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                lower_string_ptr_len(ctx, &args[0], out)?;
+                out.push(0x10); // call
+                write_uleb(out, CONSOLE_LOG_FUNC_INDEX as u64);
+                return Ok(());
+            }
+            // `dom_set_text(id, text)` lowers to
+            // `env.dom_set_text(id_ptr, id_len, text_ptr, text_len)`: push each
+            // string's pointer and length, then call the import. A browser host
+            // implements it as `document.getElementById(id).textContent = text`.
+            if name == DOM_SET_TEXT {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "dom_set_text expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                lower_string_ptr_len(ctx, &args[0], out)?;
+                lower_string_ptr_len(ctx, &args[1], out)?;
+                out.push(0x10); // call
+                write_uleb(out, DOM_SET_TEXT_FUNC_INDEX as u64);
+                return Ok(());
+            }
+            // Fixed-width integer conversions are inlined, not real calls.
+            // `to_<T>(x)` normalizes the argument's `i64` cell into `T`'s width
+            // (truncate + sign/zero-extend), matching the interpreter's
+            // `Value::int(x, T)`. This is the same encoding the native backend
+            // uses.
+            if let Some(kind) = to_int_conversion_kind(name) {
+                if args.len() != 1 {
+                    return Err(format!("`{name}` takes exactly one argument"));
+                }
+                lower_expr(ctx, &args[0], out)?;
+                emit_normalize_i64(kind, out);
+                return Ok(());
+            }
+            // `to_f32(x f64) -> f32` rounds an f64 to single precision with
+            // `f32.demote_f64`; `to_f64(x f32) -> f64` widens an f32 with
+            // `f64.promote_f32` (exact). These builtins are inlined, not real
+            // calls — the same encoding the native backend uses (`cvtsd2ss` /
+            // `cvtss2sd`), so the WASM result is bit-identical to the interpreter.
+            if name == "to_f32" {
+                if args.len() != 1 {
+                    return Err("`to_f32` takes exactly one argument".to_string());
+                }
+                lower_expr(ctx, &args[0], out)?;
+                out.push(0xb6); // f32.demote_f64
+                return Ok(());
+            }
+            if name == "to_f64" {
+                if args.len() != 1 {
+                    return Err("`to_f64` takes exactly one argument".to_string());
+                }
+                lower_expr(ctx, &args[0], out)?;
+                out.push(0xbb); // f64.promote_f32
+                return Ok(());
+            }
+            // `to_i64(x)` widens a fixed-width cell to `i64`; the source cell is
+            // already normalized, so this is the identity on the bits.
+            if name == "to_i64" {
+                if args.len() != 1 {
+                    return Err("`to_i64` takes exactly one argument".to_string());
+                }
+                lower_expr(ctx, &args[0], out)?;
+                return Ok(());
+            }
+            // `to_string(x)` builds a `[char_len][byte_len][utf8]` string record for
+            // an integer / bool / char / byte / string argument, matching the
+            // interpreters' `Value::Display` bit-for-bit. A float argument
+            // (`to_string(f32|f64)`) is DEFERRED — matching Rust's `Display` dtoa in
+            // WASM is out of scope — so it errors here and the function falls back to
+            // the interpreters.
+            if name == TO_STRING_BUILTIN {
+                if args.len() != 1 {
+                    return Err("`to_string` takes exactly one argument".to_string());
+                }
+                return lower_to_string(ctx, &args[0], out);
+            }
+            // Index-based string operations. Each is gated on a `string` first
+            // argument so the name cannot shadow a user function of the same
+            // spelling: only a genuine `string`-typed call routes here. `substring`
+            // and `find` are CHAR-indexed (they decode UTF-8 to map char index to
+            // byte offset), while `contains`/`starts_with`/`ends_with` are byte-exact
+            // substring/prefix/suffix tests — matching the interpreters bit-for-bit
+            // (`builtin_substring`/`builtin_find`/`char_find`/`builtin_contains`/…).
+            if name == SUBSTRING_BUILTIN && args.len() == 3 && args[0].ty.name == "string" {
+                return lower_substring(ctx, &args[0], &args[1], &args[2], out);
+            }
+            if name == FIND_BUILTIN && args.len() == 2 && args[0].ty.name == "string" {
+                return lower_find(ctx, &args[0], &args[1], out);
+            }
+            if name == CONTAINS_BUILTIN && args.len() == 2 && args[0].ty.name == "string" {
+                return lower_contains(ctx, &args[0], &args[1], out);
+            }
+            if name == STARTS_WITH_BUILTIN && args.len() == 2 && args[0].ty.name == "string" {
+                return lower_starts_with(ctx, &args[0], &args[1], out);
+            }
+            if name == ENDS_WITH_BUILTIN && args.len() == 2 && args[0].ty.name == "string" {
+                return lower_ends_with(ctx, &args[0], &args[1], out);
+            }
+            // Growable `list<T>` (scalar or `string` `T`) builtins. `list_new()`
+            // allocates an empty header; `push`/`get`/`set`/`pop` operate on a
+            // `list`-typed first argument (checked so these names cannot shadow a
+            // user function or an array op). `len(l)` is NOT special-cased here — a
+            // list's `len` shares offset 0 with the string/array length header, so
+            // the generic `len` path below reads it. A list op whose element is a
+            // MUTABLE heap type is deferred: `supported_list_element` returns
+            // `None`, so lowering errors and the function is demoted to the
+            // interpreters.
+            if name == LIST_NEW_BUILTIN {
+                return lower_list_new(ctx, args, out);
+            }
+            if name == LIST_PUSH_BUILTIN && args.len() == 2 && args[0].ty.list_element().is_some() {
+                return lower_list_push(ctx, &args[0], &args[1], out);
+            }
+            if name == LIST_GET_BUILTIN && args.len() == 2 && args[0].ty.list_element().is_some() {
+                return lower_list_get(ctx, &args[0], &args[1], out);
+            }
+            if name == LIST_SET_BUILTIN && args.len() == 3 && args[0].ty.list_element().is_some() {
+                return lower_list_set(ctx, &args[0], &args[1], &args[2], out);
+            }
+            if name == LIST_POP_BUILTIN && args.len() == 1 && args[0].ty.list_element().is_some() {
+                return lower_list_pop(ctx, &args[0], out);
+            }
+            // Growable `map<K, V>` (scalar `K`; scalar or `string` `V`) builtins.
+            // `map_new()` allocates an empty `[len][cap][entries]` header;
+            // `map_set`/`map_get`/`map_has`/`map_len` operate on a `map`-typed first
+            // argument. These names are not shared with any array/list op, so they
+            // dispatch on name directly (the arity/key/value types are validated in
+            // each lowering). A map op whose key is a heap type, or whose value is a
+            // MUTABLE heap type, is deferred: `supported_map_kv` returns `None`, so
+            // lowering errors and the function is demoted to the interpreters.
+            // `map_len(m)` shares offset 0 with the length header, but (unlike
+            // lists) it is spelled `map_len`, so it routes here explicitly.
+            if name == MAP_NEW_BUILTIN {
+                return lower_map_new(ctx, args, out);
+            }
+            if name == MAP_SET_BUILTIN && args.len() == 3 && args[0].ty.map_args().is_some() {
+                return lower_map_set(ctx, &args[0], &args[1], &args[2], out);
+            }
+            if name == MAP_GET_BUILTIN && args.len() == 2 && args[0].ty.map_args().is_some() {
+                return lower_map_get(ctx, &expr.ty, &args[0], &args[1], out);
+            }
+            if name == MAP_HAS_BUILTIN && args.len() == 2 && args[0].ty.map_args().is_some() {
+                return lower_map_has(ctx, &args[0], &args[1], out);
+            }
+            if name == MAP_LEN_BUILTIN && args.len() == 1 && args[0].ty.map_args().is_some() {
+                return lower_map_len(ctx, &args[0], out);
+            }
+            // `len(s)`/`len(a)`/`len(l)` reads the leading i32 length header.
+            if name == LEN_BUILTIN {
+                return lower_len(ctx, args, out);
+            }
+            // Overflow-aware arithmetic builtins (`checked_*`/`saturating_*`/
+            // `wrapping_*`). `wrapping_*` reuses the default fixed-width `+`/`-`/`*`;
+            // `saturating_*` clamps to `T`'s bounds; `checked_*` builds an
+            // `option<T>` record. Guarded by a fixed-width first operand so the
+            // names cannot shadow a user function of the same spelling.
+            if let Some((ovf_op, mode)) = overflow_builtin(name)
+                && args.len() == 2
+                && let Some(kind) = fixed_int_kind(args[0].ty.name.as_str())
+            {
+                if mode == OverflowMode::Wrapping {
+                    lower_expr(ctx, &args[0], out)?;
+                    lower_expr(ctx, &args[1], out)?;
+                    return emit_fixed_binop(ctx, ovf_op.binary_op(), kind, out);
+                }
+                return lower_wasm_overflow(
+                    ctx, ovf_op, mode, kind, &expr.ty, &args[0], &args[1], out,
+                );
+            }
+            // A call whose name is a declared struct is a struct construction: the
+            // IR lowerer emits struct literals as positional `Call`s.
+            if ctx.structs.contains_key(name) {
+                return lower_struct_construction(ctx, name, args, out);
+            }
+            // A call whose result type is a supported enum and whose name is one of
+            // its variants is enum construction: `some(x)`/`ok(x)`/`err(e)`/`none`
+            // (the built-ins) or a user `Variant(payload...)`. The IR lowerer emits
+            // these as positional `Call`s (with empty `args` for a unit variant),
+            // carrying the constructed enum type as `expr.ty`.
+            if let Some(layout) = ctx.enum_layout(&expr.ty)
+                && layout.tag_of(name).is_some()
+            {
+                return lower_enum_construction(ctx, &layout, name, args, out);
+            }
+            let index = *ctx.func_index.get(name).ok_or_else(|| {
+                format!("call to unsupported builtin or unknown function `{name}`")
+            })?;
+            for arg in args {
+                lower_expr(ctx, arg, out)?;
+                // Preserve Lullaby value semantics across the call boundary: an
+                // aggregate is an `i32` pointer, so passing it raw would let the
+                // callee mutate the caller's record through a shared pointer. A
+                // mutable aggregate argument (struct/array/enum — never an
+                // immutable `string`) is deep-copied into a fresh record here, so
+                // the callee receives an independent snapshot exactly like the
+                // interpreters clone the argument value. A returned aggregate is
+                // the callee's own fresh record, so no copy is needed there.
+                if is_mutable_aggregate(&arg.ty, ctx.structs, ctx.enums) {
+                    emit_deep_copy(ctx, &arg.ty, out)?;
+                }
+            }
+            out.push(0x10); // call
+            write_uleb(out, index as u64);
+            Ok(())
+        }
+        IrExprKind::Await { .. } => Err("await is not supported by the WASM backend".to_string()),
+        // Closures are not compiled to WASM in this increment: a function that
+        // constructs or calls a closure is skipped (this `Err`) and falls back to
+        // the interpreters, exactly like other unsupported constructs.
+        IrExprKind::Closure { .. } => {
+            Err("closures are not supported by the WASM backend".to_string())
+        }
+    }
+}
+
+/// Lower a `string` argument to the two host-import operands `[ptr, len]`: push a
+/// pointer to the string's first UTF-8 byte, then its UTF-8 BYTE length. The
+/// record pointer is evaluated once into a scratch `i32` local so a non-trivial
+/// string expression is not lowered twice; the operand pointer is
+/// `record_ptr + STR_DATA_OFF` (past the two `i32` headers) so the host slices
+/// `[ptr, ptr + len)` directly, and the length is the record's byte-length header
+/// (`STR_BYTE_LEN_OFF`) so multi-byte UTF-8 text decodes correctly — not the char
+/// count, which only equals the byte length for ASCII.
+pub(crate) fn lower_string_ptr_len(
+    ctx: &mut LowerCtx,
+    arg: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if value_val_type(&arg.ty, ctx.structs, ctx.enums) != Some(WasmValType::I32)
+        || arg.ty.name != "string"
+    {
+        return Err(format!(
+            "console_log/dom_set_text expect a string but got `{}`",
+            arg.ty.name
+        ));
+    }
+    lower_expr(ctx, arg, out)?; // string record pointer (i32)
+    let ptr = ctx.add_local(WasmValType::I32);
+    set_local(out, ptr);
+    // operand: record_ptr + STR_DATA_OFF (pointer to the first UTF-8 byte).
+    get_local(out, ptr);
+    out.push(0x41); // i32.const STR_DATA_OFF
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    // operand: byte length (the second header).
+    get_local(out, ptr); // base for the length load
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    Ok(())
+}
+
+/// Lower `len(x)` where `x` is a `string` or `array`: load the leading `i32`
+/// length header (char count for strings, element count for arrays), then extend
+/// to `i64` (the builtin's result type on the interpreters).
+pub(crate) fn lower_len(
+    ctx: &mut LowerCtx,
+    args: &[IrExpr],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if args.len() != 1 {
+        return Err(format!("len expects 1 argument, got {}", args.len()));
+    }
+    let arg = &args[0];
+    if value_val_type(&arg.ty, ctx.structs, ctx.enums) != Some(WasmValType::I32) {
+        return Err(format!(
+            "len expects a string or array but got `{}`",
+            arg.ty.name
+        ));
+    }
+    lower_expr(ctx, arg, out)?; // pointer (i32)
+    out.push(0x28); // i32.load
+    out.push(0x02); // align 2 (4-byte)
+    write_uleb(out, 0); // offset 0 (the length header)
+    // i64.extend_i32_s -> the builtin returns i64.
+    out.push(0xac);
+    Ok(())
+}
+
+/// Lower a struct construction `Struct(f0, f1, ...)`: `__alloc` a run of one
+/// 8-byte slot per field, then store each field value at its slot offset. Leaves
+/// the base pointer on the stack.
+pub(crate) fn lower_struct_construction(
+    ctx: &mut LowerCtx,
+    name: &str,
+    args: &[IrExpr],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let fields = ctx
+        .structs
+        .get(name)
+        .ok_or_else(|| format!("`{name}` is not a struct"))?
+        .clone();
+    if args.len() != fields.len() {
+        return Err(format!(
+            "struct `{name}` expects {} fields, got {}",
+            fields.len(),
+            args.len()
+        ));
+    }
+    let ptr = alloc_bytes(ctx, fields.len() as i32 * SLOT_SIZE, out);
+    for (slot, ((_, field_ty), arg)) in fields.iter().zip(args).enumerate() {
+        let slot_ty = slot_val_type(field_ty, ctx.structs, ctx.enums)
+            .ok_or_else(|| format!("struct `{name}` field has unsupported type"))?;
+        get_local(out, ptr); // base pointer
+        lower_expr(ctx, arg, out)?; // field value
+        emit_store_at(slot_ty, slot as i32 * SLOT_SIZE, out);
+    }
+    get_local(out, ptr);
+    Ok(())
+}
+
+/// Lower an enum construction (`some(x)`/`none`/`ok(x)`/`err(e)` or a user
+/// `Variant(payload...)`): `__alloc` a `[tag i32 (padded)][slot0][slot1]...]`
+/// record sized for the enum's widest variant, store the variant's discriminant
+/// tag at offset 0, store each payload value into its leading slot, and leave the
+/// base pointer (the enum value) on the stack. The discriminant is the variant's
+/// index in the enum's declaration order, matching the interpreters (which
+/// dispatch `match` by variant name against this same ordered layout).
+pub(crate) fn lower_enum_construction(
+    ctx: &mut LowerCtx,
+    layout: &EnumLayout,
+    variant: &str,
+    args: &[IrExpr],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let tag = layout
+        .tag_of(variant)
+        .ok_or_else(|| format!("`{variant}` is not a variant of the enum"))?;
+    let payload = layout
+        .payload_of(variant)
+        .ok_or_else(|| format!("`{variant}` is not a variant of the enum"))?
+        .to_vec();
+    if args.len() != payload.len() {
+        return Err(format!(
+            "enum variant `{variant}` expects {} payload value(s), got {}",
+            payload.len(),
+            args.len()
+        ));
+    }
+    let ptr = alloc_bytes(ctx, layout.size_bytes(), out);
+    // Tag at offset 0 (i32 discriminant).
+    get_local(out, ptr);
+    out.push(0x41); // i32.const tag
+    write_sleb(out, tag as i64);
+    emit_store_at(WasmValType::I32, 0, out);
+    // Payload values into the leading slots (offset ENUM_PAYLOAD_BASE + i*SLOT).
+    for (slot, (payload_ty, arg)) in payload.iter().zip(args).enumerate() {
+        let slot_ty = slot_val_type(payload_ty, ctx.structs, ctx.enums)
+            .ok_or_else(|| format!("enum variant `{variant}` payload has unsupported type"))?;
+        get_local(out, ptr); // base pointer
+        lower_expr(ctx, arg, out)?; // payload value
+        emit_store_at(slot_ty, ENUM_PAYLOAD_BASE + slot as i32 * SLOT_SIZE, out);
+    }
+    get_local(out, ptr);
+    Ok(())
+}
+
+/// Lower a fixed array literal `[e0, e1, ...]`: `__alloc` a `[len i32][slots]`
+/// block, write the length header and each element slot, and leave the base
+/// pointer on the stack.
+pub(crate) fn lower_array_literal(
+    ctx: &mut LowerCtx,
+    expr: &IrExpr,
+    elements: &[IrExpr],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = expr
+        .ty
+        .array_element()
+        .ok_or_else(|| format!("array literal has non-array type `{}`", expr.ty.name))?;
+    let slot_ty = slot_val_type(&elem_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("array element type `{}` is unsupported", elem_ty.name))?;
+    let total = LEN_HEADER + elements.len() as i32 * SLOT_SIZE;
+    let ptr = alloc_bytes(ctx, total, out);
+    // Length header: i32.store [ptr + 0] = element count.
+    get_local(out, ptr);
+    out.push(0x41); // i32.const
+    write_sleb(out, elements.len() as i64);
+    out.push(0x36); // i32.store
+    out.push(0x02); // align 2
+    write_uleb(out, 0);
+    for (i, element) in elements.iter().enumerate() {
+        get_local(out, ptr);
+        lower_expr(ctx, element, out)?;
+        emit_store_at(slot_ty, LEN_HEADER + i as i32 * SLOT_SIZE, out);
+    }
+    get_local(out, ptr);
+    Ok(())
+}
+
+/// Lower a struct field read `target.field`: push the target pointer, add the
+/// field's slot offset, and load the slot.
+pub(crate) fn lower_field_read(
+    ctx: &mut LowerCtx,
+    target: &IrExpr,
+    field: &str,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (offset, slot_ty) = struct_field_slot(ctx, &target.ty, field)?;
+    lower_expr(ctx, target, out)?; // base pointer
+    emit_load_at(slot_ty, offset, out);
+    Ok(())
+}
+
+/// Lower an array element read `target[index]`: compute the slot address, then
+/// load it. WASM traps on out-of-bounds memory access (no explicit bounds check
+/// this increment).
+pub(crate) fn lower_index_read(
+    ctx: &mut LowerCtx,
+    target: &IrExpr,
+    index: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = target
+        .ty
+        .array_element()
+        .ok_or_else(|| format!("indexing a non-array type `{}`", target.ty.name))?;
+    let slot_ty = slot_val_type(&elem_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("array element type `{}` is unsupported", elem_ty.name))?;
+    lower_expr(ctx, target, out)?; // base pointer (i32)
+    lower_array_slot_offset(ctx, index, out)?; // += header + index*SLOT_SIZE
+    emit_load(slot_ty, out);
+    Ok(())
+}
+
+pub(crate) fn lower_binary(
+    ctx: &mut LowerCtx,
+    left: &IrExpr,
+    op: BinaryOp,
+    right: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // String ordering (`< <= > >=`) is lexicographic by content; the scalar
+    // backend would compare heap pointers, so defer the function to the
+    // interpreters. Concatenation `+` and equality use their own paths.
+    if matches!(
+        op,
+        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual
+    ) && (left.ty.name == "string" || right.ty.name == "string")
+    {
+        return Err("string ordering comparison is not supported on the wasm backend".to_string());
+    }
+    // Short-circuit `and`/`or` via WASM `if`/`else` producing i32.
+    match op {
+        BinaryOp::And => {
+            lower_expr(ctx, left, out)?;
+            out.push(0x04); // if
+            out.push(0x7f); // result i32
+            lower_expr(ctx, right, out)?;
+            out.push(0x05); // else
+            out.push(0x41); // i32.const 0
+            write_sleb(out, 0);
+            out.push(0x0b); // end
+            return Ok(());
+        }
+        BinaryOp::Or => {
+            lower_expr(ctx, left, out)?;
+            out.push(0x04); // if
+            out.push(0x7f); // result i32
+            out.push(0x41); // i32.const 1
+            write_sleb(out, 1);
+            out.push(0x05); // else
+            lower_expr(ctx, right, out)?;
+            out.push(0x0b); // end
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    // Runtime string concatenation: `a + b` where both operands are `string`
+    // allocates a fresh `[char_len][byte_len][utf8 bytes]` record whose bytes are
+    // the two operands' byte ranges joined and whose char/byte headers are the
+    // sums of the operands' headers. Strings are immutable, so the result is a new
+    // record with no aliasing. Any other `+` operand type falls through to the
+    // scalar arithmetic paths below.
+    if op == BinaryOp::Add && left.ty.name == "string" && right.ty.name == "string" {
+        return lower_string_concat(ctx, left, right, out);
+    }
+
+    // A fixed-width operand kind (both operands share it; the type checker forbids
+    // mixing widths) selects width- and signedness-correct codegen that
+    // re-normalizes width-producing results, mirroring the interpreter free
+    // functions and the native backend.
+    if let Some(kind) = fixed_int_kind(left.ty.name.as_str()) {
+        lower_expr(ctx, left, out)?;
+        lower_expr(ctx, right, out)?;
+        return emit_fixed_binop(ctx, op, kind, out);
+    }
+
+    // Integer bitwise/shift operators on plain `i64` map directly to the WASM
+    // opcodes (no width normalization needed). f64/bool/char/byte cannot carry
+    // them, so a bitwise/shift op on a non-integer type is rejected (the function
+    // falls back to the interpreters).
+    if matches!(
+        op,
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr
+    ) {
+        if left.ty.name != "i64" {
+            return Err(format!(
+                "bitwise/shift operator on unsupported type `{}` (wasm backend)",
+                left.ty.name
+            ));
+        }
+        lower_expr(ctx, left, out)?;
+        lower_expr(ctx, right, out)?;
+        return emit_i64_bitwise_or_shift(op, out);
+    }
+
+    // The operand value type drives the opcode family. For a FLOAT operand this
+    // must be derived structurally: the IR annotates a float ARITHMETIC node with
+    // `i64` (see the IR binary lowerer), so `if a + b > c` would otherwise pick an
+    // integer compare over f32/f64 values. `float_val_type_of` looks through
+    // arithmetic to the reliably-typed leaves (float literals, float locals, and
+    // the `to_f32`/`to_f64` conversions); when neither operand is a float it falls
+    // back to the left operand's own value type (i64/i32).
+    let operand_ty = match float_val_type_of(ctx, left).or_else(|| float_val_type_of(ctx, right)) {
+        Some(ft) => ft,
+        None => expr_val_type(ctx, left)?
+            .ok_or_else(|| "binary operand has no scalar value".to_string())?,
+    };
+    lower_expr(ctx, left, out)?;
+    lower_expr(ctx, right, out)?;
+    // Plain `i64` signed division goes through the wrapping guard so `i64::MIN /
+    // -1` yields `i64::MIN` instead of trapping, matching the interpreters.
+    if matches!((op, operand_ty), (BinaryOp::Divide, WasmValType::I64)) {
+        emit_i64_signed_div_guarded(ctx, out);
+        return Ok(());
+    }
+    emit_binary_op_typed(op, operand_ty, out)
+}
+
+/// Lower runtime string concatenation `a + b` (both `string`) into a fresh
+/// `[char_len: i32][byte_len: i32][utf8 bytes]` record and leave its pointer on
+/// the stack.
+///
+/// Strings are immutable, so concatenation always builds a NEW record (no
+/// aliasing): read each operand's char-count and byte-count headers, `__alloc` a
+/// record of `STR_DATA_OFF + byte_a + byte_b` bytes, write the summed headers
+/// (char count = `char_a + char_b`, byte count = `byte_a + byte_b`), then
+/// `memory.copy` each operand's UTF-8 byte range into place. Working in BYTE
+/// ranges (not char counts) keeps multi-byte UTF-8 correct; the result's `len`
+/// (its char-count header) is `len(a) + len(b)`, matching the interpreters
+/// bit-for-bit. Chained `a + b + c` nests naturally: the inner `+` yields a normal
+/// string record consumed by the outer `+`.
+pub(crate) fn lower_string_concat(
+    ctx: &mut LowerCtx,
+    left: &IrExpr,
+    right: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // Evaluate both operands once into scratch record-pointer locals (each may be
+    // a non-trivial expression — a variable, a literal, or a nested concat).
+    lower_expr(ctx, left, out)?;
+    let a = ctx.add_local(WasmValType::I32);
+    set_local(out, a);
+    lower_expr(ctx, right, out)?;
+    let b = ctx.add_local(WasmValType::I32);
+    set_local(out, b);
+
+    // Read the four headers into locals: char and byte counts of each operand.
+    let char_a = ctx.add_local(WasmValType::I32);
+    get_local(out, a);
+    emit_load_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+    set_local(out, char_a);
+    let byte_a = ctx.add_local(WasmValType::I32);
+    get_local(out, a);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    set_local(out, byte_a);
+    let char_b = ctx.add_local(WasmValType::I32);
+    get_local(out, b);
+    emit_load_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+    set_local(out, char_b);
+    let byte_b = ctx.add_local(WasmValType::I32);
+    get_local(out, b);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    set_local(out, byte_b);
+
+    // dst = __alloc(STR_DATA_OFF + byte_a + byte_b): header + both byte ranges.
+    out.push(0x41); // i32.const STR_DATA_OFF
+    write_sleb(out, STR_DATA_OFF as i64);
+    get_local(out, byte_a);
+    out.push(0x6a); // i32.add
+    get_local(out, byte_b);
+    out.push(0x6a); // i32.add
+    let dst = alloc_runtime(ctx, out);
+
+    // dst[char_len] = char_a + char_b.
+    get_local(out, dst);
+    get_local(out, char_a);
+    get_local(out, char_b);
+    out.push(0x6a); // i32.add
+    emit_store_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+    // dst[byte_len] = byte_a + byte_b.
+    get_local(out, dst);
+    get_local(out, byte_a);
+    get_local(out, byte_b);
+    out.push(0x6a); // i32.add
+    emit_store_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+
+    // memory.copy(dst + STR_DATA_OFF, a + STR_DATA_OFF, byte_a): first operand's
+    // bytes. `memory.copy` pops size, src, dest (pushed dest, src, size).
+    get_local(out, dst);
+    out.push(0x41); // i32.const STR_DATA_OFF
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add -> dest
+    get_local(out, a);
+    out.push(0x41);
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add -> src
+    get_local(out, byte_a); // size
+    emit_memory_copy(out);
+
+    // memory.copy(dst + STR_DATA_OFF + byte_a, b + STR_DATA_OFF, byte_b): second
+    // operand's bytes appended after the first range.
+    get_local(out, dst);
+    out.push(0x41);
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    get_local(out, byte_a);
+    out.push(0x6a); // i32.add -> dest = dst + STR_DATA_OFF + byte_a
+    get_local(out, b);
+    out.push(0x41);
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add -> src
+    get_local(out, byte_b); // size
+    emit_memory_copy(out);
+
+    // The concatenated record's pointer is the value of the expression.
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Emit the `memory.copy` bulk-memory instruction, copying `size` bytes from `src`
+/// to `dest` within the single linear memory (all three operands already on the
+/// stack in dest, src, size order). Encoded as the `0xfc` misc prefix, sub-opcode
+/// `0x0a`, then the destination and source memory indices (both `0` — the module
+/// has exactly one memory).
+pub(crate) fn emit_memory_copy(out: &mut Vec<u8>) {
+    out.push(0xfc); // misc-op prefix
+    write_uleb(out, 0x0a); // memory.copy
+    out.push(0x00); // dest memory index
+    out.push(0x00); // src memory index
+}
+
+// -- Index-based string-operation codegen ------------------------------------
+//
+// These lower the char-indexed `substring`/`find` and the byte-exact
+// `contains`/`starts_with`/`ends_with` builtins over the `[char_len][byte_len]
+// [utf8 bytes]` string record. The byte scans compare `memory[hay + i]` against
+// `memory[needle + j]` with `i32.load8_u`; `find`/`substring` additionally decode
+// UTF-8 lead bytes (a byte is a char start iff `(b & 0xC0) != 0x80`) to map char
+// indices to byte offsets. Every scan is an inline WASM loop over the UTF-8 bytes,
+// matching the interpreters' `str::find`/`str::contains`/`chars()` bit-for-bit.
+
+/// Push a pointer to a string record's first UTF-8 byte: `record_ptr + STR_DATA_OFF`.
+/// The record pointer must already be on the stack.
+pub(crate) fn emit_add_data_off(out: &mut Vec<u8>) {
+    out.push(0x41); // i32.const STR_DATA_OFF
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+}
+
+/// Emit `i32.load8_u` reading the byte at the address on the stack (offset 0).
+pub(crate) fn emit_load8_u(out: &mut Vec<u8>) {
+    out.push(0x2d); // i32.load8_u
+    write_uleb(out, 0); // align 0 (1-byte)
+    write_uleb(out, 0); // offset 0
+}
+
+/// Evaluate a `string` expression into a fresh scratch triple of `i32` locals and
+/// return them as `(data_ptr, byte_len)`: `data_ptr` points at the first UTF-8
+/// byte (`record + STR_DATA_OFF`) and `byte_len` is the UTF-8 byte-length header.
+/// The record pointer is evaluated once so a non-trivial string expression is not
+/// lowered twice.
+pub(crate) fn lower_string_data_len(
+    ctx: &mut LowerCtx,
+    arg: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(u32, u32), String> {
+    if arg.ty.name != "string" {
+        return Err(format!(
+            "index-based string op expects a string but got `{}`",
+            arg.ty.name
+        ));
+    }
+    lower_expr(ctx, arg, out)?; // record pointer (i32)
+    let record = ctx.add_local(WasmValType::I32);
+    set_local(out, record);
+    // data = record + STR_DATA_OFF
+    let data = ctx.add_local(WasmValType::I32);
+    get_local(out, record);
+    emit_add_data_off(out);
+    set_local(out, data);
+    // byte_len = i32.load [record + STR_BYTE_LEN_OFF]
+    let byte_len = ctx.add_local(WasmValType::I32);
+    get_local(out, record);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    set_local(out, byte_len);
+    Ok((data, byte_len))
+}
+
+/// Emit an expression that leaves an `i32` bool (`1`/`0`) on the stack: whether the
+/// `needle` bytes match the haystack bytes starting at byte position `pos`. The
+/// caller guarantees `pos + needle_len <= hay_len`, so no bounds check is needed
+/// inside; an empty needle (`needle_len == 0`) yields `1` (the inner loop runs zero
+/// times), matching Rust's `""` prefix/substring semantics. Emitted as a
+/// self-contained `block (result i32)` holding a byte-compare loop.
+pub(crate) fn emit_bytes_match_at(
+    ctx: &mut LowerCtx,
+    hay_data: u32,
+    needle_data: u32,
+    needle_len: u32,
+    pos: u32,
+    out: &mut Vec<u8>,
+) {
+    // result block: j = 0; loop { if j >= needle_len -> push 1, break;
+    //   if hay[pos+j] != needle[j] -> push 0, break; j += 1; continue }
+    let j = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, j);
+    out.push(0x02); // block (result i32)
+    out.push(0x7f);
+    out.push(0x03); // loop (result i32)
+    out.push(0x7f);
+    // if j >= needle_len -> matched: push 1 and break out of both.
+    get_local(out, j);
+    get_local(out, needle_len);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x04); // if (no result — a branch exits the enclosing blocks)
+    out.push(0x40);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x0c); // br 2 (leave block with 1 on the stack)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // if hay[pos + j] != needle[j] -> mismatch: push 0 and break.
+    get_local(out, hay_data);
+    get_local(out, pos);
+    out.push(0x6a); // i32.add
+    get_local(out, j);
+    out.push(0x6a); // i32.add -> hay_data + pos + j
+    emit_load8_u(out);
+    get_local(out, needle_data);
+    get_local(out, j);
+    out.push(0x6a); // i32.add -> needle_data + j
+    emit_load8_u(out);
+    out.push(0x47); // i32.ne
+    out.push(0x04); // if
+    out.push(0x40);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    out.push(0x0c); // br 2 (leave block with 0)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // j += 1; continue the loop.
+    get_local(out, j);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, j);
+    out.push(0x0c); // br 0 (repeat loop)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block -> i32 bool on the stack
+}
+
+/// Emit a scan for the FIRST byte position at which `needle` matches `hay`, storing
+/// that byte position into `found_pos` and a `1`/`0` flag into `found_flag`. Mirrors
+/// Rust's `str::find` at the byte level: it tries every start `pos` in
+/// `0..=(hay_len - needle_len)` and stops at the first full byte match. An empty
+/// needle matches at `pos = 0` (the match loop runs zero iterations), matching
+/// `"...".find("") == Some(0)`. When `needle_len > hay_len` the outer loop never
+/// runs and `found_flag` stays `0`. Returns `(found_pos, found_flag)`: fresh
+/// caller-visible `i32` locals holding the matched byte position and the found
+/// flag, initialized by this function.
+pub(crate) fn emit_byte_search(
+    ctx: &mut LowerCtx,
+    hay_data: u32,
+    hay_len: u32,
+    needle_data: u32,
+    needle_len: u32,
+    out: &mut Vec<u8>,
+) -> (u32, u32) {
+    let found_pos = ctx.add_local(WasmValType::I32);
+    let found_flag = ctx.add_local(WasmValType::I32);
+    // found_flag = 0; found_pos = 0.
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, found_flag);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, found_pos);
+    // limit = hay_len - needle_len (last valid start position, inclusive). When
+    // needle_len > hay_len this is negative, so the `pos <= limit` guard fails
+    // immediately and the search reports "not found".
+    let limit = ctx.add_local(WasmValType::I32);
+    get_local(out, hay_len);
+    get_local(out, needle_len);
+    out.push(0x6b); // i32.sub
+    set_local(out, limit);
+    // pos = 0; loop { if pos > limit break; if match_at(pos) { found; break }; pos += 1 }
+    let pos = ctx.add_local(WasmValType::I32);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, pos);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when pos > limit (signed; limit may be negative).
+    get_local(out, pos);
+    get_local(out, limit);
+    out.push(0x4a); // i32.gt_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // if bytes_match_at(pos) { found_pos = pos; found_flag = 1; break }
+    emit_bytes_match_at(ctx, hay_data, needle_data, needle_len, pos, out);
+    out.push(0x04); // if
+    out.push(0x40);
+    get_local(out, pos);
+    set_local(out, found_pos);
+    out.push(0x41);
+    write_sleb(out, 1);
+    set_local(out, found_flag);
+    out.push(0x0c); // br 2 (out of the block)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // pos += 1; continue.
+    get_local(out, pos);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, pos);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    (found_pos, found_flag)
+}
+
+/// Emit a loop that counts the number of UTF-8 characters in `data[0..byte_end)`
+/// and leaves that count (an `i32`) on the stack. A byte begins a character iff
+/// `(b & 0xC0) != 0x80` (it is not a continuation byte), so the char count is the
+/// number of non-continuation bytes in the range — exactly what
+/// `text[..byte_index].chars().count()` yields in the interpreters' `char_find`.
+/// `data` and `byte_end` are `i32` locals; `byte_end` is a byte offset relative to
+/// `data`.
+pub(crate) fn emit_char_count_upto(
+    ctx: &mut LowerCtx,
+    data: u32,
+    byte_end: u32,
+    out: &mut Vec<u8>,
+) {
+    let count = ctx.add_local(WasmValType::I32);
+    let bi = ctx.add_local(WasmValType::I32);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, count);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, bi);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when bi >= byte_end.
+    get_local(out, bi);
+    get_local(out, byte_end);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1
+    write_uleb(out, 1);
+    // if (mem[data + bi] & 0xC0) != 0x80 -> count += 1 (a char start).
+    get_local(out, data);
+    get_local(out, bi);
+    out.push(0x6a); // i32.add
+    emit_load8_u(out);
+    out.push(0x41); // i32.const 0xC0
+    write_sleb(out, 0xC0);
+    out.push(0x71); // i32.and
+    out.push(0x41); // i32.const 0x80
+    write_sleb(out, 0x80);
+    out.push(0x47); // i32.ne
+    out.push(0x04); // if
+    out.push(0x40);
+    get_local(out, count);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, count);
+    out.push(0x0b); // end if
+    // bi += 1; continue.
+    get_local(out, bi);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, bi);
+    out.push(0x0c); // br 0
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    get_local(out, count); // leave the count on the stack
+}
+
+/// Emit a loop that advances a byte offset from the start of `data` past exactly
+/// `target_char` whole UTF-8 characters, storing the resulting byte offset into the
+/// caller-owned `i32` local `out_byte`. Each step moves past one lead byte and then
+/// over all following continuation bytes (`(b & 0xC0) == 0x80`). For
+/// `target_char == char_count` this lands on `byte_len` (one past the last byte).
+/// The string is well-formed UTF-8 and `target_char <= char_count` is guaranteed by
+/// the caller's bounds check, so the walk terminates in range.
+pub(crate) fn emit_char_index_to_byte(
+    ctx: &mut LowerCtx,
+    data: u32,
+    byte_len: u32,
+    target_char: u32,
+    out_byte: u32,
+    out: &mut Vec<u8>,
+) {
+    // bi = 0; c = 0; loop { if c >= target_char break; bi += 1;
+    //   while bi < byte_len and (mem[data+bi] & 0xC0)==0x80 { bi += 1 }; c += 1 }
+    let c = ctx.add_local(WasmValType::I32);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, out_byte); // bi
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, c);
+    out.push(0x02); // outer block
+    out.push(0x40);
+    out.push(0x03); // outer loop (over chars)
+    out.push(0x40);
+    // break when c >= target_char.
+    get_local(out, c);
+    get_local(out, target_char);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of outer block)
+    write_uleb(out, 1);
+    // bi += 1 (past the lead byte).
+    get_local(out, out_byte);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, out_byte);
+    // inner loop: while bi < byte_len and mem[data+bi] is a continuation byte { bi += 1 }
+    out.push(0x02); // inner block
+    out.push(0x40);
+    out.push(0x03); // inner loop
+    out.push(0x40);
+    // break inner when bi >= byte_len.
+    get_local(out, out_byte);
+    get_local(out, byte_len);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of inner block)
+    write_uleb(out, 1);
+    // break inner when NOT a continuation byte: (mem[data+bi] & 0xC0) != 0x80.
+    get_local(out, data);
+    get_local(out, out_byte);
+    out.push(0x6a); // i32.add
+    emit_load8_u(out);
+    out.push(0x41);
+    write_sleb(out, 0xC0);
+    out.push(0x71); // i32.and
+    out.push(0x41);
+    write_sleb(out, 0x80);
+    out.push(0x47); // i32.ne
+    out.push(0x0d); // br_if 1 (out of inner block — reached the next char start)
+    write_uleb(out, 1);
+    // bi += 1; continue inner.
+    get_local(out, out_byte);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, out_byte);
+    out.push(0x0c); // br 0 (repeat inner)
+    write_uleb(out, 0);
+    out.push(0x0b); // end inner loop
+    out.push(0x0b); // end inner block
+    // c += 1; continue outer.
+    get_local(out, c);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, c);
+    out.push(0x0c); // br 0 (repeat outer)
+    write_uleb(out, 0);
+    out.push(0x0b); // end outer loop
+    out.push(0x0b); // end outer block
+}
+
+/// Lower `substring(s, start, end) -> string`: the char-indexed half-open
+/// `[start, end)` slice. Matches `builtin_substring` exactly: `start`/`end` are
+/// char indices; if `start < 0 || end < 0 || start > end || end > char_count` the
+/// range is out of bounds and the interpreters raise `L0413`, so the WASM path
+/// traps (`unreachable`) rather than producing a wrong value. Otherwise the slice's
+/// char indices are mapped to byte offsets by walking the UTF-8, a fresh
+/// `[char_len][byte_len][utf8]` record is allocated, and the byte range is
+/// `memory.copy`'d in.
+pub(crate) fn lower_substring(
+    ctx: &mut LowerCtx,
+    s: &IrExpr,
+    start: &IrExpr,
+    end: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // Evaluate the source string into (data, byte_len); also read its char-count
+    // header for the bounds check.
+    lower_expr(ctx, s, out)?; // record pointer
+    let record = ctx.add_local(WasmValType::I32);
+    set_local(out, record);
+    let char_count = ctx.add_local(WasmValType::I32);
+    get_local(out, record);
+    emit_load_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+    set_local(out, char_count);
+    let byte_len = ctx.add_local(WasmValType::I32);
+    get_local(out, record);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    set_local(out, byte_len);
+    let data = ctx.add_local(WasmValType::I32);
+    get_local(out, record);
+    emit_add_data_off(out);
+    set_local(out, data);
+
+    // start/end are i64 char indices; narrow to i32 for offset math (a valid char
+    // index fits in i32 — a string cannot hold more than 2^31 chars in a wasm32
+    // linear memory). Keep the i64 values for the bounds comparisons so a huge or
+    // negative index is rejected exactly like the interpreters.
+    let start64 = ctx.add_local(WasmValType::I64);
+    lower_expr(ctx, start, out)?;
+    set_local(out, start64);
+    let end64 = ctx.add_local(WasmValType::I64);
+    lower_expr(ctx, end, out)?;
+    set_local(out, end64);
+
+    // Bounds check (traps on failure): start < 0 || end < 0 || start > end ||
+    // end > char_count. char_count is an i32 count; extend it to i64 for the
+    // comparison.
+    // cond = (start < 0) | (end < 0) | (start > end) | (end > char_count)
+    get_local(out, start64);
+    out.push(0x42); // i64.const 0
+    write_sleb(out, 0);
+    out.push(0x53); // i64.lt_s -> start < 0
+    get_local(out, end64);
+    out.push(0x42);
+    write_sleb(out, 0);
+    out.push(0x53); // end < 0
+    out.push(0x72); // i32.or
+    get_local(out, start64);
+    get_local(out, end64);
+    out.push(0x55); // i64.gt_s -> start > end
+    out.push(0x72); // i32.or
+    get_local(out, end64);
+    get_local(out, char_count);
+    out.push(0xac); // i64.extend_i32_s (char_count -> i64)
+    out.push(0x55); // i64.gt_s -> end > char_count
+    out.push(0x72); // i32.or
+    out.push(0x04); // if (out-of-bounds) { unreachable }
+    out.push(0x40);
+    out.push(0x00); // unreachable (trap — mirrors the interpreters' L0413)
+    out.push(0x0b); // end if
+
+    // start_char / end_char as i32 char indices.
+    let start_char = ctx.add_local(WasmValType::I32);
+    get_local(out, start64);
+    out.push(0xa7); // i32.wrap_i64
+    set_local(out, start_char);
+    let end_char = ctx.add_local(WasmValType::I32);
+    get_local(out, end64);
+    out.push(0xa7); // i32.wrap_i64
+    set_local(out, end_char);
+
+    // Map char indices to byte offsets by walking the UTF-8.
+    let start_byte = ctx.add_local(WasmValType::I32);
+    emit_char_index_to_byte(ctx, data, byte_len, start_char, start_byte, out);
+    let end_byte = ctx.add_local(WasmValType::I32);
+    emit_char_index_to_byte(ctx, data, byte_len, end_char, end_byte, out);
+
+    // slice_bytes = end_byte - start_byte; slice_chars = end_char - start_char.
+    let slice_bytes = ctx.add_local(WasmValType::I32);
+    get_local(out, end_byte);
+    get_local(out, start_byte);
+    out.push(0x6b); // i32.sub
+    set_local(out, slice_bytes);
+
+    // dst = __alloc(STR_DATA_OFF + slice_bytes).
+    out.push(0x41); // i32.const STR_DATA_OFF
+    write_sleb(out, STR_DATA_OFF as i64);
+    get_local(out, slice_bytes);
+    out.push(0x6a); // i32.add
+    let dst = alloc_runtime(ctx, out);
+    // dst.char_len = end_char - start_char.
+    get_local(out, dst);
+    get_local(out, end_char);
+    get_local(out, start_char);
+    out.push(0x6b); // i32.sub
+    emit_store_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+    // dst.byte_len = slice_bytes.
+    get_local(out, dst);
+    get_local(out, slice_bytes);
+    emit_store_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    // memory.copy(dst + STR_DATA_OFF, data + start_byte, slice_bytes).
+    get_local(out, dst);
+    emit_add_data_off(out); // dest
+    get_local(out, data);
+    get_local(out, start_byte);
+    out.push(0x6a); // i32.add -> src
+    get_local(out, slice_bytes); // size
+    emit_memory_copy(out);
+
+    get_local(out, dst); // the slice record's pointer is the value
+    Ok(())
+}
+
+/// Lower `find(haystack, needle) -> i64`: the CHAR index of the first byte-level
+/// occurrence of `needle`, or `-1` if absent. Matches `char_find` exactly: byte
+/// search for the first match, then count the UTF-8 characters preceding that byte
+/// offset (`text[..byte_index].chars().count()`). An empty needle finds at byte 0,
+/// whose preceding char count is 0, so `find(s, "") == 0` — matching Rust's
+/// `find("") == Some(0)`.
+pub(crate) fn lower_find(
+    ctx: &mut LowerCtx,
+    haystack: &IrExpr,
+    needle: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (hay_data, hay_len) = lower_string_data_len(ctx, haystack, out)?;
+    let (needle_data, needle_len) = lower_string_data_len(ctx, needle, out)?;
+    let (found_pos, found_flag) =
+        emit_byte_search(ctx, hay_data, hay_len, needle_data, needle_len, out);
+    // if found_flag { char_count(hay[0..found_pos]) as i64 } else { -1 }
+    get_local(out, found_flag);
+    out.push(0x04); // if (result i64)
+    out.push(0x7e);
+    emit_char_count_upto(ctx, hay_data, found_pos, out); // i32 char index
+    out.push(0xac); // i64.extend_i32_s
+    out.push(0x05); // else
+    out.push(0x42); // i64.const -1
+    write_sleb(out, -1);
+    out.push(0x0b); // end if -> i64 on the stack
+    Ok(())
+}
+
+/// Lower `contains(s, sub) -> bool`: byte-exact substring test. Emits the same
+/// byte search as `find` and yields its found flag (`1`/`0`). An empty `sub` is
+/// contained (matches at byte 0), matching Rust's `str::contains("")`.
+pub(crate) fn lower_contains(
+    ctx: &mut LowerCtx,
+    s: &IrExpr,
+    sub: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (hay_data, hay_len) = lower_string_data_len(ctx, s, out)?;
+    let (needle_data, needle_len) = lower_string_data_len(ctx, sub, out)?;
+    let (_found_pos, found_flag) =
+        emit_byte_search(ctx, hay_data, hay_len, needle_data, needle_len, out);
+    get_local(out, found_flag); // i32 bool result
+    Ok(())
+}
+
+/// Lower `starts_with(s, prefix) -> bool`: byte-exact prefix test. If
+/// `prefix_len > s_len` the result is `0`; otherwise it is whether the prefix bytes
+/// match at byte position 0. An empty prefix matches, mirroring
+/// `str::starts_with("")`.
+pub(crate) fn lower_starts_with(
+    ctx: &mut LowerCtx,
+    s: &IrExpr,
+    prefix: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (hay_data, hay_len) = lower_string_data_len(ctx, s, out)?;
+    let (needle_data, needle_len) = lower_string_data_len(ctx, prefix, out)?;
+    // if needle_len > hay_len { 0 } else { bytes_match_at(pos = 0) }
+    get_local(out, needle_len);
+    get_local(out, hay_len);
+    out.push(0x4a); // i32.gt_s
+    out.push(0x04); // if (result i32)
+    out.push(0x7f);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    out.push(0x05); // else
+    let pos = ctx.add_local(WasmValType::I32);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, pos);
+    emit_bytes_match_at(ctx, hay_data, needle_data, needle_len, pos, out);
+    out.push(0x0b); // end if -> i32 bool
+    Ok(())
+}
+
+/// Lower `ends_with(s, suffix) -> bool`: byte-exact suffix test. If
+/// `suffix_len > s_len` the result is `0`; otherwise it is whether the suffix bytes
+/// match at byte position `s_len - suffix_len`. An empty suffix matches, mirroring
+/// `str::ends_with("")`.
+pub(crate) fn lower_ends_with(
+    ctx: &mut LowerCtx,
+    s: &IrExpr,
+    suffix: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (hay_data, hay_len) = lower_string_data_len(ctx, s, out)?;
+    let (needle_data, needle_len) = lower_string_data_len(ctx, suffix, out)?;
+    // if needle_len > hay_len { 0 } else { bytes_match_at(pos = hay_len - needle_len) }
+    get_local(out, needle_len);
+    get_local(out, hay_len);
+    out.push(0x4a); // i32.gt_s
+    out.push(0x04); // if (result i32)
+    out.push(0x7f);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    out.push(0x05); // else
+    let pos = ctx.add_local(WasmValType::I32);
+    get_local(out, hay_len);
+    get_local(out, needle_len);
+    out.push(0x6b); // i32.sub
+    set_local(out, pos);
+    emit_bytes_match_at(ctx, hay_data, needle_data, needle_len, pos, out);
+    out.push(0x0b); // end if -> i32 bool
+    Ok(())
+}
+
+// -- to_string codegen -------------------------------------------------------
+//
+// `to_string(x)` produces a fresh `[char_len: i32][byte_len: i32][utf8 bytes]`
+// string record (see the string record layout notes near `STR_DATA_OFF`),
+// interchangeable with string literals and concatenation results. The output
+// matches the interpreters' `Value::Display`:
+//   - `i64`/signed fixed-width/`isize`: decimal, leading `-` for negatives.
+//   - `u64`/unsigned fixed-width/`usize`/`byte`: unsigned decimal magnitude.
+//   - `bool`: `"true"` / `"false"` (interned literals).
+//   - `char`: the 1–4 byte UTF-8 encoding of the scalar (char_len = 1).
+//   - `string`: identity — strings are immutable, so the same pointer is returned.
+// A float argument is deferred (see the caller).
+
+/// Lower `to_string(x)` for the supported argument types, leaving the resulting
+/// string record's `i32` pointer on the stack. Dispatches on the argument's IR
+/// type. A float argument errors so the enclosing function falls back to the
+/// interpreters.
+pub(crate) fn lower_to_string(
+    ctx: &mut LowerCtx,
+    arg: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match arg.ty.name.as_str() {
+        // A `string` is already a record; strings are immutable, so returning the
+        // same pointer is value-equivalent to the interpreters' clone.
+        "string" => lower_expr(ctx, arg, out),
+        // `bool` prints `true`/`false`: select the interned literal pointer.
+        "bool" => lower_bool_to_string(ctx, arg, out),
+        // `char` prints its UTF-8 encoding (1–4 bytes, char_len = 1).
+        "char" => lower_char_to_string(ctx, arg, out),
+        // `byte` is a 0–255 magnitude held in an `i32` cell: unsigned itoa.
+        "byte" => {
+            lower_expr(ctx, arg, out)?;
+            // Widen the i32 byte cell to an i64 magnitude (unsigned: 0..255).
+            out.push(0xad); // i64.extend_i32_u
+            emit_itoa_unsigned(ctx, out);
+            Ok(())
+        }
+        // `i64` (plain signed) and the fixed-width integer kinds. Unsigned kinds
+        // print the u64 reinterpretation of their normalized cell; signed kinds
+        // print the signed value with a leading `-` for negatives.
+        "i64" => {
+            lower_expr(ctx, arg, out)?;
+            emit_itoa_signed(ctx, out);
+            Ok(())
+        }
+        name => match fixed_int_kind(name) {
+            Some(kind) if kind.is_unsigned() => {
+                lower_expr(ctx, arg, out)?;
+                emit_itoa_unsigned(ctx, out);
+                Ok(())
+            }
+            Some(_) => {
+                lower_expr(ctx, arg, out)?;
+                emit_itoa_signed(ctx, out);
+                Ok(())
+            }
+            // Floats and everything else are deferred to the interpreters.
+            None => Err(format!(
+                "to_string of `{name}` is not supported by the WASM backend"
+            )),
+        },
+    }
+}
+
+/// Lower `to_string(b)` for a `bool`: push the pointer of the interned `"true"`
+/// literal when `b` is nonzero, else the interned `"false"` literal, via a typed
+/// `if`/`else` yielding an `i32`.
+pub(crate) fn lower_bool_to_string(
+    ctx: &mut LowerCtx,
+    arg: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let true_ptr = ctx.pool.intern("true");
+    let false_ptr = ctx.pool.intern("false");
+    lower_expr(ctx, arg, out)?; // bool condition (i32 0/1)
+    out.push(0x04); // if
+    out.push(WasmValType::I32.byte()); // block type: yields i32
+    out.push(0x41); // i32.const true_ptr
+    write_sleb(out, true_ptr as i64);
+    out.push(0x05); // else
+    out.push(0x41); // i32.const false_ptr
+    write_sleb(out, false_ptr as i64);
+    out.push(0x0b); // end
+    Ok(())
+}
+
+/// Lower `to_string(c)` for a `char`: encode the Unicode scalar (an `i32` code
+/// point) to its 1–4 byte UTF-8 sequence in a fresh record with `char_len == 1`
+/// and `byte_len` the encoded length. The scalar is guaranteed valid (the type
+/// checker only admits real `char` values), so the four ranges below are
+/// exhaustive over Unicode scalars.
+pub(crate) fn lower_char_to_string(
+    ctx: &mut LowerCtx,
+    arg: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    lower_expr(ctx, arg, out)?;
+    let code = ctx.add_local(WasmValType::I32);
+    set_local(out, code);
+
+    // Allocate the maximum record (header + 4 UTF-8 bytes). Only `byte_len` bytes
+    // are meaningful; the bump allocator never reclaims, so an over-allocation of
+    // a few bytes is harmless and keeps the size a compile-time constant.
+    let dst = alloc_bytes(ctx, STR_DATA_OFF + 4, out);
+    // char_len is always 1 for a single scalar.
+    get_local(out, dst);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    emit_store_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+
+    // byte_len local, computed alongside the byte writes.
+    let byte_len = ctx.add_local(WasmValType::I32);
+
+    // if code < 0x80 { 1-byte } else if < 0x800 { 2-byte } else if < 0x10000
+    // { 3-byte } else { 4-byte }. Each arm writes its bytes at dst+STR_DATA_OFF..
+    // and sets byte_len.
+    // --- code < 0x80 ---
+    get_local(out, code);
+    out.push(0x41);
+    write_sleb(out, 0x80);
+    out.push(0x48); // i32.lt_s
+    out.push(0x04); // if
+    out.push(0x40); // block type: void
+    // dst[data+0] = code
+    emit_store_byte_at(dst, STR_DATA_OFF, |o| get_local(o, code), out);
+    set_byte_len(byte_len, 1, out);
+    out.push(0x05); // else
+    // --- code < 0x800 ---
+    get_local(out, code);
+    out.push(0x41);
+    write_sleb(out, 0x800);
+    out.push(0x48); // i32.lt_s
+    out.push(0x04); // if
+    out.push(0x40);
+    // b0 = 0xC0 | (code >> 6)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF,
+        |o| {
+            push_or(o, 0xC0, |o| push_shr_u(o, code, 6));
+        },
+        out,
+    );
+    // b1 = 0x80 | (code & 0x3F)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF + 1,
+        |o| {
+            push_or(o, 0x80, |o| push_and(o, code, 0x3F));
+        },
+        out,
+    );
+    set_byte_len(byte_len, 2, out);
+    out.push(0x05); // else
+    // --- code < 0x10000 ---
+    get_local(out, code);
+    out.push(0x41);
+    write_sleb(out, 0x10000);
+    out.push(0x48); // i32.lt_s
+    out.push(0x04); // if
+    out.push(0x40);
+    // b0 = 0xE0 | (code >> 12)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF,
+        |o| {
+            push_or(o, 0xE0, |o| push_shr_u(o, code, 12));
+        },
+        out,
+    );
+    // b1 = 0x80 | ((code >> 6) & 0x3F)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF + 1,
+        |o| {
+            push_or(o, 0x80, |o| push_and_of_shr(o, code, 6, 0x3F));
+        },
+        out,
+    );
+    // b2 = 0x80 | (code & 0x3F)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF + 2,
+        |o| {
+            push_or(o, 0x80, |o| push_and(o, code, 0x3F));
+        },
+        out,
+    );
+    set_byte_len(byte_len, 3, out);
+    out.push(0x05); // else
+    // --- 4-byte: code >= 0x10000 ---
+    // b0 = 0xF0 | (code >> 18)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF,
+        |o| {
+            push_or(o, 0xF0, |o| push_shr_u(o, code, 18));
+        },
+        out,
+    );
+    // b1 = 0x80 | ((code >> 12) & 0x3F)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF + 1,
+        |o| {
+            push_or(o, 0x80, |o| push_and_of_shr(o, code, 12, 0x3F));
+        },
+        out,
+    );
+    // b2 = 0x80 | ((code >> 6) & 0x3F)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF + 2,
+        |o| {
+            push_or(o, 0x80, |o| push_and_of_shr(o, code, 6, 0x3F));
+        },
+        out,
+    );
+    // b3 = 0x80 | (code & 0x3F)
+    emit_store_byte_at(
+        dst,
+        STR_DATA_OFF + 3,
+        |o| {
+            push_or(o, 0x80, |o| push_and(o, code, 0x3F));
+        },
+        out,
+    );
+    set_byte_len(byte_len, 4, out);
+    // Close the three nested `if`s (`< 0x10000`, `< 0x800`, `< 0x80`); the 4-byte
+    // case is the innermost `else`, so it needs no `end` of its own.
+    out.push(0x0b); // end (`< 0x10000` if)
+    out.push(0x0b); // end (`< 0x800` if)
+    out.push(0x0b); // end (`< 0x80` if)
+
+    // dst[byte_len] = byte_len local.
+    get_local(out, dst);
+    get_local(out, byte_len);
+    emit_store_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+
+    // The record pointer is the result.
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Store one byte at `dst + offset`: push `dst + offset`, then `value_fn` pushes
+/// the byte value, then `i32.store8`.
+pub(crate) fn emit_store_byte_at(
+    dst: u32,
+    offset: i32,
+    value_fn: impl FnOnce(&mut Vec<u8>),
+    out: &mut Vec<u8>,
+) {
+    get_local(out, dst);
+    value_fn(out);
+    out.push(0x3a); // i32.store8
+    write_uleb(out, 0); // align 0 (1-byte)
+    write_uleb(out, offset as u64);
+}
+
+/// Push `constant | inner(...)` as an `i32`: push `constant`, run `inner` (which
+/// leaves an i32), `i32.or`.
+pub(crate) fn push_or(out: &mut Vec<u8>, constant: i64, inner: impl FnOnce(&mut Vec<u8>)) {
+    out.push(0x41); // i32.const constant
+    write_sleb(out, constant);
+    inner(out);
+    out.push(0x72); // i32.or
+}
+
+/// Push `local >> shift` (logical) as an `i32`.
+pub(crate) fn push_shr_u(out: &mut Vec<u8>, local: u32, shift: i64) {
+    get_local(out, local);
+    out.push(0x41); // i32.const shift
+    write_sleb(out, shift);
+    out.push(0x76); // i32.shr_u
+}
+
+/// Push `local & mask` as an `i32`.
+pub(crate) fn push_and(out: &mut Vec<u8>, local: u32, mask: i64) {
+    get_local(out, local);
+    out.push(0x41); // i32.const mask
+    write_sleb(out, mask);
+    out.push(0x71); // i32.and
+}
+
+/// Push `(local >> shift) & mask` as an `i32`.
+pub(crate) fn push_and_of_shr(out: &mut Vec<u8>, local: u32, shift: i64, mask: i64) {
+    push_shr_u(out, local, shift);
+    out.push(0x41); // i32.const mask
+    write_sleb(out, mask);
+    out.push(0x71); // i32.and
+}
+
+/// Store the constant `value` into the `byte_len` local (an i32).
+pub(crate) fn set_byte_len(byte_len: u32, value: i64, out: &mut Vec<u8>) {
+    out.push(0x41); // i32.const value
+    write_sleb(out, value);
+    set_local(out, byte_len);
+}
+
+/// Emit signed integer-to-decimal: consume the `i64` value on the stack and leave
+/// a fresh string record pointer. A negative value writes a leading `-` and
+/// formats its magnitude; `i64::MIN` is handled by computing the magnitude in
+/// unsigned space (`0 - value` wraps to the correct unsigned magnitude), so the
+/// unformattable positive `-i64::MIN` is never needed.
+pub(crate) fn emit_itoa_signed(ctx: &mut LowerCtx, out: &mut Vec<u8>) {
+    let value = ctx.add_local(WasmValType::I64);
+    set_local(out, value);
+    // sign = (value < 0) as i32.
+    let sign = ctx.add_local(WasmValType::I32);
+    get_local(out, value);
+    out.push(0x42); // i64.const 0
+    write_sleb(out, 0);
+    out.push(0x53); // i64.lt_s
+    set_local(out, sign);
+    // magnitude = value < 0 ? (0 - value) : value, computed via unsigned wrap so
+    // `i64::MIN` yields its correct u64 magnitude (0x8000000000000000).
+    let mag = ctx.add_local(WasmValType::I64);
+    get_local(out, sign);
+    out.push(0x04); // if
+    out.push(WasmValType::I64.byte()); // yields i64
+    out.push(0x42); // i64.const 0
+    write_sleb(out, 0);
+    get_local(out, value);
+    out.push(0x7d); // i64.sub  -> 0 - value (wrapping)
+    out.push(0x05); // else
+    get_local(out, value);
+    out.push(0x0b); // end
+    set_local(out, mag);
+    emit_itoa_core(ctx, mag, sign, out);
+}
+
+/// Emit unsigned integer-to-decimal: consume the `i64` magnitude on the stack
+/// (interpreted as `u64`) and leave a fresh string record pointer. No sign is
+/// written.
+pub(crate) fn emit_itoa_unsigned(ctx: &mut LowerCtx, out: &mut Vec<u8>) {
+    let mag = ctx.add_local(WasmValType::I64);
+    set_local(out, mag);
+    // sign = 0 (no leading `-`).
+    let sign = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, sign);
+    emit_itoa_core(ctx, mag, sign, out);
+}
+
+/// The shared itoa core: format the unsigned `u64` magnitude in `mag` with an
+/// optional leading `-` when `sign` is nonzero, leaving a fresh
+/// `[char_len][byte_len][utf8]` record pointer on the stack. All output is ASCII,
+/// so `char_len == byte_len == sign + digit_count`.
+///
+/// Two passes over the magnitude: pass one counts decimal digits (`0` is one
+/// digit), pass two writes them least-significant-first into the tail of the data
+/// region, moving a write cursor backward from the last byte so the digits land
+/// in print order. The record is allocated once the digit count is known.
+pub(crate) fn emit_itoa_core(ctx: &mut LowerCtx, mag: u32, sign: u32, out: &mut Vec<u8>) {
+    // --- Pass 1: ndigits = number of decimal digits in `mag` (>= 1). ---
+    // A do-while counting loop (`block { loop { body; br_if 1 exit; br 0 } }`, the
+    // same idiom the list/map loops use): each iteration counts one digit and
+    // divides `scratch` down, so `mag == 0` still counts a single digit.
+    let ndigits = ctx.add_local(WasmValType::I32);
+    let scratch = ctx.add_local(WasmValType::I64);
+    out.push(0x41);
+    write_sleb(out, 0);
+    set_local(out, ndigits);
+    get_local(out, mag);
+    set_local(out, scratch);
+    out.push(0x02); // block
+    out.push(0x40); // void
+    out.push(0x03); // loop
+    out.push(0x40); // void
+    // ndigits += 1
+    get_local(out, ndigits);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, ndigits);
+    // scratch /= 10
+    get_local(out, scratch);
+    out.push(0x42);
+    write_sleb(out, 10);
+    out.push(0x80); // i64.div_u
+    set_local(out, scratch);
+    // exit the block when scratch == 0.
+    get_local(out, scratch);
+    out.push(0x42);
+    write_sleb(out, 0);
+    out.push(0x51); // i64.eq
+    out.push(0x0d); // br_if 1 (exit block)
+    write_uleb(out, 1);
+    out.push(0x0c); // br 0 (repeat loop)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+
+    // total_len = sign + ndigits.
+    let total = ctx.add_local(WasmValType::I32);
+    get_local(out, sign);
+    get_local(out, ndigits);
+    out.push(0x6a); // i32.add
+    set_local(out, total);
+
+    // dst = __alloc(STR_DATA_OFF + total).
+    out.push(0x41);
+    write_sleb(out, STR_DATA_OFF as i64);
+    get_local(out, total);
+    out.push(0x6a); // i32.add
+    let dst = alloc_runtime(ctx, out);
+
+    // Headers: char_len = byte_len = total (all ASCII).
+    get_local(out, dst);
+    get_local(out, total);
+    emit_store_at(WasmValType::I32, STR_CHAR_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, total);
+    emit_store_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+
+    // Optional leading '-' at dst + STR_DATA_OFF (only when sign != 0).
+    get_local(out, sign);
+    out.push(0x04); // if
+    out.push(0x40);
+    get_local(out, dst);
+    out.push(0x41);
+    write_sleb(out, b'-' as i64);
+    out.push(0x3a); // i32.store8
+    write_uleb(out, 0);
+    write_uleb(out, STR_DATA_OFF as u64);
+    out.push(0x0b); // end if
+
+    // --- Pass 2: write digits from the tail backward. ---
+    // cursor = dst + STR_DATA_OFF + total - 1  (address of the last byte).
+    let cursor = ctx.add_local(WasmValType::I32);
+    get_local(out, dst);
+    out.push(0x41);
+    write_sleb(out, STR_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    get_local(out, total);
+    out.push(0x6a); // i32.add
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6b); // i32.sub  -> last byte address
+    set_local(out, cursor);
+
+    // scratch = mag; then a do-while writing one digit per iteration (so `0`
+    // writes a single '0').
+    get_local(out, mag);
+    set_local(out, scratch);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // *cursor = '0' + (scratch % 10).
+    get_local(out, cursor);
+    out.push(0x41);
+    write_sleb(out, b'0' as i64);
+    // (scratch % 10) as i32
+    get_local(out, scratch);
+    out.push(0x42);
+    write_sleb(out, 10);
+    out.push(0x82); // i64.rem_u
+    out.push(0xa7); // i32.wrap_i64
+    out.push(0x6a); // i32.add -> '0' + digit
+    out.push(0x3a); // i32.store8
+    write_uleb(out, 0);
+    write_uleb(out, 0);
+    // cursor -= 1.
+    get_local(out, cursor);
+    out.push(0x41);
+    write_sleb(out, 1);
+    out.push(0x6b); // i32.sub
+    set_local(out, cursor);
+    // scratch /= 10.
+    get_local(out, scratch);
+    out.push(0x42);
+    write_sleb(out, 10);
+    out.push(0x80); // i64.div_u
+    set_local(out, scratch);
+    // continue while scratch != 0.
+    get_local(out, scratch);
+    out.push(0x42);
+    write_sleb(out, 0);
+    out.push(0x52); // i64.ne
+    out.push(0x0d); // br_if 0 -> repeat while nonzero
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+
+    // The record pointer is the result.
+    get_local(out, dst);
+}
+
+/// The WASM float value type (`F32`/`F64`) an expression evaluates to, or `None`
+/// if it is not a float. Mirrors the native backend's `float_width_of_expr`: it
+/// reads only the leaf nodes the IR types correctly — float literals, float
+/// locals/params, and the `to_f32`/`to_f64` conversions — and recurses through
+/// float arithmetic (`+ - * /`), whose own node type the IR annotates `i64`. A
+/// comparison yields a `bool` (not a float), so it reports `None`.
+pub(crate) fn float_val_type_of(ctx: &LowerCtx, expr: &IrExpr) -> Option<WasmValType> {
+    match &expr.kind {
+        IrExprKind::Float(_) => match scalar_val_type(&expr.ty) {
+            Some(ft @ (WasmValType::F32 | WasmValType::F64)) => Some(ft),
+            _ => None,
+        },
+        IrExprKind::Variable(name) => match ctx.locals.get(name)?.ty {
+            ft @ (WasmValType::F32 | WasmValType::F64) => Some(ft),
+            _ => None,
+        },
+        IrExprKind::Call { name, .. } => match name.as_str() {
+            "to_f32" => Some(WasmValType::F32),
+            "to_f64" => Some(WasmValType::F64),
+            _ => None,
+        },
+        IrExprKind::Binary {
+            left,
+            op: BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide,
+            right,
+        } => float_val_type_of(ctx, left).or_else(|| float_val_type_of(ctx, right)),
+        _ => None,
+    }
+}
+
+/// Emit a fixed-width binary op whose operands (both normalized `i64` cells of
+/// `kind`) are already on the stack (left then right), leaving the result (a
+/// normalized cell for arithmetic/bitwise/shift, a canonical `0`/`1` for
+/// comparisons) on the stack. This mirrors the interpreter free functions
+/// exactly: arithmetic wraps then re-normalizes (`Value::int`), division and
+/// comparison are signedness-aware (`int_div`/`int_cmp`), and shifts mask the
+/// count to the width and honor signedness (`int_shl`/`int_shr`).
+pub(crate) fn emit_fixed_binop(
+    ctx: &mut LowerCtx,
+    op: BinaryOp,
+    kind: IntKind,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match op {
+        BinaryOp::Add => {
+            out.push(0x7c); // i64.add
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::Subtract => {
+            out.push(0x7d); // i64.sub
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::Multiply => {
+            out.push(0x7e); // i64.mul
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::Divide => {
+            // Divide on the full 64-bit cell (signedness-correct: signed cells are
+            // sign-extended, unsigned cells zero-extended), matching `int_div`.
+            // WASM `div_s`/`div_u` traps on a zero divisor, exactly like the
+            // existing `i64` divide path.
+            if kind.is_unsigned() {
+                out.push(0x80); // i64.div_u
+            } else {
+                // Signed division guards `i64::MIN / -1` (and, after
+                // normalization, each width's MIN / -1) against the WASM trap.
+                emit_i64_signed_div_guarded(ctx, out);
+            }
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::Remainder => {
+            // WASM `rem_s`/`rem_u` need no overflow guard: `rem_s` returns 0 for
+            // `MIN % -1` (matching `wrapping_rem`) and traps only on a zero
+            // divisor, exactly like the interpreters' remainder path.
+            if kind.is_unsigned() {
+                out.push(0x82); // i64.rem_u
+            } else {
+                out.push(0x81); // i64.rem_s
+            }
+            emit_normalize_i64(kind, out);
+        }
+        // Equality is width-agnostic on the normalized cells.
+        BinaryOp::Equal => out.push(0x51),    // i64.eq
+        BinaryOp::NotEqual => out.push(0x52), // i64.ne
+        // Ordering uses unsigned comparisons for unsigned kinds, signed for
+        // signed kinds, on the normalized cells.
+        BinaryOp::Less => out.push(if kind.is_unsigned() { 0x54 } else { 0x53 }), // lt_u/lt_s
+        BinaryOp::LessEqual => out.push(if kind.is_unsigned() { 0x58 } else { 0x57 }), // le_u/le_s
+        BinaryOp::Greater => out.push(if kind.is_unsigned() { 0x56 } else { 0x55 }), // gt_u/gt_s
+        BinaryOp::GreaterEqual => out.push(if kind.is_unsigned() { 0x5a } else { 0x59 }), // ge_u/ge_s
+        BinaryOp::BitAnd => {
+            out.push(0x83); // i64.and
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::BitOr => {
+            out.push(0x84); // i64.or
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::BitXor => {
+            out.push(0x85); // i64.xor
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::Shl | BinaryOp::Shr => {
+            // Mask the shift count to `width-1` (matching `int_shl`/`int_shr`):
+            // `right & (width-1)`. The count is already on the stack; AND it with
+            // the mask, then shift the left operand and re-normalize. `<<` is
+            // `shl`; `>>` is `shr_u` (logical) for unsigned kinds, `shr_s`
+            // (arithmetic) for signed kinds.
+            let mask = i64::from(kind.width_bits() - 1); // 7/15/31/63
+            out.push(0x42); // i64.const mask
+            write_sleb(out, mask);
+            out.push(0x83); // i64.and (masked count)
+            let shift_opcode = match (op, kind.is_unsigned()) {
+                (BinaryOp::Shl, _) => 0x86,     // i64.shl
+                (BinaryOp::Shr, true) => 0x88,  // i64.shr_u (logical)
+                (BinaryOp::Shr, false) => 0x87, // i64.shr_s (arithmetic)
+                _ => unreachable!("outer match restricts to shifts"),
+            };
+            out.push(shift_opcode);
+            emit_normalize_i64(kind, out);
+        }
+        BinaryOp::And | BinaryOp::Or => {
+            return Err("logical and/or must be short-circuited".to_string());
+        }
+    }
+    Ok(())
+}
+
+// -- Overflow-aware arithmetic (checked/saturating/wrapping) -----------------
+//
+// The overflow-aware builtins operate on two operands of the same fixed-width
+// kind `T` (`i8`…`u64`/`isize`/`usize`; `i64` is excluded by the type checker).
+// `wrapping_*` reuses the default fixed-width `+`/`-`/`*` (wrap then normalize).
+// `saturating_*` and `checked_*` detect overflow with comparison-only formulas
+// on the normalized operands (no host carry flags exist in WASM), producing the
+// same clamp/`none`/`some` result as the interpreters' `overflow_arith` for every
+// width and sign. Division appears only in the 64-bit `mul` overflow tests and is
+// always guarded (by a structured `if` on a zero divisor, plus the signed
+// `MIN / -1` guard) so no case can trap.
+
+/// The arithmetic operation of an overflow-aware builtin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverflowOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl OverflowOp {
+    /// The wrapping [`BinaryOp`] this operation shares with the default `+`/`-`/`*`
+    /// (used to route `wrapping_*` through the fixed-width binary-op emitter).
+    fn binary_op(self) -> BinaryOp {
+        match self {
+            OverflowOp::Add => BinaryOp::Add,
+            OverflowOp::Sub => BinaryOp::Subtract,
+            OverflowOp::Mul => BinaryOp::Multiply,
+        }
+    }
+
+    /// The bare `i64.add`/`i64.sub`/`i64.mul` opcode.
+    fn wasm_opcode(self) -> u8 {
+        match self {
+            OverflowOp::Add => 0x7c,
+            OverflowOp::Sub => 0x7d,
+            OverflowOp::Mul => 0x7e,
+        }
+    }
+}
+
+/// The overflow behaviour of an overflow-aware builtin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverflowMode {
+    Wrapping,
+    Saturating,
+    Checked,
+}
+
+/// Recognize an overflow-aware arithmetic builtin name (`checked_add`,
+/// `saturating_mul`, `wrapping_sub`, …), returning its `(op, mode)`.
+pub(crate) fn overflow_builtin(name: &str) -> Option<(OverflowOp, OverflowMode)> {
+    let (mode, op) = name.split_once('_')?;
+    let mode = match mode {
+        "checked" => OverflowMode::Checked,
+        "saturating" => OverflowMode::Saturating,
+        "wrapping" => OverflowMode::Wrapping,
+        _ => return None,
+    };
+    let op = match op {
+        "add" => OverflowOp::Add,
+        "sub" => OverflowOp::Sub,
+        "mul" => OverflowOp::Mul,
+        _ => return None,
+    };
+    Some((op, mode))
+}
+
+/// `i64.const v`.
+pub(crate) fn push_i64_const(out: &mut Vec<u8>, v: i64) {
+    out.push(0x42);
+    write_sleb(out, v);
+}
+
+/// `i32.const v`.
+pub(crate) fn push_i32_const(out: &mut Vec<u8>, v: i32) {
+    out.push(0x41);
+    write_sleb(out, i64::from(v));
+}
+
+/// Push an `i32` boolean (`1` iff `a <op> b` overflows `kind`), leaving it on the
+/// stack. `a`/`b` are the normalized operands; `wrapped` is `normalize(a op b)`
+/// (used by the 64-bit signed `mul` division test). Comparison-only, matching
+/// [`lullaby_runtime`]'s `overflow_arith` exactly.
+pub(crate) fn push_wasm_overflow_flag(
+    ctx: &mut LowerCtx,
+    op: OverflowOp,
+    kind: IntKind,
+    a: u32,
+    b: u32,
+    wrapped: u32,
+    out: &mut Vec<u8>,
+) {
+    let (min_i128, max_i128) = kind.range_i128();
+    let min = min_i128 as i64;
+    let max = max_i128 as i64;
+    let w64 = matches!(kind, IntKind::U64 | IntKind::Usize | IntKind::Isize);
+    let unsigned = kind.is_unsigned();
+    match op {
+        OverflowOp::Add if unsigned => {
+            // a >u (MAX - b)
+            get_local(out, a);
+            push_i64_const(out, max);
+            get_local(out, b);
+            out.push(0x7d); // i64.sub
+            out.push(0x56); // i64.gt_u
+        }
+        OverflowOp::Add => {
+            // pos = (b > 0) & (a > MAX - b)
+            get_local(out, b);
+            push_i64_const(out, 0);
+            out.push(0x55); // i64.gt_s
+            get_local(out, a);
+            push_i64_const(out, max);
+            get_local(out, b);
+            out.push(0x7d); // i64.sub
+            out.push(0x55); // i64.gt_s
+            out.push(0x71); // i32.and
+            // neg = (b < 0) & (a < MIN - b)
+            get_local(out, b);
+            push_i64_const(out, 0);
+            out.push(0x53); // i64.lt_s
+            get_local(out, a);
+            push_i64_const(out, min);
+            get_local(out, b);
+            out.push(0x7d); // i64.sub
+            out.push(0x53); // i64.lt_s
+            out.push(0x71); // i32.and
+            out.push(0x72); // i32.or
+        }
+        OverflowOp::Sub if unsigned => {
+            // a <u b
+            get_local(out, a);
+            get_local(out, b);
+            out.push(0x54); // i64.lt_u
+        }
+        OverflowOp::Sub => {
+            // pos = (b < 0) & (a > MAX + b)
+            get_local(out, b);
+            push_i64_const(out, 0);
+            out.push(0x53); // i64.lt_s
+            get_local(out, a);
+            push_i64_const(out, max);
+            get_local(out, b);
+            out.push(0x7c); // i64.add
+            out.push(0x55); // i64.gt_s
+            out.push(0x71); // i32.and
+            // neg = (b > 0) & (a < MIN + b)
+            get_local(out, b);
+            push_i64_const(out, 0);
+            out.push(0x55); // i64.gt_s
+            get_local(out, a);
+            push_i64_const(out, min);
+            get_local(out, b);
+            out.push(0x7c); // i64.add
+            out.push(0x53); // i64.lt_s
+            out.push(0x71); // i32.and
+            out.push(0x72); // i32.or
+        }
+        OverflowOp::Mul if !w64 => {
+            // Narrow: the exact product fits i64; range-check it against [min, max].
+            if unsigned {
+                get_local(out, a);
+                get_local(out, b);
+                out.push(0x7e); // i64.mul
+                push_i64_const(out, max);
+                out.push(0x56); // i64.gt_u
+            } else {
+                let prod = ctx.add_local(WasmValType::I64);
+                get_local(out, a);
+                get_local(out, b);
+                out.push(0x7e); // i64.mul
+                set_local(out, prod);
+                get_local(out, prod);
+                push_i64_const(out, max);
+                out.push(0x55); // i64.gt_s
+                get_local(out, prod);
+                push_i64_const(out, min);
+                out.push(0x53); // i64.lt_s
+                out.push(0x72); // i32.or
+            }
+        }
+        OverflowOp::Mul if unsigned => {
+            // 64-bit unsigned: overflow iff a*b > MAX iff (b != 0) & (a > MAX/u b).
+            // Guard the divide-by-zero with a structured `if` (WASM `i32.and` does
+            // not short-circuit).
+            get_local(out, b);
+            out.push(0x50); // i64.eqz
+            out.push(0x04); // if
+            out.push(0x7f); // result i32
+            push_i32_const(out, 0);
+            out.push(0x05); // else
+            get_local(out, a);
+            push_i64_const(out, max);
+            get_local(out, b);
+            out.push(0x80); // i64.div_u
+            out.push(0x56); // i64.gt_u
+            out.push(0x0b); // end
+        }
+        OverflowOp::Mul => {
+            // 64-bit signed (isize): if a == 0 no overflow, else overflow iff the
+            // wrapped product divided by `a` does not recover `b` — plus the
+            // `-1 * MIN` case the wrapping division cannot distinguish. The guarded
+            // signed division avoids the `MIN / -1` trap; `a != 0` avoids div-by-0.
+            get_local(out, a);
+            out.push(0x50); // i64.eqz
+            out.push(0x04); // if
+            out.push(0x7f); // result i32
+            push_i32_const(out, 0);
+            out.push(0x05); // else
+            // (a == -1) & (b == MIN)
+            get_local(out, a);
+            push_i64_const(out, -1);
+            out.push(0x51); // i64.eq
+            get_local(out, b);
+            push_i64_const(out, min);
+            out.push(0x51); // i64.eq
+            out.push(0x71); // i32.and
+            // (guarded_div_s(wrapped, a) != b)
+            get_local(out, wrapped);
+            get_local(out, a);
+            emit_i64_signed_div_guarded(ctx, out);
+            get_local(out, b);
+            out.push(0x52); // i64.ne
+            out.push(0x72); // i32.or
+            out.push(0x0b); // end
+        }
+    }
+}
+
+/// Push the `i64` saturation target for `a <op> b` (the bound the true result
+/// crosses on overflow). Read only when the overflow flag is set.
+pub(crate) fn push_wasm_saturation_target(
+    op: OverflowOp,
+    kind: IntKind,
+    a: u32,
+    b: u32,
+    wrapped: u32,
+    out: &mut Vec<u8>,
+) {
+    let (min_i128, max_i128) = kind.range_i128();
+    let min = min_i128 as i64;
+    let max = max_i128 as i64;
+    let unsigned = kind.is_unsigned();
+    match (op, unsigned) {
+        // Unsigned subtraction underflows to the minimum (0); unsigned add/mul
+        // saturate up to the maximum.
+        (OverflowOp::Sub, true) => push_i64_const(out, min),
+        (_, true) => push_i64_const(out, max),
+        // Signed multiply: the true product's sign is sign(a) ^ sign(b); a negative
+        // product saturates to MIN, else MAX. `select(MIN, MAX, (a ^ b) < 0)`.
+        (OverflowOp::Mul, false) => {
+            push_i64_const(out, min);
+            push_i64_const(out, max);
+            get_local(out, a);
+            get_local(out, b);
+            out.push(0x85); // i64.xor
+            push_i64_const(out, 0);
+            out.push(0x53); // i64.lt_s
+            out.push(0x1b); // select
+        }
+        // Signed add/sub: a signed overflow flips the wrapped result's sign, so a
+        // negative wrapped value means positive overflow (target MAX), else MIN.
+        // `select(MAX, MIN, wrapped < 0)`.
+        (_, false) => {
+            push_i64_const(out, max);
+            push_i64_const(out, min);
+            get_local(out, wrapped);
+            push_i64_const(out, 0);
+            out.push(0x53); // i64.lt_s
+            out.push(0x1b); // select
+        }
+    }
+}
+
+/// Lower an overflow-aware arithmetic builtin. `wrapping_*` leaves the wrapped
+/// `T` value on the stack; `saturating_*` the clamped `T`; `checked_*` a fresh
+/// `option<T>` record pointer (`some(result)`/`none`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_wasm_overflow(
+    ctx: &mut LowerCtx,
+    op: OverflowOp,
+    mode: OverflowMode,
+    kind: IntKind,
+    result_ty: &TypeRef,
+    left: &IrExpr,
+    right: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // Evaluate both operands into `i64` locals so the overflow tests can read them
+    // several times.
+    lower_expr(ctx, left, out)?;
+    let a = ctx.add_local(WasmValType::I64);
+    set_local(out, a);
+    lower_expr(ctx, right, out)?;
+    let b = ctx.add_local(WasmValType::I64);
+    set_local(out, b);
+    // wrapped = normalize(a op b) — the wrapping result and the `some` payload.
+    let wrapped = ctx.add_local(WasmValType::I64);
+    get_local(out, a);
+    get_local(out, b);
+    out.push(op.wasm_opcode());
+    emit_normalize_i64(kind, out);
+    set_local(out, wrapped);
+
+    match mode {
+        OverflowMode::Wrapping => {
+            get_local(out, wrapped);
+            Ok(())
+        }
+        OverflowMode::Saturating => {
+            let ovf = ctx.add_local(WasmValType::I32);
+            push_wasm_overflow_flag(ctx, op, kind, a, b, wrapped, out);
+            set_local(out, ovf);
+            // result = ovf ? target : wrapped.
+            push_wasm_saturation_target(op, kind, a, b, wrapped, out);
+            get_local(out, wrapped);
+            get_local(out, ovf);
+            out.push(0x1b); // select
+            Ok(())
+        }
+        OverflowMode::Checked => {
+            let ovf = ctx.add_local(WasmValType::I32);
+            push_wasm_overflow_flag(ctx, op, kind, a, b, wrapped, out);
+            set_local(out, ovf);
+            // Build the `option<T>` record: tag = ovf ? none : some, payload = wrapped.
+            let inner = result_ty.option_element().ok_or_else(|| {
+                format!(
+                    "checked_* result type `{}` is not an `option<T>` enum",
+                    result_ty.name
+                )
+            })?;
+            let slot_ty = slot_val_type(&inner, ctx.structs, ctx.enums).ok_or_else(|| {
+                format!("checked_* option payload `{}` is unsupported", inner.name)
+            })?;
+            let layout = build_layout(vec![
+                ("some".to_string(), vec![inner]),
+                ("none".to_string(), Vec::new()),
+            ]);
+            let some_tag = layout
+                .tag_of("some")
+                .ok_or_else(|| "checked_* option layout missing `some` variant".to_string())?;
+            let none_tag = layout
+                .tag_of("none")
+                .ok_or_else(|| "checked_* option layout missing `none` variant".to_string())?;
+            let opt = alloc_bytes(ctx, layout.size_bytes(), out);
+            // tag = select(none, some, ovf).
+            get_local(out, opt);
+            push_i32_const(out, none_tag as i32);
+            push_i32_const(out, some_tag as i32);
+            get_local(out, ovf);
+            out.push(0x1b); // select
+            emit_store_at(WasmValType::I32, 0, out);
+            // payload slot = wrapped.
+            get_local(out, opt);
+            get_local(out, wrapped);
+            emit_store_at(slot_ty, ENUM_PAYLOAD_BASE, out);
+            get_local(out, opt);
+            Ok(())
+        }
+    }
+}
+
+/// Emit a bitwise/shift binary op on plain `i64` operands already on the stack
+/// (left then right). No width normalization is needed: `i64` fills the cell.
+pub(crate) fn emit_i64_bitwise_or_shift(op: BinaryOp, out: &mut Vec<u8>) -> Result<(), String> {
+    let opcode = match op {
+        BinaryOp::BitAnd => 0x83, // i64.and
+        BinaryOp::BitOr => 0x84,  // i64.or
+        BinaryOp::BitXor => 0x85, // i64.xor
+        BinaryOp::Shl => 0x86,    // i64.shl (WASM masks the count modulo 64)
+        BinaryOp::Shr => 0x87,    // i64.shr_s (arithmetic, matching the i64 shift)
+        _ => unreachable!("caller restricts to bitwise/shift"),
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+// -- Linear-memory helpers ---------------------------------------------------
+
+/// `__alloc(size)` a run of `size` bytes and stash the returned pointer in a
+/// fresh scratch `i32` local; return that local's index. The pointer is reused
+/// for each field/element store and finally re-pushed as the aggregate value.
+pub(crate) fn alloc_bytes(ctx: &mut LowerCtx, size: i32, out: &mut Vec<u8>) -> u32 {
+    let alloc_index = *ctx
+        .func_index
+        .get(ALLOC_HELPER_NAME)
+        .expect("__alloc index recorded");
+    out.push(0x41); // i32.const size
+    write_sleb(out, size as i64);
+    out.push(0x10); // call __alloc
+    write_uleb(out, alloc_index as u64);
+    let ptr = ctx.add_local(WasmValType::I32);
+    set_local(out, ptr);
+    ptr
+}
+
+/// Deep-copy the aggregate whose pointer is on top of the stack, leaving a fresh,
+/// independent record's pointer on the stack. This is the WASM realization of the
+/// interpreters' recursive `Value::clone` on a struct/array/enum: a snapshot whose
+/// mutation cannot be observed through the original pointer.
+///
+/// - A `struct` copies each field slot; a scalar/string slot is copied word-for-
+///   word, and a nested MUTABLE aggregate slot (struct/array/enum) is itself
+///   deep-copied so nested mutation stays isolated too.
+/// - A fixed `array` reads its `[len]` header, allocates a fresh `[len][slots]`
+///   block, and copies each element in a runtime loop (deep-copying nested
+///   aggregate elements).
+/// - An `enum` copies its `[tag][payload slots]` record word-for-word: enum
+///   payloads are always scalar (see [`enum_layout`]), so no nested aggregate can
+///   hide inside, and a flat copy of the whole record is an exact deep copy.
+///
+/// `ty` must be a mutable aggregate ([`is_mutable_aggregate`]); the caller checks
+/// this before invoking. An `i32`-pointer source, an `i32`-pointer result.
+pub(crate) fn emit_deep_copy(
+    ctx: &mut LowerCtx,
+    ty: &TypeRef,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if ctx.structs.contains_key(&ty.name) {
+        return emit_deep_copy_struct(ctx, ty, out);
+    }
+    if let Some(layout) = ctx.enum_layout(ty) {
+        return emit_deep_copy_enum(ctx, &layout, out);
+    }
+    if ty.array_element().is_some() {
+        return emit_deep_copy_array(ctx, ty, out);
+    }
+    if let Some(elem) = supported_list_element(ty, ctx.structs, ctx.enums) {
+        return emit_list_deep_copy(ctx, &elem, out);
+    }
+    if let Some((_, value)) = supported_map_kv(ty, ctx.structs, ctx.enums) {
+        return emit_map_deep_copy(ctx, &value, out);
+    }
+    Err(format!(
+        "cannot deep-copy non-aggregate type `{}` (wasm backend)",
+        ty.name
+    ))
+}
+
+/// Deep-copy a struct: the source pointer is on the stack. Allocate a fresh run of
+/// one 8-byte slot per field, copy each field (deep-copying nested mutable
+/// aggregate fields), and leave the fresh pointer on the stack.
+pub(crate) fn emit_deep_copy_struct(
+    ctx: &mut LowerCtx,
+    ty: &TypeRef,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let fields = ctx
+        .structs
+        .get(&ty.name)
+        .ok_or_else(|| format!("`{}` is not a struct", ty.name))?
+        .clone();
+    // Stash the source pointer; allocate the destination.
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    let dst = alloc_bytes(ctx, fields.len() as i32 * SLOT_SIZE, out);
+    for (slot, (_, field_ty)) in fields.iter().enumerate() {
+        let offset = slot as i32 * SLOT_SIZE;
+        emit_copy_slot(ctx, field_ty, src, dst, offset, out)?;
+    }
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Deep-copy an enum: the source pointer is on the stack. The `[tag][payload slots]`
+/// record is `size_bytes()` bytes (one padded tag slot plus `slot_count` payload
+/// slots, every one 8-byte aligned).
+///
+/// A scalar or `string` payload is copied word-for-word (a `string` is immutable, so
+/// sharing its pointer IS its value-semantic copy). When EVERY variant payload is a
+/// scalar or `string`, the whole record is a flat `i64` word copy — an exact deep
+/// copy with no tag dispatch.
+///
+/// When some variant has a MUTABLE-aggregate payload (`struct` / nested `list`, e.g.
+/// `option<struct>`), the flat copy is done first (so the tag and every scalar/
+/// string slot land), then the record's tag is loaded and, for the matching
+/// variant, each mutable-aggregate payload slot is re-copied as an independent
+/// [`emit_deep_copy`] — so mutating the copy's payload is never observable through
+/// the original. This mirrors the interpreters' recursive `Value::clone` on an enum.
+pub(crate) fn emit_deep_copy_enum(
+    ctx: &mut LowerCtx,
+    layout: &EnumLayout,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    let dst = alloc_bytes(ctx, layout.size_bytes(), out);
+    // Flat word copy of the whole record (tag + every payload slot). For a scalar/
+    // string-only enum this is already the exact deep copy.
+    let words = layout.size_bytes() / SLOT_SIZE;
+    for word in 0..words {
+        let offset = word * SLOT_SIZE;
+        get_local(out, dst);
+        get_local(out, src);
+        emit_load_at(WasmValType::I64, offset, out);
+        emit_store_at(WasmValType::I64, offset, out);
+    }
+    // If any variant carries a mutable-aggregate payload, re-deep-copy those slots
+    // for the record's actual variant (branch on the loaded tag).
+    let has_mutable_payload = layout.variants.iter().any(|(_, payload)| {
+        payload
+            .iter()
+            .any(|p| is_mutable_aggregate(p, ctx.structs, ctx.enums))
+    });
+    if has_mutable_payload {
+        let tag = ctx.add_local(WasmValType::I32);
+        get_local(out, dst);
+        emit_load_at(WasmValType::I32, 0, out);
+        set_local(out, tag);
+        let variants = layout.variants.clone();
+        for (variant_tag, (_, payload)) in variants.iter().enumerate() {
+            let mutable_slots: Vec<(usize, TypeRef)> = payload
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| is_mutable_aggregate(p, ctx.structs, ctx.enums))
+                .map(|(i, p)| (i, p.clone()))
+                .collect();
+            if mutable_slots.is_empty() {
+                continue;
+            }
+            // if tag == variant_tag { deep-copy each mutable payload slot }
+            get_local(out, tag);
+            out.push(0x41); // i32.const variant_tag
+            write_sleb(out, variant_tag as i64);
+            out.push(0x46); // i32.eq
+            out.push(0x04); // if -> void
+            out.push(0x40);
+            for (slot, payload_ty) in &mutable_slots {
+                let offset = ENUM_PAYLOAD_BASE + *slot as i32 * SLOT_SIZE;
+                // dst_addr = dst + offset; load the payload pointer, deep-copy it,
+                // store the fresh independent pointer back into dst's slot.
+                get_local(out, dst);
+                out.push(0x41); // i32.const offset
+                write_sleb(out, offset as i64);
+                out.push(0x6a); // i32.add -> dst slot addr
+                get_local(out, dst);
+                emit_load_at(WasmValType::I32, offset, out);
+                emit_deep_copy(ctx, payload_ty, out)?;
+                emit_store(WasmValType::I32, out);
+            }
+            out.push(0x0b); // end if
+        }
+    }
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Deep-copy a fixed array: the source pointer is on the stack. Read the `[len]`
+/// header, allocate a fresh `[len][slots]` block, store the header, and copy each
+/// element in a runtime loop (deep-copying nested mutable aggregate elements).
+/// Leaves the fresh pointer on the stack.
+pub(crate) fn emit_deep_copy_array(
+    ctx: &mut LowerCtx,
+    ty: &TypeRef,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = ty
+        .array_element()
+        .ok_or_else(|| format!("`{}` is not an array", ty.name))?;
+    // Validate the element is a supported slot type up front (the caller already
+    // classified this array as a mutable aggregate, but re-check for the copy loop).
+    slot_val_type(&elem_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("array element type `{}` is unsupported", elem_ty.name))?;
+
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    // len = i32.load [src + 0]
+    let len = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, 0, out);
+    set_local(out, len);
+    // Allocate LEN_HEADER + len * SLOT_SIZE bytes: push the runtime size, call
+    // __alloc directly (alloc_bytes only takes a constant size), stash the dst.
+    let alloc_index = *ctx
+        .func_index
+        .get(ALLOC_HELPER_NAME)
+        .expect("__alloc index recorded");
+    get_local(out, len);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul  -> len * SLOT_SIZE
+    out.push(0x41); // i32.const LEN_HEADER
+    write_sleb(out, LEN_HEADER as i64);
+    out.push(0x6a); // i32.add  -> LEN_HEADER + len * SLOT_SIZE
+    out.push(0x10); // call __alloc
+    write_uleb(out, alloc_index as u64);
+    let dst = ctx.add_local(WasmValType::I32);
+    set_local(out, dst);
+    // Store the length header at dst + 0.
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, 0, out);
+
+    // Runtime loop: for i in 0..len { copy element i }.
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= len
+    get_local(out, i);
+    get_local(out, len);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // Element slot offset from the base: LEN_HEADER + i * SLOT_SIZE, in a local.
+    let off = ctx.add_local(WasmValType::I32);
+    get_local(out, i);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const LEN_HEADER
+    write_sleb(out, LEN_HEADER as i64);
+    out.push(0x6a); // i32.add
+    set_local(out, off);
+    // Copy element: dst_addr = dst + off, src_addr = src + off.
+    emit_copy_element_at(ctx, &elem_ty, src, dst, off, out)?;
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+
+    get_local(out, dst);
+    Ok(())
+}
+
+// -- Growable list codegen ---------------------------------------------------
+
+/// `__alloc(size)` where `size` (an `i32`) is already on the stack, stashing the
+/// returned pointer in a fresh scratch `i32` local; return that local's index.
+/// The constant-size companion is [`alloc_bytes`]; this variant handles a runtime
+/// byte count (a list's `LIST_DATA_OFF + cap * SLOT_SIZE`).
+pub(crate) fn alloc_runtime(ctx: &mut LowerCtx, out: &mut Vec<u8>) -> u32 {
+    let alloc_index = *ctx
+        .func_index
+        .get(ALLOC_HELPER_NAME)
+        .expect("__alloc index recorded");
+    out.push(0x10); // call __alloc (size already on the stack)
+    write_uleb(out, alloc_index as u64);
+    let ptr = ctx.add_local(WasmValType::I32);
+    set_local(out, ptr);
+    ptr
+}
+
+/// Push `LIST_DATA_OFF + cap * SLOT_SIZE` (the byte size of a list backing block
+/// with `cap` element slots) onto the stack, given an `i32` local holding `cap`.
+pub(crate) fn emit_list_block_size(cap_local: u32, out: &mut Vec<u8>) {
+    get_local(out, cap_local);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul  -> cap * SLOT_SIZE
+    out.push(0x41); // i32.const LIST_DATA_OFF
+    write_sleb(out, LIST_DATA_OFF as i64);
+    out.push(0x6a); // i32.add  -> LIST_DATA_OFF + cap * SLOT_SIZE
+}
+
+/// Copy the first `count` element slots (each `SLOT_SIZE` bytes) from `src` to
+/// `dst` list backing blocks in a runtime loop. `count` is an `i32` local; `src`
+/// and `dst` are `i32` locals holding list base pointers. `elem_ty` is the list's
+/// element IR type, which decides the per-element copy:
+///
+/// - a **scalar or `string`** element is copied word-for-word by a `SLOT_SIZE`-
+///   aligned `i64` load/store — a `string` is immutable, so sharing its pointer IS
+///   its value-semantic copy;
+/// - a **mutable-aggregate** element (a `struct` or a nested `list`) is
+///   DEEP-COPIED: the element pointer is loaded from `src`, `emit_deep_copy`
+///   produces a fresh independent record, and that fresh pointer is stored into
+///   `dst`. This mirrors [`emit_copy_element_at`] (the array path) and the
+///   interpreters' recursive `Value::clone`, so mutating an element of one list
+///   copy is never observable through another.
+pub(crate) fn emit_list_copy_elems(
+    ctx: &mut LowerCtx,
+    elem_ty: &TypeRef,
+    src: u32,
+    dst: u32,
+    count: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let deep = is_mutable_aggregate(elem_ty, ctx.structs, ctx.enums);
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= count
+    get_local(out, i);
+    get_local(out, count);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // off = LIST_DATA_OFF + i * SLOT_SIZE
+    let off = ctx.add_local(WasmValType::I32);
+    get_local(out, i);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const LIST_DATA_OFF
+    write_sleb(out, LIST_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    set_local(out, off);
+    if deep {
+        // dst_addr = dst + off; load the element pointer from src + off, deep-copy
+        // it into a fresh record, store that fresh pointer into dst.
+        get_local(out, dst);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> dst addr
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> src addr
+        emit_load(WasmValType::I32, out);
+        emit_deep_copy(ctx, elem_ty, out)?;
+        emit_store(WasmValType::I32, out);
+    } else {
+        // memory[dst + off] = memory[src + off] (one 8-byte word: scalar or a
+        // shared immutable `string` pointer).
+        get_local(out, dst);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> dst addr
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> src addr
+        emit_load(WasmValType::I64, out);
+        emit_store(WasmValType::I64, out);
+    }
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    Ok(())
+}
+
+/// Deep-copy the growable `list<T>` whose pointer is on the stack, leaving a fresh
+/// independent `[len][cap][slots]` block's pointer on the stack. The copy keeps the
+/// source's `len` and `cap` and duplicates its `len` element slots (deep-copying a
+/// mutable-aggregate element per [`emit_list_copy_elems`]). This is the WASM
+/// realization of the interpreters' recursive `Value::clone` on a list: mutating
+/// the copy (or the original), or an element of either, is never observable through
+/// the other pointer. `elem_ty` is the element IR type.
+pub(crate) fn emit_list_deep_copy(
+    ctx: &mut LowerCtx,
+    elem_ty: &TypeRef,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    // len = load [src + LIST_LEN_OFF], cap = load [src + LIST_CAP_OFF]
+    let len = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, LIST_LEN_OFF, out);
+    set_local(out, len);
+    let cap = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, LIST_CAP_OFF, out);
+    set_local(out, cap);
+    // dst = __alloc(LIST_DATA_OFF + cap * SLOT_SIZE)
+    emit_list_block_size(cap, out);
+    let dst = alloc_runtime(ctx, out);
+    // dst.len = len; dst.cap = cap
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, LIST_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, cap);
+    emit_store_at(WasmValType::I32, LIST_CAP_OFF, out);
+    // copy the `len` live element slots
+    emit_list_copy_elems(ctx, elem_ty, src, dst, len, out)?;
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Lower `list_new() -> list<T>`: `__alloc` an empty `[len=0][cap=LIST_INITIAL_CAP]
+/// [slots...]` block and leave its pointer on the stack. Allocating a small initial
+/// capacity means the first few `push`es do not each realloc.
+pub(crate) fn lower_list_new(
+    ctx: &mut LowerCtx,
+    args: &[IrExpr],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!("list_new expects 0 arguments, got {}", args.len()));
+    }
+    let ptr = alloc_bytes(ctx, LIST_DATA_OFF + LIST_INITIAL_CAP * SLOT_SIZE, out);
+    get_local(out, ptr);
+    out.push(0x41); // i32.const 0 (len)
+    write_sleb(out, 0);
+    emit_store_at(WasmValType::I32, LIST_LEN_OFF, out);
+    get_local(out, ptr);
+    out.push(0x41); // i32.const LIST_INITIAL_CAP (cap)
+    write_sleb(out, LIST_INITIAL_CAP as i64);
+    emit_store_at(WasmValType::I32, LIST_CAP_OFF, out);
+    get_local(out, ptr);
+    Ok(())
+}
+
+/// Lower `push(l, x) -> list<T>` (value-semantic append): deep-copy `l`, grow the
+/// copy when it is full (double the capacity, or seed `LIST_INITIAL_CAP` from an
+/// empty list, reallocating and copying the live elements — the old block is
+/// orphaned in the no-reclaim bump heap), store `x` into slot `len`, bump `len`,
+/// and leave the fresh list pointer on the stack. Because `push` always returns a
+/// NEW list, `l = push(l, x)` matches the interpreters' `Value::clone`-then-append.
+pub(crate) fn lower_list_push(
+    ctx: &mut LowerCtx,
+    list: &IrExpr,
+    value: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = supported_list_element(&list.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+        format!(
+            "push expects a supported-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    let slot_ty = collection_slot_type(&elem_ty, ctx.structs, ctx.enums, 0)
+        .ok_or_else(|| format!("list element type `{}` is unsupported", elem_ty.name))?;
+    let deep_elem = is_mutable_aggregate(&elem_ty, ctx.structs, ctx.enums);
+    // Deep-copy the source list into a fresh, independent block (value semantics).
+    lower_expr(ctx, list, out)?;
+    emit_list_deep_copy(ctx, &elem_ty, out)?;
+    let lst = ctx.add_local(WasmValType::I32);
+    set_local(out, lst);
+    // Grow if len == cap.
+    let len = ctx.add_local(WasmValType::I32);
+    get_local(out, lst);
+    emit_load_at(WasmValType::I32, LIST_LEN_OFF, out);
+    set_local(out, len);
+    let cap = ctx.add_local(WasmValType::I32);
+    get_local(out, lst);
+    emit_load_at(WasmValType::I32, LIST_CAP_OFF, out);
+    set_local(out, cap);
+    // if len >= cap { grow }
+    get_local(out, len);
+    get_local(out, cap);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x04); // if
+    out.push(0x40); // void block type
+    emit_list_grow(ctx, &elem_ty, lst, len, cap, out)?;
+    out.push(0x0b); // end if
+    // slot address of element `len`: lst + LIST_DATA_OFF + len * SLOT_SIZE
+    get_local(out, lst);
+    get_local(out, len);
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const LIST_DATA_OFF
+    write_sleb(out, LIST_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    out.push(0x6a); // i32.add -> element slot address
+    lower_expr(ctx, value, out)?; // the value to append
+    if deep_elem {
+        // A mutable-aggregate element is stored as an INDEPENDENT deep copy so a
+        // later mutation of the source value never leaks into the list, matching the
+        // interpreters (an argument `Value` is cloned before it is pushed).
+        emit_deep_copy(ctx, &elem_ty, out)?;
+    }
+    emit_store(slot_ty, out);
+    // len += 1
+    get_local(out, lst);
+    get_local(out, len);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    emit_store_at(WasmValType::I32, LIST_LEN_OFF, out);
+    get_local(out, lst);
+    Ok(())
+}
+
+/// Grow the list in `lst` (an `i32` local) so it has room past `len` (== `cap`):
+/// compute `new_cap = if cap == 0 { LIST_INITIAL_CAP } else { cap * 2 }`, `__alloc`
+/// a fresh block, copy the `len` live elements (deep-copying a mutable-aggregate
+/// element per [`emit_list_copy_elems`], with `elem_ty` the element type), write the
+/// new `cap` and preserved `len`, and update `lst` to the new pointer. `len` and
+/// `cap` locals are refreshed so the caller sees the post-grow capacity; the old
+/// block is orphaned. The elements copied here already came from a fresh deep copy
+/// of the source list, so the grow reuses their independent records without a second
+/// deep recursion — but the copy still routes through `emit_list_copy_elems`, whose
+/// per-element deep-copy keeps the grown block's elements independent of the
+/// pre-grow block that is about to be orphaned.
+pub(crate) fn emit_list_grow(
+    ctx: &mut LowerCtx,
+    elem_ty: &TypeRef,
+    lst: u32,
+    len: u32,
+    cap: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // new_cap = cap == 0 ? LIST_INITIAL_CAP : cap * 2
+    let new_cap = ctx.add_local(WasmValType::I32);
+    get_local(out, cap);
+    out.push(0x45); // i32.eqz
+    out.push(0x04); // if -> i32
+    out.push(0x7f); // result i32
+    out.push(0x41); // i32.const LIST_INITIAL_CAP
+    write_sleb(out, LIST_INITIAL_CAP as i64);
+    out.push(0x05); // else
+    get_local(out, cap);
+    out.push(0x41); // i32.const 2
+    write_sleb(out, 2);
+    out.push(0x6c); // i32.mul
+    out.push(0x0b); // end if
+    set_local(out, new_cap);
+    // dst = __alloc(LIST_DATA_OFF + new_cap * SLOT_SIZE)
+    emit_list_block_size(new_cap, out);
+    let dst = alloc_runtime(ctx, out);
+    // dst.len = len; dst.cap = new_cap
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, LIST_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, new_cap);
+    emit_store_at(WasmValType::I32, LIST_CAP_OFF, out);
+    // copy the `len` live elements from the old block (lst) to dst
+    emit_list_copy_elems(ctx, elem_ty, lst, dst, len, out)?;
+    // lst = dst; cap = new_cap (len is unchanged)
+    get_local(out, dst);
+    set_local(out, lst);
+    get_local(out, new_cap);
+    set_local(out, cap);
+    Ok(())
+}
+
+/// Lower `get(l, i) -> T`: load element `i` from `l + LIST_DATA_OFF + i*SLOT_SIZE`.
+/// The interpreters bounds-check and raise `L0413`; the WASM backend relies on
+/// linear-memory trapping for a truly out-of-range index, so in-bounds reads match
+/// the interpreters exactly and an OOB read traps (a consistent, documented
+/// behavior) instead of returning a poisoned value.
+///
+/// The interpreters return `values[i].clone()` — a DEEP CLONE of the element — so a
+/// mutable-aggregate element (`struct`/nested `list`) is loaded and then
+/// `emit_deep_copy`'d into a fresh independent record before it leaves `get`.
+/// Mutating the returned copy (or pushing it into another list and mutating that)
+/// therefore never affects the original list's element, exactly like the
+/// interpreters. A scalar or immutable `string` element needs no copy (a `string`
+/// is shared, which IS its value-semantic clone).
+pub(crate) fn lower_list_get(
+    ctx: &mut LowerCtx,
+    list: &IrExpr,
+    index: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = supported_list_element(&list.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+        format!(
+            "get expects a supported-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    let slot_ty = collection_slot_type(&elem_ty, ctx.structs, ctx.enums, 0)
+        .ok_or_else(|| format!("list element type `{}` is unsupported", elem_ty.name))?;
+    lower_expr(ctx, list, out)?; // base pointer
+    emit_list_elem_offset(ctx, index, out)?; // += LIST_DATA_OFF + index * SLOT_SIZE
+    emit_load(slot_ty, out);
+    if is_mutable_aggregate(&elem_ty, ctx.structs, ctx.enums) {
+        // Return an independent deep copy (the interpreters' `values[i].clone()`).
+        emit_deep_copy(ctx, &elem_ty, out)?;
+    }
+    Ok(())
+}
+
+/// Lower `set(l, i, x) -> list<T>` (value-semantic replace): deep-copy `l`, store
+/// `x` into element slot `i` of the copy, and leave the fresh list pointer on the
+/// stack. In-bounds writes match the interpreters; an OOB index traps on the
+/// linear-memory store, consistent with `get`.
+pub(crate) fn lower_list_set(
+    ctx: &mut LowerCtx,
+    list: &IrExpr,
+    index: &IrExpr,
+    value: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = supported_list_element(&list.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+        format!(
+            "set expects a supported-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    let slot_ty = collection_slot_type(&elem_ty, ctx.structs, ctx.enums, 0)
+        .ok_or_else(|| format!("list element type `{}` is unsupported", elem_ty.name))?;
+    let deep_elem = is_mutable_aggregate(&elem_ty, ctx.structs, ctx.enums);
+    lower_expr(ctx, list, out)?;
+    emit_list_deep_copy(ctx, &elem_ty, out)?;
+    let lst = ctx.add_local(WasmValType::I32);
+    set_local(out, lst);
+    // element slot address in the copy
+    get_local(out, lst);
+    emit_list_elem_offset(ctx, index, out)?;
+    lower_expr(ctx, value, out)?;
+    if deep_elem {
+        // Store an independent deep copy of the replacement so a later mutation of
+        // the source value never leaks into the list (interpreter clone semantics).
+        emit_deep_copy(ctx, &elem_ty, out)?;
+    }
+    emit_store(slot_ty, out);
+    get_local(out, lst);
+    Ok(())
+}
+
+/// Lower `pop(l) -> list<T>` (value-semantic remove-last): deep-copy `l`, decrement
+/// the copy's `len` (dropping the last element in place — the slot stays allocated,
+/// exactly like the interpreters' `Vec::pop` shrinks the length), and leave the
+/// fresh list pointer on the stack. Popping an empty list is `L0413` on the
+/// interpreters; the WASM path decrements to `-1` len, so the enclosing program is
+/// expected to keep the same non-empty precondition the interpreters require.
+pub(crate) fn lower_list_pop(
+    ctx: &mut LowerCtx,
+    list: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let elem_ty = supported_list_element(&list.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+        format!(
+            "pop expects a supported-element list but got `{}`",
+            list.ty.name
+        )
+    })?;
+    lower_expr(ctx, list, out)?;
+    emit_list_deep_copy(ctx, &elem_ty, out)?;
+    let lst = ctx.add_local(WasmValType::I32);
+    set_local(out, lst);
+    // len -= 1
+    get_local(out, lst);
+    get_local(out, lst);
+    emit_load_at(WasmValType::I32, LIST_LEN_OFF, out);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6b); // i32.sub
+    emit_store_at(WasmValType::I32, LIST_LEN_OFF, out);
+    get_local(out, lst);
+    Ok(())
+}
+
+/// After a list base pointer is on the stack, add `LIST_DATA_OFF + index*SLOT_SIZE`
+/// so the top of stack is the element slot address. The `index` expression is an
+/// `i64`, truncated to `i32` (`i32.wrap_i64`) exactly like array indexing.
+pub(crate) fn emit_list_elem_offset(
+    ctx: &mut LowerCtx,
+    index: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    lower_expr(ctx, index, out)?; // index (i64)
+    out.push(0xa7); // i32.wrap_i64
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul -> index * SLOT_SIZE
+    out.push(0x41); // i32.const LIST_DATA_OFF
+    write_sleb(out, LIST_DATA_OFF as i64);
+    out.push(0x6a); // i32.add -> LIST_DATA_OFF + index * SLOT_SIZE
+    out.push(0x6a); // i32.add base + that offset
+    Ok(())
+}
+
+// -- Growable map codegen ----------------------------------------------------
+
+/// Push `MAP_DATA_OFF + cap * MAP_ENTRY_SIZE` (the byte size of a map backing
+/// block with `cap` entry records) onto the stack, given an `i32` local holding
+/// `cap`.
+pub(crate) fn emit_map_block_size(cap_local: u32, out: &mut Vec<u8>) {
+    get_local(out, cap_local);
+    out.push(0x41); // i32.const MAP_ENTRY_SIZE
+    write_sleb(out, MAP_ENTRY_SIZE as i64);
+    out.push(0x6c); // i32.mul  -> cap * MAP_ENTRY_SIZE
+    out.push(0x41); // i32.const MAP_DATA_OFF
+    write_sleb(out, MAP_DATA_OFF as i64);
+    out.push(0x6a); // i32.add  -> MAP_DATA_OFF + cap * MAP_ENTRY_SIZE
+}
+
+/// Push `base + MAP_DATA_OFF + entry * MAP_ENTRY_SIZE` (the address of entry
+/// record `entry`) onto the stack. `base` and `entry` are `i32` locals.
+pub(crate) fn emit_map_entry_addr(base: u32, entry: u32, out: &mut Vec<u8>) {
+    get_local(out, base);
+    get_local(out, entry);
+    out.push(0x41); // i32.const MAP_ENTRY_SIZE
+    write_sleb(out, MAP_ENTRY_SIZE as i64);
+    out.push(0x6c); // i32.mul -> entry * MAP_ENTRY_SIZE
+    out.push(0x41); // i32.const MAP_DATA_OFF
+    write_sleb(out, MAP_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    out.push(0x6a); // i32.add -> base + MAP_DATA_OFF + entry * MAP_ENTRY_SIZE
+}
+
+/// Copy the first `count` entry records (each `MAP_ENTRY_SIZE` = two `SLOT_SIZE`
+/// words) from `src` to `dst` map backing blocks in a runtime loop. `count`, `src`,
+/// and `dst` are `i32` locals; `value_ty` is the map's value IR type. A map KEY is
+/// always a scalar or an immutable `string` pointer (a `string` is compared by
+/// content but shared on copy), so the key word is copied flat. The VALUE word is:
+///
+/// - copied FLAT for a scalar or immutable `string` value — sharing the pointer IS
+///   the value-semantic copy;
+/// - DEEP-COPIED for a mutable-aggregate value (a `struct`, i.e. `map<K, struct>`):
+///   the value pointer is loaded from `src`, `emit_deep_copy` produces a fresh
+///   independent record, and that fresh pointer is stored into `dst` — matching the
+///   interpreters' recursive `Value::clone` on a map, so mutating a value of one map
+///   copy is never observable through another.
+pub(crate) fn emit_map_copy_entries(
+    ctx: &mut LowerCtx,
+    value_ty: &TypeRef,
+    src: u32,
+    dst: u32,
+    count: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let deep_value = is_mutable_aggregate(value_ty, ctx.structs, ctx.enums);
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= count
+    get_local(out, i);
+    get_local(out, count);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // off = MAP_DATA_OFF + i * MAP_ENTRY_SIZE
+    let off = ctx.add_local(WasmValType::I32);
+    get_local(out, i);
+    out.push(0x41); // i32.const MAP_ENTRY_SIZE
+    write_sleb(out, MAP_ENTRY_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const MAP_DATA_OFF
+    write_sleb(out, MAP_DATA_OFF as i64);
+    out.push(0x6a); // i32.add
+    set_local(out, off);
+    // Copy the key word flat (a scalar or a shared immutable `string` pointer).
+    get_local(out, dst);
+    get_local(out, off);
+    out.push(0x6a); // i32.add -> dst key addr
+    get_local(out, src);
+    get_local(out, off);
+    out.push(0x6a); // i32.add -> src key addr
+    emit_load_at(WasmValType::I64, 0, out);
+    emit_store_at(WasmValType::I64, 0, out);
+    // Copy the value word at MAP_VALUE_OFF: flat for a scalar/string, deep for a
+    // mutable aggregate.
+    if deep_value {
+        get_local(out, dst);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> dst entry addr
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> src entry addr
+        emit_load_at(WasmValType::I32, MAP_VALUE_OFF, out);
+        emit_deep_copy(ctx, value_ty, out)?;
+        emit_store_at(WasmValType::I32, MAP_VALUE_OFF, out);
+    } else {
+        get_local(out, dst);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> dst entry addr
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add -> src entry addr
+        emit_load_at(WasmValType::I64, MAP_VALUE_OFF, out);
+        emit_store_at(WasmValType::I64, MAP_VALUE_OFF, out);
+    }
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    Ok(())
+}
+
+/// Deep-copy the growable `map<K, V>` whose pointer is on the stack, leaving a
+/// fresh independent `[len][cap][entries]` block's pointer on the stack. The copy
+/// keeps the source's `len` and `cap` and duplicates its `len` live entry records
+/// (each two words; a mutable-aggregate value is deep-copied per
+/// [`emit_map_copy_entries`], with `value_ty` the value type). This is the WASM
+/// realization of the interpreters' recursive clone on a map: mutating the copy (or
+/// the original), or a value of either, is never observable through the other.
+pub(crate) fn emit_map_deep_copy(
+    ctx: &mut LowerCtx,
+    value_ty: &TypeRef,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let src = ctx.add_local(WasmValType::I32);
+    set_local(out, src);
+    // len = load [src + MAP_LEN_OFF], cap = load [src + MAP_CAP_OFF]
+    let len = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, MAP_LEN_OFF, out);
+    set_local(out, len);
+    let cap = ctx.add_local(WasmValType::I32);
+    get_local(out, src);
+    emit_load_at(WasmValType::I32, MAP_CAP_OFF, out);
+    set_local(out, cap);
+    // dst = __alloc(MAP_DATA_OFF + cap * MAP_ENTRY_SIZE)
+    emit_map_block_size(cap, out);
+    let dst = alloc_runtime(ctx, out);
+    // dst.len = len; dst.cap = cap
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, cap);
+    emit_store_at(WasmValType::I32, MAP_CAP_OFF, out);
+    // copy the `len` live entry records
+    emit_map_copy_entries(ctx, value_ty, src, dst, len, out)?;
+    get_local(out, dst);
+    Ok(())
+}
+
+/// Lower `map_new() -> map<K, V>`: `__alloc` an empty
+/// `[len=0][cap=MAP_INITIAL_CAP][entries...]` block and leave its pointer on the
+/// stack. A small initial capacity means the first few `map_set`s do not realloc.
+pub(crate) fn lower_map_new(
+    ctx: &mut LowerCtx,
+    args: &[IrExpr],
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!("map_new expects 0 arguments, got {}", args.len()));
+    }
+    let ptr = alloc_bytes(ctx, MAP_DATA_OFF + MAP_INITIAL_CAP * MAP_ENTRY_SIZE, out);
+    get_local(out, ptr);
+    out.push(0x41); // i32.const 0 (len)
+    write_sleb(out, 0);
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    get_local(out, ptr);
+    out.push(0x41); // i32.const MAP_INITIAL_CAP (cap)
+    write_sleb(out, MAP_INITIAL_CAP as i64);
+    emit_store_at(WasmValType::I32, MAP_CAP_OFF, out);
+    get_local(out, ptr);
+    Ok(())
+}
+
+/// Emit the equality opcode comparing two SCALAR key values (already pushed) of
+/// WASM slot type `key_ty`. Scalar keys use `i64.eq` (`i64`/fixed-width), `i32.eq`
+/// (`bool`/`char`/`byte`), or the ordered `f*.eq` (floats), matching how the
+/// interpreters compare `Value` keys by content. A `string` key is NOT a scalar
+/// and is compared by content via [`emit_string_eq`], never this opcode.
+pub(crate) fn emit_key_eq(key_ty: WasmValType, out: &mut Vec<u8>) {
+    match key_ty {
+        WasmValType::I32 => out.push(0x46), // i32.eq
+        WasmValType::I64 => out.push(0x51), // i64.eq
+        WasmValType::F32 => out.push(0x5b), // f32.eq
+        WasmValType::F64 => out.push(0x61), // f64.eq
+    }
+}
+
+/// Emit a CONTENT equality test for two `string` pointers `a` and `b` (both `i32`
+/// locals pointing at `[char_len: i32][byte_len: i32][utf8 bytes]` records),
+/// leaving an `i32` boolean (1 if the strings hold identical bytes, else 0) on the
+/// stack. This matches the interpreters' `Value::String` equality: two DISTINCT
+/// string objects with the same bytes compare equal (content, not pointer
+/// identity). The test first compares the `byte_len` headers; if they differ the
+/// result is 0 without touching the bytes. If they match, it walks the UTF-8 bytes
+/// front-to-back, returning 0 on the first differing byte and 1 once every byte
+/// matched (a zero-length string trivially matches). A pointer-identity fast path
+/// (`a == b`) short-circuits when the same record is passed for both sides.
+pub(crate) fn emit_string_eq(ctx: &mut LowerCtx, a: u32, b: u32, out: &mut Vec<u8>) -> u32 {
+    let result = ctx.add_local(WasmValType::I32);
+    // Fast path: identical pointers are the same string, so equal.
+    get_local(out, a);
+    get_local(out, b);
+    out.push(0x46); // i32.eq
+    out.push(0x04); // if -> void
+    out.push(0x40);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    set_local(out, result);
+    out.push(0x05); // else
+    // Compare byte-length headers.
+    let byte_len = ctx.add_local(WasmValType::I32);
+    get_local(out, a);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    set_local(out, byte_len);
+    get_local(out, byte_len);
+    get_local(out, b);
+    emit_load_at(WasmValType::I32, STR_BYTE_LEN_OFF, out);
+    out.push(0x47); // i32.ne
+    out.push(0x04); // if -> void  (byte lengths differ => not equal)
+    out.push(0x40);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, result);
+    out.push(0x05); // else  (equal lengths: walk the bytes)
+    // Assume equal until a byte mismatches; scan i in [0, byte_len).
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    set_local(out, result);
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= byte_len
+    get_local(out, i);
+    get_local(out, byte_len);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // if load8_u(a + STR_DATA_OFF + i) != load8_u(b + STR_DATA_OFF + i) { result = 0; break }
+    get_local(out, a);
+    get_local(out, i);
+    out.push(0x6a); // i32.add
+    out.push(0x2d); // i32.load8_u
+    write_uleb(out, 0); // align 0
+    write_uleb(out, STR_DATA_OFF as u64);
+    get_local(out, b);
+    get_local(out, i);
+    out.push(0x6a); // i32.add
+    out.push(0x2d); // i32.load8_u
+    write_uleb(out, 0); // align 0
+    write_uleb(out, STR_DATA_OFF as u64);
+    out.push(0x47); // i32.ne
+    out.push(0x04); // if -> void
+    out.push(0x40);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, result);
+    out.push(0x0c); // br 2 (out of the block)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    out.push(0x0b); // end if (byte-length mismatch)
+    out.push(0x0b); // end if (pointer fast path)
+    result
+}
+
+/// Linear-scan the map in `map_local` for the entry whose key equals the value in
+/// `key_local` (slot type `key_ty`), returning a fresh `i32` local holding the
+/// matching entry index, or the map's `len` if no key matched (the "found index
+/// else len" convention: `map_set` appends at `len`, `map_get`/`map_has` treat
+/// `index == len` as absent). The scan visits entries front-to-back so the FIRST
+/// matching key wins, mirroring the interpreters' insertion-ordered association
+/// list. When `key_is_string`, the key slot holds an `i32` string POINTER and keys
+/// are compared by CONTENT via [`emit_string_eq`] (decoded bytes, so two distinct
+/// string objects with equal bytes match) instead of an integer slot compare;
+/// otherwise the scalar `key_ty` compare of [`emit_key_eq`] is used. `len` is
+/// loaded into a caller-visible local so callers can reuse it.
+pub(crate) fn emit_map_find(
+    ctx: &mut LowerCtx,
+    map_local: u32,
+    key_local: u32,
+    key_ty: WasmValType,
+    key_is_string: bool,
+    len_local: u32,
+    out: &mut Vec<u8>,
+) -> u32 {
+    // len = load [map + MAP_LEN_OFF]
+    get_local(out, map_local);
+    emit_load_at(WasmValType::I32, MAP_LEN_OFF, out);
+    set_local(out, len_local);
+    // found = len (sentinel: "not found")
+    let found = ctx.add_local(WasmValType::I32);
+    get_local(out, len_local);
+    set_local(out, found);
+    // i = 0
+    let i = ctx.add_local(WasmValType::I32);
+    out.push(0x41); // i32.const 0
+    write_sleb(out, 0);
+    set_local(out, i);
+    out.push(0x02); // block
+    out.push(0x40);
+    out.push(0x03); // loop
+    out.push(0x40);
+    // break when i >= len
+    get_local(out, i);
+    get_local(out, len_local);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x0d); // br_if 1 (out of the block)
+    write_uleb(out, 1);
+    // if key(entry i) == key_local { found = i; break }
+    if key_is_string {
+        // Load the entry's stored string pointer, then compare by content.
+        let entry_key = ctx.add_local(WasmValType::I32);
+        emit_map_entry_addr(map_local, i, out); // entry addr
+        emit_load(WasmValType::I32, out); // load key slot (string pointer at offset 0)
+        set_local(out, entry_key);
+        let eq = emit_string_eq(ctx, entry_key, key_local, out);
+        get_local(out, eq);
+    } else {
+        emit_map_entry_addr(map_local, i, out); // entry addr
+        emit_load(key_ty, out); // load key slot (offset 0 within the entry)
+        get_local(out, key_local);
+        emit_key_eq(key_ty, out);
+    }
+    out.push(0x04); // if
+    out.push(0x40); // void
+    get_local(out, i);
+    set_local(out, found);
+    out.push(0x0c); // br 2 (out of the block, skipping the increment)
+    write_uleb(out, 2);
+    out.push(0x0b); // end if
+    // i += 1
+    get_local(out, i);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    set_local(out, i);
+    out.push(0x0c); // br 0 (repeat)
+    write_uleb(out, 0);
+    out.push(0x0b); // end loop
+    out.push(0x0b); // end block
+    found
+}
+
+/// Lower `map_set(m, k, v) -> map<K, V>` (value-semantic insert/update): deep-copy
+/// `m`, scan the copy for `k`; if found, overwrite that entry's value slot in
+/// place (preserving the entry's position/order); otherwise grow when full (double
+/// the capacity, or seed `MAP_INITIAL_CAP` from an empty map) and append a new
+/// `(k, v)` entry, bumping `len`. Leaves the fresh map pointer on the stack.
+/// Because `map_set` always returns a NEW map, `m = map_set(m, k, v)` matches the
+/// interpreters' clone-then-mutate on the insertion-ordered association list.
+pub(crate) fn lower_map_set(
+    ctx: &mut LowerCtx,
+    map: &IrExpr,
+    key: &IrExpr,
+    value: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (key_ty, value_ty) =
+        supported_map_kv(&map.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+            format!(
+                "map_set expects a scalar/string key and a supported value but got `{}`",
+                map.ty.name
+            )
+        })?;
+    let key_slot = scalar_or_string_slot_type(&key_ty)
+        .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let key_is_string = key_ty.name == "string";
+    let value_slot = collection_slot_type(&value_ty, ctx.structs, ctx.enums, 0)
+        .ok_or_else(|| format!("map value type `{}` is unsupported", value_ty.name))?;
+    let deep_value = is_mutable_aggregate(&value_ty, ctx.structs, ctx.enums);
+
+    // Deep-copy the source map into a fresh, independent block (value semantics).
+    lower_expr(ctx, map, out)?;
+    emit_map_deep_copy(ctx, &value_ty, out)?;
+    let mp = ctx.add_local(WasmValType::I32);
+    set_local(out, mp);
+    // Evaluate the key once into a local for the scan and (on append) the store.
+    lower_expr(ctx, key, out)?;
+    let key_local = ctx.add_local(key_slot);
+    set_local(out, key_local);
+
+    // Scan for the key; `found == len` means "not present".
+    let len = ctx.add_local(WasmValType::I32);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, key_is_string, len, out);
+
+    // if found == len { append } else { overwrite value in place }
+    get_local(out, found);
+    get_local(out, len);
+    out.push(0x46); // i32.eq
+    out.push(0x04); // if
+    out.push(0x40); // void
+    // --- append branch ---
+    // Grow if len == cap.
+    let cap = ctx.add_local(WasmValType::I32);
+    get_local(out, mp);
+    emit_load_at(WasmValType::I32, MAP_CAP_OFF, out);
+    set_local(out, cap);
+    get_local(out, len);
+    get_local(out, cap);
+    out.push(0x4e); // i32.ge_s
+    out.push(0x04); // if
+    out.push(0x40); // void
+    emit_map_grow(ctx, &value_ty, mp, len, cap, out)?;
+    out.push(0x0b); // end if (grow)
+    // entry addr of index `len`
+    emit_map_entry_addr(mp, len, out);
+    let entry_addr = ctx.add_local(WasmValType::I32);
+    set_local(out, entry_addr);
+    // store key at entry + 0
+    get_local(out, entry_addr);
+    get_local(out, key_local);
+    emit_store_at(key_slot, 0, out);
+    // store value at entry + MAP_VALUE_OFF (an independent deep copy for a
+    // mutable-aggregate value, matching the interpreters' clone-before-insert).
+    get_local(out, entry_addr);
+    lower_expr(ctx, value, out)?;
+    if deep_value {
+        emit_deep_copy(ctx, &value_ty, out)?;
+    }
+    emit_store_at(value_slot, MAP_VALUE_OFF, out);
+    // len += 1
+    get_local(out, mp);
+    get_local(out, len);
+    out.push(0x41); // i32.const 1
+    write_sleb(out, 1);
+    out.push(0x6a); // i32.add
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    out.push(0x05); // else
+    // --- overwrite branch: store value into entry `found`'s value slot ---
+    emit_map_entry_addr(mp, found, out);
+    lower_expr(ctx, value, out)?;
+    if deep_value {
+        emit_deep_copy(ctx, &value_ty, out)?;
+    }
+    emit_store_at(value_slot, MAP_VALUE_OFF, out);
+    out.push(0x0b); // end if (append/overwrite)
+
+    get_local(out, mp);
+    Ok(())
+}
+
+/// Grow the map in `mp` (an `i32` local) so it has room past `len` (== `cap`):
+/// compute `new_cap = if cap == 0 { MAP_INITIAL_CAP } else { cap * 2 }`, `__alloc`
+/// a fresh block, copy the `len` live entries (deep-copying a mutable-aggregate
+/// value per [`emit_map_copy_entries`], with `value_ty` the value type), write the
+/// new `cap` and preserved `len`, and update `mp` to the new pointer. `len` and
+/// `cap` locals are refreshed so the caller sees the post-grow capacity; the old
+/// block is orphaned.
+pub(crate) fn emit_map_grow(
+    ctx: &mut LowerCtx,
+    value_ty: &TypeRef,
+    mp: u32,
+    len: u32,
+    cap: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // new_cap = cap == 0 ? MAP_INITIAL_CAP : cap * 2
+    let new_cap = ctx.add_local(WasmValType::I32);
+    get_local(out, cap);
+    out.push(0x45); // i32.eqz
+    out.push(0x04); // if -> i32
+    out.push(0x7f); // result i32
+    out.push(0x41); // i32.const MAP_INITIAL_CAP
+    write_sleb(out, MAP_INITIAL_CAP as i64);
+    out.push(0x05); // else
+    get_local(out, cap);
+    out.push(0x41); // i32.const 2
+    write_sleb(out, 2);
+    out.push(0x6c); // i32.mul
+    out.push(0x0b); // end if
+    set_local(out, new_cap);
+    // dst = __alloc(MAP_DATA_OFF + new_cap * MAP_ENTRY_SIZE)
+    emit_map_block_size(new_cap, out);
+    let dst = alloc_runtime(ctx, out);
+    // dst.len = len; dst.cap = new_cap
+    get_local(out, dst);
+    get_local(out, len);
+    emit_store_at(WasmValType::I32, MAP_LEN_OFF, out);
+    get_local(out, dst);
+    get_local(out, new_cap);
+    emit_store_at(WasmValType::I32, MAP_CAP_OFF, out);
+    // copy the `len` live entries from the old block (mp) to dst
+    emit_map_copy_entries(ctx, value_ty, mp, dst, len, out)?;
+    // mp = dst; cap = new_cap (len unchanged)
+    get_local(out, dst);
+    set_local(out, mp);
+    get_local(out, new_cap);
+    set_local(out, cap);
+    Ok(())
+}
+
+/// Lower `map_get(m, k) -> option<V>`: deep-copy `m` is NOT needed (read-only),
+/// scan for `k`, and construct `some(v)` (loading the found entry's value slot)
+/// or `none`, reusing the enum/option linear-memory layout. `result_ty` is the
+/// call's `option<V>` type, from which the `some`/`none` [`EnumLayout`] is built.
+pub(crate) fn lower_map_get(
+    ctx: &mut LowerCtx,
+    result_ty: &TypeRef,
+    map: &IrExpr,
+    key: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (key_ty, value_ty) =
+        supported_map_kv(&map.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+            format!(
+                "map_get expects a scalar/string key and a supported value but got `{}`",
+                map.ty.name
+            )
+        })?;
+    let key_slot = scalar_or_string_slot_type(&key_ty)
+        .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let key_is_string = key_ty.name == "string";
+    let value_slot = collection_slot_type(&value_ty, ctx.structs, ctx.enums, 0)
+        .ok_or_else(|| format!("map value type `{}` is unsupported", value_ty.name))?;
+    let deep_value = is_mutable_aggregate(&value_ty, ctx.structs, ctx.enums);
+    // The result `option<V>` enum layout: variant `some(V)` is tag 0, `none` tag 1.
+    // Built directly (not via `enum_layout`) so a mutable-aggregate value type
+    // (`map<K, struct>` -> `option<struct>`) is laid out — the `some` payload is one
+    // `i32` pointer slot, deep-copied above so the option owns an independent value.
+    // The produced option is consumed locally (matched to extract the value), so its
+    // enum-level deep copy across a boundary is not exercised by this construction.
+    let inner = result_ty.option_element().ok_or_else(|| {
+        format!(
+            "map_get result type `{}` is not an `option<V>` enum",
+            result_ty.name
+        )
+    })?;
+    if inner.name != value_ty.name {
+        return Err(format!(
+            "map_get result `option<{}>` does not match value type `{}`",
+            inner.name, value_ty.name
+        ));
+    }
+    let layout = build_layout(vec![
+        ("some".to_string(), vec![inner]),
+        ("none".to_string(), Vec::new()),
+    ]);
+
+    // Evaluate the map to a pointer local and the key to a slot local.
+    lower_expr(ctx, map, out)?;
+    let mp = ctx.add_local(WasmValType::I32);
+    set_local(out, mp);
+    lower_expr(ctx, key, out)?;
+    let key_local = ctx.add_local(key_slot);
+    set_local(out, key_local);
+
+    let len = ctx.add_local(WasmValType::I32);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, key_is_string, len, out);
+
+    // Allocate the option record once; fill it in either branch. Result pointer is
+    // stashed so both branches leave the same pointer on the stack at the `end`.
+    let opt = alloc_bytes(ctx, layout.size_bytes(), out);
+    // if found == len { none } else { some(value) }
+    get_local(out, found);
+    get_local(out, len);
+    out.push(0x46); // i32.eq
+    out.push(0x04); // if
+    out.push(0x40); // void
+    // --- none branch: tag = 1 ---
+    let none_tag = layout
+        .tag_of("none")
+        .ok_or_else(|| "option layout missing `none` variant".to_string())?;
+    get_local(out, opt);
+    out.push(0x41); // i32.const none_tag
+    write_sleb(out, none_tag as i64);
+    emit_store_at(WasmValType::I32, 0, out);
+    out.push(0x05); // else
+    // --- some branch: tag = 0, payload = entry(found).value ---
+    let some_tag = layout
+        .tag_of("some")
+        .ok_or_else(|| "option layout missing `some` variant".to_string())?;
+    get_local(out, opt);
+    out.push(0x41); // i32.const some_tag
+    write_sleb(out, some_tag as i64);
+    emit_store_at(WasmValType::I32, 0, out);
+    // opt payload slot = load entry(found).value. A mutable-aggregate value is
+    // deep-copied so the option's payload is an INDEPENDENT record — mutating the
+    // retrieved value never affects the map's stored value, matching the
+    // interpreters' `map_get` returning a clone of the value.
+    get_local(out, opt);
+    emit_map_entry_addr(mp, found, out);
+    emit_load_at(value_slot, MAP_VALUE_OFF, out);
+    if deep_value {
+        emit_deep_copy(ctx, &value_ty, out)?;
+    }
+    emit_store_at(value_slot, ENUM_PAYLOAD_BASE, out);
+    out.push(0x0b); // end if
+
+    get_local(out, opt);
+    Ok(())
+}
+
+/// Lower `map_has(m, k) -> bool`: scan for `k`, leaving `found != len` (an `i32`
+/// boolean: 1 if present, 0 if absent) on the stack.
+pub(crate) fn lower_map_has(
+    ctx: &mut LowerCtx,
+    map: &IrExpr,
+    key: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let (key_ty, _value_ty) =
+        supported_map_kv(&map.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+            format!(
+                "map_has expects a scalar/string key and a supported value but got `{}`",
+                map.ty.name
+            )
+        })?;
+    let key_slot = scalar_or_string_slot_type(&key_ty)
+        .ok_or_else(|| format!("map key type `{}` is unsupported", key_ty.name))?;
+    let key_is_string = key_ty.name == "string";
+
+    lower_expr(ctx, map, out)?;
+    let mp = ctx.add_local(WasmValType::I32);
+    set_local(out, mp);
+    lower_expr(ctx, key, out)?;
+    let key_local = ctx.add_local(key_slot);
+    set_local(out, key_local);
+
+    let len = ctx.add_local(WasmValType::I32);
+    let found = emit_map_find(ctx, mp, key_local, key_slot, key_is_string, len, out);
+    // result = found != len
+    get_local(out, found);
+    get_local(out, len);
+    out.push(0x47); // i32.ne
+    Ok(())
+}
+
+/// Lower `map_len(m) -> i64`: load the leading `i32` `len` header and extend to
+/// `i64` (the builtin's interpreter result type). Reads offset 0, shared with the
+/// string/array/list length header.
+pub(crate) fn lower_map_len(
+    ctx: &mut LowerCtx,
+    map: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    supported_map_kv(&map.ty, ctx.structs, ctx.enums).ok_or_else(|| {
+        format!(
+            "map_len expects a scalar/string key and a supported value but got `{}`",
+            map.ty.name
+        )
+    })?;
+    lower_expr(ctx, map, out)?; // map pointer
+    emit_load_at(WasmValType::I32, MAP_LEN_OFF, out);
+    out.push(0xac); // i64.extend_i32_s
+    Ok(())
+}
+
+/// Copy one struct field slot from `src + offset` to `dst + offset` (both are
+/// `i32` local indices holding base pointers; `offset` is a constant byte offset).
+/// A scalar/string slot is copied word-for-word (by its own WASM slot type); a
+/// nested MUTABLE aggregate slot is deep-copied so nested mutation stays isolated.
+pub(crate) fn emit_copy_slot(
+    ctx: &mut LowerCtx,
+    slot_ir_ty: &TypeRef,
+    src: u32,
+    dst: u32,
+    offset: i32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let slot_ty = slot_val_type(slot_ir_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("slot type `{}` is unsupported", slot_ir_ty.name))?;
+    get_local(out, dst); // base for the store
+    if is_mutable_aggregate(slot_ir_ty, ctx.structs, ctx.enums) {
+        // Load the nested pointer, deep-copy it, store the fresh pointer.
+        get_local(out, src);
+        emit_load_at(WasmValType::I32, offset, out);
+        emit_deep_copy(ctx, slot_ir_ty, out)?;
+    } else {
+        // Scalar or immutable string: copy the slot word by its own type.
+        get_local(out, src);
+        emit_load_at(slot_ty, offset, out);
+    }
+    emit_store_at(slot_ty, offset, out);
+    Ok(())
+}
+
+/// Copy one array element from `src + off` to `dst + off`, where `off` is an `i32`
+/// local holding the runtime byte offset (`LEN_HEADER + i * SLOT_SIZE`). A
+/// scalar/string element is copied word-for-word; a nested MUTABLE aggregate
+/// element is deep-copied. Mirrors [`emit_copy_slot`] but with a runtime offset.
+pub(crate) fn emit_copy_element_at(
+    ctx: &mut LowerCtx,
+    elem_ir_ty: &TypeRef,
+    src: u32,
+    dst: u32,
+    off: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let slot_ty = slot_val_type(elem_ir_ty, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("array element type `{}` is unsupported", elem_ir_ty.name))?;
+    // dst_addr = dst + off
+    get_local(out, dst);
+    get_local(out, off);
+    out.push(0x6a); // i32.add
+    if is_mutable_aggregate(elem_ir_ty, ctx.structs, ctx.enums) {
+        // src_addr = src + off; load the nested pointer; deep-copy; store fresh.
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add
+        emit_load(WasmValType::I32, out);
+        emit_deep_copy(ctx, elem_ir_ty, out)?;
+    } else {
+        // src_addr = src + off; load the element word by its own type.
+        get_local(out, src);
+        get_local(out, off);
+        out.push(0x6a); // i32.add
+        emit_load(slot_ty, out);
+    }
+    emit_store(slot_ty, out);
+    Ok(())
+}
+
+/// The `(byte offset, slot WASM type)` of a struct field, given the struct's
+/// type and the field name.
+pub(crate) fn struct_field_slot(
+    ctx: &LowerCtx,
+    struct_ty: &TypeRef,
+    field: &str,
+) -> Result<(i32, WasmValType), String> {
+    let fields = ctx
+        .structs
+        .get(&struct_ty.name)
+        .ok_or_else(|| format!("`{}` is not a struct", struct_ty.name))?;
+    let position = fields
+        .iter()
+        .position(|(name, _)| name == field)
+        .ok_or_else(|| format!("unknown field `{field}` on `{}`", struct_ty.name))?;
+    let slot_ty = slot_val_type(&fields[position].1, ctx.structs, ctx.enums)
+        .ok_or_else(|| format!("field `{field}` has an unsupported type"))?;
+    Ok((position as i32 * SLOT_SIZE, slot_ty))
+}
+
+/// Given a base pointer already on the stack, add `LEN_HEADER + index*SLOT_SIZE`
+/// so the top of stack is the element slot address. The `index` expression is an
+/// `i64`; it is truncated to `i32` for the address arithmetic.
+pub(crate) fn lower_array_slot_offset(
+    ctx: &mut LowerCtx,
+    index: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // offset = LEN_HEADER + index * SLOT_SIZE (index is i64 -> i32).
+    lower_expr(ctx, index, out)?;
+    out.push(0xa7); // i32.wrap_i64
+    out.push(0x41); // i32.const SLOT_SIZE
+    write_sleb(out, SLOT_SIZE as i64);
+    out.push(0x6c); // i32.mul
+    out.push(0x41); // i32.const LEN_HEADER
+    write_sleb(out, LEN_HEADER as i64);
+    out.push(0x6a); // i32.add
+    out.push(0x6a); // i32.add  (base + offset)
+    Ok(())
+}
+
+/// Fold one assignment-path hop into the running address on the stack, returning
+/// the hop's leaf IR type. On entry the current base/element pointer is on the
+/// stack; on exit the slot address for this hop is on the stack.
+pub(crate) fn lower_place_address(
+    ctx: &mut LowerCtx,
+    cur_ty: &TypeRef,
+    place: &crate::IrPlace,
+    out: &mut Vec<u8>,
+) -> Result<TypeRef, String> {
+    match place {
+        crate::IrPlace::Field(field) => {
+            let (offset, _) = struct_field_slot(ctx, cur_ty, field)?;
+            if offset != 0 {
+                out.push(0x41); // i32.const offset
+                write_sleb(out, offset as i64);
+                out.push(0x6a); // i32.add
+            }
+            let fields = ctx
+                .structs
+                .get(&cur_ty.name)
+                .ok_or_else(|| format!("`{}` is not a struct", cur_ty.name))?;
+            let field_ty = fields
+                .iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, ty)| ty.clone())
+                .ok_or_else(|| format!("unknown field `{field}`"))?;
+            Ok(field_ty)
+        }
+        crate::IrPlace::Index(index) => {
+            let elem_ty = cur_ty
+                .array_element()
+                .ok_or_else(|| format!("indexing a non-array type `{}`", cur_ty.name))?;
+            lower_array_slot_offset(ctx, index, out)?;
+            Ok(elem_ty)
+        }
+    }
+}
+
+/// A non-mid-path store at a base pointer already on the stack followed by the
+/// value: `emit_store` picks the opcode. Alignment `2` = 4-byte for `i32`, `3` =
+/// 8-byte for `i64`/`f64` (offset 0).
+pub(crate) fn emit_store(ty: WasmValType, out: &mut Vec<u8>) {
+    emit_store_at(ty, 0, out);
+}
+
+/// Store the value on the stack (with the base pointer pushed just before it) at
+/// `base + offset`.
+pub(crate) fn emit_store_at(ty: WasmValType, offset: i32, out: &mut Vec<u8>) {
+    let (opcode, align) = match ty {
+        WasmValType::I32 => (0x36u8, 2u64), // i32.store
+        WasmValType::I64 => (0x37, 3),      // i64.store
+        WasmValType::F32 => (0x38, 2),      // f32.store (4-byte)
+        WasmValType::F64 => (0x39, 3),      // f64.store
+    };
+    out.push(opcode);
+    write_uleb(out, align);
+    write_uleb(out, offset as u64);
+}
+
+/// Load a slot value from the address on the stack.
+pub(crate) fn emit_load(ty: WasmValType, out: &mut Vec<u8>) {
+    emit_load_at(ty, 0, out);
+}
+
+/// Load a slot value from `base + offset` (base pointer on the stack).
+pub(crate) fn emit_load_at(ty: WasmValType, offset: i32, out: &mut Vec<u8>) {
+    let (opcode, align) = match ty {
+        WasmValType::I32 => (0x28u8, 2u64), // i32.load
+        WasmValType::I64 => (0x29, 3),      // i64.load
+        WasmValType::F32 => (0x2a, 2),      // f32.load (4-byte)
+        WasmValType::F64 => (0x2b, 3),      // f64.load
+    };
+    out.push(opcode);
+    write_uleb(out, align);
+    write_uleb(out, offset as u64);
+}
+
+/// Emit the opcode(s) for a binary op given the operand WASM type.
+pub(crate) fn emit_binary_op_typed(
+    op: BinaryOp,
+    ty: WasmValType,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match ty {
+        WasmValType::I64 => emit_i64_binop(op, out),
+        WasmValType::F32 => emit_f32_binop(op, out),
+        WasmValType::F64 => emit_f64_binop(op, out),
+        WasmValType::I32 => emit_i32_binop(op, out),
+    }
+}
+
+pub(crate) fn emit_i64_binop(op: BinaryOp, out: &mut Vec<u8>) -> Result<(), String> {
+    let opcode = match op {
+        BinaryOp::Add => 0x7c,
+        BinaryOp::Subtract => 0x7d,
+        BinaryOp::Multiply => 0x7e,
+        BinaryOp::Divide => 0x7f,    // i64.div_s (traps on 0)
+        BinaryOp::Remainder => 0x81, // i64.rem_s (traps on 0; returns 0 for MIN%-1)
+        BinaryOp::Equal => 0x51,
+        BinaryOp::NotEqual => 0x52,
+        BinaryOp::Less => 0x53,         // lt_s
+        BinaryOp::LessEqual => 0x57,    // le_s
+        BinaryOp::Greater => 0x55,      // gt_s
+        BinaryOp::GreaterEqual => 0x59, // ge_s
+        // `and`/`or` short-circuit and the integer bitwise ops are deferred on
+        // this backend; both are routed away before reaching this opcode table.
+        BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr => unreachable!("handled by caller"),
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+/// Emit a signed `i64` division that matches the interpreters' wrapping
+/// semantics on the one overflow case `i64::MIN / -1`. WASM `i64.div_s` traps on
+/// that input (as well as on a zero divisor), but the interpreters use
+/// `wrapping_div`, which yields `i64::MIN`. Operands (dividend then divisor) must
+/// already be on the stack. Stash both, and when the divisor is `-1` compute
+/// `0 - dividend` — wrapping negation is exactly `x / -1` across the whole `i64`
+/// range, including `i64::MIN / -1 == i64::MIN`. Otherwise divide normally, which
+/// still traps on a zero divisor exactly like before (division-by-zero behavior
+/// is unchanged). Used for both the plain-`i64` and fixed-width signed division
+/// paths, so the WASM backend stays bit-for-bit with the interpreters and the
+/// native backend.
+pub(crate) fn emit_i64_signed_div_guarded(ctx: &mut LowerCtx, out: &mut Vec<u8>) {
+    let divisor = ctx.add_local(WasmValType::I64);
+    let dividend = ctx.add_local(WasmValType::I64);
+    // Stack holds [dividend, divisor]; pop them into locals (divisor is on top).
+    set_local(out, divisor);
+    set_local(out, dividend);
+    // divisor == -1 ?
+    get_local(out, divisor);
+    out.push(0x42); // i64.const -1
+    write_sleb(out, -1);
+    out.push(0x51); // i64.eq
+    out.push(0x04); // if
+    out.push(0x7e); // block type: i64 result
+    // then: 0 - dividend (wrapping negation == dividend / -1)
+    out.push(0x42); // i64.const 0
+    write_sleb(out, 0);
+    get_local(out, dividend);
+    out.push(0x7d); // i64.sub
+    out.push(0x05); // else
+    // else: dividend / divisor (traps only on a zero divisor)
+    get_local(out, dividend);
+    get_local(out, divisor);
+    out.push(0x7f); // i64.div_s
+    out.push(0x0b); // end
+}
+
+pub(crate) fn emit_f64_binop(op: BinaryOp, out: &mut Vec<u8>) -> Result<(), String> {
+    let opcode = match op {
+        BinaryOp::Add => 0xa0,
+        BinaryOp::Subtract => 0xa1,
+        BinaryOp::Multiply => 0xa2,
+        BinaryOp::Divide => 0xa3,
+        BinaryOp::Equal => 0x61,
+        BinaryOp::NotEqual => 0x62,
+        BinaryOp::Less => 0x63,
+        BinaryOp::LessEqual => 0x65,
+        BinaryOp::Greater => 0x64,
+        BinaryOp::GreaterEqual => 0x66,
+        // `and`/`or` short-circuit, `%` is integer-only, and the integer bitwise
+        // ops are deferred; all are routed away before reaching this opcode table.
+        BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::Remainder
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr => unreachable!("handled by caller"),
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+/// Emit a single-precision `f32` binary op. Arithmetic (`f32.add/sub/mul/div`)
+/// keeps the result in single precision, so it is bit-identical to the
+/// interpreter's real `f32`. The comparison ops (`f32.eq/ne/lt/le/gt/ge`) are
+/// IEEE-754: relational compares and `==` are false when either operand is NaN,
+/// `!=` is true — exactly the interpreter's (Rust `f32`) semantics.
+pub(crate) fn emit_f32_binop(op: BinaryOp, out: &mut Vec<u8>) -> Result<(), String> {
+    let opcode = match op {
+        BinaryOp::Add => 0x92,
+        BinaryOp::Subtract => 0x93,
+        BinaryOp::Multiply => 0x94,
+        BinaryOp::Divide => 0x95,
+        BinaryOp::Equal => 0x5b,
+        BinaryOp::NotEqual => 0x5c,
+        BinaryOp::Less => 0x5d,
+        BinaryOp::Greater => 0x5e,
+        BinaryOp::LessEqual => 0x5f,
+        BinaryOp::GreaterEqual => 0x60,
+        // `and`/`or` short-circuit, `%` is integer-only, and the integer bitwise
+        // ops are deferred; all are routed away before reaching this opcode table.
+        BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::Remainder
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr => unreachable!("handled by caller"),
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+/// `i32` operands are `bool`/`char`/`byte`. Comparisons use the signed opcodes;
+/// arithmetic is supported defensively.
+pub(crate) fn emit_i32_binop(op: BinaryOp, out: &mut Vec<u8>) -> Result<(), String> {
+    let opcode = match op {
+        BinaryOp::Add => 0x6a,
+        BinaryOp::Subtract => 0x6b,
+        BinaryOp::Multiply => 0x6c,
+        BinaryOp::Divide => 0x6d,    // i32.div_s
+        BinaryOp::Remainder => 0x6f, // i32.rem_s
+        BinaryOp::Equal => 0x46,
+        BinaryOp::NotEqual => 0x47,
+        BinaryOp::Less => 0x48,         // lt_s
+        BinaryOp::LessEqual => 0x4c,    // le_s
+        BinaryOp::Greater => 0x4a,      // gt_s
+        BinaryOp::GreaterEqual => 0x4e, // ge_s
+        // `and`/`or` short-circuit and the integer bitwise ops are deferred on
+        // this backend; both are routed away before reaching this opcode table.
+        BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::BitAnd
+        | BinaryOp::BitOr
+        | BinaryOp::BitXor
+        | BinaryOp::Shl
+        | BinaryOp::Shr => unreachable!("handled by caller"),
+    };
+    out.push(opcode);
+    Ok(())
+}
+
+/// The WASM value type an expression leaves on the stack, using the IR's type
+/// annotation. `None` for a `void` expression. A pointer type (string/struct/
+/// array) reports `i32`.
+pub(crate) fn expr_val_type(ctx: &LowerCtx, expr: &IrExpr) -> Result<Option<WasmValType>, String> {
+    if expr.ty.is_void() {
+        return Ok(None);
+    }
+    if let Some(vt) = value_val_type(&expr.ty, ctx.structs, ctx.enums) {
+        return Ok(Some(vt));
+    }
+    Err(format!(
+        "expression has unsupported type `{}`",
+        expr.ty.name
+    ))
+}
+
+/// Whether a non-void function body always leaves a value / returns on every
+/// path. Conservative: accept a trailing `Return(Some)`, a value-producing tail
+/// `Expr`, an exhaustive `If` whose branches all guarantee a value, an exhaustive
+/// `Match` whose arms all guarantee a value, or a `loop` whose body contains a
+/// `Return`.
+pub(crate) fn body_guarantees_value(body: &[IrStmt]) -> bool {
+    match body.last() {
+        Some(IrStmt::Return(Some(_))) => true,
+        Some(IrStmt::Expr(expr)) => !expr.ty.is_void(),
+        Some(IrStmt::If {
+            branches,
+            else_body,
+            ..
+        }) => {
+            !else_body.is_empty()
+                && body_guarantees_value(else_body)
+                && branches.iter().all(|b| body_guarantees_value(&b.body))
+        }
+        // A `match` is exhaustive (semantics enforces it), so it guarantees a
+        // value iff every arm body does. This is what makes a `match`-tail
+        // function like `fn count o option<i64> -> i64` eligible.
+        Some(IrStmt::Match { arms, .. }) => {
+            !arms.is_empty() && arms.iter().all(|arm| body_guarantees_value(&arm.body))
+        }
+        Some(IrStmt::Loop { body, .. }) => stmts_contain_return(body),
+        _ => false,
+    }
+}
+
+pub(crate) fn stmts_contain_return(stmts: &[IrStmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        IrStmt::Return(_) => true,
+        IrStmt::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches.iter().any(|b| stmts_contain_return(&b.body))
+                || stmts_contain_return(else_body)
+        }
+        IrStmt::Match { arms, .. } => arms.iter().any(|arm| stmts_contain_return(&arm.body)),
+        IrStmt::While { body, .. } | IrStmt::Loop { body, .. } | IrStmt::For { body, .. } => {
+            stmts_contain_return(body)
+        }
+        _ => false,
+    })
+}
+
+// -- Local get/set helpers ---------------------------------------------------
+
+pub(crate) fn get_local(out: &mut Vec<u8>, index: u32) {
+    out.push(0x20);
+    write_uleb(out, index as u64);
+}
+
+pub(crate) fn set_local(out: &mut Vec<u8>, index: u32) {
+    out.push(0x21);
+    write_uleb(out, index as u64);
+}
+
+// -- Binary encoder ----------------------------------------------------------
+
+/// Unsigned LEB128.
+pub(crate) fn write_uleb(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+/// Signed LEB128.
+pub(crate) fn write_sleb(out: &mut Vec<u8>, mut value: i64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7; // arithmetic shift
+        let sign_bit = byte & 0x40;
+        let done = (value == 0 && sign_bit == 0) || (value == -1 && sign_bit != 0);
+        if !done {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if done {
+            break;
+        }
+    }
+}
+
+/// A distinct signature (parameters + optional result). Functions with the same
+/// signature share a type-section entry.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct FuncType {
+    params: Vec<WasmValType>,
+    result: Option<WasmValType>,
+}
+
+/// The internal, non-exported bump-allocator helper `__alloc(size i32) -> i32`.
+/// It reads the mutable bump-pointer global, advances it by `size`, and returns
+/// the old value (the freshly allocated offset). Struct/array construction calls
+/// it to reserve their layout in linear memory.
+pub(crate) fn alloc_helper() -> LoweredFunction {
+    let mut body = Vec::new();
+    body.push(0x23); // global.get
+    write_uleb(&mut body, BUMP_GLOBAL_INDEX as u64); // old bump = return value
+    body.push(0x23); // global.get
+    write_uleb(&mut body, BUMP_GLOBAL_INDEX as u64);
+    get_local(&mut body, 0); // size (param 0)
+    body.push(0x6a); // i32.add
+    body.push(0x24); // global.set
+    write_uleb(&mut body, BUMP_GLOBAL_INDEX as u64);
+    LoweredFunction {
+        name: ALLOC_HELPER_NAME.to_string(),
+        params: vec![WasmValType::I32],
+        result: Some(WasmValType::I32),
+        extra_locals: Vec::new(),
+        body,
+    }
+}
+
+/// The `env`-module field names of the imported host functions, in the order
+/// that fixes their low WASM function indices (must match `*_FUNC_INDEX`).
+const IMPORT_FIELD_NAMES: [&str; IMPORT_FUNC_COUNT as usize] =
+    ["log_i64", "console_log", "dom_set_text"];
+
+/// The signatures of the imported host functions, one per low function index,
+/// reserved as the leading entries of the Type section so the Import section can
+/// reference them by their index.
+pub(crate) fn import_func_types() -> Vec<FuncType> {
+    vec![
+        // 0: env.log_i64(i64) -> void
+        FuncType {
+            params: vec![WasmValType::I64],
+            result: None,
+        },
+        // 1: env.console_log(ptr i32, len i32) -> void
+        FuncType {
+            params: vec![WasmValType::I32, WasmValType::I32],
+            result: None,
+        },
+        // 2: env.dom_set_text(id_ptr i32, id_len i32, text_ptr i32, text_len i32) -> void
+        FuncType {
+            params: vec![
+                WasmValType::I32,
+                WasmValType::I32,
+                WasmValType::I32,
+                WasmValType::I32,
+            ],
+            result: None,
+        },
+    ]
+}
+
+/// Index of the mutable `i32` bump-pointer global.
+const BUMP_GLOBAL_INDEX: u32 = 0;
+
+/// Export name of the internal bump-allocator helper. It is distinct from any
+/// Lullaby identifier (double underscore prefix) so it cannot collide.
+pub(crate) const ALLOC_HELPER_NAME: &str = "__alloc";
+
+/// Encode the whole module: header + Type, Import, Function, Memory, Global,
+/// Export, Code, and Data sections.
+///
+/// The imports (`env.log_i64`, `env.console_log`, `env.dom_set_text`) occupy WASM
+/// function indices `0..IMPORT_FUNC_COUNT`, so every internally-defined function
+/// is numbered from `IMPORT_FUNC_COUNT` up; the caller already assigned those
+/// shifted indices. The internal `__alloc` helper
+/// is appended after the user functions. `pool` supplies the interned
+/// string-literal bytes seeded into the Data section and fixes the bump global's
+/// initial value (past the reserved region and the whole literal pool).
+pub(crate) fn encode_module(user_functions: &[LoweredFunction], pool: &StringPool) -> Vec<u8> {
+    // All internally-defined functions, in module (index) order: the compiled
+    // user functions, then the bump-allocator helper.
+    let mut functions: Vec<LoweredFunction> = user_functions.to_vec();
+    functions.push(alloc_helper());
+
+    // Type table. Entries 0..IMPORT_FUNC_COUNT are reserved for the imported host
+    // functions' signatures (so the Import section references them by index);
+    // internal functions dedup against the whole table.
+    //   0: env.log_i64      (i64) -> void
+    //   1: env.console_log  (i32, i32) -> void
+    //   2: env.dom_set_text (i32, i32, i32, i32) -> void
+    let mut types: Vec<FuncType> = import_func_types();
+    let mut type_of_func: Vec<u32> = Vec::with_capacity(functions.len());
+    for f in &functions {
+        let sig = FuncType {
+            params: f.params.clone(),
+            result: f.result,
+        };
+        let idx = match types.iter().position(|t| *t == sig) {
+            Some(i) => i as u32,
+            None => {
+                types.push(sig);
+                (types.len() - 1) as u32
+            }
+        };
+        type_of_func.push(idx);
+    }
+
+    let mut module = Vec::new();
+    // Magic + version.
+    module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    // Type section (id 1).
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, types.len() as u64);
+        for t in &types {
+            section.push(0x60); // func type
+            write_uleb(&mut section, t.params.len() as u64);
+            for p in &t.params {
+                section.push(p.byte());
+            }
+            match t.result {
+                Some(vt) => {
+                    write_uleb(&mut section, 1);
+                    section.push(vt.byte());
+                }
+                None => write_uleb(&mut section, 0),
+            }
+        }
+        push_section(&mut module, 1, &section);
+    }
+
+    // Import section (id 2): the host functions from module `env`, in the fixed
+    // order that defines their low WASM function indices (0, 1, 2). Each
+    // references the reserved type-table entry with the same index.
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, IMPORT_FUNC_COUNT as u64);
+        for (i, field) in IMPORT_FIELD_NAMES.iter().enumerate() {
+            write_name(&mut section, "env");
+            write_name(&mut section, field);
+            section.push(0x00); // import kind: func
+            write_uleb(&mut section, i as u64); // reserved type index
+        }
+        push_section(&mut module, 2, &section);
+    }
+
+    // Function section (id 3): type index per internal function.
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, functions.len() as u64);
+        for &t in &type_of_func {
+            write_uleb(&mut section, t as u64);
+        }
+        push_section(&mut module, 3, &section);
+    }
+
+    // Memory section (id 5): one memory, min 1 page, no maximum.
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, 1); // one memory
+        section.push(0x00); // limits: flag 0 = min only
+        write_uleb(&mut section, 1); // min 1 page (64 KiB)
+        push_section(&mut module, 5, &section);
+    }
+
+    // Global section (id 6): the mutable `i32` bump pointer, initialized past the
+    // reserved region AND the string-literal pool so `__alloc` never overwrites
+    // static string data.
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, 1); // one global
+        section.push(WasmValType::I32.byte()); // value type i32
+        section.push(0x01); // mutable
+        section.push(0x41); // i32.const (init expr)
+        write_sleb(&mut section, pool.heap_base() as i64);
+        section.push(0x0b); // end init expr
+        push_section(&mut module, 6, &section);
+    }
+
+    // Export section (id 7): the linear memory, then every internal function by
+    // name. Function export indices are the shifted (post-import) indices.
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, (functions.len() + 1) as u64); // +1 for memory
+        write_name(&mut section, "memory");
+        section.push(0x02); // export kind: mem
+        write_uleb(&mut section, 0); // memory index 0
+        for (i, f) in functions.iter().enumerate() {
+            write_name(&mut section, &f.name);
+            section.push(0x00); // export kind: func
+            write_uleb(&mut section, IMPORT_FUNC_COUNT as u64 + i as u64);
+        }
+        push_section(&mut module, 7, &section);
+    }
+
+    // Code section (id 10).
+    {
+        let mut section = Vec::new();
+        write_uleb(&mut section, functions.len() as u64);
+        for f in &functions {
+            let mut code = Vec::new();
+            // Locals: run-length compressed consecutive same-type runs.
+            let runs = compress_locals(&f.extra_locals);
+            write_uleb(&mut code, runs.len() as u64);
+            for (count, ty) in runs {
+                write_uleb(&mut code, count as u64);
+                code.push(ty.byte());
+            }
+            code.extend_from_slice(&f.body);
+            code.push(0x0b); // end
+            write_uleb(&mut section, code.len() as u64);
+            section.extend_from_slice(&code);
+        }
+        push_section(&mut module, 10, &section);
+    }
+
+    // Data section (id 11): one active segment at offset 0 seeding the reserved
+    // region [0, RESERVED_BASE) with zeros (so a handed-out pointer is never null)
+    // followed by the interned string-literal pool starting at `RESERVED_BASE`.
+    {
+        let mut segment = vec![0u8; RESERVED_BASE as usize];
+        segment.extend_from_slice(&pool.bytes);
+
+        let mut section = Vec::new();
+        write_uleb(&mut section, 1); // one data segment
+        section.push(0x00); // segment kind 0: active, memory 0, offset expr
+        section.push(0x41); // i32.const (offset expr)
+        write_sleb(&mut section, 0);
+        section.push(0x0b); // end offset expr
+        write_uleb(&mut section, segment.len() as u64);
+        section.extend_from_slice(&segment);
+        push_section(&mut module, 11, &section);
+    }
+
+    module
+}
+
+/// Write a WASM name: length-prefixed UTF-8 bytes.
+pub(crate) fn write_name(out: &mut Vec<u8>, name: &str) {
+    let bytes = name.as_bytes();
+    write_uleb(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+/// Run-length compress a local declaration list into `(count, type)` runs.
+pub(crate) fn compress_locals(locals: &[WasmValType]) -> Vec<(u32, WasmValType)> {
+    let mut runs: Vec<(u32, WasmValType)> = Vec::new();
+    for &ty in locals {
+        match runs.last_mut() {
+            Some((count, last)) if *last == ty => *count += 1,
+            _ => runs.push((1, ty)),
+        }
+    }
+    runs
+}
+
+/// Append a section: `id`, byte length, then the section contents.
+pub(crate) fn push_section(module: &mut Vec<u8>, id: u8, contents: &[u8]) {
+    module.push(id);
+    write_uleb(module, contents.len() as u64);
+    module.extend_from_slice(contents);
+}
