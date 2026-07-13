@@ -35,6 +35,7 @@ pub mod macho_object;
 pub mod native_contract;
 pub mod native_object;
 pub mod object_model;
+pub mod rc_prototype;
 pub mod wasm;
 
 pub use native_object::{
