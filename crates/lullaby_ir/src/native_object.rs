@@ -1252,6 +1252,13 @@ const STR_FROM_CHAR_SYMBOL: &str = "__lullaby_str_from_char";
 /// it traps with `ud2`, mirroring the interpreters' `L0413`.
 const STR_SUBSTRING_SYMBOL: &str = "__lullaby_str_substring";
 
+/// The char-index helper emitted in `.text`. Signature: the source string record
+/// pointer in `rcx`, the char index (i64) in `rdx`; returns in `rax` the Unicode
+/// code point of the `i`-th character (an `i64` `char` cell). On an out-of-range
+/// index (`i < 0 || i >= char_count`) it traps with `ud2`, mirroring `L0413`.
+/// Implements `s[i]`.
+const STR_CHAR_AT_SYMBOL: &str = "__lullaby_str_char_at";
+
 /// The `find` helper emitted in `.text`. Signature: the haystack record pointer
 /// in `rcx`, the needle record pointer in `rdx`; returns in `rax` the CHAR index
 /// (i64) of the first byte-level occurrence of the needle, or `-1` if absent. An
@@ -6614,6 +6621,26 @@ fn lower_native_expr(
                 emit_mov_rax_from_rax_disp(code, MAP_LEN_OFF);
                 return Ok(());
             }
+            // `char_code(c)`: a `char` is stored as its Unicode code point in an i64
+            // cell, so `char_code` is the identity on that cell (matches the
+            // interpreters' `char as i64`).
+            if name == "char_code" && args.len() == 1 && args[0].ty.name == "char" {
+                lower_native_expr(ctx, &args[0], code)?;
+                return Ok(());
+            }
+            // `is_digit(c)`: 1 when the code point is an ASCII digit `'0'..='9'`
+            // (48..=57), else 0 — matching the interpreters' `is_ascii_digit`. One
+            // unsigned range test: `(c - 48) <= 9` (a `c < 48` underflows to a huge
+            // unsigned value that is not `<= 9`). Other `is_*` predicates are
+            // Unicode-aware and stay on the interpreters.
+            if name == "is_digit" && args.len() == 1 {
+                lower_native_expr(ctx, &args[0], code)?; // c -> rax
+                code.extend_from_slice(&[0x48, 0x83, 0xE8, 0x30]); // sub rax, 48
+                code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x09]); // cmp rax, 9
+                code.extend_from_slice(&[0x0F, 0x96, 0xC0]); // setbe al
+                code.extend_from_slice(&[0x48, 0x0F, 0xB6, 0xC0]); // movzx rax, al
+                return Ok(());
+            }
             // `len(arr)` over a fixed native array folds to a compile-time
             // constant (arrays never grow in the native subset).
             if name == "len"
@@ -6811,6 +6838,12 @@ fn lower_native_expr(
                 symbol: name.clone(),
             });
             Ok(())
+        }
+        // `s[i]` on a heap string yields the `i`-th Unicode scalar (a `char`), via
+        // the UTF-8-aware char-at helper. Guarded on the string operand type so a
+        // normal array index still resolves as a stack access below.
+        BytecodeExprKind::Index { target, index } if is_string_type(&target.ty) => {
+            lower_string_char_at(ctx, target, index, code)
         }
         BytecodeExprKind::Field { .. } | BytecodeExprKind::Index { .. } => {
             // A struct-field or array-index read yielding an i64 scalar. Resolve
@@ -8476,6 +8509,25 @@ fn lower_string_substring(
     Ok(())
 }
 
+/// Lower `s[i]`: stage the string record pointer into `rcx` and the char index
+/// into `rdx`, then call the char-at helper, which leaves the `i`-th code point
+/// (an `i64` `char` cell) in `rax`. Operands spill because evaluating the index
+/// may clobber the string's register.
+fn lower_string_char_at(
+    ctx: &mut NativeCtx,
+    s: &BytecodeExpr,
+    index: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    lower_native_expr(ctx, s, code)?; // record pointer -> rax
+    code.push(0x50); // push rax (string record)
+    lower_native_expr(ctx, index, code)?; // index i64 -> rax
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (index)
+    code.push(0x59); // pop rcx (string record)
+    emit_call_symbol(ctx, STR_CHAR_AT_SYMBOL, code);
+    Ok(())
+}
+
 /// Lower a two-string operation (`find`/`contains`/`starts_with`/`ends_with`):
 /// evaluate the first string record pointer into `rcx` and the second into `rdx`,
 /// then call the named `.text` helper, which leaves its result (an `i64` char
@@ -9768,6 +9820,7 @@ fn heap_runtime_helpers() -> Vec<HelperFunction> {
         emit_str_from_bool_helper(),
         emit_str_from_char_helper(),
         emit_str_substring_helper(),
+        emit_str_char_at_helper(),
         emit_str_find_helper(),
         emit_str_contains_helper(),
         emit_str_starts_with_helper(),
@@ -9799,6 +9852,7 @@ fn program_uses_heap_helpers(functions: &[LoweredNativeFunction]) -> bool {
                     | STR_FROM_BOOL_SYMBOL
                     | STR_FROM_CHAR_SYMBOL
                     | STR_SUBSTRING_SYMBOL
+                    | STR_CHAR_AT_SYMBOL
                     | STR_FIND_SYMBOL
                     | STR_CONTAINS_SYMBOL
                     | STR_STARTS_WITH_SYMBOL
@@ -11703,6 +11757,98 @@ fn emit_char_to_byte_walk(code: &mut Vec<u8>) {
     patch_rel32(code, wdone_site);
 }
 
+/// `__lullaby_str_char_at(rcx = s, rdx = i) -> rax = code point`.
+///
+/// Returns the Unicode scalar of the `i`-th character. Bounds-checks `i` against
+/// `char_count` (unsigned, so `i < 0` traps too) with `ud2` (mirroring `L0413`),
+/// walks the UTF-8 to char `i`'s byte offset, then decodes the 1–4-byte sequence
+/// there into its code point. Preserves the two callee-saved registers the walk
+/// uses (`rsi`, `r15`); makes no internal call.
+fn emit_str_char_at_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    code.push(0x56); // push rsi
+    code.extend_from_slice(&[0x41, 0x57]); // push r15
+
+    // Bounds check: unsigned i >= char_len -> ud2.
+    code.extend_from_slice(&[0x48, 0x8B, 0x41, 0x00]); // mov rax, [rcx + 0] (char_len)
+    code.extend_from_slice(&[0x48, 0x39, 0xC2]); // cmp rdx, rax
+    code.extend_from_slice(&[0x72, 0x02]); // jb +2 (in bounds)
+    code.extend_from_slice(&[0x0F, 0x0B]); // ud2
+
+    // Set up the walk: rsi = data (rcx+16), r15 = byte_len (rcx+8), rax = i.
+    code.extend_from_slice(&[0x4C, 0x8B, 0x79, 0x08]); // mov r15, [rcx + 8]
+    code.extend_from_slice(&[0x48, 0x8D, 0x71, 0x10]); // lea rsi, [rcx + 16]
+    code.extend_from_slice(&[0x48, 0x89, 0xD0]); // mov rax, rdx (i)
+    emit_char_to_byte_walk(&mut code); // rax = byte offset of char i
+
+    // Decode the UTF-8 sequence at [rsi + rax] into r8 (the code point).
+    code.extend_from_slice(&[0x44, 0x0F, 0xB6, 0x04, 0x06]); // movzx r8d, byte [rsi+rax]  (lead)
+    // 1-byte: lead < 0x80 -> cp = lead.
+    code.extend_from_slice(&[0x41, 0x81, 0xF8]);
+    code.extend_from_slice(&0x80u32.to_le_bytes()); // cmp r8d, 0x80
+    code.extend_from_slice(&[0x0F, 0x82]); // jb done
+    let done1 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // b1 = [rsi+rax+1] & 0x3F.
+    code.extend_from_slice(&[0x44, 0x0F, 0xB6, 0x4C, 0x06, 0x01]); // movzx r9d, byte [rsi+rax+1]
+    code.extend_from_slice(&[0x41, 0x83, 0xE1, 0x3F]); // and r9d, 0x3F
+    // 2-byte: lead < 0xE0 -> cp = ((lead & 0x1F) << 6) | b1.
+    code.extend_from_slice(&[0x41, 0x81, 0xF8]);
+    code.extend_from_slice(&0xE0u32.to_le_bytes()); // cmp r8d, 0xE0
+    code.extend_from_slice(&[0x0F, 0x83]); // jae three_plus
+    let three_plus = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x41, 0x83, 0xE0, 0x1F]); // and r8d, 0x1F
+    code.extend_from_slice(&[0x41, 0xC1, 0xE0, 0x06]); // shl r8d, 6
+    code.extend_from_slice(&[0x45, 0x09, 0xC8]); // or r8d, r9d
+    code.push(0xE9); // jmp done
+    let done2 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // three_plus: b2 = [rsi+rax+2] & 0x3F.
+    patch_rel32(&mut code, three_plus);
+    code.extend_from_slice(&[0x44, 0x0F, 0xB6, 0x54, 0x06, 0x02]); // movzx r10d, byte [rsi+rax+2]
+    code.extend_from_slice(&[0x41, 0x83, 0xE2, 0x3F]); // and r10d, 0x3F
+    // 3-byte: lead < 0xF0 -> cp = ((lead & 0x0F) << 12) | (b1 << 6) | b2.
+    code.extend_from_slice(&[0x41, 0x81, 0xF8]);
+    code.extend_from_slice(&0xF0u32.to_le_bytes()); // cmp r8d, 0xF0
+    code.extend_from_slice(&[0x0F, 0x83]); // jae four
+    let four = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x41, 0x83, 0xE0, 0x0F]); // and r8d, 0x0F
+    code.extend_from_slice(&[0x41, 0xC1, 0xE0, 0x0C]); // shl r8d, 12
+    code.extend_from_slice(&[0x41, 0xC1, 0xE1, 0x06]); // shl r9d, 6
+    code.extend_from_slice(&[0x45, 0x09, 0xC8]); // or r8d, r9d
+    code.extend_from_slice(&[0x45, 0x09, 0xD0]); // or r8d, r10d
+    code.push(0xE9); // jmp done
+    let done3 = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // four: b3 = [rsi+rax+3] & 0x3F ; cp = ((lead & 0x07)<<18)|(b1<<12)|(b2<<6)|b3.
+    patch_rel32(&mut code, four);
+    code.extend_from_slice(&[0x44, 0x0F, 0xB6, 0x5C, 0x06, 0x03]); // movzx r11d, byte [rsi+rax+3]
+    code.extend_from_slice(&[0x41, 0x83, 0xE3, 0x3F]); // and r11d, 0x3F
+    code.extend_from_slice(&[0x41, 0x83, 0xE0, 0x07]); // and r8d, 0x07
+    code.extend_from_slice(&[0x41, 0xC1, 0xE0, 0x12]); // shl r8d, 18
+    code.extend_from_slice(&[0x41, 0xC1, 0xE1, 0x0C]); // shl r9d, 12
+    code.extend_from_slice(&[0x41, 0xC1, 0xE2, 0x06]); // shl r10d, 6
+    code.extend_from_slice(&[0x45, 0x09, 0xC8]); // or r8d, r9d
+    code.extend_from_slice(&[0x45, 0x09, 0xD0]); // or r8d, r10d
+    code.extend_from_slice(&[0x45, 0x09, 0xD8]); // or r8d, r11d
+    // done: rax = r8 (code point).
+    patch_rel32(&mut code, done1);
+    patch_rel32(&mut code, done2);
+    patch_rel32(&mut code, done3);
+    code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
+    code.extend_from_slice(&[0x41, 0x5F]); // pop r15
+    code.push(0x5E); // pop rsi
+    code.push(0xC3); // ret
+
+    HelperFunction {
+        name: STR_CHAR_AT_SYMBOL.to_string(),
+        code,
+        relocations: Vec::new(),
+    }
+}
+
 /// `__lullaby_str_substring(rcx = s, rdx = start, r8 = end) -> rax = record`.
 ///
 /// Char-indexed `[start, end)` slice. Bounds-checks exactly like the interpreters
@@ -11963,6 +12109,7 @@ fn write_object_with_data(
         emit_str_from_bool_helper(),
         emit_str_from_char_helper(),
         emit_str_substring_helper(),
+        emit_str_char_at_helper(),
         emit_str_find_helper(),
         emit_str_contains_helper(),
         emit_str_starts_with_helper(),
@@ -12031,6 +12178,7 @@ fn write_object_with_data(
         STR_FROM_BOOL_SYMBOL,
         STR_FROM_CHAR_SYMBOL,
         STR_SUBSTRING_SYMBOL,
+        STR_CHAR_AT_SYMBOL,
         STR_FIND_SYMBOL,
         STR_CONTAINS_SYMBOL,
         STR_STARTS_WITH_SYMBOL,
@@ -12961,6 +13109,38 @@ mod native_program_tests {
         assert!(
             text.windows(4).any(|w| w == [0x48, 0x0F, 0x4C, 0xC1]),
             "expected a `cmovl` scalar max fold"
+        );
+    }
+
+    #[test]
+    fn compiles_string_char_index_and_char_builtins() {
+        // `s[i]` (string char access), `char_code`, and `is_digit` now compile
+        // natively — a parse loop over a string goes native end to end. The `.text`
+        // must call the char-at helper (a relocation to STR_CHAR_AT_SYMBOL).
+        let program = emit_native_program(&module_for(concat!(
+            "fn parse_uint s string -> i64\n",
+            "    let val = 0\n",
+            "    let n = len(s)\n",
+            "    for i from 0 to n - 1\n",
+            "        if is_digit(s[i])\n",
+            "            val = val * 10 + char_code(s[i]) - 48\n",
+            "    val\n\n",
+            "fn main -> i64\n",
+            "    parse_uint(\"31337\")\n",
+        )))
+        .expect("emit native program");
+        assert!(
+            program.compiled.contains(&"parse_uint".to_string()),
+            "the string-indexing parse loop should compile natively: {:?}",
+            program.skipped
+        );
+        // The char-at helper symbol is present in the emitted object (it backs `s[i]`).
+        assert!(
+            program
+                .bytes
+                .windows(STR_CHAR_AT_SYMBOL.len())
+                .any(|w| w == STR_CHAR_AT_SYMBOL.as_bytes()),
+            "expected the char-at helper `{STR_CHAR_AT_SYMBOL}` in the object"
         );
     }
 
@@ -15246,6 +15426,7 @@ mod native_program_tests {
             STR_FROM_BOOL_SYMBOL,
             STR_FROM_CHAR_SYMBOL,
             STR_SUBSTRING_SYMBOL,
+            STR_CHAR_AT_SYMBOL,
             STR_FIND_SYMBOL,
             STR_CONTAINS_SYMBOL,
             STR_STARTS_WITH_SYMBOL,
@@ -15318,6 +15499,7 @@ mod native_program_tests {
         assert!(program.skipped.is_empty(), "{:?}", program.skipped);
         for symbol in [
             STR_SUBSTRING_SYMBOL,
+            STR_CHAR_AT_SYMBOL,
             STR_FIND_SYMBOL,
             STR_CONTAINS_SYMBOL,
             STR_STARTS_WITH_SYMBOL,
