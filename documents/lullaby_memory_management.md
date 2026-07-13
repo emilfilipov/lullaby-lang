@@ -34,21 +34,29 @@ fn main -> i64
 
 ## Design Philosophy
 
+> **Model decision (supersedes any tracing-GC framing below):** Lullaby's heap is
+> **reference-counted**, layered with **arenas** (regions) for scope-local data —
+> **not** garbage-collected. This matches `language_specification.md` and the shipped
+> `rc<T>`/`ref<T>` surface. The rationale, options analysis, and staged plan are in
+> [memory_model_decision.md](memory_model_decision.md); where the sections below
+> describe tracing GC they are historical/rejected and are being rewritten.
+
 ### Core Principles
 
-1. **Hybrid Memory Model**: Combine automatic garbage collection with explicit memory regions for systems-level control
+1. **Reference-counted heap + regions**: reference counting frees deterministically
+   at scope exit (no GC pauses); arenas (regions) bulk-allocate scope-local data
 2. **Region-Based Allocation**: Primary allocation mechanism optimized for predictable memory layout (critical for OS kernels)
 3. **Lifetime Tracking**: Automatic scope-based lifetime management through AST analysis
-4. **Minimal Runtime Overhead**: Garbage collector designed for fast execution with minimal interference to critical paths
+4. **Minimal Runtime Overhead**: Syntax-directed `inc`/`dec`/`drop` insertion — no collector, no stop-the-world, no compile-time cost that erodes the fast build
 5. **Deterministic Behavior**: Memory operations explicitly trackable and verifiable by the compiler
 
 ### Key Differentiators from Existing Languages
 
 | Traditional Language | Lullaby Approach |
 |---------------------|--------------------|
-| Global heap GC (Java, C#, Go) | **Region-based allocation** with optional selective GC |
-| Manual memory management (C, C++) | **Explicit regions** + **automatic cleanup** for local scopes |
-| Reference counting (Python, Swift) | **Reachability-based** tracking via scope analysis |
+| Global heap GC (Java, C#, Go) | **Reference counting** + **region-based allocation** (no GC pauses) |
+| Manual memory management (C, C++) | **Explicit regions** + **automatic RC cleanup** for local scopes |
+| Refcount without reuse (Python, Swift) | **RC + arenas**, architected toward Perceus-style in-place reuse |
 | Garbage collector as afterthought | **Integrated into compilation pipeline** as core optimization phase |
 
 ---
@@ -270,6 +278,15 @@ clear ref obj  # Marks as unreachable for GC
 ---
 
 ## Garbage Collection System (Optional Module)
+
+> **Superseded / historical.** Lullaby does not use tracing garbage collection.
+> The heap is reference-counted (with arenas for scope-local data); see
+> [memory_model_decision.md](memory_model_decision.md). Tracing GC was evaluated
+> and rejected — it needs precise stack maps (a poor fit for the hand-written,
+> no-SSA native emitter), introduces pauses (wrong for a systems language), and
+> contradicts the shipped reference-counting commitment. This section is retained
+> only as record of the rejected alternative and will be removed on the next
+> rewrite of this document.
 
 ### GC Design Goals
 1. **Minimal Performance Impact**: Fast collection with low pause times
