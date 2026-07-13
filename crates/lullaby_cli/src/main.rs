@@ -73,6 +73,7 @@ fn run() -> Result<(), String> {
             invocation.freestanding,
             invocation.debug,
             invocation.native_target,
+            invocation.fast_math,
         ),
         CommandName::Lsp => lsp(),
         CommandName::Version => {
@@ -421,6 +422,7 @@ fn native_file(
     freestanding: bool,
     debug: bool,
     target_triple: Option<String>,
+    fast_math: bool,
 ) -> Result<(), String> {
     // Resolve the object-file target. `None` is the default Windows COFF target;
     // an explicit `--target` selects ELF (Linux) or Mach-O (macOS). An unknown or
@@ -479,23 +481,26 @@ fn native_file(
     let debug_options = debug.then(|| DebugOptions {
         source_file: compiled.path.display().to_string(),
     });
-    let program = match emit_native_program_for_target(&bytecode, &target, debug_options.as_ref()) {
-        Ok(program) => program,
-        Err(error) => {
-            let mut report = DiagnosticReport::new(error.code, DiagnosticPhase::Ir, error.message)
-                .with_source_path(compiled.path.display().to_string());
-            report = report.with_note(
+    let program =
+        match emit_native_program_for_target(&bytecode, &target, debug_options.as_ref(), fast_math)
+        {
+            Ok(program) => program,
+            Err(error) => {
+                let mut report =
+                    DiagnosticReport::new(error.code, DiagnosticPhase::Ir, error.message)
+                        .with_source_path(compiled.path.display().to_string());
+                report = report.with_note(
                 "the native backend compiles only i64-scalar functions (params and return all i64)",
             );
-            let mut rendered = format_reports(&[report], mode, Some(&compiled.source));
-            if mode == OutputMode::Verbose {
-                for skip in &error.skipped {
-                    rendered.push_str(&format!("\nskipped {}: {}", skip.name, skip.reason));
+                let mut rendered = format_reports(&[report], mode, Some(&compiled.source));
+                if mode == OutputMode::Verbose {
+                    for skip in &error.skipped {
+                        rendered.push_str(&format!("\nskipped {}: {}", skip.name, skip.reason));
+                    }
                 }
+                return Err(rendered);
             }
-            return Err(rendered);
-        }
-    };
+        };
 
     // Freestanding / no-std mode guarantees a no-C-runtime executable. The emitted
     // program links only the minimal OS import (`kernel32!ExitProcess`); any
@@ -1403,6 +1408,13 @@ struct Invocation {
     /// `x86_64-apple-darwin` (Mach-O). Ignored by every command other than
     /// `native`.
     native_target: Option<String>,
+    /// Opt-in fast-math for the native backend (`lullaby native --fast-math`).
+    /// Permits parity-BREAKING float optimizations — currently f64 sum/dot
+    /// reductions vectorized with a 2-lane packed accumulator, which reorders the
+    /// additions (float `+` is not associative) so the result can differ from the
+    /// scalar fold in the last ULP. Off by default (bit-exact parity preserved);
+    /// ignored by every command other than `native`.
+    fast_math: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1499,6 +1511,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     freestanding: false,
                     debug: false,
                     native_target: None,
+                    fast_math: false,
                 }))
             } else {
                 Err("usage: lullaby --version".to_string())
@@ -1518,6 +1531,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     freestanding: false,
                     debug: false,
                     native_target: None,
+                    fast_math: false,
                 }))
             } else {
                 Err("usage: lullaby --help".to_string())
@@ -1537,6 +1551,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     freestanding: false,
                     debug: false,
                     native_target: None,
+                    fast_math: false,
                 }))
             } else {
                 Err("usage: lullaby docs".to_string())
@@ -1556,6 +1571,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     freestanding: false,
                     debug: false,
                     native_target: None,
+                    fast_math: false,
                 }))
             } else {
                 Err("usage: lullaby examples".to_string())
@@ -1575,6 +1591,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     freestanding: false,
                     debug: false,
                     native_target: None,
+                    fast_math: false,
                 }))
             } else {
                 Err("usage: lullaby lsp".to_string())
@@ -1596,6 +1613,7 @@ fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                     freestanding: false,
                     debug: false,
                     native_target: None,
+                    fast_math: false,
                 })),
                 _ => Err("usage: lullaby new <name>".to_string()),
             }
@@ -1616,6 +1634,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
     let mut freestanding = false;
     let mut debug = false;
     let mut native_target: Option<String> = None;
+    let mut fast_math = false;
     let mut cursor = 0;
     let usage = command_usage(command);
 
@@ -1685,6 +1704,14 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
                     return Err(usage);
                 }
                 freestanding = true;
+                cursor += 1;
+            }
+            "--fast-math" => {
+                // Opt-in parity-breaking float optimizations (native only).
+                if command != "native" {
+                    return Err(usage);
+                }
+                fast_math = true;
                 cursor += 1;
             }
             "--debug" | "-g" => {
@@ -1771,6 +1798,7 @@ fn parse_file_command(command: &str, args: &[String]) -> Result<Option<Invocatio
         freestanding,
         debug,
         native_target,
+        fast_math,
     }))
 }
 
@@ -1809,6 +1837,7 @@ fn parse_fmt_command(args: &[String]) -> Result<Option<Invocation>, String> {
         freestanding: false,
         debug: false,
         native_target: None,
+        fast_math: false,
     }))
 }
 
@@ -1819,7 +1848,7 @@ fn command_usage(command: &str) -> String {
         "inspect" => "usage: lullaby inspect [--verbose|--format json] <file.lbc>".to_string(),
         "test" => "usage: lullaby test [--verbose] <file.lby>".to_string(),
         "wasm" => "usage: lullaby wasm [--verbose] [-o out.wasm] <file.lby>".to_string(),
-        "native" => "usage: lullaby native [--verbose] [--freestanding|--no-std] [--debug|-g] [--target x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-unknown-linux-gnu] [-o out] <file.lby>".to_string(),
+        "native" => "usage: lullaby native [--verbose] [--freestanding|--no-std] [--debug|-g] [--fast-math] [--target x86_64-pc-windows-msvc|x86_64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-unknown-linux-gnu] [-o out] <file.lby>".to_string(),
         "run" => "usage: lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|full] [--verbose|--format json] <file.lby> [args...]\n       lullaby run [--verbose|--format json] <file.lbc>".to_string(),
         _ => "usage: lullaby check [--verbose|--format json] <file.lby>".to_string(),
     }
@@ -1841,7 +1870,7 @@ fn display_version() -> String {
 
 fn print_help() {
     println!(
-        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby compile [--optimize none|constant-fold|dead-code|full] [-o output.lbc] [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby build [--optimize none|constant-fold|dead-code|full] [-o output.lbc] [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|full] [--verbose|--format json] <file.lby | project-dir | lullaby.json> [args...]\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby test [--verbose] <file.lby | project-dir | lullaby.json>\n  lullaby wasm [--verbose] [-o out.wasm] <file.lby | project-dir | lullaby.json>\n  lullaby native [--verbose] [--freestanding|--no-std] [--debug|-g] [--target <triple>] [-o out] <file.lby | project-dir | lullaby.json>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby new <name>\n  lullaby lsp\n  lullaby docs\n  lullaby examples\n  lullaby --version\n\nA <project-dir> is a directory containing a lullaby.json manifest; you may also\npass the lullaby.json path directly. A project may span multiple src directories\nand depend on other local Lullaby projects.",
+        "lullaby {}\n\nusage:\n  lullaby check [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby compile [--optimize none|constant-fold|dead-code|full] [-o output.lbc] [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby build [--optimize none|constant-fold|dead-code|full] [-o output.lbc] [--verbose|--format json] <file.lby | project-dir | lullaby.json>\n  lullaby inspect [--verbose|--format json] <file.lbc>\n  lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|full] [--verbose|--format json] <file.lby | project-dir | lullaby.json> [args...]\n  lullaby run [--verbose|--format json] <file.lbc>\n  lullaby test [--verbose] <file.lby | project-dir | lullaby.json>\n  lullaby wasm [--verbose] [-o out.wasm] <file.lby | project-dir | lullaby.json>\n  lullaby native [--verbose] [--freestanding|--no-std] [--debug|-g] [--fast-math] [--target <triple>] [-o out] <file.lby | project-dir | lullaby.json>\n  lullaby fmt [--write|--check] <file.lby>\n  lullaby new <name>\n  lullaby lsp\n  lullaby docs\n  lullaby examples\n  lullaby --version\n\nA <project-dir> is a directory containing a lullaby.json manifest; you may also\npass the lullaby.json path directly. A project may span multiple src directories\nand depend on other local Lullaby projects.",
         display_version()
     );
 }

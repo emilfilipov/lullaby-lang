@@ -1387,7 +1387,7 @@ pub fn emit_native_program_with_debug(
     module: &BytecodeModule,
     debug: Option<&DebugOptions>,
 ) -> Result<NativeProgram, NativeProgramError> {
-    emit_native_program_for_target(module, &x86_64_windows_target(), debug)
+    emit_native_program_for_target(module, &x86_64_windows_target(), debug, false)
 }
 
 /// Emit a native program for an explicit `target`, selecting the object-file
@@ -1407,6 +1407,7 @@ pub fn emit_native_program_for_target(
     module: &BytecodeModule,
     target: &NativeTarget,
     debug: Option<&DebugOptions>,
+    fast_math: bool,
 ) -> Result<NativeProgram, NativeProgramError> {
     let target = target.clone();
 
@@ -1516,6 +1517,7 @@ pub fn emit_native_program_for_target(
                 &mut strings,
                 &signatures,
                 array_lengths,
+                fast_math,
             ) {
                 Ok(l) => lowered.push(l),
                 Err(reason) => {
@@ -2650,6 +2652,11 @@ struct NativeCtx<'a> {
     /// For each promoted register, the frame slot into which the prologue spills
     /// the caller's (callee-saved) value and from which the epilogue restores it.
     saved_reg_slots: Vec<(PReg, i32)>,
+    /// Opt-in `--fast-math`: permits parity-BREAKING float codegen (currently f64
+    /// sum/dot reductions vectorized with a 2-lane packed accumulator, which
+    /// reorders the additions). Off by default, so the default build stays
+    /// bit-exact with the interpreters.
+    fast_math: bool,
 }
 
 /// The native signature of a compiled function: the layout of each parameter and
@@ -2809,6 +2816,7 @@ impl<'a> NativeCtx<'a> {
             signatures,
             promoted,
             saved_reg_slots,
+            fast_math: false,
         })
     }
 
@@ -3677,6 +3685,7 @@ fn lower_native_function(
     strings: &mut StringPool,
     signatures: &HashMap<String, NativeSignature>,
     array_lengths: &ArrayLengths,
+    fast_math: bool,
 ) -> Result<LoweredNativeFunction, String> {
     let mut ctx = NativeCtx::plan(
         function,
@@ -3688,6 +3697,7 @@ fn lower_native_function(
         signatures,
         array_lengths,
     )?;
+    ctx.fast_math = fast_math;
     let mut code = Vec::new();
 
     // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size.
@@ -5880,6 +5890,16 @@ fn lower_native_for(
     if let Some(minmax) = detect_minmax_reduction(ctx, name, step, body) {
         return lower_native_minmax_reduction(ctx, name, start, end, &minmax, code);
     }
+    // Auto-vectorize f64 sum/dot reductions (`acc += a[i]` / `acc += a[i]*b[i]`)
+    // ONLY under `--fast-math`: a 2-lane packed accumulator reorders the additions
+    // (float `+` is not associative), so the result can differ from the scalar fold
+    // in the last ULP. Off by default -> the reduction runs scalar and stays
+    // bit-exact with the interpreters.
+    if ctx.fast_math
+        && let Some(red) = detect_f64_reduction(ctx, name, step, body)
+    {
+        return lower_native_f64_reduction(ctx, name, start, end, &red, code);
+    }
     // Auto-vectorize `for i: c[i] = a[i] <op> b[i]` element-wise map. Same exact
     // matcher-with-scalar-fallback discipline as the reduction.
     if let Some(map) = detect_elementwise_map(ctx, name, step, body) {
@@ -6674,6 +6694,178 @@ fn emit_load_array_elem(code: &mut Vec<u8>, i_slot: i32, base: i32) {
     code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
     emit_sub_rcx_imm(code, base);
     code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+}
+
+/// `movsd xmm1, [rbp - slot]` — load an f64 local into xmm1.
+fn emit_movsd_xmm1_from_local(code: &mut Vec<u8>, slot: i32) {
+    code.extend_from_slice(&[0xF2, 0x0F, 0x10, 0x8D]); // movsd xmm1, [rbp + disp32]
+    code.extend_from_slice(&(-slot).to_le_bytes());
+}
+
+/// A recognized f64 reduction: `for i: acc += a[i]` (sum) or `acc += a[i]*b[i]`
+/// (dot). Only vectorized under `--fast-math` (the 2-lane packed fold reorders the
+/// additions). `rhs_base` is `Some` for a dot product, `None` for a plain sum.
+struct F64Reduction {
+    acc_slot: i32,
+    lhs_base: i32,
+    rhs_base: Option<i32>,
+    array_len: i64,
+}
+
+/// Recognize `for counter from S to E: acc += a[counter]` or
+/// `acc += a[counter] * b[counter]` where `acc` is an `f64` local and the arrays are
+/// `array<f64>`. Returns `None` for anything else (scalar fallback).
+fn detect_f64_reduction(
+    ctx: &NativeCtx,
+    counter: &str,
+    step: Option<&BytecodeExpr>,
+    body: &[BytecodeInstruction],
+) -> Option<F64Reduction> {
+    match step {
+        None => {}
+        Some(expr) => match expr.kind {
+            BytecodeExprKind::Integer(1) => {}
+            _ => return None,
+        },
+    }
+    let [
+        BytecodeInstruction::Assign {
+            name: acc,
+            path,
+            op: AssignOp::Add,
+            value,
+            ..
+        },
+    ] = body
+    else {
+        return None;
+    };
+    if !path.is_empty() {
+        return None;
+    }
+    let acc_local = ctx.locals.get(acc)?;
+    if !matches!(acc_local.ty, NativeType::F64) {
+        return None;
+    }
+    match &value.kind {
+        // sum: acc += a[i]
+        BytecodeExprKind::Index { .. } => {
+            let (lhs_base, len) = indexed_f64_base(ctx, value, counter)?;
+            Some(F64Reduction {
+                acc_slot: acc_local.slot,
+                lhs_base,
+                rhs_base: None,
+                array_len: len,
+            })
+        }
+        // dot: acc += a[i] * b[i]
+        BytecodeExprKind::Binary {
+            left,
+            op: BinaryOp::Multiply,
+            right,
+        } => {
+            let (lhs_base, ll) = indexed_f64_base(ctx, left, counter)?;
+            let (rhs_base, rl) = indexed_f64_base(ctx, right, counter)?;
+            Some(F64Reduction {
+                acc_slot: acc_local.slot,
+                lhs_base,
+                rhs_base: Some(rhs_base),
+                array_len: ll.min(rl),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Emit an f64 sum/dot reduction with a 2-lane packed accumulator: `pxor` seeds
+/// `xmm0` to `0.0`; the main loop `movdqu`-loads a pair (and `mulpd`s the b-pair
+/// for a dot), `addpd`s into `xmm0`; then the two lanes fold (`unpckhpd`+`addsd`,
+/// SSE2) into the `acc` local, and a scalar tail (`addsd`/`mulsd`) handles the odd
+/// element. `--fast-math` only (the packed pairing reorders the additions).
+fn lower_native_f64_reduction(
+    ctx: &mut NativeCtx,
+    counter: &str,
+    start: &BytecodeExpr,
+    end: &BytecodeExpr,
+    red: &F64Reduction,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let i_slot = ctx.local_slot(counter)?;
+    let end_slot = ctx.local_slot(&format!("{counter}__end"))?;
+    lower_native_expr(ctx, start, code)?;
+    store_local(code, i_slot);
+    lower_native_expr(ctx, end, code)?;
+    store_local(code, end_slot);
+    emit_loop_bounds_guard(code, i_slot, end_slot, red.array_len);
+    code.extend_from_slice(&[0x66, 0x0F, 0xEF, 0xC0]); // pxor xmm0, xmm0 (packed acc = 0)
+
+    // `rcx = &array[i+1]` given `rdx = 8*(i+1)`: rcx = rbp - rdx - base.
+    let block_addr = |code: &mut Vec<u8>, base: i32| {
+        code.extend_from_slice(&[0x48, 0x89, 0xE9]); // mov rcx, rbp
+        code.extend_from_slice(&[0x48, 0x29, 0xD1]); // sub rcx, rdx
+        emit_sub_rcx_imm(code, base);
+    };
+
+    // --- main SIMD loop: while i + 1 <= end, accumulate the pair ---
+    let main_top = code.len();
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]);
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg after_main
+    let after_main = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (block offset)
+    block_addr(code, red.lhs_base);
+    emit_movdqu_xmm1_from_rcx(code); // xmm1 = a pair
+    if let Some(rhs_base) = red.rhs_base {
+        block_addr(code, rhs_base);
+        code.extend_from_slice(&[0xF3, 0x0F, 0x6F, 0x11]); // movdqu xmm2, [rcx] (b pair)
+        code.extend_from_slice(&[0x66, 0x0F, 0x59, 0xCA]); // mulpd xmm1, xmm2
+    }
+    code.extend_from_slice(&[0x66, 0x0F, 0x58, 0xC1]); // addpd xmm0, xmm1
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x02]); // add rax, 2
+    store_local(code, i_slot);
+    emit_jmp_to(code, main_top);
+
+    // after_main: fold the two lanes, then add into acc.
+    patch_rel32(code, after_main);
+    code.extend_from_slice(&[0x66, 0x0F, 0x28, 0xC8]); // movapd xmm1, xmm0
+    code.extend_from_slice(&[0x66, 0x0F, 0x15, 0xC9]); // unpckhpd xmm1, xmm1 (high lane -> low)
+    code.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xC1]); // addsd xmm0, xmm1 (lane0 = lane0+lane1)
+    emit_movsd_xmm1_from_local(code, red.acc_slot); // xmm1 = acc
+    code.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xC1]); // addsd xmm0, xmm1 (acc + packed sum)
+    store_float_local(code, red.acc_slot, FloatWidth::F64);
+
+    // --- scalar tail: while i <= end, acc += a[i] (* b[i]) ---
+    let rem_top = code.len();
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]);
+    code.extend_from_slice(&(-end_slot).to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x8F]); // jg done
+    let done = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
+    code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+    block_addr(code, red.lhs_base);
+    load_float_from_rcx(code, FloatWidth::F64); // xmm0 = a[i]
+    if let Some(rhs_base) = red.rhs_base {
+        block_addr(code, rhs_base);
+        emit_movsd_xmm1_from_rcx(code); // xmm1 = b[i]
+        code.extend_from_slice(&[0xF2, 0x0F, 0x59, 0xC1]); // mulsd xmm0, xmm1
+    }
+    emit_movsd_xmm1_from_local(code, red.acc_slot); // xmm1 = acc
+    code.extend_from_slice(&[0xF2, 0x0F, 0x58, 0xC1]); // addsd xmm0, xmm1
+    store_float_local(code, red.acc_slot, FloatWidth::F64);
+    load_local(code, i_slot);
+    code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
+    store_local(code, i_slot);
+    emit_jmp_to(code, rem_top);
+
+    patch_rel32(code, done);
+    Ok(())
 }
 
 // -- Expression lowering (result left in rax) --------------------------------
@@ -13765,6 +13957,52 @@ mod native_program_tests {
     }
 
     #[test]
+    fn f64_reduction_vectorizes_only_under_fast_math() {
+        // An f64 sum reduction `acc += a[i]` stays SCALAR by default (bit-exact
+        // parity) and vectorizes to a packed `addpd` (66 0F 58) only under
+        // --fast-math (which reorders the additions).
+        let src = concat!(
+            "fn compute -> i64\n",
+            "    let a array<f64> = [1.0, 2.0, 3.0, 4.0]\n",
+            "    let s f64 = 0.0\n",
+            "    for i from 0 to 3\n",
+            "        s += a[i]\n",
+            "    let ok i64 = 0\n",
+            "    if s > 9.5\n",
+            "        ok = 1\n",
+            "    ok\n\n",
+            "fn main -> i64\n",
+            "    compute()\n",
+        );
+        let has_addpd = |program: &NativeProgram| {
+            let sec = COFF_HEADER_SIZE as usize;
+            let off = read_u32(&program.bytes, sec + 20) as usize;
+            let size = read_u32(&program.bytes, sec + 16) as usize;
+            program.bytes[off..off + size]
+                .windows(4)
+                .any(|w| w == [0x66, 0x0F, 0x58, 0xC1])
+        };
+        // Default: scalar (no addpd).
+        let default = emit_native_program(&module_for(src)).expect("default emit");
+        assert!(
+            !has_addpd(&default),
+            "an f64 reduction must NOT vectorize without --fast-math (parity)"
+        );
+        // --fast-math: vectorized (addpd present).
+        let fast = emit_native_program_for_target(
+            &module_for(src),
+            &crate::native_contract::x86_64_windows_target(),
+            None,
+            true,
+        )
+        .expect("fast-math emit");
+        assert!(
+            has_addpd(&fast),
+            "an f64 reduction must vectorize (addpd) under --fast-math"
+        );
+    }
+
+    #[test]
     fn compiles_f64_struct_fields() {
         // An f64 struct field (init, read, arithmetic, by-value copy) compiles
         // natively — a full 8-byte word is bit-lossless through the GPR copy path,
@@ -16382,6 +16620,7 @@ mod native_program_tests {
             &module_for(ADD_AND_MAIN),
             &crate::native_contract::x86_64_linux_target(),
             None,
+            false,
         )
         .expect("emit ELF program");
 
@@ -16404,6 +16643,7 @@ mod native_program_tests {
             &module_for(ADD_AND_MAIN),
             &crate::native_contract::x86_64_macos_target(),
             None,
+            false,
         )
         .expect("emit Mach-O program");
 
@@ -16423,6 +16663,7 @@ mod native_program_tests {
             &module_for(ADD_AND_MAIN),
             &crate::native_contract::x86_64_linux_target(),
             None,
+            false,
         )
         .expect("emit ELF program");
         // Locate `.text` and confirm the exit-syscall byte sequence appears.
@@ -16443,6 +16684,7 @@ mod native_program_tests {
             &module,
             &crate::native_contract::x86_64_windows_target(),
             None,
+            false,
         )
         .expect("windows");
         assert_eq!(
@@ -16463,6 +16705,7 @@ mod native_program_tests {
             ),
             &crate::native_contract::x86_64_linux_target(),
             None,
+            false,
         )
         .expect("emit ELF program with strings");
         assert_eq!(&program.bytes[0..4], &[0x7f, b'E', b'L', b'F']);
