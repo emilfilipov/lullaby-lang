@@ -5100,6 +5100,50 @@ impl MapOp {
     }
 }
 
+/// The element-wise map operators over `array<f64>`: `+ - *`. Each lane is an
+/// independent IEEE-754 double op, so the packed store is bit-for-bit identical to
+/// the scalar loop (element-wise maps do NOT reorder, so unlike an f64 *reduction*
+/// they stay parity-exact and need no fast-math opt-in).
+#[derive(Clone, Copy, PartialEq)]
+enum FloatMapOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl FloatMapOp {
+    /// Packed: `xmm0 <op>= xmm1` (two f64 lanes). addpd/subpd/mulpd.
+    fn emit_packed(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            FloatMapOp::Add => &[0x66, 0x0F, 0x58, 0xC1], // addpd
+            FloatMapOp::Sub => &[0x66, 0x0F, 0x5C, 0xC1], // subpd
+            FloatMapOp::Mul => &[0x66, 0x0F, 0x59, 0xC1], // mulpd
+        });
+    }
+    /// Scalar tail: `xmm0 <op>= xmm1` (single f64). addsd/subsd/mulsd.
+    fn emit_scalar(self, code: &mut Vec<u8>) {
+        code.extend_from_slice(match self {
+            FloatMapOp::Add => &[0xF2, 0x0F, 0x58, 0xC1], // addsd
+            FloatMapOp::Sub => &[0xF2, 0x0F, 0x5C, 0xC1], // subsd
+            FloatMapOp::Mul => &[0xF2, 0x0F, 0x59, 0xC1], // mulsd
+        });
+    }
+}
+
+/// An element-wise map's element type + operator: integer (`paddq`…) or float
+/// (`addpd`…). Selected by the operand type at detection; the emitter branches on
+/// it for the packed op and the scalar tail.
+#[derive(Clone, Copy)]
+enum MapKind {
+    Int(MapOp),
+    Float(FloatMapOp),
+}
+
+/// `movsd xmm1, [rcx]` — load a single f64 into xmm1 (scalar-tail rhs).
+fn emit_movsd_xmm1_from_rcx(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0xF2, 0x0F, 0x10, 0x09]);
+}
+
 /// `sub rcx, imm32` (imm may be any i32; encodes the 32-bit immediate form).
 fn emit_sub_rcx_imm(code: &mut Vec<u8>, imm: i32) {
     code.extend_from_slice(&[0x48, 0x81, 0xE9]);
@@ -6162,7 +6206,7 @@ struct ElementwiseMap {
     /// The smallest of the three arrays' lengths — the loop must stay within all
     /// of dest/lhs/rhs, so the hoisted bounds guard checks against the minimum.
     min_len: i64,
-    op: MapOp,
+    kind: MapKind,
 }
 
 /// True when `expr` is exactly the loop counter `counter`.
@@ -6186,6 +6230,34 @@ fn indexed_i64_base(ctx: &NativeCtx, expr: &BytecodeExpr, counter: &str) -> Opti
         index_len,
         ..
     } = resolve_read_place(ctx, expr).ok()?
+    else {
+        return None;
+    };
+    if elem_words != 1 {
+        return None;
+    }
+    Some((base_slot + const_words as i32 * 8, index_len))
+}
+
+/// Like [`indexed_i64_base`] but for a contiguous `array<f64>` element read.
+fn indexed_f64_base(ctx: &NativeCtx, expr: &BytecodeExpr, counter: &str) -> Option<(i32, i64)> {
+    let BytecodeExprKind::Index { index, .. } = &expr.kind else {
+        return None;
+    };
+    if !index_is_counter(index, counter) {
+        return None;
+    }
+    let (place, elem_ty) = resolve_read_place_typed(ctx, expr).ok()?;
+    if !matches!(elem_ty, NativeType::F64) {
+        return None;
+    }
+    let ScalarPlace::Dynamic {
+        base_slot,
+        const_words,
+        elem_words,
+        index_len,
+        ..
+    } = place
     else {
         return None;
     };
@@ -6230,21 +6302,41 @@ fn detect_elementwise_map(
     if !index_is_counter(dest_index, counter) {
         return None;
     }
-    // The value is `lhs[counter] <op> rhs[counter]` for a vectorizable `op`.
+    // The value is `lhs[counter] <op> rhs[counter]` for a vectorizable `op`. Try the
+    // i64 forms first (`+ - & | ^`); if the operands are `array<f64>` instead, try
+    // the float forms (`+ - *` via addpd/subpd/mulpd — bit-exact, per-lane).
     let BytecodeExprKind::Binary { left, op, right } = &value.kind else {
         return None;
     };
-    let map_op = match op {
-        BinaryOp::Add => MapOp::Add,
-        BinaryOp::Subtract => MapOp::Sub,
-        BinaryOp::BitAnd => MapOp::And,
-        BinaryOp::BitOr => MapOp::Or,
-        BinaryOp::BitXor => MapOp::Xor,
-        _ => return None,
+    let (lhs_base, lhs_len, rhs_base, rhs_len, kind, dest_float) = if let Some(map_op) = match op {
+        BinaryOp::Add => Some(MapOp::Add),
+        BinaryOp::Subtract => Some(MapOp::Sub),
+        BinaryOp::BitAnd => Some(MapOp::And),
+        BinaryOp::BitOr => Some(MapOp::Or),
+        BinaryOp::BitXor => Some(MapOp::Xor),
+        _ => None,
+    }
+    .filter(|_| indexed_i64_base(ctx, left, counter).is_some())
+    {
+        let (lb, ll) = indexed_i64_base(ctx, left, counter)?;
+        let (rb, rl) = indexed_i64_base(ctx, right, counter)?;
+        (lb, ll, rb, rl, MapKind::Int(map_op), false)
+    } else {
+        let fop = match op {
+            BinaryOp::Add => FloatMapOp::Add,
+            BinaryOp::Subtract => FloatMapOp::Sub,
+            BinaryOp::Multiply => FloatMapOp::Mul,
+            _ => return None,
+        };
+        let (lb, ll) = indexed_f64_base(ctx, left, counter)?;
+        let (rb, rl) = indexed_f64_base(ctx, right, counter)?;
+        (lb, ll, rb, rl, MapKind::Float(fop), true)
     };
-    let (lhs_base, lhs_len) = indexed_i64_base(ctx, left, counter)?;
-    let (rhs_base, rhs_len) = indexed_i64_base(ctx, right, counter)?;
-    let dest_place = resolve_scalar_place(ctx, dest, path).ok()?;
+    let (dest_place, dest_ty) = resolve_scalar_place_typed(ctx, dest, path).ok()?;
+    // The destination element type must match the operands (i64 or f64).
+    if dest_float != matches!(dest_ty, NativeType::F64) {
+        return None;
+    }
     let ScalarPlace::Dynamic {
         base_slot,
         const_words,
@@ -6263,7 +6355,7 @@ fn detect_elementwise_map(
         lhs_base,
         rhs_base,
         min_len: dest_len.min(lhs_len).min(rhs_len),
-        op: map_op,
+        kind,
     })
 }
 
@@ -6313,7 +6405,10 @@ fn lower_native_vectorized_map(
     emit_movdqu_xmm0_from_rcx(code);
     block_addr(code, map.rhs_base);
     emit_movdqu_xmm1_from_rcx(code);
-    map.op.emit_packed(code);
+    match map.kind {
+        MapKind::Int(op) => op.emit_packed(code),
+        MapKind::Float(op) => op.emit_packed(code),
+    }
     block_addr(code, map.dest_base);
     emit_movdqu_rcx_from_xmm0(code);
     load_local(code, i_slot);
@@ -6321,7 +6416,7 @@ fn lower_native_vectorized_map(
     store_local(code, i_slot);
     emit_jmp_to(code, main_top);
 
-    // --- scalar remainder: while i <= end, dest[i] = lhs[i] (+|-) rhs[i] ---
+    // --- scalar remainder: while i <= end, dest[i] = lhs[i] <op> rhs[i] ---
     patch_rel32(code, after_main_site);
     let rem_top = code.len();
     load_local(code, i_slot); // rax = i
@@ -6334,20 +6429,34 @@ fn lower_native_vectorized_map(
     load_local(code, i_slot);
     code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]); // shl rax, 3
     code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax
-    // rax = lhs[i]
-    block_addr(code, map.lhs_base);
-    code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-    code.push(0x50); // push rax (lhs)
-    // rax = rhs[i]
-    block_addr(code, map.rhs_base);
-    code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
-    code.push(0x59); // pop rcx (rcx = lhs)
-    map.op.emit_scalar_tail(code); // rax = lhs <op> rhs
-    // dest[i] = rax
-    code.push(0x50); // push rax (result)
-    block_addr(code, map.dest_base);
-    code.push(0x58); // pop rax (result)
-    code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+    match map.kind {
+        MapKind::Int(op) => {
+            // rax = lhs[i]
+            block_addr(code, map.lhs_base);
+            code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+            code.push(0x50); // push rax (lhs)
+            // rax = rhs[i]
+            block_addr(code, map.rhs_base);
+            code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
+            code.push(0x59); // pop rcx (rcx = lhs)
+            op.emit_scalar_tail(code); // rax = lhs <op> rhs
+            // dest[i] = rax
+            code.push(0x50); // push rax (result)
+            block_addr(code, map.dest_base);
+            code.push(0x58); // pop rax (result)
+            code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+        }
+        MapKind::Float(op) => {
+            // xmm0 = lhs[i] ; xmm1 = rhs[i] ; xmm0 <op>= xmm1 ; dest[i] = xmm0.
+            block_addr(code, map.lhs_base);
+            load_float_from_rcx(code, FloatWidth::F64); // movsd xmm0, [rcx]
+            block_addr(code, map.rhs_base);
+            emit_movsd_xmm1_from_rcx(code); // movsd xmm1, [rcx]
+            op.emit_scalar(code); // addsd/subsd/mulsd xmm0, xmm1
+            block_addr(code, map.dest_base);
+            store_float_from_rcx(code, FloatWidth::F64); // movsd [rcx], xmm0
+        }
+    }
     load_local(code, i_slot);
     code.extend_from_slice(&[0x48, 0x83, 0xC0, 0x01]); // add rax, 1
     store_local(code, i_slot);
@@ -13650,6 +13759,41 @@ mod native_program_tests {
                 .windows(STR_CHAR_AT_SYMBOL.len())
                 .any(|w| w == STR_CHAR_AT_SYMBOL.as_bytes()),
             "expected the char-at helper `{STR_CHAR_AT_SYMBOL}` in the object"
+        );
+    }
+
+    #[test]
+    fn vectorizes_f64_elementwise_map() {
+        // `for i: c[i] = a[i] + b[i]` over `array<f64>` vectorizes to a packed
+        // `addpd` (66 0F 58) loop with an `addsd` (F2 0F 58) scalar tail — bit-exact
+        // (per-lane, no reordering). The i64 map path is unchanged.
+        let program = emit_native_program(&module_for(concat!(
+            "fn vadd -> i64\n",
+            "    let a array<f64> = [1.0, 2.0, 3.0]\n",
+            "    let b array<f64> = [4.0, 5.0, 6.0]\n",
+            "    let c array<f64> = [0.0, 0.0, 0.0]\n",
+            "    for i from 0 to 2\n",
+            "        c[i] = a[i] + b[i]\n",
+            "    let ok i64 = 0\n",
+            "    if c[0] > 4.5\n",
+            "        ok = 1\n",
+            "    ok\n\n",
+            "fn main -> i64\n",
+            "    vadd()\n",
+        )))
+        .expect("emit native program");
+        assert!(program.compiled.contains(&"vadd".to_string()));
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        assert!(
+            text.windows(4).any(|w| w == [0x66, 0x0F, 0x58, 0xC1]),
+            "expected a packed `addpd xmm0, xmm1`"
+        );
+        assert!(
+            text.windows(4).any(|w| w == [0xF2, 0x0F, 0x58, 0xC1]),
+            "expected an `addsd xmm0, xmm1` scalar tail"
         );
     }
 
