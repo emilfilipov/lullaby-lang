@@ -2680,6 +2680,36 @@ fn rc_drop_inserted_for_owned_loop_string_but_not_when_it_escapes() {
 }
 
 #[test]
+fn binop_own_helper_forwards_operands_and_reclaims_fresh_ones() {
+    // The two-string ownership-aware helper must `mov rsi, rdx` (48 89 D6 — NOT the
+    // no-op 48 89 F6 that a prior typo emitted, which left the right operand as
+    // garbage and crashed on its rc_dec), indirect-`call r9` the op, and `rc_dec`
+    // the marked operands.
+    let helper = emit_str_binop_own_helper();
+    assert!(
+        helper.code.windows(3).any(|w| w == [0x48, 0x89, 0xD6]),
+        "binop_own must set the right operand with `mov rsi, rdx` (48 89 D6)"
+    );
+    assert!(
+        !helper.code.windows(3).any(|w| w == [0x48, 0x89, 0xF6]),
+        "binop_own must NOT contain the no-op `mov rsi, rsi` (48 89 F6)"
+    );
+    assert!(
+        helper.code.windows(3).any(|w| w == [0x41, 0xFF, 0xD1]),
+        "binop_own must indirect-call the op (`call r9`)"
+    );
+    assert!(
+        helper
+            .relocations
+            .iter()
+            .filter(|r| r.symbol == RC_DEC_SYMBOL)
+            .count()
+            >= 2,
+        "binop_own must rc_dec both marked operands"
+    );
+}
+
+#[test]
 fn len_of_fresh_temp_emits_and_uses_ownership_aware_helper() {
     // `len(to_string(i))` reads a fresh temporary, so the object emits and
     // (per the reclamation parity test) calls `__lullaby_str_len_own`, which reads

@@ -1146,6 +1146,60 @@ pub(crate) fn emit_str_len_own_helper() -> HelperFunction {
     }
 }
 
+/// `__lullaby_str_binop_own(rcx = left, rdx = right, r8 = mask, r9 = op) -> rax`.
+///
+/// Calls the two-string op `r9` (forwarding `left`/`right` in `rcx`/`rdx`), then
+/// `rc_dec`s each operand the compile-time `mask` marks as a uniquely-owned fresh
+/// temporary (bit 0 = left, bit 1 = right) — reclaiming fresh-temp arguments to the
+/// borrow-only two-string builtins and `split`/`join`. The operands and mask are
+/// preserved across the op call in callee-saved `rbx`/`rsi`/`rdi`, and the result
+/// across the `rc_dec` calls in `r12`.
+pub(crate) fn emit_str_binop_own_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+
+    // Prologue: 4 callee-saved pushes (%16 -> 8), `sub rsp, 0x28` -> %16 == 0 with
+    // 32 shadow bytes for the internal calls.
+    code.push(0x53); // push rbx
+    code.push(0x56); // push rsi
+    code.push(0x57); // push rdi
+    code.extend_from_slice(&[0x41, 0x54]); // push r12
+    code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp, 0x28
+
+    code.extend_from_slice(&[0x48, 0x89, 0xCB]); // mov rbx, rcx (left)
+    code.extend_from_slice(&[0x48, 0x89, 0xD6]); // mov rsi, rdx (right)
+    code.extend_from_slice(&[0x44, 0x89, 0xC7]); // mov edi, r8d (mask)
+
+    // result = op(left, right); rcx/rdx still hold the forwarded operands.
+    code.extend_from_slice(&[0x41, 0xFF, 0xD1]); // call r9
+    code.extend_from_slice(&[0x49, 0x89, 0xC4]); // mov r12, rax (result)
+
+    // if mask & 1: rc_dec(left).
+    code.extend_from_slice(&[0xF7, 0xC7, 0x01, 0x00, 0x00, 0x00]); // test edi, 1
+    code.extend_from_slice(&[0x74, 0x08]); // jz +8
+    code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx (left)
+    emit_helper_call(&mut code, &mut relocations, RC_DEC_SYMBOL);
+    // if mask & 2: rc_dec(right).
+    code.extend_from_slice(&[0xF7, 0xC7, 0x02, 0x00, 0x00, 0x00]); // test edi, 2
+    code.extend_from_slice(&[0x74, 0x08]); // jz +8
+    code.extend_from_slice(&[0x48, 0x89, 0xF1]); // mov rcx, rsi (right)
+    emit_helper_call(&mut code, &mut relocations, RC_DEC_SYMBOL);
+
+    code.extend_from_slice(&[0x4C, 0x89, 0xE0]); // mov rax, r12 (result)
+    code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]); // add rsp, 0x28
+    code.extend_from_slice(&[0x41, 0x5C]); // pop r12
+    code.push(0x5F); // pop rdi
+    code.push(0x5E); // pop rsi
+    code.push(0x5B); // pop rbx
+    code.push(0xC3); // ret
+
+    HelperFunction {
+        name: STR_BINOP_OWN_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
 /// `__lullaby_str_from_int(rcx = value, rdx = signed_flag) -> rax = string record`.
 ///
 /// Formats `value` in decimal. When `signed_flag` is nonzero the value is treated

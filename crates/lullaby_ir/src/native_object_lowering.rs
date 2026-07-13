@@ -1196,7 +1196,28 @@ pub(crate) fn lower_string_binary_op(
     lower_native_expr(ctx, right, code)?; // right record pointer -> rax
     code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax (right)
     code.push(0x59); // pop rcx (left)
-    emit_call_symbol(ctx, symbol, code);
+    // If an operand is a uniquely-owned fresh string temporary it is dead after the
+    // op reads it, so reclaim it via the ownership-aware indirect-call helper;
+    // otherwise the bare op keeps zero overhead. (`is_owning_string_alloc` requires
+    // a `string`-typed fresh alloc, so an `array<string>` operand of `join` is never
+    // marked — it is not a plain string and must not be flat-`rc_dec`d.)
+    let mask =
+        (is_owning_string_alloc(left) as i32) | ((is_owning_string_alloc(right) as i32) << 1);
+    if mask == 0 {
+        emit_call_symbol(ctx, symbol, code);
+    } else {
+        code.extend_from_slice(&[0x41, 0xB8]); // mov r8d, mask
+        code.extend_from_slice(&mask.to_le_bytes());
+        // lea r9, [rip + <op symbol>] (REL32 relocation, like a call target).
+        code.extend_from_slice(&[0x4C, 0x8D, 0x0D]);
+        let site = code.len();
+        code.extend_from_slice(&[0, 0, 0, 0]);
+        ctx.relocations.push(CodeRelocation {
+            offset: site as u32,
+            symbol: symbol.to_string(),
+        });
+        emit_call_symbol(ctx, STR_BINOP_OWN_SYMBOL, code);
+    }
     Ok(())
 }
 

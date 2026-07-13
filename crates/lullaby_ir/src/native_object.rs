@@ -1296,6 +1296,16 @@ const STR_CONCAT_OWN_SYMBOL: &str = "__lullaby_str_concat_own";
 /// string value keeps the plain header read.
 const STR_LEN_OWN_SYMBOL: &str = "__lullaby_str_len_own";
 
+/// The ownership-aware two-string-op helper: left in `rcx`, right in `rdx`, a
+/// compile-time ownership mask in `r8` (bit 0 = left is a fresh temp, bit 1 =
+/// right), and the target op's address in `r9`. It calls the op (an indirect
+/// `call r9`, forwarding `left`/`right`), then `rc_dec`s each operand the mask
+/// marks, and returns the op's result — reclaiming fresh-temp arguments to the
+/// borrow-only two-string builtins (`find`/`count`/`contains`/`starts_with`/
+/// `ends_with`) and to `split`/`join`. Emitted only when an operand is a fresh
+/// temp; a `var`/`var` call keeps the bare op with zero overhead.
+const STR_BINOP_OWN_SYMBOL: &str = "__lullaby_str_binop_own";
+
 /// The integer-to-string helper emitted in `.text`. Signature: a signed 64-bit
 /// value in `rcx` and a signedness flag in `rdx` (0 = format as unsigned `u64`,
 /// nonzero = format as signed `i64`); returns in `rax` a fresh string record of
