@@ -769,6 +769,55 @@ fn native_conditional_execution_parity_when_linkable() {
     assert_eq!(exit, (interp.rem_euclid(256)) as i32);
 }
 
+/// A function whose final expression is a bare tail `if`/`else` (no trailing
+/// `return`) must return the branch value natively, not the fallthrough `0`.
+/// Regression test for a miscompile where a `xor rax,rax` safety epilogue
+/// clobbered the tail `if`'s result.
+#[test]
+fn native_tail_if_return_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_tail_if.lby");
+    let out = std::env::temp_dir().join("lullaby_native_tail_if_parity.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(
+        interp, 300,
+        "classify(15)+classify(3)=300, total>250 so main=300"
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld and/or kernel32.lib not available; skipping native tail-if parity");
+        return;
+    }
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native tail-if must return the branch value, not 0"
+    );
+}
+
 /// An inline-conditional condition must be `bool` (`L0305`, shared with `if`).
 #[test]
 fn rejects_conditional_non_bool_condition() {

@@ -1,0 +1,17 @@
+# A function whose final expression IS a bare `if`/`else` (no trailing `return`).
+# The native backend must treat the tail `if` as the return value; a regression
+# once emitted a fallthrough `xor rax,rax` that clobbered the branch result,
+# returning 0. Both `classify` and `main` end in a tail `if`.
+
+fn classify n i64 -> i64
+    if n > 10
+        100
+    else
+        200
+
+fn main -> i64
+    let total i64 = classify(15) + classify(3)
+    if total > 250
+        total
+    else
+        0

@@ -3824,6 +3824,18 @@ fn lower_native_function(
     // epilogue and never reaches the shared match end.)
     let tail_is_value_match = !function.return_type.is_void()
         && matches!(instructions.last(), Some(BytecodeInstruction::Match { .. }));
+    // A function whose last statement is an `if`/`elif`/`else` producing the
+    // function's value (e.g. a body ending in `if c\n a\n else\n b`): each branch
+    // leaves its value in `rax` and converges after the chain, where the epilogue
+    // returns it. Without this the tail `if` lowers as a plain statement and the
+    // fallthrough `xor rax,rax` below overwrites the branch result (returning 0).
+    // Restricted to a scalar-register return (not float/aggregate — those tail
+    // `if`s stay deferred): a value-producing `if` is exhaustive (has an `else`),
+    // so control always reaches the epilogue with `rax` set.
+    let tail_is_value_if = !function.return_type.is_void()
+        && ctx.sret_slot.is_none()
+        && !matches!(ctx.return_ty, NativeType::F64 | NativeType::F32)
+        && matches!(instructions.last(), Some(BytecodeInstruction::If { .. }));
     if tail_is_asm {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
@@ -3857,6 +3869,13 @@ fn lower_native_function(
         {
             lower_native_match(&mut ctx, scrutinee, arms, true, &mut code, &mut loops)?;
         }
+        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
+    } else if tail_is_value_if {
+        // The tail `if` lowers as a statement; each branch leaves the function's
+        // value in rax and jumps to the convergence point right before this
+        // epilogue, which returns it. Emitting the epilogue here makes the
+        // fallthrough `xor rax,rax` below unreachable (dead safety code).
+        lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
         emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else {
         lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
