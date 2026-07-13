@@ -129,12 +129,23 @@ composition** (§the decision), not new primitives.
 Each stage is independently shippable and test-gated (native == interpreter parity;
 deterministic refcount assertions).
 
-1. **A real allocator + RC runtime helpers.** Replace the never-freeing bump
-   allocator with a free-list allocator; add `__lullaby_rc_inc` / `__lullaby_rc_dec`
-   (`dec` frees at zero). Small, self-contained hand-emitted routines, siblings to
-   the existing `__lullaby_alloc` / string helpers. Give heap records an RC header
-   word. *No behavior change yet — just the machinery.*
-2. **Scope-based drop insertion (the core).** At each binding/copy of a
+1. **A real allocator + RC runtime helpers.** ✅ **LANDED** (native, behavior-neutral).
+   The bump allocator is now a **free-list allocator** with a 16-byte per-block RC
+   header `[size][refcount]` (the returned pointer names the payload, so record
+   offsets are unchanged; refcount at `[ptr − 8]`). `__lullaby_rc_dec` (`dec [ptr − 8]`,
+   free-at-zero) and `__lullaby_rc_free` (push the block onto the LIFO free list
+   `__lullaby_free_head`) are emitted as `.text` helpers; the allocator first-fit-reuses
+   freed blocks. No drops were inserted at this stage, so it was behavior-neutral.
+2. **Scope-based drop insertion (the core).** 🚧 **FIRST INCREMENT LANDED.** The
+   backend inserts `rc_dec` (free-at-zero) for a **uniquely-owned, borrow-only
+   `string` local in a loop body**, on the loop's fallthrough back-edge — reclaiming
+   per-iteration temporaries that previously leaked and could exhaust the heap
+   (verified: ~300k allocs / ~14 MB in a 1 MiB heap completes). The analysis is
+   default-deny (any escape → not dropped → leak, never double-freed); early-exit
+   edges leak safely. Remaining for this stage: `inc` for aliased/shared owners,
+   intermediate sub-expression temporaries, list/map/struct/enum drops, and drops on
+   `return`/`break`/`continue`/`?`/`throw`/`match`-arm exit edges (not just
+   fallthrough). At each binding/copy of a
    reference-counted value insert `inc`; at each scope exit insert `dec`/drop —
    **on every exit edge** (fallthrough, `return`, `?`/`throw`, `match` arms). Extend
    the existing scope-exit sequencing the backend already does for aggregates. This

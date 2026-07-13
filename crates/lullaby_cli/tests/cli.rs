@@ -911,6 +911,54 @@ fn native_split_execution_parity_when_linkable() {
     assert_eq!(exit, expected, "native split result must match interpreter");
 }
 
+/// RC drop insertion (memory model stage 2) reclaims a uniquely-owned, borrow-only
+/// `string` local allocated each loop iteration. The fixture allocates ~300k string
+/// records (~14 MB total) in the fixed 1 MiB native heap: without per-iteration
+/// `rc_dec`/`rc_free` reuse it would exhaust the heap and crash, so a correct exit
+/// code equal to the interpreter's result is proof the block is actually reclaimed.
+#[test]
+fn native_rc_string_reclaim_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_rc_string_reclaim.lby");
+    let out = std::env::temp_dir().join("lullaby_native_rc_reclaim.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(interp, 9_600_032, "32 chars * 300001 iterations");
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld and/or kernel32.lib not available; skipping native RC reclaim parity");
+        return;
+    }
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native RC-reclaimed loop must complete with the interpreter's result \
+         (a crash here means the heap exhausted — reclamation regressed)"
+    );
+}
+
 /// An inline-conditional condition must be `bool` (`L0305`, shared with `if`).
 #[test]
 fn rejects_conditional_non_bool_condition() {

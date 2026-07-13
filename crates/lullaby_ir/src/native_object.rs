@@ -819,6 +819,18 @@ const HEAP_FREE_HEAD_SYMBOL: &str = "__lullaby_free_head";
 /// The heap region base symbol in `.bss` — a fixed reserved bump region.
 const HEAP_BASE_SYMBOL: &str = "__lullaby_heap_base";
 
+/// `__lullaby_rc_dec(payload ptr in rcx)`: decrement the block's refcount at
+/// `[rcx - 8]` and, if it reached zero, tail-call `__lullaby_rc_free` to return the
+/// block to the free list. The drop primitive scope-based drop insertion (RC stage
+/// 2) emits at each scope-exit edge of a uniquely-owned heap local.
+const RC_DEC_SYMBOL: &str = "__lullaby_rc_dec";
+
+/// `__lullaby_rc_free(payload ptr in rcx)`: push the block (whose base is
+/// `rcx - 16`) onto the LIFO free list `__lullaby_free_head`, threading the "next"
+/// link through the freed block's refcount slot (`[base + 8]`). The allocator
+/// first-fit-reuses it on a later allocation.
+const RC_FREE_SYMBOL: &str = "__lullaby_rc_free";
+
 /// Size of the per-allocation reference-counting header, in bytes: `[size i64]
 /// [refcount i64]` sitting immediately BEFORE the payload the allocator returns.
 /// The returned pointer names the payload (offset 0 = the first payload word), so
@@ -5923,6 +5935,10 @@ fn lower_native_while(
         break_sites: Vec::new(),
     });
     lower_native_stmts(ctx, body, code, loops)?;
+    // Reclaim per-iteration owned string temporaries on the fallthrough back-edge
+    // (RC drop insertion); `continue` (jumps to `top`) and `break` skip it and leak
+    // on those paths, which is safe.
+    emit_loop_body_string_drops(ctx, body, code)?;
     let loop_ctx = loops.pop().expect("loop pushed");
 
     emit_jmp_to(code, top); // jmp top
@@ -5949,6 +5965,7 @@ fn lower_native_loop(
         break_sites: Vec::new(),
     });
     lower_native_stmts(ctx, body, code, loops)?;
+    emit_loop_body_string_drops(ctx, body, code)?;
     let loop_ctx = loops.pop().expect("loop pushed");
 
     emit_jmp_to(code, top);
@@ -5956,6 +5973,212 @@ fn lower_native_loop(
     let end = code.len();
     for site in loop_ctx.break_sites {
         patch_rel32_to(code, site, end);
+    }
+    Ok(())
+}
+
+// -- Scope-based drop insertion (RC memory model, stage 2) --------------------
+//
+// Reference-counted heap blocks are reclaimed by inserting `rc_dec` (free-at-zero)
+// at scope-exit. The FIRST increment targets the highest-value, provably-safe
+// case: a `string` local declared directly in a LOOP body that is uniquely owned
+// (a fresh allocation, never reassigned) and only ever BORROWED (used solely as
+// the argument of `len`). Such a local is dead at the end of each iteration, so a
+// single `rc_dec` on the fallthrough loop-body edge frees it — reclaiming what
+// would otherwise leak and, for a long loop, exhaust the fixed heap region.
+//
+// Everything here is DEFAULT-DENY: any use that could alias, store, return, or
+// pass ownership elsewhere disqualifies the local, which is then simply not
+// dropped (it leaks exactly as before — never double-freed). Early-exit edges
+// (`return`/`break`/`continue`) skip the fallthrough drop and leak on that path,
+// which is safe; only the fallthrough (loop back-edge) frees, exactly once.
+
+/// Whether `value` is a freshly-allocated `string` record this scope uniquely owns:
+/// a string literal (materialized into a new record), a `+` concatenation, or a
+/// `substring`/`trim`/`repeat` call (each always allocates a fresh record in the
+/// native backend), or `to_string` of a non-string scalar. NOT a bare variable
+/// (an alias), a container read, or a user-function result (unknown ownership).
+fn is_owning_string_alloc(value: &BytecodeExpr) -> bool {
+    if value.ty.name != "string" {
+        return false;
+    }
+    match &value.kind {
+        BytecodeExprKind::String(_) => true,
+        BytecodeExprKind::Binary {
+            op: BinaryOp::Add, ..
+        } => true,
+        BytecodeExprKind::Call { name, args } => match name.as_str() {
+            "substring" | "trim" | "repeat" => true,
+            "to_string" => args.len() == 1 && args[0].ty.name != "string",
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether every use of the string local `name` within `expr` is a pure borrow —
+/// concretely, the sole argument of a `len(name)` call (which reads a header word
+/// and does not retain the record). A bare mention anywhere else (a return value,
+/// any other call argument, an aggregate store, a concat operand, an alias) lets
+/// ownership escape, so `name` is not droppable.
+fn string_local_borrow_only_expr(name: &str, expr: &BytecodeExpr) -> bool {
+    match &expr.kind {
+        BytecodeExprKind::Variable(v) => v != name,
+        BytecodeExprKind::Integer(_)
+        | BytecodeExprKind::Float(_)
+        | BytecodeExprKind::Bool(_)
+        | BytecodeExprKind::String(_)
+        | BytecodeExprKind::Char(_)
+        | BytecodeExprKind::Closure { .. } => true,
+        BytecodeExprKind::Call { name: fname, args } => {
+            if fname == "len"
+                && args.len() == 1
+                && matches!(&args[0].kind, BytecodeExprKind::Variable(v) if v == name)
+            {
+                true
+            } else {
+                args.iter().all(|a| string_local_borrow_only_expr(name, a))
+            }
+        }
+        BytecodeExprKind::Binary { left, right, .. } => {
+            string_local_borrow_only_expr(name, left) && string_local_borrow_only_expr(name, right)
+        }
+        BytecodeExprKind::Unary { expr, .. } | BytecodeExprKind::Await { expr } => {
+            string_local_borrow_only_expr(name, expr)
+        }
+        BytecodeExprKind::Index { target, index } => {
+            string_local_borrow_only_expr(name, target)
+                && string_local_borrow_only_expr(name, index)
+        }
+        BytecodeExprKind::Field { target, .. } => string_local_borrow_only_expr(name, target),
+        BytecodeExprKind::Array(elems) => {
+            elems.iter().all(|e| string_local_borrow_only_expr(name, e))
+        }
+    }
+}
+
+/// Whether every use of `name` across `stmts` (recursing into nested blocks) is a
+/// pure borrow, and `name` is never reassigned, shadowed, or rebound. Any
+/// violation disqualifies the local from dropping.
+fn string_local_borrow_only_stmts(name: &str, stmts: &[BytecodeInstruction]) -> bool {
+    stmts.iter().all(|s| string_local_borrow_only_stmt(name, s))
+}
+
+fn string_local_borrow_only_stmt(name: &str, stmt: &BytecodeInstruction) -> bool {
+    match stmt {
+        BytecodeInstruction::Let { name: n, value, .. } => {
+            n != name && string_local_borrow_only_expr(name, value)
+        }
+        BytecodeInstruction::Assign {
+            name: n,
+            path,
+            value,
+            ..
+        } => {
+            // Any assignment targeting `name` (a rebind, or a container mutation of
+            // `name`) breaks the unique-ownership assumption.
+            n != name
+                && path.iter().all(|p| match p {
+                    BytecodePlace::Index(e) => string_local_borrow_only_expr(name, e),
+                    BytecodePlace::Field(_) => true,
+                })
+                && string_local_borrow_only_expr(name, value)
+        }
+        BytecodeInstruction::Return(Some(e)) | BytecodeInstruction::Expr(e) => {
+            string_local_borrow_only_expr(name, e)
+        }
+        BytecodeInstruction::Return(None)
+        | BytecodeInstruction::Break(_)
+        | BytecodeInstruction::Continue(_)
+        | BytecodeInstruction::Asm { .. } => true,
+        BytecodeInstruction::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches.iter().all(|b| {
+                string_local_borrow_only_expr(name, &b.condition)
+                    && string_local_borrow_only_stmts(name, &b.body)
+            }) && string_local_borrow_only_stmts(name, else_body)
+        }
+        BytecodeInstruction::While {
+            condition, body, ..
+        } => {
+            string_local_borrow_only_expr(name, condition)
+                && string_local_borrow_only_stmts(name, body)
+        }
+        BytecodeInstruction::For {
+            name: v,
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            v != name
+                && string_local_borrow_only_expr(name, start)
+                && string_local_borrow_only_expr(name, end)
+                && step
+                    .as_ref()
+                    .is_none_or(|s| string_local_borrow_only_expr(name, s))
+                && string_local_borrow_only_stmts(name, body)
+        }
+        BytecodeInstruction::Loop { body, .. } => string_local_borrow_only_stmts(name, body),
+        BytecodeInstruction::Match {
+            scrutinee, arms, ..
+        } => {
+            string_local_borrow_only_expr(name, scrutinee)
+                && arms.iter().all(|a| {
+                    let binds = matches!(&a.pattern, BytecodeMatchPattern::Variant { bindings, .. }
+                        if bindings.iter().any(|b| b == name));
+                    !binds && string_local_borrow_only_stmts(name, &a.body)
+                })
+        }
+        BytecodeInstruction::Throw { value, .. } => string_local_borrow_only_expr(name, value),
+        BytecodeInstruction::Try {
+            body,
+            catch_name,
+            catch_body,
+            ..
+        } => {
+            catch_name != name
+                && string_local_borrow_only_stmts(name, body)
+                && string_local_borrow_only_stmts(name, catch_body)
+        }
+    }
+}
+
+/// After lowering a loop `body`, emit an `rc_dec` (free-at-zero) for each string
+/// local declared directly in `body` that is uniquely owned and only borrowed —
+/// reclaiming the per-iteration allocation on the fallthrough back-edge. Emitted
+/// only for `string` stack locals (a string-using function is never
+/// register-promoted, so the pointer is always in a stack slot).
+fn emit_loop_body_string_drops(
+    ctx: &mut NativeCtx,
+    body: &[BytecodeInstruction],
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    for (idx, stmt) in body.iter().enumerate() {
+        let BytecodeInstruction::Let { name, value, .. } = stmt else {
+            continue;
+        };
+        let Ok(local) = ctx.local(name) else {
+            continue;
+        };
+        if !matches!(local.ty, NativeType::String) {
+            continue;
+        }
+        let slot = local.slot;
+        if !is_owning_string_alloc(value) {
+            continue;
+        }
+        if !string_local_borrow_only_stmts(name, &body[idx + 1..]) {
+            continue;
+        }
+        // mov rcx, [rbp - slot] ; call __lullaby_rc_dec
+        code.extend_from_slice(&[0x48, 0x8B, 0x8D]);
+        code.extend_from_slice(&(-slot).to_le_bytes());
+        emit_call_symbol(ctx, RC_DEC_SYMBOL, code);
     }
     Ok(())
 }
@@ -6068,6 +6291,11 @@ fn lower_native_for(
         break_sites: Vec::new(),
     });
     lower_native_stmts(ctx, body, code, loops)?;
+    // Reclaim uniquely-owned per-iteration string temporaries on the fallthrough
+    // back-edge (RC drop insertion). Placed BEFORE the step label so a `continue`
+    // (which jumps to the step label) skips it — leaking on that path, which is
+    // safe — while the common no-`continue` body frees every iteration.
+    emit_loop_body_string_drops(ctx, body, code)?;
     let loop_ctx = loops.pop().expect("loop pushed");
 
     // Step block (target of `continue`): i += step.
@@ -10539,6 +10767,8 @@ fn build_object_model(
 fn heap_runtime_helpers() -> Vec<HelperFunction> {
     vec![
         emit_heap_alloc_helper(),
+        emit_rc_free_helper(),
+        emit_rc_dec_helper(),
         emit_heap_strlen_helper(),
         emit_list_new_helper(),
         emit_list_copy_helper(),
@@ -10603,6 +10833,7 @@ fn program_uses_heap_helpers(functions: &[LoweredNativeFunction]) -> bool {
                     | STR_SPLIT_SYMBOL
                     | STR_JOIN_SYMBOL
                     | PARSE_I64_SYMBOL
+                    | RC_DEC_SYMBOL
                     | TO_CSTR_SYMBOL
             )
         })
@@ -11000,6 +11231,58 @@ fn emit_heap_alloc_helper() -> HelperFunction {
 
     HelperFunction {
         name: HEAP_ALLOC_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
+/// `__lullaby_rc_free(payload ptr in rcx)`: push the block onto the LIFO free list.
+/// The block base is `rcx - 16`; the "next" link is threaded through the freed
+/// block's now-dead refcount slot (`[base + 8]`). A leaf (no calls); volatile only.
+fn emit_rc_free_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+
+    code.extend_from_slice(&[0x48, 0x8D, 0x41, 0xF0]); // lea rax, [rcx - 16] (block base)
+    code.extend_from_slice(&[0x4C, 0x8D, 0x15]); // lea r10, [rip + free_head]
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: HEAP_FREE_HEAD_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x49, 0x8B, 0x12]); // mov rdx, [r10] (old head)
+    code.extend_from_slice(&[0x48, 0x89, 0x50, 0x08]); // mov [rax + 8], rdx (block.next = old head)
+    code.extend_from_slice(&[0x49, 0x89, 0x02]); // mov [r10], rax (free_head = block)
+    code.push(0xC3); // ret
+
+    HelperFunction {
+        name: RC_FREE_SYMBOL.to_string(),
+        code,
+        relocations,
+    }
+}
+
+/// `__lullaby_rc_dec(payload ptr in rcx)`: `dec qword [rcx - 8]`; if the refcount
+/// reached zero, tail-call `__lullaby_rc_free` (which returns to our caller);
+/// otherwise the block is still live and we return. `rcx` (the payload pointer) is
+/// preserved by the `dec` and forwarded as `rc_free`'s argument.
+fn emit_rc_dec_helper() -> HelperFunction {
+    let mut code: Vec<u8> = Vec::new();
+    let mut relocations: Vec<CodeRelocation> = Vec::new();
+
+    code.extend_from_slice(&[0x48, 0xFF, 0x49, 0xF8]); // dec qword [rcx - 8]
+    code.extend_from_slice(&[0x75, 0x05]); // jnz keep (skip the 5-byte jmp)
+    code.push(0xE9); // jmp __lullaby_rc_free (tail call)
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: RC_FREE_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    // keep:
+    code.push(0xC3); // ret
+
+    HelperFunction {
+        name: RC_DEC_SYMBOL.to_string(),
         code,
         relocations,
     }
@@ -13475,6 +13758,16 @@ fn write_object_with_data(
         &alloc.code,
         &alloc.relocations,
     );
+    for rc_helper in [emit_rc_free_helper(), emit_rc_dec_helper()] {
+        append_code(
+            &mut text,
+            &mut relocations,
+            &mut func_offsets,
+            &rc_helper.name,
+            &rc_helper.code,
+            &rc_helper.relocations,
+        );
+    }
     let strlen = emit_heap_strlen_helper();
     append_code(
         &mut text,
@@ -13593,6 +13886,8 @@ fn write_object_with_data(
     }
     for helper in [
         HEAP_ALLOC_SYMBOL,
+        RC_FREE_SYMBOL,
+        RC_DEC_SYMBOL,
         HEAP_STRLEN_SYMBOL,
         LIST_NEW_SYMBOL,
         LIST_COPY_SYMBOL,
@@ -14277,6 +14572,50 @@ mod native_program_tests {
     /// Parse the little-endian u32 at `offset` in `bytes`.
     fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    /// Whether the `.text` section has any relocation targeting the symbol `name`
+    /// (i.e. some emitted instruction references it — a `call`/`lea`). Distinct from
+    /// [`coff_symbol`], which only reports that the symbol is DEFINED (helpers are
+    /// always defined even when unreferenced). Used to assert a call was emitted.
+    fn coff_text_relocates_to(bytes: &[u8], name: &str) -> bool {
+        let sym_table = read_u32(bytes, 8) as usize;
+        let count = read_u32(bytes, 12) as usize;
+        let string_table = sym_table + count * 18;
+        // Find the symbol's index in the symbol table.
+        let mut target: Option<u32> = None;
+        for i in 0..count {
+            let rec = sym_table + i * 18;
+            let matches = if name.len() <= 8 {
+                let mut padded = [0u8; 8];
+                padded[..name.len()].copy_from_slice(name.as_bytes());
+                bytes[rec..rec + 8] == padded
+            } else if bytes[rec..rec + 4] == [0, 0, 0, 0] {
+                let str_offset = read_u32(bytes, rec + 4) as usize;
+                let start = string_table + str_offset;
+                let end = start + name.len();
+                end <= bytes.len()
+                    && bytes[start..end] == *name.as_bytes()
+                    && bytes.get(end) == Some(&0)
+            } else {
+                false
+            };
+            if matches {
+                target = Some(i as u32);
+                break;
+            }
+        }
+        let Some(target) = target else {
+            return false;
+        };
+        // `.text` is section 1 (first section header, right after the COFF header).
+        let text_hdr = COFF_HEADER_SIZE as usize;
+        let ptr_relocs = read_u32(bytes, text_hdr + 24) as usize;
+        let num_relocs = read_u16(bytes, text_hdr + 32) as usize;
+        (0..num_relocs).any(|i| {
+            let rec = ptr_relocs + i * 10;
+            read_u32(bytes, rec + 4) == target
+        })
     }
 
     /// Parse the little-endian u16 at `offset` in `bytes`.
@@ -16843,6 +17182,71 @@ mod native_program_tests {
             program.skipped
         );
         assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+    }
+
+    #[test]
+    fn rc_drop_inserted_for_owned_loop_string_but_not_when_it_escapes() {
+        // The `__lullaby_rc_dec` call site (`E8` after `mov rcx, [rbp-slot]`) is the
+        // observable signature of drop insertion. A uniquely-owned, borrow-only loop
+        // string local gets one; an escaping one (returned via an accumulator) does
+        // not — proving the default-deny analysis.
+        let dropped = emit_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let total i64 = 0\n",
+            "    for i from 0 to 10\n",
+            "        let s string = \"payload\"\n",
+            "        total = total + len(s)\n",
+            "    total\n",
+        )))
+        .expect("emit dropped program");
+        assert!(
+            coff_text_relocates_to(&dropped.bytes, RC_DEC_SYMBOL),
+            "a uniquely-owned borrow-only loop string must be dropped"
+        );
+
+        // Escaping: the string is concatenated into an accumulator that survives the
+        // loop, so ownership escapes and it must NOT be dropped.
+        let escapes = emit_native_program(&module_for(concat!(
+            "fn main -> i64\n",
+            "    let acc string = \"\"\n",
+            "    for i from 0 to 10\n",
+            "        let s string = \"x\"\n",
+            "        acc = acc + s\n",
+            "    len(acc)\n",
+        )))
+        .expect("emit escaping program");
+        assert!(
+            !coff_text_relocates_to(&escapes.bytes, RC_DEC_SYMBOL),
+            "a string whose ownership escapes into an accumulator must NOT be dropped"
+        );
+    }
+
+    #[test]
+    fn rc_dec_helper_frees_at_zero_and_tail_calls_free() {
+        // rc_dec decrements the refcount at [rcx-8] and tail-jumps to rc_free only at
+        // zero; rc_free pushes the block base (rcx-16) onto the free list.
+        let dec = emit_rc_dec_helper();
+        assert_eq!(
+            &dec.code[0..4],
+            &[0x48, 0xFF, 0x49, 0xF8],
+            "rc_dec must start with `dec qword [rcx - 8]`"
+        );
+        assert!(
+            dec.relocations.iter().any(|r| r.symbol == RC_FREE_SYMBOL),
+            "rc_dec must tail-call rc_free at zero"
+        );
+        let free = emit_rc_free_helper();
+        assert!(
+            free.relocations
+                .iter()
+                .any(|r| r.symbol == HEAP_FREE_HEAD_SYMBOL),
+            "rc_free must push onto the free list"
+        );
+        assert_eq!(
+            &free.code[0..4],
+            &[0x48, 0x8D, 0x41, 0xF0],
+            "rc_free must compute the block base with `lea rax, [rcx - 16]`"
+        );
     }
 
     #[test]
