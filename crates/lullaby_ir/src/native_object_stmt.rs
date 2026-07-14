@@ -3812,6 +3812,144 @@ pub(crate) fn emit_for_affine_reduction(
     Ok(())
 }
 
+/// A `for i from a to b { acc += c2*i² + c1*i + c0 }` — the O(1) quadratic closed
+/// form for `for` loops, mirroring [`ForAffineReduction`] one degree higher.
+pub(crate) struct ForQuadraticReduction {
+    acc_reg: Option<PReg>,
+    acc_slot: i32,
+    start: BytecodeExpr,
+    end: BytecodeExpr,
+    c0: i32,
+    c1: i32,
+    c2: i32,
+}
+
+pub(crate) fn detect_for_quadratic_reduction(
+    ctx: &NativeCtx,
+    name: &str,
+    start: &BytecodeExpr,
+    end: &BytecodeExpr,
+    step: Option<&BytecodeExpr>,
+    body: &[BytecodeInstruction],
+) -> Option<ForQuadraticReduction> {
+    match step {
+        None => {}
+        Some(expr) => match &expr.kind {
+            BytecodeExprKind::Integer(1) => {}
+            _ => return None,
+        },
+    }
+    let [acc_stmt] = body else {
+        return None;
+    };
+    let BytecodeInstruction::Assign { name: acc_name, .. } = acc_stmt else {
+        return None;
+    };
+    if acc_name == name {
+        return None;
+    }
+    let addend = reduction_addend(acc_stmt, acc_name)?;
+    let [c0_64, c1_64, c2_64] = poly_form(&addend.kind, name)?;
+    if c2_64 == 0 {
+        return None; // degree ≤ 1 is the cheaper for-affine path
+    }
+    let c0 = i32::try_from(c0_64).ok()?;
+    let c1 = i32::try_from(c1_64).ok()?;
+    let c2 = i32::try_from(c2_64).ok()?;
+    let acc_local = ctx.local(acc_name).ok()?;
+    if !matches!(acc_local.ty, NativeType::I64) {
+        return None;
+    }
+    let acc_slot = acc_local.slot;
+    let acc_reg = ctx.promoted_reg(acc_slot);
+    Some(ForQuadraticReduction {
+        acc_reg,
+        acc_slot,
+        start: start.clone(),
+        end: end.clone(),
+        c0,
+        c1,
+        c2,
+    })
+}
+
+/// Emit the `for` quadratic closed form over the inclusive range `a..=b`:
+/// `count = b-a+1`, `S1 = (a+b)*count/2`, `S2 = Σi² = g(b) - g(a-1)`,
+/// `acc += c2*S2 + c1*S1 + c0*count`. `a`/`b` are read at run time; `count <= 0`
+/// leaves `acc` untouched. O(1).
+pub(crate) fn emit_for_quadratic_reduction(
+    ctx: &mut NativeCtx,
+    plan: &ForQuadraticReduction,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    // r8 = a, r9 = b.
+    lower_native_expr(ctx, &plan.start, code)?; // rax = a
+    code.push(0x50); // push rax
+    lower_native_expr(ctx, &plan.end, code)?; // rax = b
+    code.extend_from_slice(&[0x49, 0x89, 0xC1]); // mov r9, rax
+    code.extend_from_slice(&[0x41, 0x58]); // pop r8
+
+    // r10 = count = b - a + 1. Skip when count <= 0.
+    code.extend_from_slice(&[0x4D, 0x89, 0xCA]); // mov r10, r9
+    code.extend_from_slice(&[0x4D, 0x29, 0xC2]); // sub r10, r8
+    code.extend_from_slice(&[0x49, 0x83, 0xC2, 0x01]); // add r10, 1
+    code.extend_from_slice(&[0x4D, 0x85, 0xD2]); // test r10, r10
+    code.extend_from_slice(&[0x0F, 0x8E]); // jle done
+    let done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+
+    // r11 = S2 = g(b) - g(a-1).
+    code.extend_from_slice(&[0x4C, 0x89, 0xC9]); // mov rcx, r9  (b)
+    emit_g_of_m(code);
+    code.extend_from_slice(&[0x49, 0x89, 0xC3]); // mov r11, rax  (g(b))
+    code.extend_from_slice(&[0x49, 0x8D, 0x48, 0xFF]); // lea rcx, [r8 - 1]  (a-1)
+    emit_g_of_m(code);
+    code.extend_from_slice(&[0x49, 0x29, 0xC3]); // sub r11, rax  -> S2
+
+    // rax = S1 = (a+b)*count/2.
+    code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
+    code.extend_from_slice(&[0x4C, 0x01, 0xC8]); // add rax, r9  (a+b)
+    code.extend_from_slice(&[0x4C, 0x89, 0xD2]); // mov rdx, r10  (count copy)
+    code.extend_from_slice(&[0xF6, 0xC2, 0x01]); // test dl, 1
+    code.extend_from_slice(&[0x0F, 0x84]); // jz s1_even
+    let s1_even_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xD1, 0xF8]); // sar rax, 1
+    code.extend_from_slice(&[0xE9]);
+    let s1_mul_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    let s1_even = code.len();
+    patch_rel32_to(code, s1_even_site, s1_even);
+    code.extend_from_slice(&[0x48, 0xD1, 0xEA]); // shr rdx, 1
+    let s1_mul = code.len();
+    patch_rel32_to(code, s1_mul_site, s1_mul);
+    code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC2]); // imul rax, rdx -> S1
+
+    // acc += c2*S2 + c1*S1 + c0*count.
+    code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, c1  (c1*S1)
+    code.extend_from_slice(&plan.c1.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0xDA]); // mov rdx, r11  (S2)
+    code.extend_from_slice(&[0x48, 0x69, 0xD2]); // imul rdx, rdx, c2
+    code.extend_from_slice(&plan.c2.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+    code.extend_from_slice(&[0x4C, 0x89, 0xD2]); // mov rdx, r10  (count)
+    code.extend_from_slice(&[0x48, 0x69, 0xD2]); // imul rdx, rdx, c0
+    code.extend_from_slice(&plan.c0.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+
+    match plan.acc_reg {
+        Some(reg) => reg.add_rax(code),
+        None => {
+            code.extend_from_slice(&[0x48, 0x01, 0x85]); // add [rbp + disp32], rax
+            code.extend_from_slice(&(-plan.acc_slot).to_le_bytes());
+        }
+    }
+
+    let done = code.len();
+    patch_rel32_to(code, done_site, done);
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_native_for(
     ctx: &mut NativeCtx,
@@ -3829,6 +3967,11 @@ pub(crate) fn lower_native_for(
     // falls through).
     if let Some(plan) = detect_for_affine_reduction(ctx, name, start, end, step, body) {
         return emit_for_affine_reduction(ctx, &plan, code);
+    }
+    // Same for a quadratic `for` addend (`acc += c2*i²+c1*i+c0`) via the S2 = Σi²
+    // Faulhaber closed form.
+    if let Some(plan) = detect_for_quadratic_reduction(ctx, name, start, end, step, body) {
+        return emit_for_quadratic_reduction(ctx, &plan, code);
     }
     // Auto-vectorize a recognized `for i from S to E: acc += a[i]` sum reduction
     // over an `array<i64>` into an SSE2 packed loop. Anything that does not match
