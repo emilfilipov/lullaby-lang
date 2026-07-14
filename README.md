@@ -65,9 +65,13 @@ Lullaby already beats Python.
   close-form to `acc += a·S + b·count` (`S = (i0+n-1)(n-i0)/2`) with *no loop* —
   O(1) vs C's O(N). This applies to `for i from a to b: acc += …` too (**~88×
   faster than C** measured), even though the `for` counter is stack-resident and
-  could not be ILP-unrolled — the closed form needs no counter. Non-affine polynomial reductions (`acc += i*i`) use a
-  four-way multi-accumulator that breaks the serial `acc` chain — ~1.7× faster
-  than the naive loop (~1.2× C, where C's SIMD still wins the packed multiply).
+  could not be ILP-unrolled — the closed form needs no counter.
+- Quadratic reductions (`acc += i*i` — sum of squares, variance): **~0.02× C —
+  ~45× faster than C**. Closes to `acc += c2·S2 + c1·S1 + c0·count` where
+  `S2 = Σi²` uses Faulhaber's `m(m+1)(2m+1)/6`, dividing by 3 via 3's *modular
+  inverse* (`0xAAAA…AB`) so it stays exact under wrapping. Cubic and higher
+  (`i*i*i`) fall back to a four-way multi-accumulator that breaks the serial
+  `acc` chain (~1.7× faster than the naive loop).
 - Euclid `gcd` accumulation loop: **~1.00× C — at parity** (10.9 vs 11.0 ns/gcd)
   — `sqrt`/`abs`/`min`/`max`/`gcd`/`sign`/`clamp` now lower to inline machine code
   (`gcd` is a branchless magnitude `abs` + unsigned `div` Euclid), matching C's

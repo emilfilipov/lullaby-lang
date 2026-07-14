@@ -321,16 +321,51 @@ fn for_loop_affine_reduction_lowers_to_closed_form() {
 }
 
 #[test]
-fn quadratic_reduction_uses_multi_accumulator() {
-    // `acc += i*i` is not affine, so it uses the multi-accumulator unroll: the
-    // three extra accumulators are zeroed (`xor r8,r8` = 4D 31 C0) and folded
-    // back in (`add rax, r8` into a lane, and `add <acc>, r8` = 4C 01 ..).
+fn quadratic_reduction_lowers_to_closed_form() {
+    // `acc += i*i` is degree 2, so it closes to `acc += c2*S2 + c1*S1 + c0*count`
+    // with `S2 = sum(i²)` — the Faulhaber `g(m)` uses the modular inverse of 3
+    // (`mov rdx, 0xAAAA_AAAA_AAAA_AAAB` = 48 BA AB AA…AA) for the exact `/3`.
+    // No loop remains.
     let program = emit_native_program(&module_for(concat!(
         "fn red n i64 -> i64\n",
         "    let acc i64 = 0\n",
         "    let i i64 = 0\n",
         "    while i < n\n",
         "        acc = acc + (i * i)\n",
+        "        i = i + 1\n",
+        "    return acc\n\n",
+        "fn main -> i64\n",
+        "    red(1000)\n",
+    )))
+    .expect("emit native program");
+    let sec = COFF_HEADER_SIZE as usize;
+    let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+    let text_size = read_u32(&program.bytes, sec + 16) as usize;
+    let text = &program.bytes[text_offset..text_offset + text_size];
+    assert!(
+        text.windows(10)
+            .any(|w| w[0..2] == [0x48, 0xBA] && w[2..10] == 0xAAAA_AAAA_AAAA_AAABu64.to_le_bytes()),
+        "expected `mov rdx, inv3` (the exact /3 for the sum-of-squares closed form)"
+    );
+    assert!(
+        !text
+            .windows(5)
+            .any(|w| w[0] == 0xE9 && i32::from_le_bytes([w[1], w[2], w[3], w[4]]) < 0),
+        "the quadratic reduction is closed-form (O(1)); no backward loop jump"
+    );
+}
+
+#[test]
+fn cubic_reduction_uses_multi_accumulator() {
+    // `acc += i*i*i` is degree 3 (no simple closed form), so it uses the
+    // multi-accumulator unroll: the three extra accumulators are zeroed
+    // (`xor r8,r8` = 4D 31 C0) and folded via `add r8, rax` (49 01 C0).
+    let program = emit_native_program(&module_for(concat!(
+        "fn red n i64 -> i64\n",
+        "    let acc i64 = 0\n",
+        "    let i i64 = 0\n",
+        "    while i < n\n",
+        "        acc = acc + (i * i * i)\n",
         "        i = i + 1\n",
         "    return acc\n\n",
         "fn main -> i64\n",

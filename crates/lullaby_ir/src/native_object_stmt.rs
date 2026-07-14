@@ -2954,6 +2954,54 @@ fn affine_form(expr: &BytecodeExprKind, counter: &str) -> Option<(i64, i64)> {
     }
 }
 
+/// The polynomial coefficients `[c0, c1, c2]` of `expr` as `c2*i² + c1*i + c0`
+/// (wrapping i64), or `None` if it is not a polynomial of degree ≤ 2 in the
+/// counter (a non-counter variable, division, a call, or a product whose degree
+/// would exceed 2). Generalizes [`affine_form`] one degree higher.
+fn poly_form(expr: &BytecodeExprKind, counter: &str) -> Option<[i64; 3]> {
+    match expr {
+        BytecodeExprKind::Integer(c) => Some([*c, 0, 0]),
+        BytecodeExprKind::Variable(name) if name == counter => Some([0, 1, 0]),
+        BytecodeExprKind::Binary { left, op, right } => {
+            let l = poly_form(&left.kind, counter)?;
+            let r = poly_form(&right.kind, counter)?;
+            let degree = |p: &[i64; 3]| {
+                if p[2] != 0 {
+                    2
+                } else if p[1] != 0 {
+                    1
+                } else {
+                    0
+                }
+            };
+            match op {
+                BinaryOp::Add => Some([
+                    l[0].wrapping_add(r[0]),
+                    l[1].wrapping_add(r[1]),
+                    l[2].wrapping_add(r[2]),
+                ]),
+                BinaryOp::Subtract => Some([
+                    l[0].wrapping_sub(r[0]),
+                    l[1].wrapping_sub(r[1]),
+                    l[2].wrapping_sub(r[2]),
+                ]),
+                // A product stays degree ≤ 2 only if the operand degrees sum to
+                // ≤ 2; then the degree-3/4 cross terms vanish.
+                BinaryOp::Multiply if degree(&l) + degree(&r) <= 2 => Some([
+                    l[0].wrapping_mul(r[0]),
+                    l[0].wrapping_mul(r[1])
+                        .wrapping_add(l[1].wrapping_mul(r[0])),
+                    l[0].wrapping_mul(r[2])
+                        .wrapping_add(l[1].wrapping_mul(r[1]))
+                        .wrapping_add(l[2].wrapping_mul(r[0])),
+                ]),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn detect_affine_reduction(
     ctx: &NativeCtx,
     condition: &BytecodeExpr,
@@ -3081,6 +3129,192 @@ pub(crate) fn emit_affine_reduction(
     Ok(())
 }
 
+/// A degree-2 reduction `acc += c2*i² + c1*i + c0` over the counter — the closed
+/// form `acc += c2*S2 + c1*S1 + c0*count`, where `S2 = sum(i²)`. O(1), like the
+/// affine case, one degree higher.
+pub(crate) struct QuadraticReductionLoop {
+    acc: PReg,
+    counter: PReg,
+    bound: SumBound,
+    c0: i32,
+    c1: i32,
+    c2: i32,
+}
+
+pub(crate) fn detect_quadratic_reduction(
+    ctx: &NativeCtx,
+    condition: &BytecodeExpr,
+    body: &[BytecodeInstruction],
+) -> Option<QuadraticReductionLoop> {
+    let BytecodeExprKind::Binary {
+        left,
+        op: BinaryOp::Less,
+        right,
+    } = &condition.kind
+    else {
+        return None;
+    };
+    let BytecodeExprKind::Variable(counter_name) = &left.kind else {
+        return None;
+    };
+    if left.ty.name != "i64" {
+        return None;
+    }
+    let [acc_stmt, step_stmt] = body else {
+        return None;
+    };
+    let BytecodeInstruction::Assign { name: acc_name, .. } = acc_stmt else {
+        return None;
+    };
+    if acc_name == counter_name {
+        return None;
+    }
+    let addend = reduction_addend(acc_stmt, acc_name)?;
+    if !is_promoted_self_add(step_stmt, counter_name, &AddendCheck::One) {
+        return None;
+    }
+    let [c0_64, c1_64, c2_64] = poly_form(&addend.kind, counter_name)?;
+    // Degree must be exactly 2 (degree ≤ 1 is the cheaper affine path).
+    if c2_64 == 0 {
+        return None;
+    }
+    let c0 = i32::try_from(c0_64).ok()?;
+    let c1 = i32::try_from(c1_64).ok()?;
+    let c2 = i32::try_from(c2_64).ok()?;
+    let bound = parse_reduction_bound(right, counter_name, acc_name)?;
+    let acc = promoted_reg_of_name(ctx, acc_name)?;
+    let counter = promoted_reg_of_name(ctx, counter_name)?;
+    if acc == counter {
+        return None;
+    }
+    Some(QuadraticReductionLoop {
+        acc,
+        counter,
+        bound,
+        c0,
+        c1,
+        c2,
+    })
+}
+
+/// `rax = g(m) = m(m+1)(2m+1)/6` for `m` in `rcx` (clobbers rax/rdx, preserves
+/// rcx). Computed exactly mod 2^64: `m(m+1)/2` by halving the even factor of
+/// `{m, m+1}` (avoiding an overflow-before-halve), `* (2m+1)`, then `/3` via the
+/// modular inverse of 3 (`0xAAAA…AB`) — exact because `m(m+1)(2m+1)/2` is always
+/// a multiple of 3, so `X * inv3 ≡ X/3 (mod 2^64)`.
+fn emit_g_of_m(code: &mut Vec<u8>) {
+    code.extend_from_slice(&[0x48, 0x8D, 0x51, 0x01]); // lea rdx, [rcx + 1]   (m+1)
+    code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx              (m)
+    code.extend_from_slice(&[0xF6, 0xC1, 0x01]); // test cl, 1
+    code.extend_from_slice(&[0x0F, 0x84]); // jz m_even
+    let m_even_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xD1, 0xFA]); // sar rdx, 1  (m odd -> (m+1)/2)
+    code.extend_from_slice(&[0xE9]); // jmp mul_half
+    let mul_half_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    let m_even = code.len();
+    patch_rel32_to(code, m_even_site, m_even);
+    code.extend_from_slice(&[0x48, 0xD1, 0xF8]); // sar rax, 1  (m even -> m/2)
+    let mul_half = code.len();
+    patch_rel32_to(code, mul_half_site, mul_half);
+    code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC2]); // imul rax, rdx  -> m(m+1)/2
+    code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x09, 0x01]); // lea rdx, [rcx + rcx + 1]  (2m+1)
+    code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC2]); // imul rax, rdx  -> Q = m(m+1)(2m+1)/2
+    code.extend_from_slice(&[0x48, 0xBA]); // mov rdx, inv3
+    code.extend_from_slice(&0xAAAA_AAAA_AAAA_AAABu64.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC2]); // imul rax, rdx  -> Q/3 = g(m)
+}
+
+/// Emit the quadratic reduction closed form `acc += c2*S2 + c1*S1 + c0*count`.
+/// `count = n - i0` (r8), `S1 = (i0+n-1)*count/2` (r9), `S2 = sum(i²) = g(n-1) -
+/// g(i0-1)` (r10). `i0` stays in the promoted counter register throughout; `n`
+/// in r11. O(1). A `count <= 0` guard leaves acc/i untouched; `i = n` afterward.
+pub(crate) fn emit_quadratic_reduction(
+    ctx: &mut NativeCtx,
+    plan: &QuadraticReductionLoop,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let QuadraticReductionLoop {
+        acc,
+        counter,
+        c0,
+        c1,
+        c2,
+        ..
+    } = *plan;
+
+    // r11 = n.
+    match &plan.bound {
+        SumBound::Const(bound) => {
+            code.extend_from_slice(&[0x49, 0xC7, 0xC3]); // mov r11, imm32
+            code.extend_from_slice(&(*bound as i32).to_le_bytes());
+        }
+        SumBound::Runtime(bound_expr) => {
+            lower_native_expr(ctx, bound_expr, code)?; // rax = n
+            code.extend_from_slice(&[0x49, 0x89, 0xC3]); // mov r11, rax
+        }
+    }
+
+    // r8 = count = n - i0. Skip when count <= 0.
+    code.extend_from_slice(&[0x4D, 0x89, 0xD8]); // mov r8, r11
+    emit_sub_r8_counter(code, counter); // sub r8, i0
+    code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+    code.extend_from_slice(&[0x0F, 0x8E]); // jle done
+    let done_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+
+    // r9 = S1 = (i0 + n - 1)*count/2.
+    counter.to_rax(code); // rax = i0
+    code.extend_from_slice(&[0x4C, 0x01, 0xD8]); // add rax, r11
+    code.extend_from_slice(&[0x48, 0x83, 0xE8, 0x01]); // sub rax, 1
+    code.extend_from_slice(&[0x4C, 0x89, 0xC2]); // mov rdx, r8  (count copy)
+    code.extend_from_slice(&[0xF6, 0xC2, 0x01]); // test dl, 1
+    code.extend_from_slice(&[0x0F, 0x84]); // jz s1_even
+    let s1_even_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xD1, 0xF8]); // sar rax, 1
+    code.extend_from_slice(&[0xE9]);
+    let s1_mul_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    let s1_even = code.len();
+    patch_rel32_to(code, s1_even_site, s1_even);
+    code.extend_from_slice(&[0x48, 0xD1, 0xEA]); // shr rdx, 1
+    let s1_mul = code.len();
+    patch_rel32_to(code, s1_mul_site, s1_mul);
+    code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC2]); // imul rax, rdx -> S1
+    code.extend_from_slice(&[0x49, 0x89, 0xC1]); // mov r9, rax  (S1)
+
+    // r10 = S2 = g(n-1) - g(i0-1).
+    code.extend_from_slice(&[0x49, 0x8D, 0x4B, 0xFF]); // lea rcx, [r11 - 1]  (n-1)
+    emit_g_of_m(code);
+    code.extend_from_slice(&[0x49, 0x89, 0xC2]); // mov r10, rax  (g(n-1))
+    code.extend_from_slice(&[0x48, 0x8D, 0x48 | counter.code3(), 0xFF]); // lea rcx, [i0 - 1]
+    emit_g_of_m(code);
+    code.extend_from_slice(&[0x49, 0x29, 0xC2]); // sub r10, rax  -> S2 = g(n-1) - g(i0-1)
+
+    // acc += c2*S2 + c1*S1 + c0*count.
+    code.extend_from_slice(&[0x4C, 0x89, 0xD0]); // mov rax, r10  (S2)
+    code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, c2
+    code.extend_from_slice(&c2.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0xCA]); // mov rdx, r9  (S1)
+    code.extend_from_slice(&[0x48, 0x69, 0xD2]); // imul rdx, rdx, c1
+    code.extend_from_slice(&c1.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+    code.extend_from_slice(&[0x4C, 0x89, 0xC2]); // mov rdx, r8  (count)
+    code.extend_from_slice(&[0x48, 0x69, 0xD2]); // imul rdx, rdx, c0
+    code.extend_from_slice(&c0.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+
+    acc.add_rax(code); // acc += sum
+    // i = n : mov counter, r11.
+    code.extend_from_slice(&[0x4C, 0x89, 0xD8 | counter.code3()]); // mov counter, r11
+
+    let done = code.len();
+    patch_rel32_to(code, done_site, done);
+    Ok(())
+}
+
 pub(crate) fn lower_native_while(
     ctx: &mut NativeCtx,
     condition: &BytecodeExpr,
@@ -3101,6 +3335,13 @@ pub(crate) fn lower_native_while(
     // form is strictly faster when the addend is affine.
     if let Some(plan) = detect_affine_reduction(ctx, condition, body) {
         emit_affine_reduction(ctx, &plan, code)?;
+        return Ok(());
+    }
+    // Quadratic reduction `acc += c2*i² + c1*i + c0`: the closed form uses
+    // `S2 = sum(i²)` (Faulhaber, via g(m) and the modular inverse of 3). O(1),
+    // one degree above affine.
+    if let Some(plan) = detect_quadratic_reduction(ctx, condition, body) {
+        emit_quadratic_reduction(ctx, &plan, code)?;
         return Ok(());
     }
     // General multi-accumulator reduction: `acc = acc + EXPR` where `EXPR` is a
