@@ -3942,3 +3942,55 @@ fn elf_string_program_carries_rodata_and_bss() {
     // = 5); the data path adds .rodata, .bss, and .rela.text.
     assert!(read_u16(&program.bytes, 60) > 5, "data sections present");
 }
+
+#[test]
+fn read_only_array_param_compiles_as_fat_pointer() {
+    // A read-only `array<i64>` parameter whose length is not inferable from a call
+    // site is NO LONGER demoted: it compiles as a fat pointer (data_ptr + runtime
+    // length). `sum_array` iterates with `for x in a` (needs `len(a)` and `a[i]`);
+    // `count_at` indexes `a[i]` with a length from a separate `n` parameter. Both
+    // are helpers with no native caller, so neither could infer a stack length.
+    let program = emit_native_program(&module_for(concat!(
+        "fn sum_array a array<i64> -> i64\n",
+        "    let acc i64 = 0\n",
+        "    for x in a\n",
+        "        acc = acc + x\n",
+        "    acc\n\n",
+        "fn count_at a array<i64> n, x i64 -> i64\n",
+        "    let c i64 = 0\n",
+        "    for i from 0 to n - 1\n",
+        "        if a[i] == x\n",
+        "            c = c + 1\n",
+        "    c\n\n",
+        "fn main -> i64\n",
+        "    let xs array<i64> = [4, 1, 4, 2]\n",
+        "    sum_array(xs) + count_at(xs, 4, 4)\n",
+    )))
+    .expect("emit native program");
+    for name in ["sum_array", "count_at", "main"] {
+        assert!(
+            program.compiled.contains(&name.to_string()),
+            "expected `{name}` compiled: {:?} / skipped {:?}",
+            program.compiled,
+            program.skipped,
+        );
+    }
+    assert!(
+        !program
+            .skipped
+            .iter()
+            .any(|s| s.reason.contains("no call site to infer its length")),
+        "no fat-pointer helper should demote for a missing call-site length: {:?}",
+        program.skipped,
+    );
+
+    let text = text_bytes(&program);
+    // The fat-array element read bounds-checks the index in `rax` against the
+    // descriptor's RUNTIME length word `[rbp - len_slot]`: `cmp rax, [rbp+disp32]`
+    // = `48 3B 85 ..` followed by `jb +2` / `ud2` = `72 02 0F 0B`.
+    assert!(
+        text.windows(2).any(|w| w == [0x3B, 0x85])
+            && text.windows(4).any(|w| w == [0x72, 0x02, 0x0F, 0x0B]),
+        "expected a fat-array runtime-length bounds check (cmp rax,[rbp-len]; jb+2; ud2)"
+    );
+}

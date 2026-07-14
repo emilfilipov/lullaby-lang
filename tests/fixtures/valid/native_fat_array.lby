@@ -1,0 +1,26 @@
+fn sum_array a array<i64> -> i64
+    let total i64 = 0
+    for x in a
+        total = total + x
+    total
+
+fn count_frequency_of a array<i64> n, x i64 -> i64
+    let count i64 = 0
+    for i from 0 to n - 1
+        if a[i] == x
+            count = count + 1
+    count
+
+fn max_in a array<i64> -> i64
+    let best i64 = a[0]
+    for x in a
+        if x > best
+            best = x
+    best
+
+fn main -> i64
+    let xs array<i64> = [3, 1, 4, 1, 5, 9, 2, 6]
+    let s i64 = sum_array(xs)
+    let c i64 = count_frequency_of(xs, 8, 1)
+    let m i64 = max_in(xs)
+    s + c + m

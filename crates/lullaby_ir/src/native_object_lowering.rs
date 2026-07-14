@@ -206,7 +206,9 @@ pub(crate) fn lower_native_float_expr(
             };
             match place {
                 ScalarPlace::Const { slot } => load_float_local(code, slot, width),
-                ScalarPlace::Dynamic { .. } => {
+                // A dynamic stack element or a fat-pointer array element: both
+                // resolve their (bounds-checked) address into rcx.
+                ScalarPlace::Dynamic { .. } | ScalarPlace::FatIndex { .. } => {
                     emit_dynamic_addr_into_rcx(ctx, &place, code)?; // rcx = &elem (bounds-checked)
                     load_float_from_rcx(code, width);
                 }

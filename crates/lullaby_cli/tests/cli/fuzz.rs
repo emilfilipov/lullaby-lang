@@ -443,3 +443,71 @@ fn fuzz_array_interpreters_agree() {
         );
     }
 }
+
+#[test]
+fn fuzz_array_native_matches_interpreter_when_linkable() {
+    // Compile each fat-pointer `array<i64>`-parameter program to a real `.exe` and
+    // check its exit code against the interpreter result — the high-value oracle for
+    // the calling-convention change. Gated on the link toolchain; skips cleanly when
+    // absent. This ASSERTS the helper (a fat-pointer array parameter) compiles
+    // natively, so a regression that demoted it would fail here, not silently pass.
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native array differential fuzz");
+        return;
+    }
+    ensure_msvc_env();
+
+    const PROGRAMS: u64 = 80;
+    let base_seed = 0x7C6A_2F13_88BE_4D05u64;
+    let dir = std::env::temp_dir().join("lullaby_fuzz_native_array");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_array_program(seed);
+
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "interpreter divergence on native-array-fuzz #{i} (seed {seed:#x}):\n{source}"
+        );
+        let expected = match ast {
+            Outcome::Value(n) => n,
+            other => panic!("array generator produced {other:?} on seed {seed:#x}:\n{source}"),
+        };
+
+        let src_path = dir.join(format!("fuzz_arr_{i}.lby"));
+        let exe_path = dir.join(format!("fuzz_arr_{i}.exe"));
+        std::fs::write(&src_path, &source).expect("write fuzz source");
+        let _ = std::fs::remove_file(&exe_path);
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "-o",
+                exe_path.to_str().expect("exe path"),
+                src_path.to_str().expect("src path"),
+            ])
+            .output()
+            .expect("run native");
+        assert!(
+            emit.status.success(),
+            "native emit failed on array-fuzz #{i} (seed {seed:#x}) — the helper's \
+             fat-pointer array parameter must compile:\n{source}\n{}",
+            stderr(&emit)
+        );
+        assert!(
+            exe_path.is_file(),
+            "no linked exe on array-fuzz #{i} (seed {seed:#x}):\n{source}\n{}",
+            stdout(&emit)
+        );
+
+        let run = Command::new(&exe_path).output().expect("run fuzz exe");
+        let exit = run.status.code().expect("native exit code");
+        assert_eq!(
+            exit, expected as i32,
+            "NATIVE MISCOMPILE (fat array) on #{i} (seed {seed:#x}):\n{source}\n\
+             interpreter={expected}, native exit={exit}"
+        );
+    }
+}

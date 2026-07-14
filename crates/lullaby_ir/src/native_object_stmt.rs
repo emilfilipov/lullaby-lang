@@ -524,14 +524,20 @@ pub(crate) fn lower_native_function(
                     emit_store_xmm_to_slot(&mut code, reg as u8, local.slot, width);
                 }
             }
-            NativeType::Struct { .. } | NativeType::Array { .. } | NativeType::Enum { .. } => {
+            NativeType::Struct { .. }
+            | NativeType::Array { .. }
+            | NativeType::Enum { .. }
+            | NativeType::FatArray { .. } => {
                 // The argument holds a pointer to the caller's copy (in a register
                 // for `reg < 4`, on the stack otherwise). Copy the aggregate words
                 // into the parameter's frame slots (value semantics: the callee owns
                 // an independent snapshot and never mutates the caller's copy). rax =
                 // source pointer (addresses word 0, the aggregate's highest stack
                 // address). Words descend in memory, so word k is at `[rax - 8*k]`,
-                // matching the caller's `[rbp - (base + 8*k)]` layout.
+                // matching the caller's `[rbp - (base + 8*k)]` layout. A fat-pointer
+                // array descriptor copies exactly its two words (data pointer at
+                // word 0, runtime length at word 1); the pointer is the caller's
+                // storage, shared read-only.
                 if on_stack {
                     emit_mov_rax_from_rbp_pos(&mut code, stack_disp);
                 } else {
@@ -761,6 +767,12 @@ pub(crate) fn lower_native_stmt(
                     let ty = ctx.local(name)?.ty.clone();
                     lower_aggregate_init(ctx, base, &ty, value, code)?;
                 }
+                // A fat-pointer array is a parameter-only descriptor; it can never
+                // be the type of a `let` local (there is no expression that produces
+                // one), so this arm is unreachable — reject defensively.
+                NativeType::FatArray { .. } => {
+                    return Err("a fat-pointer array cannot be bound to a local".to_string());
+                }
             }
             Ok(())
         }
@@ -884,6 +896,11 @@ pub(crate) fn lower_native_stmt(
                         pop_xmm0(code); // xmm0 = value
                         store_float_from_rcx(code, width); // movsd [rcx], xmm0
                     }
+                    // A fat-pointer array parameter is read-only, so an element
+                    // store never resolves to it; reject defensively.
+                    ScalarPlace::FatIndex { .. } => {
+                        return Err("cannot assign to a fat-pointer array element".to_string());
+                    }
                 }
                 return Ok(());
             }
@@ -978,6 +995,9 @@ pub(crate) fn lower_native_stmt(
                             code.push(0x58); // pop rax (value)
                             code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
                         }
+                        ScalarPlace::FatIndex { .. } => {
+                            return Err("cannot assign to a fat-pointer array element".to_string());
+                        }
                     }
                 }
                 other => {
@@ -1013,6 +1033,9 @@ pub(crate) fn lower_native_stmt(
                             emit_i64_binop_from_stack(code, bin)?; // rax = left <op> right
                             code.push(0x59); // pop rcx (address)
                             code.extend_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx], rax
+                        }
+                        ScalarPlace::FatIndex { .. } => {
+                            return Err("cannot assign to a fat-pointer array element".to_string());
                         }
                     }
                 }
@@ -1383,6 +1406,23 @@ pub(crate) fn resolve_place_steps_typed(
 ) -> Result<(ScalarPlace, NativeType), String> {
     let local = ctx.local(root)?;
     let base_slot = local.slot;
+    // A fat-pointer array parameter supports exactly one runtime index read
+    // (`param[i]`); the address comes from the descriptor's data pointer, not the
+    // frame base. Any other path shape (a field hop, a second index, or a bare
+    // whole-array use) is not lowered and demotes the function gracefully.
+    if let NativeType::FatArray { elem } = &local.ty {
+        let [PathStep::Index(index)] = steps else {
+            return Err("a fat-pointer array parameter supports only a single index".to_string());
+        };
+        let elem_ty = (**elem).clone();
+        let place = ScalarPlace::FatIndex {
+            ptr_slot: base_slot,
+            len_slot: base_slot + 8,
+            elem_words: elem_ty.words() as i64,
+            index: (*index).clone(),
+        };
+        return Ok((place, elem_ty));
+    }
     let mut ty = local.ty.clone();
     let mut const_words: i64 = 0;
     let mut dynamic: Option<(i64, i64, BytecodeExpr)> = None;
@@ -1549,7 +1589,7 @@ pub(crate) fn emit_load_place(
             load_local(code, *slot);
             Ok(())
         }
-        ScalarPlace::Dynamic { .. } => {
+        ScalarPlace::Dynamic { .. } | ScalarPlace::FatIndex { .. } => {
             emit_dynamic_addr_into_rcx(ctx, place, code)?; // rcx = &word
             code.extend_from_slice(&[0x48, 0x8B, 0x01]); // mov rax, [rcx]
             Ok(())
@@ -1565,6 +1605,34 @@ pub(crate) fn emit_dynamic_addr_into_rcx(
     place: &ScalarPlace,
     code: &mut Vec<u8>,
 ) -> Result<(), String> {
+    // A fat-pointer array element addresses off the descriptor's runtime data
+    // pointer, not the frame base: `data_ptr - 8*elem_words*index`, with the index
+    // bounds-checked against the descriptor's runtime length word.
+    if let ScalarPlace::FatIndex {
+        ptr_slot,
+        len_slot,
+        elem_words,
+        index,
+        ..
+    } = place
+    {
+        // rax = index
+        lower_native_expr(ctx, index, code)?;
+        // Bounds check against the RUNTIME length word `[rbp - len_slot]`: one
+        // UNSIGNED compare traps a negative or over-large index (`ud2`), matching
+        // the interpreters' L0413.
+        emit_bounds_check_rax_against_slot(code, *len_slot);
+        // rax = index * elem_words   (imul rax, rax, imm32)
+        emit_imul_rax_imm(code, *elem_words);
+        // rax = rax * 8  -> byte stride  (shl rax, 3)
+        code.extend_from_slice(&[0x48, 0xC1, 0xE0, 0x03]);
+        // rcx = data_ptr (descriptor word 0)
+        emit_mov_rcx_from_slot(code, *ptr_slot);
+        // rcx = rcx - rax  (element i is at data_ptr - 8*elem_words*i; elements
+        // descend from element 0 exactly like the caller's stack array layout).
+        code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+        return Ok(());
+    }
     let ScalarPlace::Dynamic {
         base_slot,
         const_words,
@@ -1611,6 +1679,17 @@ pub(crate) fn emit_imul_rax_imm(code: &mut Vec<u8>, imm: i64) {
 pub(crate) fn emit_bounds_check_rax(code: &mut Vec<u8>, len: i64) {
     code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32
     code.extend_from_slice(&(len as i32).to_le_bytes());
+    code.extend_from_slice(&[0x72, 0x02]); // jb +2  (in bounds -> skip the trap)
+    code.extend_from_slice(&[0x0F, 0x0B]); // ud2    (out of bounds -> fault)
+}
+
+/// Like [`emit_bounds_check_rax`] but compares the index in `rax` against a
+/// **runtime** length held in the frame slot `[rbp - len_slot]` (a fat-pointer
+/// array descriptor's length word). One UNSIGNED `cmp`+`jb` traps a negative or
+/// over-large index, mirroring the interpreters' `L0413`.
+pub(crate) fn emit_bounds_check_rax_against_slot(code: &mut Vec<u8>, len_slot: i32) {
+    code.extend_from_slice(&[0x48, 0x3B, 0x85]); // cmp rax, [rbp - len_slot]
+    code.extend_from_slice(&(-len_slot).to_le_bytes());
     code.extend_from_slice(&[0x72, 0x02]); // jb +2  (in bounds -> skip the trap)
     code.extend_from_slice(&[0x0F, 0x0B]); // ud2    (out of bounds -> fault)
 }

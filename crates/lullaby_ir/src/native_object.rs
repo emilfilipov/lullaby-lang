@@ -1818,9 +1818,14 @@ fn native_signature_type_is_aggregate(
         | NativeType::Map { .. } => Ok(false),
         // A `HeapStruct` is a collection-element-only representation and never
         // reaches a top-level signature type; treat it as a register pointer word
-        // for completeness.
+        // for completeness. A `FatArray` is only ever produced by the parameter
+        // resolver (never by `resolve_native_type`), so it cannot appear here; it
+        // crosses the boundary by pointer like an aggregate.
         NativeType::HeapStruct { .. } => Ok(false),
-        NativeType::Struct { .. } | NativeType::Array { .. } | NativeType::Enum { .. } => Ok(true),
+        NativeType::Struct { .. }
+        | NativeType::Array { .. }
+        | NativeType::FatArray { .. }
+        | NativeType::Enum { .. } => Ok(true),
     }
 }
 
@@ -1929,22 +1934,195 @@ fn infer_array_lengths(
                 &mut saw_call,
             )?;
         }
+        // A concrete, agreed-upon call-site length keeps the copy-in stack-array
+        // path (unchanged): the caller passes the whole array by value, indexing is
+        // statically bounds-checked, and array reductions can auto-vectorize.
+        if let Some(len) = found {
+            lengths.insert(param.name.clone(), len);
+            continue;
+        }
+        // The length is NOT inferable (no call site, or disagreeing call sites). If
+        // the parameter is read-only, fall back to passing it as a **fat pointer**
+        // (data_ptr + runtime length) — the callee reads the caller's storage in
+        // place with no copy — instead of demoting. This is what unlocks the
+        // large family of helpers (`sum_array`, `count_frequency_of`, …) that take
+        // an `array<T>` whose length is not known at compile time.
+        if fat_array_param_elem(function, &param.name, &param.ty).is_some() {
+            lengths.insert(param.name.clone(), FAT_ARRAY_LEN);
+            continue;
+        }
+        // Not inferable and not read-only (e.g. a sort that mutates its parameter):
+        // demote so the function runs on the interpreters, matching prior behavior.
         if !saw_call {
             return Err(format!(
                 "parameter array `{}` of `{}` has no call site to infer its length from",
                 param.name, function.name
             ));
         }
-        let len = found.ok_or_else(|| {
-            format!(
-                "parameter array `{}` of `{}` could not be sized from its call sites",
-                param.name, function.name
-            )
-        })?;
-        lengths.insert(param.name.clone(), len);
+        return Err(format!(
+            "parameter array `{}` of `{}` could not be sized from its call sites",
+            param.name, function.name
+        ));
     }
 
     Ok(lengths)
+}
+
+// -- Fat-pointer array parameters --------------------------------------------
+//
+// A read-only scalar-element `array<T>` parameter is passed as a fat pointer — a
+// `(data_ptr, length)` descriptor — instead of requiring its length to be inferred
+// from a call site. The callee reads the caller's storage in place (no copy),
+// which is value-semantically identical to the interpreters' eager array copy
+// BECAUSE the parameter is never written. A mutating array parameter keeps the
+// copy-in `NativeType::Array` path (which needs an inferable length).
+
+/// The (scalar) element `NativeType` when `param` of `function` is eligible to be
+/// passed as a **fat-pointer** array — a read-only scalar-integer-element
+/// `array<T>` parameter — else `None`.
+///
+/// Eligible when the parameter type is `array<E>` with `E` a native scalar integer
+/// cell (`i64`/fixed-width/`bool`/`char`/`byte`; a heap `array<string>` and a
+/// float element are handled elsewhere / deferred) AND the body uses `param`
+/// read-only: it never assigns `param` (nor `param[i]`/`param.f`) and every use of
+/// the `param` variable is either an index-read target (`param[i]`) or the sole
+/// argument of `len(param)`. The rule is default-deny — any other use (aliasing,
+/// returning, passing it onward, whole-value arithmetic) makes the parameter
+/// ineligible, so it falls back to the copy-in path or the function skips.
+fn fat_array_param_elem(
+    function: &BytecodeFunction,
+    param_name: &str,
+    param_ty: &TypeRef,
+) -> Option<NativeType> {
+    let rest = param_ty.name.strip_prefix("array<")?;
+    let elem_name = rest.strip_suffix('>').unwrap_or(rest);
+    // Only scalar integer-cell elements in this increment (`array<f64>` and other
+    // scalar element types are a follow-up; `array<string>` is a distinct heap
+    // representation handled by `heap_string_array_element`).
+    let elem = match elem_name {
+        "i64" => NativeType::I64,
+        n if fixed_int_kind(n).is_some() => NativeType::I64,
+        "bool" | "char" | "byte" => NativeType::I64,
+        _ => return None,
+    };
+    if !param_is_read_only(&function.instructions, param_name) {
+        return None;
+    }
+    Some(elem)
+}
+
+/// Whether every statement in `body` uses `param` read-only (see
+/// [`fat_array_param_elem`]). Totally enumerated over the statement kinds so an
+/// unhandled construct can never silently pass.
+fn param_is_read_only(body: &[BytecodeInstruction], param: &str) -> bool {
+    body.iter().all(|stmt| stmt_param_read_only(stmt, param))
+}
+
+fn stmt_param_read_only(stmt: &BytecodeInstruction, param: &str) -> bool {
+    match stmt {
+        BytecodeInstruction::Assign {
+            name, path, value, ..
+        } => {
+            // An assignment whose target is `param` mutates it (whole-value, or an
+            // element/field via `path`). Index expressions in `path` and the RHS
+            // must also use `param` only in safe positions.
+            name != param
+                && path.iter().all(|p| match p {
+                    BytecodePlace::Index(index) => expr_param_read_only(index, param),
+                    BytecodePlace::Field(_) => true,
+                })
+                && expr_param_read_only(value, param)
+        }
+        BytecodeInstruction::Let { value, .. } => expr_param_read_only(value, param),
+        BytecodeInstruction::Return(Some(expr))
+        | BytecodeInstruction::Expr(expr)
+        | BytecodeInstruction::Throw { value: expr, .. } => expr_param_read_only(expr, param),
+        BytecodeInstruction::Return(None)
+        | BytecodeInstruction::Break(_)
+        | BytecodeInstruction::Continue(_)
+        | BytecodeInstruction::Asm { .. } => true,
+        BytecodeInstruction::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches.iter().all(|branch| {
+                expr_param_read_only(&branch.condition, param)
+                    && param_is_read_only(&branch.body, param)
+            }) && param_is_read_only(else_body, param)
+        }
+        BytecodeInstruction::While {
+            condition, body, ..
+        } => expr_param_read_only(condition, param) && param_is_read_only(body, param),
+        BytecodeInstruction::For {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            expr_param_read_only(start, param)
+                && expr_param_read_only(end, param)
+                && step.as_ref().is_none_or(|s| expr_param_read_only(s, param))
+                && param_is_read_only(body, param)
+        }
+        BytecodeInstruction::Loop { body, .. } => param_is_read_only(body, param),
+        BytecodeInstruction::Try {
+            body, catch_body, ..
+        } => param_is_read_only(body, param) && param_is_read_only(catch_body, param),
+        BytecodeInstruction::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_param_read_only(scrutinee, param)
+                && arms.iter().all(|arm| param_is_read_only(&arm.body, param))
+        }
+    }
+}
+
+/// Whether every occurrence of the `param` variable inside `expr` is in a
+/// **read-only** position: the target of an index read (`param[i]`) or the sole
+/// argument of `len(param)`. A bare value use of `param` anywhere else returns
+/// `false`.
+fn expr_param_read_only(expr: &BytecodeExpr, param: &str) -> bool {
+    match &expr.kind {
+        // A bare read of `param` (as a value) is not read-only-safe on its own; it
+        // is only allowed in the recognized `param[i]` / `len(param)` shapes below.
+        BytecodeExprKind::Variable(name) => name != param,
+        BytecodeExprKind::Index { target, index } => {
+            // `param[i]` is allowed: the target may be exactly `param`, otherwise it
+            // must itself be safe. The index must always be safe.
+            let target_ok = matches!(&target.kind, BytecodeExprKind::Variable(name) if name == param)
+                || expr_param_read_only(target, param);
+            target_ok && expr_param_read_only(index, param)
+        }
+        BytecodeExprKind::Call { name, args } => {
+            // `len(param)` is the one whole-value use that is allowed.
+            if name == "len"
+                && args.len() == 1
+                && matches!(&args[0].kind, BytecodeExprKind::Variable(n) if n == param)
+            {
+                return true;
+            }
+            args.iter().all(|arg| expr_param_read_only(arg, param))
+        }
+        BytecodeExprKind::Integer(_)
+        | BytecodeExprKind::Float(_)
+        | BytecodeExprKind::Bool(_)
+        | BytecodeExprKind::String(_)
+        | BytecodeExprKind::Char(_)
+        | BytecodeExprKind::Closure { .. } => true,
+        BytecodeExprKind::Array(elements) => {
+            elements.iter().all(|e| expr_param_read_only(e, param))
+        }
+        BytecodeExprKind::Unary { expr, .. } => expr_param_read_only(expr, param),
+        BytecodeExprKind::Binary { left, right, .. } => {
+            expr_param_read_only(left, param) && expr_param_read_only(right, param)
+        }
+        // `param.f` is a value use of `param` we do not lower for a fat array; the
+        // recursive check flags a bare `param` target as unsafe.
+        BytecodeExprKind::Field { target, .. } => expr_param_read_only(target, param),
+        BytecodeExprKind::Await { expr } => expr_param_read_only(expr, param),
+    }
 }
 
 /// Infer the element count of a function's returned array from its returned
@@ -2244,6 +2422,21 @@ pub(crate) enum NativeType {
     },
     /// A fixed-length array of a supported element type.
     Array { elem: Box<NativeType>, len: usize },
+    /// A **fat-pointer** `array<T>` parameter: a `(data_ptr, length)` descriptor
+    /// occupying two frame words — word 0 is a pointer to the caller's element 0
+    /// (the array's highest stack address; elements descend from there like a
+    /// stack array), word 1 is the runtime element count. Used for a **read-only**
+    /// scalar-element array parameter whose length is not known at compile time, so
+    /// the callee reads the caller's storage in place (no array-body copy) instead
+    /// of demoting because the length could not be inferred from a call site. The
+    /// descriptor crosses the call boundary by pointer, exactly like an aggregate
+    /// (one register/stack argument slot), but the pointer it carries is the shared
+    /// data pointer rather than a fresh copy. Value semantics hold ONLY because the
+    /// parameter is read-only (the body never assigns `a[i]`); a mutating array
+    /// parameter still uses the copy-in [`NativeType::Array`] path. `elem` is the
+    /// (scalar) element layout, so `a[i]` and the runtime length drive the element
+    /// stride and bounds check.
+    FatArray { elem: Box<NativeType> },
     /// A growable `list<T>` with a scalar element type. Represented as a single
     /// 8-byte word holding a heap pointer to a `[len i64][cap i64][slots]` block;
     /// it passes/returns in an integer register (by value, like a pointer) and is
@@ -2314,6 +2507,9 @@ impl NativeType {
             | NativeType::HeapStruct { .. } => 1,
             NativeType::Struct { fields, .. } => fields.iter().map(|(_, t)| t.words()).sum(),
             NativeType::Array { elem, len } => elem.words() * len,
+            // A fat-pointer array descriptor: one data-pointer word plus one
+            // length word.
+            NativeType::FatArray { .. } => 2,
             // One tag word plus the shared payload region.
             NativeType::Enum { payload_words, .. } => 1 + payload_words,
         }
@@ -2650,6 +2846,13 @@ type ArrayLengths = HashMap<String, usize>;
 /// Reserved [`ArrayLengths`] key for a function's return-array length.
 const RETURN_ARRAY_KEY: &str = "\0return";
 
+/// Sentinel [`ArrayLengths`] value marking an array **parameter** as a fat pointer
+/// — a read-only scalar array whose length is not known at compile time, passed as
+/// a `(data_ptr, runtime length)` descriptor (see [`fat_array_param_elem`]) rather
+/// than copied in by value. `resolve_signature_native_type` maps this sentinel to
+/// [`NativeType::FatArray`] instead of a fixed [`NativeType::Array`].
+const FAT_ARRAY_LEN: usize = usize::MAX;
+
 /// Resolve a **signature** type (a parameter or return type) into its
 /// `NativeType`. Identical to [`resolve_native_type`] except a fixed-array type
 /// (`array<T>`), whose length is absent from the type, takes its length from
@@ -2681,6 +2884,13 @@ fn resolve_signature_native_type(
         let len = *array_lengths.get(key).ok_or_else(|| {
             format!("array length for signature slot `{key}` could not be inferred")
         })?;
+        // A read-only array parameter with no inferable length is passed as a fat
+        // pointer (descriptor of the element layout), not a fixed stack array.
+        if len == FAT_ARRAY_LEN {
+            return Ok(NativeType::FatArray {
+                elem: Box::new(elem),
+            });
+        }
         return Ok(NativeType::Array {
             elem: Box::new(elem),
             len,
@@ -3013,6 +3223,18 @@ pub(crate) enum ScalarPlace {
         index_len: i64,
         index: BytecodeExpr,
     },
+    /// A scalar word inside a **fat-pointer** array parameter: the element address
+    /// is `data_ptr - 8 * elem_words * index`, where `data_ptr` lives in the frame
+    /// at `[rbp - ptr_slot]` (word 0 of the descriptor) and the runtime element
+    /// count lives at `[rbp - len_slot]` (word 1). The index is bounds-checked
+    /// against that runtime length before the access (matching the interpreters'
+    /// `L0413`). `elem_ty` is the scalar element layout of the loaded word.
+    FatIndex {
+        ptr_slot: i32,
+        len_slot: i32,
+        elem_words: i64,
+        index: BytecodeExpr,
+    },
 }
 
 /// Recursively collect `let`/`for` locals, assigning each contiguous 8-byte-word
@@ -3222,7 +3444,10 @@ fn max_call_arg_scratch_words(
             if let Some(sig) = signatures.get(name) {
                 let mut sum = 0usize;
                 for param_ty in &sig.params {
-                    if param_ty.is_aggregate() {
+                    // Aggregates (struct/array/enum) and fat-pointer array
+                    // descriptors are materialized into scratch before their
+                    // address is passed by pointer.
+                    if param_ty.is_aggregate() || matches!(param_ty, NativeType::FatArray { .. }) {
                         sum += param_ty.words();
                     }
                 }

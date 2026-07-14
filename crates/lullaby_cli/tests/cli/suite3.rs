@@ -192,6 +192,85 @@ pub(crate) fn native_aggregates_execution_parity_when_linkable() {
     );
 }
 
+/// Best-effort execution parity for **fat-pointer `array<i64>` parameters**:
+/// native-compile a program whose helpers take a read-only `array<i64>` parameter
+/// whose length is NOT known at compile time — reading it via `for x in a`, `a[i]`,
+/// and `len(a)`, including the `count_frequency_of a array<i64> n, x i64` shape
+/// where the length comes from a separate `n` parameter — and assert each such
+/// helper compiles natively (as a fat pointer, no longer demoted for "no call site
+/// to infer its length from"), the interpreter result agrees across AST/IR/
+/// bytecode, and — when linkable — the `.exe` exit code equals the interpreter's
+/// `main` result (mod 256). Gated on `rust-lld` + `kernel32.lib` like the other
+/// native parity tests; the compile-not-skip and interpreter-truth assertions
+/// always run.
+#[test]
+pub(crate) fn native_fat_array_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/native_fat_array.lby");
+    let out = std::env::temp_dir().join("lullaby_native_fat_array_parity.exe");
+
+    // Make MSVC's `LIB` available (source vcvars64 if unset) so the link+run runs.
+    ensure_msvc_env();
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    // Every fat-pointer-array helper — and `main` — must compile natively: the
+    // read-only `array<i64>` parameters are passed as fat pointers, so none is
+    // demoted for a missing call-site length.
+    let emit_out = stdout(&emit);
+    for name in ["sum_array", "count_frequency_of", "max_in", "main"] {
+        assert!(
+            emit_out.contains(&format!("compiled {name}")),
+            "expected `{name}` to compile natively (fat-pointer array), got: {emit_out}"
+        );
+    }
+    assert!(
+        !emit_out.contains("has no call site to infer its length from"),
+        "no fat-pointer-array helper should demote for a missing call-site length: {emit_out}"
+    );
+
+    // Interpreter ground truth for `main`, identical across every backend.
+    for backend in ["ast", "ir", "bytecode"] {
+        let run = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(run.status.success(), "{backend}: {}", stderr(&run));
+        let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+        assert_eq!(interp, 42, "{backend}: fat-array fixture main computes 42");
+    }
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib (via the LIB env var) not available; \
+             skipping native fat-array link+run parity"
+        );
+        return;
+    }
+
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(
+        exit, 42,
+        "native exit code must equal the interpreter result (mod 256)"
+    );
+}
+
 /// Best-effort execution parity for the native **stack-argument** ABI:
 /// native-compile a program whose functions take more than four scalar
 /// parameters (six and eight `i64`, plus a mixed int/float six-parameter

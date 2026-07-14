@@ -260,6 +260,18 @@ pub(crate) fn lower_native_expr(
                 emit_mov_rax_imm(code, *len as i64);
                 return Ok(());
             }
+            // `len(a)` over a fat-pointer array parameter reads the descriptor's
+            // runtime length word (`[rbp - (ptr_slot + 8)]`).
+            if name == "len"
+                && args.len() == 1
+                && let BytecodeExprKind::Variable(var) = &args[0].kind
+                && let Ok(local) = ctx.local(var)
+                && let NativeType::FatArray { .. } = &local.ty
+            {
+                let len_slot = local.slot + 8;
+                load_local(code, len_slot);
+                return Ok(());
+            }
             // `len(string_literal)` is the first heap-backed native string op.
             // The literal's bytes live in `.rdata`; `__lullaby_strlen_copy` bump-
             // allocates a heap copy of them, scans the copy for its terminator,
@@ -717,7 +729,8 @@ pub(crate) fn emit_native_call_args(
     // first argument register (`rcx`) instead of the stack round-trip.
     let single_agg_or_float = matches!(
         param_tys.first(),
-        Some(Some(t)) if t.is_aggregate() || matches!(t, NativeType::F64 | NativeType::F32)
+        Some(Some(t)) if t.is_aggregate()
+            || matches!(t, NativeType::F64 | NativeType::F32 | NativeType::FatArray { .. })
     );
     if sret.is_none() && args.len() == 1 && !single_agg_or_float {
         // `f(reg ± const)` (the recursive `fib(n - 1)` / `fib(n - 2)` idiom):
@@ -743,6 +756,18 @@ pub(crate) fn emit_native_call_args(
                 let base = ctx.alloc_scratch(ty.words());
                 lower_aggregate_init(ctx, base, ty, arg, code)?;
                 emit_lea_rax_slot(code, base); // rax = &scratch copy
+                code.push(0x50); // push rax
+            }
+            Some(NativeType::FatArray { .. }) => {
+                // A fat-pointer array argument: build a two-word `(data_ptr, length)`
+                // descriptor in scratch and push its address (the callee copies the
+                // two descriptor words in, then reads the array through the shared
+                // data pointer). The data pointer is the caller's array storage, so
+                // no array body is copied — value-semantically safe because the
+                // callee parameter is read-only.
+                let base = ctx.alloc_scratch(2);
+                emit_fat_array_descriptor(ctx, base, arg, code)?;
+                emit_lea_rax_slot(code, base); // rax = &descriptor
                 code.push(0x50); // push rax
             }
             Some(NativeType::F64) | Some(NativeType::F32) => {
@@ -797,6 +822,37 @@ pub(crate) fn emit_native_call_args(
     if n > 0 {
         emit_add_rsp(code, 8 * n as i32);
     }
+    Ok(())
+}
+
+/// Build a fat-pointer array **descriptor** `[data_ptr, length]` in the two scratch
+/// words at `base_slot` (word 0) and `base_slot + 8` (word 1), for a fat-array call
+/// argument. In this increment the argument must be a bare variable bound to a
+/// **stack array local** (the common `let arr array<i64> = [..]; f(arr)` shape);
+/// anything else demotes the caller gracefully. The data pointer is the address of
+/// the array's element 0 (its highest stack word), so the callee reads the caller's
+/// storage in place with no array-body copy.
+pub(crate) fn emit_fat_array_descriptor(
+    ctx: &mut NativeCtx,
+    base_slot: i32,
+    arg: &BytecodeExpr,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let BytecodeExprKind::Variable(name) = &arg.kind else {
+        return Err("a fat-pointer array argument must be an array variable".to_string());
+    };
+    let local = ctx.local(name)?.clone();
+    let NativeType::Array { len, .. } = &local.ty else {
+        return Err("a fat-pointer array argument must reference a stack array local".to_string());
+    };
+    let len = *len as i64;
+    // Descriptor word 0: data pointer = address of the array's element 0 (its
+    // highest stack word, `[rbp - arr_slot]`).
+    emit_lea_rax_slot(code, local.slot); // rax = rbp - arr_slot
+    store_local(code, base_slot); // descriptor word 0 = data_ptr
+    // Descriptor word 1: runtime length (a compile-time constant for a stack array).
+    emit_mov_rax_imm(code, len);
+    store_local(code, base_slot + 8); // descriptor word 1 = length
     Ok(())
 }
 
