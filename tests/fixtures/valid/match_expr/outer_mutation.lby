@@ -1,0 +1,26 @@
+# A block arm body that mutates a binding in the enclosing scope. The AST
+# interpreter must evaluate the value-position `match` against the real (mutable)
+# environment — not a clone — so the mutation survives and all three backends
+# agree. An arm-internal `return` diverts the whole function.
+
+enum P
+    A
+    B
+    C
+
+fn f p P -> i64
+    let total i64 = 0
+    let x i64 = match p
+        A ->
+            total = total + 5
+            1
+        B ->
+            return 999
+        C -> 3
+    total * 10 + x
+
+fn main -> i64
+    println(to_string(f(A)))
+    println(to_string(f(B)))
+    println(to_string(f(C)))
+    f(A) + f(B) + f(C)

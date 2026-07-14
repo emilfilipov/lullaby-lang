@@ -1624,13 +1624,12 @@ impl<'a> Parser<'a> {
 
         if self.eat_keyword(Keyword::Return).is_some() {
             let span = self.previous().span;
-            let expr = if self.at(TokenKindRef::Newline) {
-                None
-            } else {
-                Some(self.parse_expr_line(span)?)
-            };
-            self.expect_newline("expected newline after return statement");
-            return Some(Stmt::Return(expr));
+            if self.at(TokenKindRef::Newline) {
+                self.expect_newline("expected newline after return statement");
+                return Some(Stmt::Return(None));
+            }
+            let expr = self.parse_value_expr(span, "expected newline after return statement")?;
+            return Some(Stmt::Return(Some(expr)));
         }
 
         if self.eat_keyword(Keyword::Break).is_some() {
@@ -1711,8 +1710,7 @@ impl<'a> Parser<'a> {
             self.error("L0206", "expected `=` in let binding", self.peek().span);
             return None;
         }
-        let value = self.parse_expr_line(span)?;
-        self.expect_newline("expected newline after let binding");
+        let value = self.parse_value_expr(span, "expected newline after let binding")?;
         Some(Stmt::Let {
             name,
             ty,
@@ -1742,8 +1740,7 @@ impl<'a> Parser<'a> {
         };
         self.cursor = op_pos;
         let op = self.expect_assignment_op()?;
-        let value = self.parse_expr_line(span)?;
-        self.expect_newline("expected newline after assignment");
+        let value = self.parse_value_expr(span, "expected newline after assignment")?;
         Some(Stmt::Assign {
             name,
             path,
@@ -1995,6 +1992,24 @@ impl<'a> Parser<'a> {
         Some(MatchPattern::Variant { name, bindings })
     }
 
+    /// Parse the value expression to the right of `=` (a `let`/assignment) or a
+    /// `return`, consuming its statement terminator. A leading `match` keyword
+    /// begins a block `match` **expression**: it spans multiple indented lines
+    /// and consumes its own closing dedent, so no trailing newline follows it.
+    /// Every other expression is a single line terminated by a newline. This is
+    /// what makes `let x = match ...`, `return match ...`, and `x = match ...`
+    /// usable in value position while the indentation-only surface is preserved.
+    fn parse_value_expr(&mut self, span: Span, newline_msg: &'static str) -> Option<Expr> {
+        if self.at_any_keyword(&[Keyword::Match]) {
+            self.advance();
+            self.parse_match()
+        } else {
+            let expr = self.parse_expr_line(span)?;
+            self.expect_newline(newline_msg);
+            Some(expr)
+        }
+    }
+
     /// Parse the body of an arrow arm: either an inline expression on the same
     /// line, or a newline-introduced indented block whose last expression is the
     /// arm's value.
@@ -2005,6 +2020,13 @@ impl<'a> Parser<'a> {
             let body = self.parse_block(&[BlockEnd::Dedent]);
             self.expect(TokenKindRef::Dedent, "expected match arm body dedent")?;
             Some(body)
+        } else if self.at_any_keyword(&[Keyword::Match]) {
+            // A nested `match` expression as an inline arm value:
+            // `Variant -> match ...`. It spans its own indented arm block and
+            // consumes its closing dedent, so no trailing newline follows it.
+            self.advance();
+            let match_expr = self.parse_match()?;
+            Some(vec![Stmt::Expr(match_expr)])
         } else {
             let expr = self.parse_expr_line(span)?;
             self.expect_newline("expected newline after match arm expression");

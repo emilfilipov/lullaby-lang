@@ -1364,6 +1364,10 @@ mod suite4;
 #[path = "cli/suite5.rs"]
 mod suite5;
 
+// -- `match` as an expression, with block arm bodies -------------------------
+#[path = "cli/suite6.rs"]
+mod suite6;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

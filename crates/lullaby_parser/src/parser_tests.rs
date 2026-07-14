@@ -434,6 +434,34 @@ fn parses_match_arm_with_indented_block_body() {
 }
 
 #[test]
+fn parses_match_expression_in_let_position() {
+    // A `match` on the right of `=` parses as the `let` binding's value: the
+    // multi-line arm block is consumed by the value parser, and the statement
+    // after the arms (`x`) parses as the next statement, not a leftover.
+    let source = concat!(
+        "enum P\n    A\n    B\n\n",
+        "fn f p P -> i64\n",
+        "    let x i64 = match p\n",
+        "        A -> 1\n",
+        "        B -> 2\n",
+        "    x\n",
+    );
+    let tokens = lex(source).expect("lex");
+    let program = parse(&tokens).expect("parse");
+    let body = &program.functions[0].body;
+    let Stmt::Let { value, .. } = &body[0] else {
+        panic!("expected let binding, got {:?}", body[0]);
+    };
+    let ExprKind::Match { arms, .. } = &value.kind else {
+        panic!("expected the let value to be a match expression");
+    };
+    assert_eq!(arms.len(), 2);
+    // The trailing `x` is a separate statement, proving the match consumed its
+    // own arm block and its closing dedent.
+    assert!(matches!(&body[1], Stmt::Expr(_)));
+}
+
+#[test]
 fn parses_float_literal() {
     let source = "fn main -> f64\n    2.5\n";
     let tokens = lex(source).expect("lex");

@@ -70,6 +70,58 @@ Current rules:
 - Numeric compound assignment supports `+=`, `-=`, `*=`, and `/=` for `i64`.
 - Boolean logic supports `and`, `or`, and unary `not`. `and` and `or` short-circuit during runtime execution.
 
+### Pattern matching (`match`)
+
+`match` dispatches on an enum (or the built-in `option`/`result`) value with an
+indentation-only arm list. Each arm is `pattern -> value`, where the value is
+either an inline expression or an indented block whose final expression is the
+arm's value. See [enum_and_match_design.md](enum_and_match_design.md) for the
+pattern/exhaustiveness rules; the control-flow points are:
+
+```lullaby
+fn area s Shape -> i64
+    match s
+        Circle(r) -> r * r
+        Rect(w, h) ->
+            let base i64 = w * h
+            base
+        Empty -> 0
+```
+
+- **`match` is an expression.** When every arm yields the same type, the `match`
+  produces that value, so it is usable wherever a value is expected: as a
+  `let`/assignment right-hand side, as a `return` value, as a function's final
+  (tail) expression, and as a nested arm's value. A `match` in these positions
+  keeps the indentation-only surface — it spans its own indented arm block and
+  needs no delimiters:
+
+  ```lullaby
+  fn label n i64 -> string
+      let word string = match parity(n)
+          Even -> "even"
+          Odd -> "odd"
+      word
+  ```
+
+- **Block arm bodies.** An arm may run several statements (including side effects
+  and mutations of an enclosing binding) before its final expression, exactly
+  like a function body or an `if` block. Arm-scoped payload bindings are visible
+  throughout the block.
+- **Arm-type agreement.** In value position every arm must yield the same type,
+  which becomes the `match`'s type; arms that yield differing types are rejected
+  with `L0440`. Exhaustiveness (`L0384`) applies in value position exactly as in
+  statement position — cover every variant or add a `_` wildcard.
+- **Statement position.** A `match` whose value is not used is a plain statement;
+  its arms may run for their side effects alone.
+- All three interpreter tiers (AST, IR, bytecode VM) evaluate a value-position
+  `match` identically. The IR/bytecode tiers lower it to a hoisted result
+  temporary written by the arms (mirroring the `?` and inline-conditional
+  desugars); the native and WASM backends do not yet compile `match`, so a
+  function that uses one is cleanly demoted to the interpreter rather than
+  producing a wrong result. Nesting a `match` inside a larger expression (for
+  example a `match` directly as a call argument, `f(match ...)`) is not yet
+  parsed and is a planned follow-up.
+
 ## Control Structure Keywords
 
 ### Conditional Statements (If-Else)

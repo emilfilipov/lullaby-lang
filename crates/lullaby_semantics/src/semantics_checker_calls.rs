@@ -2278,10 +2278,42 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Check one match-arm body, flowing an optional `expected` type into its
+    /// final expression exactly like a function's tail expression, so a bare
+    /// `none`/`ok`/`err` in arm-tail position resolves against the match's
+    /// expected result type. Returns the arm's value type (its tail expression's
+    /// type, or `None` for a void/statement arm).
+    fn check_arm_body(
+        &mut self,
+        body: &[Stmt],
+        scope: &mut Scope,
+        function: &Function,
+        expected: Option<&TypeRef>,
+    ) -> Option<TypeRef> {
+        let last_index = body.len().checked_sub(1);
+        let mut last_type = None;
+        for (index, statement) in body.iter().enumerate() {
+            last_type = match statement {
+                Stmt::Expr(expr) if Some(index) == last_index => {
+                    self.check_expr_expected(expr, expected, scope, function)
+                }
+                _ => self.check_statement(statement, scope, function),
+            };
+            if matches!(
+                statement,
+                Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Throw { .. }
+            ) {
+                break;
+            }
+        }
+        last_type
+    }
+
     pub(crate) fn check_match(
         &mut self,
         scrutinee: &Expr,
         arms: &[MatchArm],
+        expected: Option<&TypeRef>,
         span: Span,
         scope: &Scope,
         function: &Function,
@@ -2308,7 +2340,7 @@ impl<'a> Checker<'a> {
                 // Still check arm bodies to surface nested errors.
                 for arm in arms {
                     let mut arm_scope = scope.clone();
-                    self.check_block(&arm.body, &mut arm_scope, function);
+                    self.check_arm_body(&arm.body, &mut arm_scope, function, expected);
                 }
                 return None;
             }
@@ -2364,7 +2396,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            arm_types.push(self.check_block(&arm.body, &mut arm_scope, function));
+            arm_types.push(self.check_arm_body(&arm.body, &mut arm_scope, function, expected));
         }
 
         // Exhaustiveness: every variant covered, or a `_` wildcard present.
@@ -2387,12 +2419,40 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Result type: the common arm body type when every arm agrees.
+        // Result type: the common arm body type when every arm agrees, mirroring
+        // `if`/`try`. When the arms disagree the match has no value and is a void
+        // statement — but if the surrounding context requires a value (`expected`
+        // is present: a `let` annotation, a `return`, or a function's tail), a
+        // valueless match cannot satisfy it, so reject the incompatible arms with
+        // a clear diagnostic instead of silently yielding void.
         match arm_types.split_first() {
             Some((first, rest)) if rest.iter().all(|ty| ty.as_ref() == first.as_ref()) => {
                 first.clone()
             }
-            _ => None,
+            _ => {
+                if expected.is_some() {
+                    let mut seen: Vec<String> = Vec::new();
+                    for ty in arm_types.iter().flatten() {
+                        if !seen.iter().any(|name| name == &ty.name) {
+                            seen.push(ty.name.clone());
+                        }
+                    }
+                    let described = if seen.is_empty() {
+                        "at least one arm produces no value".to_string()
+                    } else {
+                        format!("arms produce differing types: {}", seen.join(", "))
+                    };
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0440",
+                        format!(
+                            "a `match` used as a value must have arms that all yield the same type, but {described}"
+                        ),
+                        Some(function.name.clone()),
+                        span,
+                    ));
+                }
+                None
+            }
         }
     }
 

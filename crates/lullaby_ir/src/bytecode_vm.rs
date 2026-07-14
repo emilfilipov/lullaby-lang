@@ -808,6 +808,9 @@ pub(crate) struct Lowerer<'a> {
     /// Monotonic counter for fresh inline-conditional (`THEN if COND else ELSE`)
     /// desugar temp names, unique per program for the same reason.
     next_cond_temp: std::cell::Cell<usize>,
+    /// Monotonic counter for fresh match-expression desugar temp names, unique
+    /// per program for the same reason.
+    next_match_temp: std::cell::Cell<usize>,
     /// Lowered closure bodies collected while lowering, keyed by parse-order id.
     /// Each `ExprKind::Closure` lowering registers an entry here and emits an
     /// `IrExprKind::Closure { id }` node; the accumulated table is attached to
@@ -824,6 +827,7 @@ impl<'a> Lowerer<'a> {
             try_prelude: std::cell::RefCell::new(Vec::new()),
             next_try_temp: std::cell::Cell::new(0),
             next_cond_temp: std::cell::Cell::new(0),
+            next_match_temp: std::cell::Cell::new(0),
             closures: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -1061,12 +1065,59 @@ impl<'a> Lowerer<'a> {
                 Stmt::Unsafe { body, .. } => {
                     lowered.extend(self.lower_block(body, scope)?);
                 }
-                Stmt::Expr(expr)
-                    if Some(index) == last_index
-                        && !return_type.is_void()
-                        && !matches!(expr.kind, ExprKind::Match { .. }) =>
-                {
+                // A bare tail `match` returning a value stays a direct
+                // `IrStmt::Match` (its taken arm's tail is the function's return
+                // value), but now with the return type flowed into its arm tails
+                // so a tail `none`/`ok`/`err` resolves.
+                Stmt::Expr(Expr {
+                    kind: ExprKind::Match { scrutinee, arms },
+                    span,
+                }) if Some(index) == last_index && !return_type.is_void() => {
+                    let stmt =
+                        self.lower_match(scrutinee, arms, Some(&return_type), *span, scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(stmt);
+                }
+                Stmt::Expr(expr) if Some(index) == last_index && !return_type.is_void() => {
                     let lowered_expr = self.lower_expr_expected(expr, Some(&return_type), scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(IrStmt::Expr(lowered_expr));
+                }
+                other => {
+                    let stmt = self.lower_statement(other, scope)?;
+                    self.drain_try_prelude_into(&mut lowered);
+                    lowered.push(stmt);
+                }
+            }
+        }
+        Ok(lowered)
+    }
+
+    /// Lower a block whose value is its final expression, flowing an optional
+    /// `expected` type into that tail expression (so a bare `none`/`ok`/`err` in
+    /// tail position resolves against the expected type). Used for `match` arm
+    /// bodies, mirroring `lower_function_body`'s tail handling. Non-tail
+    /// statements are lowered exactly like `lower_block`.
+    pub(crate) fn lower_block_value(
+        &self,
+        statements: &[Stmt],
+        scope: &mut HashMap<String, TypeRef>,
+        expected: Option<&TypeRef>,
+    ) -> Result<Vec<IrStmt>, IrLoweringError> {
+        let last_index = statements.len().checked_sub(1);
+        let mut lowered = Vec::with_capacity(statements.len());
+        for (index, statement) in statements.iter().enumerate() {
+            match statement {
+                Stmt::Unsafe { body, .. } => {
+                    let inner_expected = if Some(index) == last_index {
+                        expected
+                    } else {
+                        None
+                    };
+                    lowered.extend(self.lower_block_value(body, scope, inner_expected)?);
+                }
+                Stmt::Expr(expr) if Some(index) == last_index => {
+                    let lowered_expr = self.lower_expr_expected(expr, expected, scope)?;
                     self.drain_try_prelude_into(&mut lowered);
                     lowered.push(IrStmt::Expr(lowered_expr));
                 }
@@ -1148,7 +1199,7 @@ impl<'a> Lowerer<'a> {
             Stmt::Expr(Expr {
                 kind: ExprKind::Match { scrutinee, arms },
                 span,
-            }) => self.lower_match(scrutinee, arms, *span, scope),
+            }) => self.lower_match(scrutinee, arms, None, *span, scope),
             Stmt::Expr(expr) => Ok(IrStmt::Expr(self.lower_expr(expr, scope)?)),
             Stmt::If {
                 branches,
@@ -1427,6 +1478,7 @@ impl<'a> Lowerer<'a> {
         &self,
         scrutinee: &Expr,
         arms: &[MatchArm],
+        expected: Option<&TypeRef>,
         span: Span,
         scope: &mut HashMap<String, TypeRef>,
     ) -> Result<IrStmt, IrLoweringError> {
@@ -1448,12 +1500,144 @@ impl<'a> Lowerer<'a> {
                     }
                 }
             };
-            let body = self.lower_block(&arm.body, &mut arm_scope)?;
+            // Flow the expected result type into each arm's tail expression, so a
+            // tail `none`/`ok`/`err` resolves against it exactly as semantics does.
+            let body = self.lower_block_value(&arm.body, &mut arm_scope, expected)?;
             lowered_arms.push(IrMatchArm { pattern, body });
         }
         Ok(IrStmt::Match {
             scrutinee,
             arms: lowered_arms,
+            span,
+        })
+    }
+
+    /// Desugar a value-position `match` (a `let`/assignment RHS, a `return`, or a
+    /// nested tail expression) into a hoisted temporary plus an `IrStmt::Match`,
+    /// returning a reference to the temporary. This mirrors the `?` and
+    /// inline-conditional desugars so the IR interpreter, bytecode VM, and (via
+    /// the existing demote-on-`match` gate) native/WASM backends need no
+    /// match-expression node:
+    ///
+    /// ```text
+    /// let __match_s_N = <scrutinee>          # bind the scrutinee once
+    /// let __match_v_N: T = __match_s_N       # dead init, overwritten by the taken arm
+    /// match __match_s_N
+    ///     <arm pattern> -> <arm body...>; __match_v_N = <arm tail>
+    ///     ...
+    /// ```
+    ///
+    /// `match` is exhaustive (semantics enforces this), so exactly one arm runs
+    /// and writes `__match_v_N` before it is read; the dead initializer's value
+    /// (the scrutinee) is never observed. The initializer is a valid value of any
+    /// type, so — unlike the inline conditional's zero init — a `match` may yield
+    /// an enum, struct, or collection result, not only a scalar/`string`. A
+    /// diverging arm (`return`/`throw`) leaves control before the read, so it is
+    /// left unrewritten. The interpreters are dynamically typed and any function
+    /// containing a `match` is demoted to the interpreter, so the declared temp
+    /// type never has to match the dead initializer's runtime type.
+    pub(crate) fn desugar_match(
+        &self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        expected: Option<&TypeRef>,
+        span: Span,
+        scope: &HashMap<String, TypeRef>,
+    ) -> Result<IrExpr, IrLoweringError> {
+        // Isolate the prelude buffer: `lower_block` drains the whole buffer per
+        // statement, so it must be empty while we lower arm bodies. We take any
+        // prelude accumulated so far aside and restore it, in order, at the end.
+        let outer_prelude: Vec<IrStmt> = std::mem::take(&mut self.try_prelude.borrow_mut());
+
+        let scrutinee_ir = self.lower_expr(scrutinee, scope)?;
+        let scrutinee_ty = scrutinee_ir.ty.clone();
+        let scrutinee_prelude: Vec<IrStmt> = std::mem::take(&mut self.try_prelude.borrow_mut());
+
+        let id = self.next_match_temp.get();
+        self.next_match_temp.set(id + 1);
+        let s_name = format!("__match_s_{id}");
+        let v_name = format!("__match_v_{id}");
+
+        let mut lowered_arms = Vec::with_capacity(arms.len());
+        let mut result_ty: Option<TypeRef> = expected.cloned();
+        for arm in arms {
+            let mut arm_scope = scope.clone();
+            let pattern = match &arm.pattern {
+                MatchPattern::Wildcard => IrMatchPattern::Wildcard,
+                MatchPattern::Variant { name, bindings } => {
+                    let payload = self.variant_binding_types(&scrutinee_ty, name);
+                    for (binding, ty) in bindings.iter().zip(payload.iter()) {
+                        arm_scope.insert(binding.clone(), ty.clone());
+                    }
+                    IrMatchPattern::Variant {
+                        name: name.clone(),
+                        bindings: bindings.clone(),
+                    }
+                }
+            };
+            // The arm body's own hoists drain cleanly into `body` because the
+            // prelude buffer is empty here. Flow the expected result type into
+            // the tail so a `none`/`ok`/`err` arm resolves against it.
+            let mut body = self.lower_block_value(&arm.body, &mut arm_scope, expected)?;
+            // Rewrite the arm's tail expression into `__match_v_N = <tail>`. A
+            // diverging tail (`return`/`throw`) or a valueless arm is left as-is.
+            if matches!(body.last(), Some(IrStmt::Expr(_)))
+                && let Some(IrStmt::Expr(value)) = body.pop()
+            {
+                if result_ty.is_none() {
+                    result_ty = Some(value.ty.clone());
+                }
+                body.push(IrStmt::Assign {
+                    name: v_name.clone(),
+                    path: Vec::new(),
+                    op: AssignOp::Replace,
+                    value,
+                    span,
+                });
+            }
+            lowered_arms.push(IrMatchArm { pattern, body });
+        }
+
+        let result_ty = result_ty.unwrap_or_else(|| TypeRef::new("void"));
+
+        let s_let = IrStmt::Let {
+            name: s_name.clone(),
+            ty: scrutinee_ty.clone(),
+            value: scrutinee_ir,
+            span,
+        };
+        let v_let = IrStmt::Let {
+            name: v_name.clone(),
+            ty: result_ty.clone(),
+            value: IrExpr {
+                kind: IrExprKind::Variable(s_name.clone()),
+                ty: scrutinee_ty.clone(),
+                span,
+            },
+            span,
+        };
+        let match_stmt = IrStmt::Match {
+            scrutinee: IrExpr {
+                kind: IrExprKind::Variable(s_name),
+                ty: scrutinee_ty,
+                span,
+            },
+            arms: lowered_arms,
+            span,
+        };
+
+        {
+            let mut prelude = self.try_prelude.borrow_mut();
+            *prelude = outer_prelude;
+            prelude.extend(scrutinee_prelude);
+            prelude.push(s_let);
+            prelude.push(v_let);
+            prelude.push(match_stmt);
+        }
+
+        Ok(IrExpr {
+            kind: IrExprKind::Variable(v_name),
+            ty: result_ty,
             span,
         })
     }
@@ -1750,14 +1934,16 @@ impl<'a> Lowerer<'a> {
                     ty,
                 )
             }
-            // A `match` is lowered as a statement (`IrStmt::Match`) at its
-            // statement position; the indentation-only surface never nests it
-            // inside another expression, so reaching here is a lowering bug.
-            ExprKind::Match { .. } => {
-                return Err(IrLoweringError::new(
-                    "`match` can only appear as a statement expression",
-                    Some(expr.span),
-                ));
+            // A `match` in value position (a `let`/assignment RHS, a `return`, or
+            // a nested tail) is desugared here into a hoisted temporary plus an
+            // `IrStmt::Match` whose arms write that temporary, mirroring the `?`
+            // and inline-conditional desugars. The result flows back as a
+            // reference to the temporary, so no backend needs a match-expression
+            // node. A `match` in bare statement/tail position is still lowered
+            // directly to `IrStmt::Match` by `lower_statement`/`lower_match`.
+            ExprKind::Match { scrutinee, arms } => {
+                let temp = self.desugar_match(scrutinee, arms, expected, expr.span, scope)?;
+                (temp.kind, temp.ty)
             }
             ExprKind::Await { expr: inner } => {
                 // `await e` requires `e: Future<T>`; the awaited result type `T`
