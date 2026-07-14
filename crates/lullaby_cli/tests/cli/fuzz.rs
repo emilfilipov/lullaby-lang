@@ -418,6 +418,48 @@ fn gen_string_loop_program(seed: u64) -> String {
     )
 }
 
+/// Generates one program that exercises **arena-first memory (stage 1)**: an
+/// arena-eligible LEAF helper `h a i64 -> i64` (scalar return, no user calls, no
+/// loop, allocates strings that stay local) called from `main`'s bounded loop.
+/// `h` routes its per-call heap allocations through the function-scoped arena and
+/// rewinds the bump pointer on return; the arena is behavior-neutral to the
+/// computed value (it only changes WHEN memory is reclaimed), so ANY native/
+/// interpreter divergence here is an arena-induced miscompile (a clobbered return
+/// value across the reset, or an unsound rewind that corrupts a still-live value).
+/// Every string op is one the native subset supports and all backends agree on
+/// (ASCII, so `len` counts identically), and the bounds are always valid, so the
+/// program is divergence-free like the other generators.
+fn gen_arena_program(seed: u64) -> String {
+    let mut rng = Rng(seed ^ 0xA5A5_1234_DEAD_BEEFu64);
+    let hi = rng.range(5, 40);
+    // `s`: a fresh, uniquely-owned string built straight-line from the parameter.
+    let s_expr = match rng.below(4) {
+        0 => "to_string(a) + \"__suffix__\"".to_string(),
+        1 => "trim(to_string(a * 3))".to_string(),
+        2 => "substring(to_string(a * 7 + 1), 0, 1)".to_string(),
+        _ => "repeat(\"ab\", 3)".to_string(),
+    };
+    // `t`: a second allocation derived from `s` (also reclaimed by the arena).
+    let t_expr = match rng.below(3) {
+        0 => "upper(s)".to_string(),
+        1 => "lower(s)".to_string(),
+        _ => "s + \"?\"".to_string(),
+    };
+    // A scalar result derived from both (never returns a heap value — required for
+    // arena eligibility).
+    let result = match rng.below(3) {
+        0 => "len(s) + len(t)".to_string(),
+        1 => "len(t) - len(s)".to_string(),
+        _ => "len(s) * 2 + len(t)".to_string(),
+    };
+    let bias = rng.range(-50, 50);
+    format!(
+        "fn h a i64 -> i64\n    let s string = {s_expr}\n    let t string = {t_expr}\n    \
+         {result}\n\nfn main -> i64\n    let total i64 = 0\n    for i from 0 to {hi}\n        \
+         total = total + h(i)\n    total + {bias}\n"
+    )
+}
+
 /// The result of running a program on one backend, reduced to a comparable form.
 #[derive(PartialEq, Eq, Debug)]
 enum Outcome {
@@ -752,6 +794,97 @@ fn fuzz_string_loop_native_matches_interpreter_when_linkable() {
         assert_eq!(
             exit, expected as i32,
             "NATIVE MISCOMPILE (string-loop RC drop) on #{i} (seed {seed:#x}):\n{source}\n\
+             interpreter={expected}, native exit={exit}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_arena_interpreters_agree() {
+    // Cross-check the three engines on arena-eligible-function programs. Always runs
+    // (no toolchain needed); a divergence prints the reproducing program.
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0x41E5_9A2C_7B3D_0F19u64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_arena_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "arena backend divergence on program #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "arena generator produced a non-i64 main on seed {seed:#x}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_arena_native_matches_interpreter_when_linkable() {
+    // The high-value oracle for arena-first memory (stage 1): compile each generated
+    // program (an arena-eligible leaf helper called from a loop) to a real `.exe` and
+    // check its exit code against the interpreter. The arena is behavior-neutral to the
+    // computed value, so ANY divergence here is an arena-induced miscompile (a return
+    // value clobbered by the return-edge reset, or an unsound bump-pointer rewind).
+    // Gated on the link toolchain; skips cleanly when absent.
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native arena fuzz");
+        return;
+    }
+    ensure_msvc_env();
+
+    const PROGRAMS: u64 = 100;
+    let base_seed = 0x9D2B_C4E7_16A0_38F5u64;
+    let dir = std::env::temp_dir().join("lullaby_fuzz_native_arena");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_arena_program(seed);
+
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "interpreter divergence on native-arena-fuzz #{i} (seed {seed:#x}):\n{source}"
+        );
+        let expected = match ast {
+            Outcome::Value(n) => n,
+            other => panic!("arena generator produced {other:?} on seed {seed:#x}:\n{source}"),
+        };
+
+        let src_path = dir.join(format!("fuzz_arena_{i}.lby"));
+        let exe_path = dir.join(format!("fuzz_arena_{i}.exe"));
+        std::fs::write(&src_path, &source).expect("write fuzz source");
+        let _ = std::fs::remove_file(&exe_path);
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "-o",
+                exe_path.to_str().expect("exe path"),
+                src_path.to_str().expect("src path"),
+            ])
+            .output()
+            .expect("run native");
+        assert!(
+            emit.status.success(),
+            "native emit failed on arena-fuzz #{i} (seed {seed:#x}) — the arena-eligible \
+             helper must compile:\n{source}\n{}",
+            stderr(&emit)
+        );
+        assert!(
+            exe_path.is_file(),
+            "no linked exe on arena-fuzz #{i} (seed {seed:#x}):\n{source}\n{}",
+            stdout(&emit)
+        );
+
+        let run = Command::new(&exe_path).output().expect("run fuzz exe");
+        let exit = run.status.code().expect("native exit code");
+        assert_eq!(
+            exit, expected as i32,
+            "NATIVE MISCOMPILE (arena) on #{i} (seed {seed:#x}):\n{source}\n\
              interpreter={expected}, native exit={exit}"
         );
     }

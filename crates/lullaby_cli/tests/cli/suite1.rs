@@ -937,6 +937,64 @@ pub(crate) fn native_rc_string_reclaim_execution_parity_when_linkable() {
     );
 }
 
+/// Arena-first memory (stage 1) reclamation. `build_len` is a provably-local,
+/// heap-using LEAF function (scalar return, no user calls, no loop): it allocates a
+/// string per call that stays local, so it routes its allocations through a
+/// function-scoped arena and rewinds the bump pointer on return. `main` calls it in
+/// a 200_001-iteration loop, allocating far more than the fixed 1 MiB heap in
+/// aggregate; because each call's region is reclaimed at return, the process
+/// completes with the interpreter's exact result. WITHOUT the arena, `build_len`
+/// (which has no loop, so no per-iteration RC drops) would leak every call and
+/// exhaust the heap — so a correct exit code proves per-call arena reset. This is
+/// the arena analogue of `native_rc_string_reclaim_execution_parity_when_linkable`.
+#[test]
+pub(crate) fn native_arena_string_reclaim_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_arena_string_reclaim.lby");
+    let out = std::env::temp_dir().join("lullaby_native_arena_reclaim.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(
+        interp, 3_088_906,
+        "sum of build_len(i) = len(to_string(i)+\"!!!!!!!!!!\") for i in 0..=200000"
+    );
+
+    // The direct-PE path needs no linker, so this runs unconditionally on a COFF
+    // host. (It also links via rust-lld when available; either way the produced
+    // exe must run.)
+    if !out.is_file() {
+        eprintln!("no native exe produced; skipping arena reclaim run");
+        return;
+    }
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native arena-reclaimed loop must complete with the interpreter's result \
+         (a crash here means the heap exhausted — the per-call arena reset regressed)"
+    );
+}
+
 /// RC call-argument reclamation: `len(<fresh temp>)` frees the temporary it reads.
 /// `len(to_string(i))` in a loop allocates a `to_string` record each iteration that
 /// `len` reads and (before this) leaked; over 300k iterations (~10 MB) in the fixed

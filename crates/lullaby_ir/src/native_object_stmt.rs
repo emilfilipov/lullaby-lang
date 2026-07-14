@@ -442,6 +442,7 @@ pub(crate) fn lower_native_function(
     signatures: &HashMap<String, NativeSignature>,
     array_lengths: &ArrayLengths,
     fast_math: bool,
+    is_arena: bool,
 ) -> Result<LoweredNativeFunction, String> {
     let mut ctx = NativeCtx::plan(
         function,
@@ -452,6 +453,7 @@ pub(crate) fn lower_native_function(
         strings,
         signatures,
         array_lengths,
+        is_arena,
     )?;
     ctx.fast_math = fast_math;
     let mut code = Vec::new();
@@ -587,6 +589,17 @@ pub(crate) fn lower_native_function(
         reg += 1;
     }
 
+    // Arena-first memory (stage 1) prologue: after the parameters are seated (so
+    // the argument registers are free), save the current bump pointer
+    // (`__lullaby_heap_next`) into the arena mark slot and set the arena-mode flag.
+    // The body then bump-allocates all its heap through the arena; every return edge
+    // rewinds the bump pointer and clears the flag (see `emit_arena_reset`). This is
+    // the only change to the function relative to its RC codegen, and it is
+    // value-neutral: it reclaims dead memory at return without altering any result.
+    if ctx.is_arena {
+        emit_arena_prologue(&mut ctx, &mut code);
+    }
+
     let mut loops: Vec<NativeLoop> = Vec::new();
 
     // A function whose last statement is a value-producing tail expression (e.g.
@@ -629,6 +642,7 @@ pub(crate) fn lower_native_function(
         if let BytecodeInstruction::Asm { bytes, .. } = &tail[0] {
             code.extend_from_slice(bytes);
         }
+        emit_arena_reset(&mut ctx, &mut code);
         emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else if tail_is_value_expr {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
@@ -646,6 +660,7 @@ pub(crate) fn lower_native_function(
                 lower_native_expr(&mut ctx, expr, &mut code)?;
             }
         }
+        emit_arena_reset(&mut ctx, &mut code);
         emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else if tail_is_value_match {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
@@ -656,6 +671,7 @@ pub(crate) fn lower_native_function(
         {
             lower_native_match(&mut ctx, scrutinee, arms, true, &mut code, &mut loops)?;
         }
+        emit_arena_reset(&mut ctx, &mut code);
         emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else if tail_is_value_if {
         // The tail `if` lowers as a statement; each branch leaves the function's
@@ -663,6 +679,7 @@ pub(crate) fn lower_native_function(
         // epilogue, which returns it. Emitting the epilogue here makes the
         // fallthrough `xor rax,rax` below unreachable (dead safety code).
         lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
+        emit_arena_reset(&mut ctx, &mut code);
         emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
     } else {
         lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
@@ -715,6 +732,65 @@ pub(crate) fn emit_native_epilogue(
         }
     }
     code.extend_from_slice(&[0x5D, 0xC3]); // pop rbp; ret
+}
+
+/// Arena-first memory (stage 1) prologue: save the current bump pointer
+/// (`__lullaby_heap_next`) into the arena mark slot and set the arena-mode flag to
+/// `1`. Emitted once, after parameter seating (so the argument registers are free
+/// and `rax` may be used as scratch). Only called when `ctx.is_arena`.
+fn emit_arena_prologue(ctx: &mut NativeCtx, code: &mut Vec<u8>) {
+    let mark = ctx.arena_mark_slot;
+    // mov rax, [rip + heap_next]
+    code.extend_from_slice(&[0x48, 0x8B, 0x05]);
+    let site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    ctx.relocations.push(CodeRelocation {
+        offset: site as u32,
+        symbol: HEAP_NEXT_SYMBOL.to_string(),
+    });
+    // mov [rbp - mark], rax  (save the entry bump pointer)
+    code.extend_from_slice(&[0x48, 0x89, 0x85]);
+    code.extend_from_slice(&(-mark).to_le_bytes());
+    // mov eax, 1 ; mov [rip + alloc_mode], rax  (enter arena mode)
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x48, 0x89, 0x05]);
+    let mode_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    ctx.relocations.push(CodeRelocation {
+        offset: mode_site as u32,
+        symbol: ALLOC_MODE_SYMBOL.to_string(),
+    });
+}
+
+/// Arena-first memory (stage 1) return reset: restore the bump pointer to the entry
+/// mark (reclaiming, in one bulk rewind, every heap block the function allocated)
+/// and clear the arena-mode flag. Emitted at EVERY return/exit edge, immediately
+/// before the epilogue. Uses `r10`/`r10d` as scratch so the return value in `rax`
+/// (or `xmm0`) is preserved. A no-op unless `ctx.is_arena`.
+fn emit_arena_reset(ctx: &mut NativeCtx, code: &mut Vec<u8>) {
+    if !ctx.is_arena {
+        return;
+    }
+    let mark = ctx.arena_mark_slot;
+    // mov r10, [rbp - mark] ; mov [rip + heap_next], r10  (rewind the bump pointer)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x95]);
+    code.extend_from_slice(&(-mark).to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0x15]);
+    let next_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    ctx.relocations.push(CodeRelocation {
+        offset: next_site as u32,
+        symbol: HEAP_NEXT_SYMBOL.to_string(),
+    });
+    // xor r10d, r10d ; mov [rip + alloc_mode], r10  (leave arena mode)
+    code.extend_from_slice(&[0x45, 0x31, 0xD2]);
+    code.extend_from_slice(&[0x4C, 0x89, 0x15]);
+    let mode_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    ctx.relocations.push(CodeRelocation {
+        offset: mode_site as u32,
+        symbol: ALLOC_MODE_SYMBOL.to_string(),
+    });
 }
 
 pub(crate) fn lower_native_stmts(
@@ -1052,6 +1128,7 @@ pub(crate) fn lower_native_stmt(
             } else {
                 lower_native_expr(ctx, expr, code)?;
             }
+            emit_arena_reset(ctx, code);
             emit_native_epilogue(code, ctx.frame_size, &ctx.saved_reg_slots);
             Ok(())
         }

@@ -93,7 +93,8 @@ fn push_u64(bytes: &mut Vec<u8>, value: u64) {
 /// `None` (so the caller falls back to the `rust-lld` path) if any `.text`
 /// relocation names a symbol this writer cannot resolve — i.e. anything beyond
 /// the compiled functions, the heap/string runtime helpers, the `.rdata` string
-/// constants, the three `.bss` heap cells, and the single `ExitProcess` import.
+/// constants, the four `.bss` heap cells (bump pointer, free-list head, arena-mode
+/// flag, region base), and the single `ExitProcess` import.
 ///
 /// The caller guarantees the program is freestanding-eligible (a `main` is
 /// present and no `extern fn` C import is required); this writer emits the entry
@@ -222,7 +223,7 @@ pub(crate) fn write_pe_executable(
         plan.push(SectionPlan {
             name: ".bss",
             characteristics: 0xC000_0080,
-            virtual_size: 16 + HEAP_REGION_SIZE,
+            virtual_size: HEAP_BSS_SIZE,
             has_raw: false,
         });
     }
@@ -295,6 +296,8 @@ pub(crate) fn write_pe_executable(
             bss_rva? + 8
         } else if reloc.symbol == HEAP_BASE_SYMBOL {
             bss_rva? + 16
+        } else if reloc.symbol == ALLOC_MODE_SYMBOL {
+            bss_rva? + ALLOC_MODE_OFFSET
         } else {
             // Unresolvable symbol (e.g. an unexpected external): refuse to emit a
             // direct PE and let the caller fall back to the linker path.

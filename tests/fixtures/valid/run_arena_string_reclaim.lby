@@ -1,0 +1,9 @@
+fn build_len x i64 -> i64
+    let s string = to_string(x) + "!!!!!!!!!!"
+    len(s)
+
+fn main -> i64
+    let total i64 = 0
+    for i from 0 to 200000
+        total = total + build_len(i)
+    total
