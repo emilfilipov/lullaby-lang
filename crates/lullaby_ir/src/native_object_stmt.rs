@@ -2571,6 +2571,20 @@ fn emit_cmp_counter_scratch(code: &mut Vec<u8>, counter: PReg, reg: u8) {
     code.extend_from_slice(&[rex, 0x39, 0xC0 | ((reg & 7) << 3) | counter.code3()]);
 }
 
+/// Pad `code` with 1-byte NOPs until its length is a 16-byte multiple. Every
+/// native function starts at a 16-aligned offset in `.text` (the object writer
+/// pads between functions), so a function-buffer offset that is a multiple of 16
+/// is also 16-aligned in the final image. Calling this right before a hot loop's
+/// top aligns the loop entry, keeping the tight body off the 32-byte
+/// fetch/uop-cache boundaries that otherwise roughly halve throughput — the
+/// difference measured between two byte-identical ILP loops (0.066 vs 0.126
+/// ns/iter). The pad executes once on loop entry (fall-through), so it is free.
+fn emit_align_loop_top(code: &mut Vec<u8>) {
+    while !code.len().is_multiple_of(16) {
+        code.push(0x90); // nop
+    }
+}
+
 pub(crate) fn emit_sum_reduction(
     ctx: &mut NativeCtx,
     plan: &SumReductionLoop,
@@ -2615,6 +2629,7 @@ pub(crate) fn emit_sum_reduction(
 
     // Main loop: while i < bound-(K-1), fold the whole block `i..i+K-1` in one
     // `acc` add. `4*i + 6` wrapping equals four wrapping `+= i` steps.
+    emit_align_loop_top(code);
     let main_top = code.len();
     emit_cmp_counter_scratch(code, counter, RDX); // cmp i, rdx (bound-3)
     code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end
@@ -2864,6 +2879,7 @@ pub(crate) fn emit_general_reduction(
     };
 
     // Blocked main loop: while i < bound-(K-1), do K iterations into K accumulators.
+    emit_align_loop_top(code);
     let main_top = code.len();
     emit_cmp_counter_scratch(code, counter, RDX); // cmp i, rdx
     code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end
@@ -3065,6 +3081,7 @@ pub(crate) fn emit_affine_reduction(
     };
 
     // Blocked main loop: acc += block_a*i + block_b, i += K.
+    emit_align_loop_top(code);
     let main_top = code.len();
     emit_cmp_counter_scratch(code, counter, RDX);
     code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end

@@ -59,15 +59,16 @@ Lullaby already beats Python.
   per step into one dependent add and breaking the serial `acc` chain. This now
   fires for a **runtime bound** too (`while i < n`): loop-weighted register
   promotion keeps the counter and accumulator in registers ahead of the
-  invariant `n`, taking that loop from **5× slower than C to ~C parity** (and
-  the constant-bound form stays 2× faster).
+  invariant `n`, and 16-byte **loop-top alignment** keeps the tight body off the
+  32-byte fetch boundary — together taking that loop from **5× slower than C to
+  2× faster** (constant and runtime bound now both ~0.066 ns/iter).
 - Affine reduction loops (`acc += a*i + b` — `i+i`, `3*i+5`, weighted sums):
-  **0.52–0.57× C — ~1.8× faster than C**. The affine block sum folds four
+  **0.30–0.53× C — up to ~3× faster than C**. The affine block sum folds four
   iterations into one `imul`+`add` (`acc += 4a*i + (6a+4b)`), one dependent op
-  per four iterations vs C's per-element loop. Non-affine polynomial reductions
-  (`acc += i*i`) use a four-way multi-accumulator that breaks the serial `acc`
-  chain — ~1.7× faster than the naive loop (~1.3–1.5× C, where C's SIMD still
-  wins the packed multiply).
+  per four iterations vs C's per-element loop, with the loop top 16-aligned.
+  Non-affine polynomial reductions (`acc += i*i`) use a four-way
+  multi-accumulator that breaks the serial `acc` chain — ~1.7× faster than the
+  naive loop (~1.2× C, where C's SIMD still wins the packed multiply).
 - Euclid `gcd` accumulation loop: **~1.00× C — at parity** (10.9 vs 11.0 ns/gcd)
   — `sqrt`/`abs`/`min`/`max`/`gcd`/`sign`/`clamp` now lower to inline machine code
   (`gcd` is a branchless magnitude `abs` + unsigned `div` Euclid), matching C's
