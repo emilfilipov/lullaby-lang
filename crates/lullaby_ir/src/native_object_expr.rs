@@ -1196,6 +1196,33 @@ pub(crate) fn lower_native_binary(
             {
                 return lower_native_float_compare(ctx, left, op, right, width, code);
             }
+            // Strength-reduce `*` by a constant on plain `i64`: a power of two
+            // becomes `shl` and 3/5/9 a single `lea [x + x*scale]` (exactly as C
+            // does), each 1-cycle vs `imul`'s 3-cycle latency — a win on a
+            // dependency chain. All keep the low 64 bits (wrapping). Other
+            // constants fall through to the immediate `imul` below.
+            if fixed_int_kind(left.ty.name.as_str()).is_none()
+                && op == BinaryOp::Multiply
+                && let BytecodeExprKind::Integer(m) = &right.kind
+            {
+                if *m >= 2 && (*m & (*m - 1)) == 0 {
+                    let k = m.trailing_zeros() as u8; // 1..=62 for a positive i64
+                    lower_native_expr(ctx, left, code)?; // x in rax
+                    code.extend_from_slice(&[0x48, 0xC1, 0xE0, k]); // shl rax, k
+                    return Ok(());
+                }
+                // `lea rax, [rax + rax*scale]`: 3 (scale 2), 5 (scale 4), 9 (scale 8).
+                if let Some(sib) = match *m {
+                    3 => Some(0x40u8),
+                    5 => Some(0x80),
+                    9 => Some(0xC0),
+                    _ => None,
+                } {
+                    lower_native_expr(ctx, left, code)?; // x in rax
+                    code.extend_from_slice(&[0x48, 0x8D, 0x04, sib]); // lea rax, [rax + rax*scale]
+                    return Ok(());
+                }
+            }
             // Constant right operand on a plain `i64` add/sub/mul: fold into an
             // immediate (`add`/`sub rax, imm32`, or `imul rax, rax, imm32`),
             // skipping the operand-stack shuffle. x86 `add`/`sub`/`imul` keep the
