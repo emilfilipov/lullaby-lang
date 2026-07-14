@@ -1944,7 +1944,11 @@ impl<'a> Runtime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("abs", 1, args.len()))?;
         match value {
-            Value::I64(n) => Ok(Value::I64(n.abs())),
+            // Wrapping abs so `abs(i64::MIN)` yields `i64::MIN` (matching release
+            // `i64::abs` and the native/WASM backends) instead of panicking on
+            // overflow in a debug build — deterministic across build modes and
+            // bit-identical across all backends.
+            Value::I64(n) => Ok(Value::I64(n.wrapping_abs())),
             Value::F64(n) => Ok(Value::F64(n.abs())),
             other => Err(RuntimeError::new(
                 "L0417",
