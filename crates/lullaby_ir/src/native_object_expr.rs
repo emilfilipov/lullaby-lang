@@ -422,6 +422,22 @@ pub(crate) fn lower_native_expr(
                     OverflowMode::Checked => {}
                 }
             }
+            // `abs(x)` on `i64`: the branchless two's-complement abs idiom
+            // (`sar` sign mask, `xor`, `sub`), matching release `i64::abs` — which
+            // wraps `abs(i64::MIN)` back to `i64::MIN`, consistent with the native
+            // wrapping-arithmetic contract. `abs(f64)` is handled in the float
+            // lowerer (an XMM sign-bit clear) and routes there via
+            // `float_width_of_expr`, so only the i64 case reaches here.
+            if name == "abs" && args.len() == 1 && args[0].ty.name == "i64" {
+                lower_native_expr(ctx, &args[0], code)?; // x in rax
+                code.extend_from_slice(&[
+                    0x48, 0x89, 0xC2, // mov rdx, rax
+                    0x48, 0xC1, 0xFA, 0x3F, // sar rdx, 63   (sign mask)
+                    0x48, 0x31, 0xD0, // xor rax, rdx
+                    0x48, 0x29, 0xD0, // sub rax, rdx  -> rax = |x|
+                ]);
+                return Ok(());
+            }
             // `min(a, b)` / `max(a, b)` on plain `i64`: a branchless signed
             // `cmp` + `cmov`, matching the interpreters' `i64::min`/`i64::max`
             // exactly. Evaluate left→rax (spilled), right→rax, then `pop rcx`

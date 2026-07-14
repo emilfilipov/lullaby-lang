@@ -881,16 +881,27 @@ fn compiles_abs_f64_as_sse2_sign_clear() {
 }
 
 #[test]
-fn abs_i64_defers_gracefully() {
-    // `abs(i64)` has no native lowering (only the f64 case is delivered): the
-    // integer call path finds `abs` is not a compiled user function and skips the
-    // whole function to the interpreters — it must never miscompile.
-    let err = emit_native_program(&module_for(
+fn compiles_abs_i64_as_twos_complement_idiom() {
+    // `abs(i64)` lowers to the branchless two's-complement abs idiom
+    // (`sar rdx, 63` = 48 C1 FA 3F, then `xor`/`sub rax, rdx`), matching release
+    // `i64::abs` (wraps `abs(i64::MIN)` to i64::MIN like the native contract).
+    let program = emit_native_program(&module_for(
         concat!("fn main -> i64\n", "    abs(0 - 5)\n",),
     ))
-    .expect_err("abs(i64) is deferred");
-    assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
-    assert!(err.skipped.iter().any(|s| s.name == "main"));
+    .expect("abs(i64) compiles natively");
+    assert!(
+        program.compiled.contains(&"main".to_string()),
+        "an abs(i64)-using function must compile natively: {:?}",
+        program.skipped
+    );
+    assert!(
+        program
+            .bytes
+            .windows(4)
+            .any(|w| w == [0x48, 0xC1, 0xFA, 0x3F])
+            && program.bytes.windows(3).any(|w| w == [0x48, 0x29, 0xD0]),
+        "abs(i64) must emit `sar rdx, 63` + `sub rax, rdx`"
+    );
 }
 
 #[test]
