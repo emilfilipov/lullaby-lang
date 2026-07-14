@@ -95,7 +95,7 @@ what runtime they assume (canonical detail:
 | Global heap GC (Java, C#, Go) | **Arena-first allocation** + opt-in **reference counting** (no GC pauses) |
 | Manual memory management (C, C++) | **Arena-first safe defaults** + `unsafe` raw pointers only at the hardware edge |
 | Borrow checker (Rust) | **Arenas + runtime-enforced safety** — memory-safe without borrow-check fights |
-| Garbage collector as afterthought | **Integrated into compilation pipeline** as core optimization phase |
+| Safe *or* low-level — pick one | **Two tiers, one language** — safe arena defaults; `no-runtime` freestanding tier for kernels/embedded |
 
 ---
 
