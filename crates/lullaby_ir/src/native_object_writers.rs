@@ -198,7 +198,7 @@ pub(crate) fn build_object_model(
         sections.push(ObjectSection {
             kind: ObjectSectionKind::Bss,
             data: Vec::new(),
-            size: u64::from(16 + HEAP_REGION_SIZE),
+            size: u64::from(HEAP_BSS_SIZE),
             relocations: Vec::new(),
         });
         (Some(1usize), Some(2usize))
@@ -257,6 +257,12 @@ pub(crate) fn build_object_model(
             name: HEAP_BASE_SYMBOL.to_string(),
             section: bss_section,
             value: 16,
+            kind: ObjectSymbolKind::Data,
+        });
+        symbols.push(ObjectSymbol {
+            name: ALLOC_MODE_SYMBOL.to_string(),
+            section: bss_section,
+            value: u64::from(ALLOC_MODE_OFFSET),
             kind: ObjectSymbolKind::Data,
         });
     }
@@ -395,6 +401,11 @@ pub(crate) fn program_uses_heap_helpers(functions: &[LoweredNativeFunction]) -> 
                     | STR_READ_OWN_SYMBOL
                     | DROP_STRING_ARRAY_SYMBOL
                     | TO_CSTR_SYMBOL
+                    // An arena-eligible function references the bump-pointer cell
+                    // (and the arena-mode flag) in its prologue/return reset, so
+                    // seeing either forces the heap sections + helpers to be emitted.
+                    | HEAP_NEXT_SYMBOL
+                    | ALLOC_MODE_SYMBOL
             )
         })
     })
@@ -1000,6 +1011,13 @@ fn write_object_with_data(
         value: 16,
         is_function: false,
     });
+    // The arena-mode flag cell sits past the 1 MiB heap region.
+    symbols.push(SymbolDef {
+        name: ALLOC_MODE_SYMBOL.to_string(),
+        section_number: 3,
+        value: ALLOC_MODE_OFFSET,
+        is_function: false,
+    });
     // Undefined external symbols for any unresolved relocation target — the
     // `extern fn` C functions bound by the linker (section 0), like `ExitProcess`.
     for reloc in &relocations {
@@ -1039,7 +1057,7 @@ fn write_object_with_data(
     // -- Section layout ------------------------------------------------------
     // Sections: .text, .rdata, .bss, and (with --debug) .debug$S.
     let num_sections: u32 = if debug_built.is_some() { 4 } else { 3 };
-    let bss_size = 16 + HEAP_REGION_SIZE;
+    let bss_size = HEAP_BSS_SIZE;
     let num_relocs = relocations.len() as u32;
 
     let headers_end = COFF_HEADER_SIZE + num_sections * SECTION_HEADER_SIZE;

@@ -1656,9 +1656,8 @@ fn emits_rdata_and_bss_for_string_len() {
     // pointer.
     let bss_size = read_u32(&program.bytes, sec3 + 16);
     assert_eq!(
-        bss_size,
-        16 + HEAP_REGION_SIZE,
-        "bss reserves heap + bump pointer + free-list head"
+        bss_size, HEAP_BSS_SIZE,
+        "bss reserves heap + bump pointer + free-list head + arena-mode flag"
     );
     assert_eq!(
         read_u32(&program.bytes, sec3 + 20),
@@ -3096,6 +3095,109 @@ fn rc_drop_inserted_for_owned_loop_string_but_not_when_it_escapes() {
     );
 }
 
+/// Arena-first memory (stage 1): the arena-mode prologue's distinctive byte
+/// sequence — `mov eax, 1` (`B8 01 00 00 00`) then `mov [rip + alloc_mode], rax`
+/// (`48 89 05`) — marks a function that routes its heap allocations through the
+/// function-scoped arena. Only `emit_arena_prologue` emits this shape.
+fn has_arena_prologue(program: &NativeProgram) -> bool {
+    program
+        .bytes
+        .windows(8)
+        .any(|w| w == [0xB8, 0x01, 0x00, 0x00, 0x00, 0x48, 0x89, 0x05])
+}
+
+#[test]
+fn arena_region_used_for_provably_local_heap_function() {
+    // `build_len` returns a scalar, allocates a string that stays local (only read
+    // by `len`), calls no user function, and has no loop — so it is arena-eligible
+    // and takes the arena path. `main` calls a user function, so it does not.
+    let program = emit_native_program(&module_for(concat!(
+        "fn build_len x i64 -> i64\n",
+        "    let s string = to_string(x) + \"!\"\n",
+        "    len(s)\n\n",
+        "fn main -> i64\n",
+        "    build_len(5)\n",
+    )))
+    .expect("emit arena program");
+    assert!(
+        program.compiled.contains(&"build_len".to_string()),
+        "build_len must compile natively: {:?} / {:?}",
+        program.compiled,
+        program.skipped
+    );
+    assert!(
+        has_arena_prologue(&program),
+        "a provably-local heap-using function must take the arena path"
+    );
+}
+
+#[test]
+fn arena_not_used_when_a_heap_value_escapes() {
+    // (a) A function that RETURNS a heap value cannot be arena (the value outlives
+    // the call). `make_s` returns a string; `main` only calls a user function.
+    // Neither function is arena, so no arena prologue is emitted anywhere.
+    let returns_heap = emit_native_program(&module_for(concat!(
+        "fn make_s -> string\n",
+        "    to_string(5) + \"!\"\n\n",
+        "fn main -> i64\n",
+        "    len(make_s())\n",
+    )))
+    .expect("emit returns-heap program");
+    assert!(
+        !has_arena_prologue(&returns_heap),
+        "a function returning a heap value must NOT take the arena path"
+    );
+
+    // (b) A function that PASSES a heap value to a user-defined function cannot be
+    // arena (the callee could retain the pointer). `build` allocates a string and
+    // passes it to `tag`; `tag` returns a string (also not arena); `main` only
+    // calls a user function. No arena prologue anywhere.
+    let escapes_via_call = emit_native_program(&module_for(concat!(
+        "fn tag s string -> string\n",
+        "    s + \"?\"\n\n",
+        "fn build -> i64\n",
+        "    let s string = to_string(5) + \"!\"\n",
+        "    len(tag(s))\n\n",
+        "fn main -> i64\n",
+        "    build()\n",
+    )))
+    .expect("emit escapes-via-call program");
+    assert!(
+        !has_arena_prologue(&escapes_via_call),
+        "a function passing a heap value to a user function must NOT take the arena path"
+    );
+}
+
+#[test]
+fn arena_not_used_for_function_with_an_allocating_loop() {
+    // A function-scoped arena is reclaimed only at return, so a loop that allocates
+    // each iteration would grow the region unboundedly within one call — such a
+    // function stays on the RC / free-list path (its loop-body drops reclaim per
+    // iteration). `sum_lens` is scalar-returning and leaf, but its `for` loop
+    // allocates, so it is NOT arena-eligible.
+    let program = emit_native_program(&module_for(concat!(
+        "fn sum_lens -> i64\n",
+        "    let total i64 = 0\n",
+        "    for i from 0 to 10\n",
+        "        let s string = to_string(i) + \"!\"\n",
+        "        total = total + len(s)\n",
+        "    total\n\n",
+        "fn main -> i64\n",
+        "    sum_lens()\n",
+    )))
+    .expect("emit allocating-loop program");
+    assert!(
+        program.compiled.contains(&"sum_lens".to_string()),
+        "sum_lens must still compile natively (on the RC path): {:?} / {:?}",
+        program.compiled,
+        program.skipped
+    );
+    assert!(
+        !has_arena_prologue(&program),
+        "a function with an allocating loop must NOT take the arena path"
+    );
+}
+
 #[test]
 fn rc_drop_inserted_on_break_and_continue_early_exit_edges() {
     // RC stage 2: a uniquely-owned, borrow-only loop string is now dropped on the
@@ -3396,9 +3498,22 @@ fn rc_dec_helper_frees_at_zero_and_tail_calls_free() {
             .any(|r| r.symbol == HEAP_FREE_HEAD_SYMBOL),
         "rc_free must push onto the free list"
     );
+    // Arena-first memory (stage 1): rc_free first checks the arena-mode flag and,
+    // when set, returns without pushing (the arena reclaims by bump-pointer rewind).
     assert_eq!(
-        &free.code[0..4],
-        &[0x48, 0x8D, 0x41, 0xF0],
+        &free.code[0..3],
+        &[0x48, 0x8B, 0x05],
+        "rc_free must begin by loading the arena-mode flag (`mov rax, [rip + alloc_mode]`)"
+    );
+    assert!(
+        free.relocations
+            .iter()
+            .any(|r| r.symbol == ALLOC_MODE_SYMBOL),
+        "rc_free must reference the arena-mode flag"
+    );
+    // The RC push path still computes the block base with `lea rax, [rcx - 16]`.
+    assert!(
+        free.code.windows(4).any(|w| w == [0x48, 0x8D, 0x41, 0xF0]),
         "rc_free must compute the block base with `lea rax, [rcx - 16]`"
     );
 }

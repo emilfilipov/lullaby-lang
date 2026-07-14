@@ -24,6 +24,22 @@ pub(crate) fn emit_heap_alloc_helper() -> HelperFunction {
     // r8 = need = payload size (rcx) + RC header.
     code.extend_from_slice(&[0x4C, 0x8D, 0x41, RC_HEADER_SIZE as u8]); // lea r8, [rcx + 16]
 
+    // Arena mode (stage-1 arena-first memory): when the arena-mode flag is set the
+    // current function is a provably-local heap-using region that reclaims its
+    // allocations by rewinding the bump pointer on return, so we must NOT reuse a
+    // free-list block (that would clobber the pre-existing free list's chain links
+    // when the block is later re-seeded). Skip the free-list scan and bump directly.
+    code.extend_from_slice(&[0x48, 0x8B, 0x05]); // mov rax, [rip + alloc_mode]
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: ALLOC_MODE_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x0F, 0x85]); // jnz bump
+    let mode_bump_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+
     // Free-list first-fit scan. r10 = &(prev's next slot) (starts at &free_head),
     // r11 = cur block base.
     code.extend_from_slice(&[0x4C, 0x8D, 0x15]); // lea r10, [rip + free_head]
@@ -58,6 +74,7 @@ pub(crate) fn emit_heap_alloc_helper() -> HelperFunction {
 
     // bump: seed the bump pointer if zero, then carve `need` bytes.
     patch_rel32(&mut code, bump_site);
+    patch_rel32(&mut code, mode_bump_site);
     code.extend_from_slice(&[0x48, 0x8B, 0x05]); // mov rax, [rip + heap_next]
     relocations.push(CodeRelocation {
         offset: code.len() as u32,
@@ -103,6 +120,24 @@ pub(crate) fn emit_rc_free_helper() -> HelperFunction {
     let mut code: Vec<u8> = Vec::new();
     let mut relocations: Vec<CodeRelocation> = Vec::new();
 
+    // Arena mode: while a provably-local arena function runs, its frees must NOT
+    // push onto the free list — the whole region it allocated is reclaimed by
+    // rewinding the bump pointer on return, and pushing would put a block that the
+    // rewind reclaims onto the free list (a later reuse would then double-allocate
+    // the rewound memory). So when the arena-mode flag is set, return without
+    // pushing; the block is reclaimed in bulk at the function's return edge.
+    code.extend_from_slice(&[0x48, 0x8B, 0x05]); // mov rax, [rip + alloc_mode]
+    relocations.push(CodeRelocation {
+        offset: code.len() as u32,
+        symbol: ALLOC_MODE_SYMBOL.to_string(),
+    });
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    // jnz +21 — skip the 21-byte free-list push (lea+lea+mov+mov+mov) to the ret.
+    let skip_push_site = code.len();
+    code.extend_from_slice(&[0x75, 0x00]); // placeholder; patched below
+
+    let push_start = code.len();
     code.extend_from_slice(&[0x48, 0x8D, 0x41, 0xF0]); // lea rax, [rcx - 16] (block base)
     code.extend_from_slice(&[0x4C, 0x8D, 0x15]); // lea r10, [rip + free_head]
     relocations.push(CodeRelocation {
@@ -113,6 +148,16 @@ pub(crate) fn emit_rc_free_helper() -> HelperFunction {
     code.extend_from_slice(&[0x49, 0x8B, 0x12]); // mov rdx, [r10] (old head)
     code.extend_from_slice(&[0x48, 0x89, 0x50, 0x08]); // mov [rax + 8], rdx (block.next = old head)
     code.extend_from_slice(&[0x49, 0x89, 0x02]); // mov [r10], rax (free_head = block)
+    // Patch the arena-mode skip to land on the `ret` below (rel8 from the byte after
+    // the jnz operand to the ret).
+    let ret_target = code.len();
+    let rel = (ret_target - (skip_push_site + 2)) as u8;
+    code[skip_push_site + 1] = rel;
+    debug_assert_eq!(
+        ret_target - push_start,
+        21,
+        "rc_free push body must be 21 bytes"
+    );
     code.push(0xC3); // ret
 
     HelperFunction {

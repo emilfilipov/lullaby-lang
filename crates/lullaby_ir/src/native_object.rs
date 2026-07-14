@@ -831,6 +831,33 @@ const HEAP_FREE_HEAD_SYMBOL: &str = "__lullaby_free_head";
 /// The heap region base symbol in `.bss` — a fixed reserved bump region.
 const HEAP_BASE_SYMBOL: &str = "__lullaby_heap_base";
 
+/// The arena-mode flag cell in `.bss` (an 8-byte word, zero-initialized).
+///
+/// Arena-first memory (stage 1): a **function-scoped implicit region** for a
+/// provably-local heap-using function. While such a function runs this flag is
+/// `1`; `__lullaby_alloc` then skips its free-list reuse scan and *always* bump-
+/// allocates, and `__lullaby_rc_free` becomes a no-op (it does not push the block
+/// onto the free list). The function saves `__lullaby_heap_next` on entry and
+/// restores it on every return edge, so the whole region it allocated is reclaimed
+/// by a single bulk rewind of the bump pointer. Because arena allocations only ever
+/// bump (never touch the pre-existing free list) and arena frees never push,
+/// restoring the bump pointer is sound and the free list is invariant across the
+/// call. Default `0` selects the normal RC / free-list path (every non-arena
+/// function, and the whole program before any arena function runs). The cell lives
+/// past the heap region so the RC cell offsets (`heap_next`=0, `free_head`=8,
+/// `heap_base`=16) stay unchanged.
+const ALLOC_MODE_SYMBOL: &str = "__lullaby_alloc_mode";
+
+/// Byte offset of the arena-mode flag within `.bss`, immediately after the heap
+/// region (so the pre-existing cell offsets are unchanged).
+const ALLOC_MODE_OFFSET: u32 = 16 + HEAP_REGION_SIZE;
+
+/// Total size of the `.bss` section backing the heap: the three RC cells (24 bytes
+/// through `heap_base`... conceptually 16 for the cells preceding the region) plus
+/// the 1 MiB region plus the 8-byte arena-mode flag past it. Computed as the mode
+/// cell offset plus its 8 bytes.
+const HEAP_BSS_SIZE: u32 = ALLOC_MODE_OFFSET + 8;
+
 /// `__lullaby_rc_dec(payload ptr in rcx)`: decrement the block's refcount at
 /// `[rcx - 8]` and, if it reached zero, tail-call `__lullaby_rc_free` to return the
 /// block to the free list. The drop primitive scope-based drop insertion (RC stage
@@ -1630,6 +1657,12 @@ pub fn emit_native_program_for_target(
             continue;
         }
 
+        // Arena-first memory (stage 1): the set of functions whose heap allocations
+        // provably stay local, so they route through a function-scoped arena
+        // (reclaimed by rewinding the bump pointer on every return edge). Default-
+        // deny; every other function keeps its unchanged RC / free-list codegen.
+        let arena_names = arena_eligible_functions(module, &eligible_names, &signatures);
+
         for name in &eligible_names {
             let function = module
                 .functions
@@ -1647,6 +1680,7 @@ pub fn emit_native_program_for_target(
                 &signatures,
                 array_lengths,
                 fast_math,
+                arena_names.contains(name.as_str()),
             ) {
                 Ok(l) => lowered.push(l),
                 Err(reason) => {
@@ -3036,6 +3070,15 @@ pub(crate) struct NativeCtx<'a> {
     /// reorders the additions). Off by default, so the default build stays
     /// bit-exact with the interpreters.
     fast_math: bool,
+    /// Arena-first memory (stage 1): this function is a provably-local heap-using
+    /// region. When set, the prologue saves `__lullaby_heap_next` into
+    /// `arena_mark_slot` and sets the arena-mode flag; every return edge restores
+    /// the bump pointer (reclaiming the whole region the function allocated) and
+    /// clears the flag. The body codegen is otherwise unchanged (value-neutral).
+    is_arena: bool,
+    /// The frame slot (`[rbp - arena_mark_slot]`) holding the saved bump pointer
+    /// when `is_arena`; `0` otherwise (unused).
+    arena_mark_slot: i32,
 }
 
 /// The native signature of a compiled function: the layout of each parameter and
@@ -3069,6 +3112,7 @@ impl<'a> NativeCtx<'a> {
         strings: &'a mut StringPool,
         signatures: &'a HashMap<String, NativeSignature>,
         array_lengths: &ArrayLengths,
+        is_arena: bool,
     ) -> Result<Self, String> {
         let mut locals: HashMap<String, NativeLocal> = HashMap::new();
         let mut next_slot: i32 = 0;
@@ -3166,6 +3210,15 @@ impl<'a> NativeCtx<'a> {
             saved_reg_slots.push((reg, next_slot));
         }
 
+        // Arena-first memory (stage 1): reserve one frame word to save the bump
+        // pointer (`__lullaby_heap_next`) on entry, restored on every return edge.
+        let arena_mark_slot = if is_arena {
+            next_slot += 8;
+            next_slot
+        } else {
+            0
+        };
+
         let has_call = body_has_call(&function.instructions);
         // Reserve local slots plus (if calling) 32 bytes of shadow space, plus an
         // outgoing stack-argument area for any call passing more than four
@@ -3196,6 +3249,8 @@ impl<'a> NativeCtx<'a> {
             promoted,
             saved_reg_slots,
             fast_math: false,
+            is_arena,
+            arena_mark_slot,
         })
     }
 
@@ -3745,6 +3800,299 @@ fn expr_has_call(expr: &BytecodeExpr) -> bool {
         BytecodeExprKind::Unary { expr, .. } => expr_has_call(expr),
         _ => false,
     }
+}
+
+// -- Arena-first memory: function-scoped-region eligibility (stage 1) ---------
+//
+// A function routes its heap allocations through a function-scoped arena (the
+// shared bump heap, reclaimed by rewinding `heap_next` on every return edge)
+// ONLY when every heap value it allocates provably stays local. The criterion is
+// tight, locally checkable, and DEFAULT-DENY — anything not provably local keeps
+// the unchanged RC / free-list codegen (arena and RC coexist). See
+// `documents/native_backend_contract.md`.
+
+/// Whether a type is one of the heap-backed value types the native backend
+/// allocates: `string`, growable `list<…>`/`map<…>`, or a heap `array<string>`.
+/// Scalar `array<T>` is stack-allocated and is intentionally NOT heap here.
+fn arena_type_is_heap(ty: &TypeRef) -> bool {
+    let name = ty.name.as_str();
+    name == "string"
+        || name.starts_with("list<")
+        || name.starts_with("map<")
+        || heap_string_array_element(ty).is_some()
+}
+
+/// Whether an expression tree references any heap-typed value (an allocation or a
+/// read of a heap value). Used both to require an arena function actually touches
+/// the heap (else the arena is a pointless no-op) and to reject loops that touch
+/// the heap (a function-scoped arena would grow unboundedly across iterations).
+fn expr_touches_heap(expr: &BytecodeExpr) -> bool {
+    if arena_type_is_heap(&expr.ty) {
+        return true;
+    }
+    match &expr.kind {
+        BytecodeExprKind::Integer(_)
+        | BytecodeExprKind::Float(_)
+        | BytecodeExprKind::Bool(_)
+        | BytecodeExprKind::Char(_)
+        | BytecodeExprKind::Variable(_)
+        | BytecodeExprKind::Closure { .. } => false,
+        BytecodeExprKind::String(_) => true,
+        BytecodeExprKind::Array(elements) => elements.iter().any(expr_touches_heap),
+        BytecodeExprKind::Index { target, index } => {
+            expr_touches_heap(target) || expr_touches_heap(index)
+        }
+        BytecodeExprKind::Unary { expr, .. } | BytecodeExprKind::Await { expr } => {
+            expr_touches_heap(expr)
+        }
+        BytecodeExprKind::Binary { left, right, .. } => {
+            expr_touches_heap(left) || expr_touches_heap(right)
+        }
+        BytecodeExprKind::Call { args, .. } => args.iter().any(expr_touches_heap),
+        BytecodeExprKind::Field { target, .. } => expr_touches_heap(target),
+    }
+}
+
+/// Whether a body references any heap-typed value anywhere.
+fn body_touches_heap(body: &[BytecodeInstruction]) -> bool {
+    body.iter().any(instruction_touches_heap)
+}
+
+fn instruction_touches_heap(instruction: &BytecodeInstruction) -> bool {
+    match instruction {
+        BytecodeInstruction::Let { value, .. }
+        | BytecodeInstruction::Assign { value, .. }
+        | BytecodeInstruction::Return(Some(value))
+        | BytecodeInstruction::Expr(value)
+        | BytecodeInstruction::Throw { value, .. } => expr_touches_heap(value),
+        BytecodeInstruction::Return(None)
+        | BytecodeInstruction::Break(_)
+        | BytecodeInstruction::Continue(_)
+        | BytecodeInstruction::Asm { .. } => false,
+        BytecodeInstruction::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|b| expr_touches_heap(&b.condition) || body_touches_heap(&b.body))
+                || body_touches_heap(else_body)
+        }
+        BytecodeInstruction::While {
+            condition, body, ..
+        } => expr_touches_heap(condition) || body_touches_heap(body),
+        BytecodeInstruction::For {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            expr_touches_heap(start)
+                || expr_touches_heap(end)
+                || step.as_ref().is_some_and(expr_touches_heap)
+                || body_touches_heap(body)
+        }
+        BytecodeInstruction::Loop { body, .. } => body_touches_heap(body),
+        BytecodeInstruction::Match {
+            scrutinee, arms, ..
+        } => expr_touches_heap(scrutinee) || arms.iter().any(|arm| body_touches_heap(&arm.body)),
+        BytecodeInstruction::Try {
+            body, catch_body, ..
+        } => body_touches_heap(body) || body_touches_heap(catch_body),
+    }
+}
+
+/// Whether an expression calls a user-defined or `extern` function (as opposed to
+/// a native builtin). A heap value passed to user code could be retained past the
+/// function's return, so any such call disqualifies arena eligibility.
+fn expr_calls_user(expr: &BytecodeExpr, user_names: &std::collections::HashSet<&str>) -> bool {
+    match &expr.kind {
+        BytecodeExprKind::Call { name, args } => {
+            user_names.contains(name.as_str())
+                || args.iter().any(|a| expr_calls_user(a, user_names))
+        }
+        BytecodeExprKind::Binary { left, right, .. } => {
+            expr_calls_user(left, user_names) || expr_calls_user(right, user_names)
+        }
+        BytecodeExprKind::Unary { expr, .. } | BytecodeExprKind::Await { expr } => {
+            expr_calls_user(expr, user_names)
+        }
+        BytecodeExprKind::Index { target, index } => {
+            expr_calls_user(target, user_names) || expr_calls_user(index, user_names)
+        }
+        BytecodeExprKind::Field { target, .. } => expr_calls_user(target, user_names),
+        BytecodeExprKind::Array(elements) => {
+            elements.iter().any(|e| expr_calls_user(e, user_names))
+        }
+        BytecodeExprKind::Integer(_)
+        | BytecodeExprKind::Float(_)
+        | BytecodeExprKind::Bool(_)
+        | BytecodeExprKind::String(_)
+        | BytecodeExprKind::Char(_)
+        | BytecodeExprKind::Variable(_)
+        | BytecodeExprKind::Closure { .. } => false,
+    }
+}
+
+/// Whether a body calls any user-defined or `extern` function anywhere.
+fn body_calls_user(
+    body: &[BytecodeInstruction],
+    user_names: &std::collections::HashSet<&str>,
+) -> bool {
+    body.iter().any(|i| instruction_calls_user(i, user_names))
+}
+
+fn instruction_calls_user(
+    instruction: &BytecodeInstruction,
+    user_names: &std::collections::HashSet<&str>,
+) -> bool {
+    match instruction {
+        BytecodeInstruction::Let { value, .. }
+        | BytecodeInstruction::Assign { value, .. }
+        | BytecodeInstruction::Return(Some(value))
+        | BytecodeInstruction::Expr(value)
+        | BytecodeInstruction::Throw { value, .. } => expr_calls_user(value, user_names),
+        BytecodeInstruction::Return(None)
+        | BytecodeInstruction::Break(_)
+        | BytecodeInstruction::Continue(_)
+        | BytecodeInstruction::Asm { .. } => false,
+        BytecodeInstruction::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches.iter().any(|b| {
+                expr_calls_user(&b.condition, user_names) || body_calls_user(&b.body, user_names)
+            }) || body_calls_user(else_body, user_names)
+        }
+        BytecodeInstruction::While {
+            condition, body, ..
+        } => expr_calls_user(condition, user_names) || body_calls_user(body, user_names),
+        BytecodeInstruction::For {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            expr_calls_user(start, user_names)
+                || expr_calls_user(end, user_names)
+                || step
+                    .as_ref()
+                    .is_some_and(|s| expr_calls_user(s, user_names))
+                || body_calls_user(body, user_names)
+        }
+        BytecodeInstruction::Loop { body, .. } => body_calls_user(body, user_names),
+        BytecodeInstruction::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_calls_user(scrutinee, user_names)
+                || arms
+                    .iter()
+                    .any(|arm| body_calls_user(&arm.body, user_names))
+        }
+        BytecodeInstruction::Try {
+            body, catch_body, ..
+        } => body_calls_user(body, user_names) || body_calls_user(catch_body, user_names),
+    }
+}
+
+/// Whether a body contains a loop whose header or body touches the heap. Such a
+/// loop allocates once per iteration, which a function-scoped arena (reclaimed only
+/// at return) cannot bound — so it disqualifies arena eligibility. Per-iteration
+/// (loop) sub-regions are a later staging step.
+fn body_has_allocating_loop(body: &[BytecodeInstruction]) -> bool {
+    body.iter().any(instruction_has_allocating_loop)
+}
+
+fn instruction_has_allocating_loop(instruction: &BytecodeInstruction) -> bool {
+    match instruction {
+        BytecodeInstruction::While {
+            condition, body, ..
+        } => expr_touches_heap(condition) || body_touches_heap(body),
+        BytecodeInstruction::For {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            expr_touches_heap(start)
+                || expr_touches_heap(end)
+                || step.as_ref().is_some_and(expr_touches_heap)
+                || body_touches_heap(body)
+        }
+        BytecodeInstruction::Loop { body, .. } => body_touches_heap(body),
+        BytecodeInstruction::If {
+            branches,
+            else_body,
+            ..
+        } => {
+            branches.iter().any(|b| body_has_allocating_loop(&b.body))
+                || body_has_allocating_loop(else_body)
+        }
+        BytecodeInstruction::Match { arms, .. } => {
+            arms.iter().any(|arm| body_has_allocating_loop(&arm.body))
+        }
+        BytecodeInstruction::Try {
+            body, catch_body, ..
+        } => body_has_allocating_loop(body) || body_has_allocating_loop(catch_body),
+        _ => false,
+    }
+}
+
+/// Compute the set of arena-eligible function names for a module. Default-deny:
+/// a function qualifies only when ALL hold — (1) its return type is a native
+/// scalar (`i64`/`bool`/fixed-width lowered as `i64`, `f64`, `f32` — never a heap
+/// type, so no heap value can escape via the return), (2) it actually touches the
+/// heap (else the arena is a no-op), (3) it calls no user-defined / `extern`
+/// function (a leaf w.r.t. user code, so no heap pointer can be passed to and
+/// retained by code that outlives it, and arena mode never leaks into RC-freeing
+/// code), and (4) it has no loop that touches the heap (a function-scoped arena is
+/// reclaimed only at return, so an allocating loop would grow the region
+/// unboundedly). All heap allocations of a qualifying function are dead at every
+/// return edge, so rewinding the bump pointer there reclaims them soundly.
+fn arena_eligible_functions(
+    module: &BytecodeModule,
+    eligible_names: &[String],
+    signatures: &HashMap<String, NativeSignature>,
+) -> std::collections::HashSet<String> {
+    let user_names: std::collections::HashSet<&str> = module
+        .functions
+        .iter()
+        .map(|f| f.name.as_str())
+        .chain(module.extern_functions.iter().map(String::as_str))
+        .collect();
+
+    let mut arena = std::collections::HashSet::new();
+    for name in eligible_names {
+        let Some(sig) = signatures.get(name) else {
+            continue;
+        };
+        // (1) Scalar (non-heap) return.
+        if !matches!(sig.ret, NativeType::I64 | NativeType::F64 | NativeType::F32) {
+            continue;
+        }
+        let Some(function) = module.functions.iter().find(|f| &f.name == name) else {
+            continue;
+        };
+        // (2) Actually uses the heap.
+        if !body_touches_heap(&function.instructions) {
+            continue;
+        }
+        // (3) Leaf w.r.t. user code.
+        if body_calls_user(&function.instructions, &user_names) {
+            continue;
+        }
+        // (4) No loop that touches the heap.
+        if body_has_allocating_loop(&function.instructions) {
+            continue;
+        }
+        arena.insert(name.clone());
+    }
+    arena
 }
 
 /// Loop targets: the byte offsets a `break`/`continue` jumps to. Because loop
