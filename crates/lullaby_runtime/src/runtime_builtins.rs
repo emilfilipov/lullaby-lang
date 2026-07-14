@@ -1082,14 +1082,31 @@ impl<'a> Runtime<'a> {
         let span = statement_span(statement);
         let result = match statement {
             Stmt::Let { name, value, .. } => {
-                // Move-on-functional-update fast path: `let x = f(x, …)` re-binding
-                // an existing innermost local consumes it by move, not clone.
-                let value = match self.try_move_functional_update(name, value, env, true)? {
-                    Some(result) => result,
-                    None => self.eval_expr(value, env)?,
-                };
-                env.define(name.clone(), value);
-                Ok(Control::Value(Value::Void))
+                // A `match` in value position is evaluated against the real
+                // (mutable) environment — exactly like a statement `match` — so its
+                // arm blocks may mutate outer bindings and any `return`/loop control
+                // inside an arm propagates, keeping AST parity with the IR/bytecode
+                // desugaring (which lowers it to real statements). Evaluating it via
+                // `eval_expr` would clone the env and silently drop those effects.
+                if let ExprKind::Match { scrutinee, arms } = &value.kind {
+                    match self.eval_match(scrutinee, arms, env)? {
+                        Control::Value(v) => {
+                            env.define(name.clone(), v);
+                            Ok(Control::Value(Value::Void))
+                        }
+                        diverted => Ok(diverted),
+                    }
+                } else {
+                    // Move-on-functional-update fast path: `let x = f(x, …)`
+                    // re-binding an existing innermost local consumes it by move,
+                    // not clone.
+                    let value = match self.try_move_functional_update(name, value, env, true)? {
+                        Some(result) => result,
+                        None => self.eval_expr(value, env)?,
+                    };
+                    env.define(name.clone(), value);
+                    Ok(Control::Value(Value::Void))
+                }
             }
             Stmt::Assign {
                 name,
@@ -1098,17 +1115,34 @@ impl<'a> Runtime<'a> {
                 value,
                 ..
             } => {
+                // A `match` RHS is evaluated on the real env (see the `let` case)
+                // so its arm effects survive; a diverted control (`return`/loop)
+                // from an arm propagates instead of assigning.
+                let match_rhs = if let ExprKind::Match { scrutinee, arms } = &value.kind {
+                    match self.eval_match(scrutinee, arms, env)? {
+                        Control::Value(v) => Some(v),
+                        diverted => return Ok(diverted),
+                    }
+                } else {
+                    None
+                };
                 if path.is_empty() && matches!(op, AssignOp::Replace) {
                     // Whole-variable reassignment `x = RHS`: try the
                     // move-on-functional-update fast path (`x = f(x, …)`) before
                     // falling back to the ordinary clone path.
-                    let new = match self.try_move_functional_update(name, value, env, false)? {
-                        Some(result) => result,
-                        None => self.eval_expr(value, env)?,
+                    let new = match match_rhs {
+                        Some(v) => v,
+                        None => match self.try_move_functional_update(name, value, env, false)? {
+                            Some(result) => result,
+                            None => self.eval_expr(value, env)?,
+                        },
                     };
                     env.assign(name, new)?;
                 } else {
-                    let rhs = self.eval_expr(value, env)?;
+                    let rhs = match match_rhs {
+                        Some(v) => v,
+                        None => self.eval_expr(value, env)?,
+                    };
                     if path.is_empty() {
                         let new = apply_compound(env.get(name)?, op, rhs)?;
                         env.assign(name, new)?;
@@ -1131,11 +1165,26 @@ impl<'a> Runtime<'a> {
                 Ok(Control::Value(Value::Void))
             }
             Stmt::Return(expr) => {
-                let value = expr
-                    .as_ref()
-                    .map(|expr| self.eval_expr(expr, env))
-                    .unwrap_or(Ok(Value::Void))?;
-                Ok(Control::Return(value))
+                // `return match ...`: evaluate the match on the real env (see the
+                // `let` case) so its arm effects are kept and its value becomes the
+                // function's return value. An arm that itself `return`s also returns
+                // that value; loop control escaping an arm propagates unchanged.
+                if let Some(Expr {
+                    kind: ExprKind::Match { scrutinee, arms },
+                    ..
+                }) = expr.as_ref()
+                {
+                    match self.eval_match(scrutinee, arms, env)? {
+                        Control::Value(v) | Control::Return(v) => Ok(Control::Return(v)),
+                        diverted => Ok(diverted),
+                    }
+                } else {
+                    let value = expr
+                        .as_ref()
+                        .map(|expr| self.eval_expr(expr, env))
+                        .unwrap_or(Ok(Value::Void))?;
+                    Ok(Control::Return(value))
+                }
             }
             Stmt::Break(_) => Ok(Control::Break),
             Stmt::Continue(_) => Ok(Control::Continue),

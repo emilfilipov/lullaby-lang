@@ -2519,7 +2519,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Match { scrutinee, arms } => {
-                self.check_match(scrutinee, arms, expr.span, scope, function)
+                self.check_match(scrutinee, arms, expected, expr.span, scope, function)
             }
             ExprKind::Await { expr: inner } => {
                 // `await e` requires `e: Future<T>` and produces `T`. Awaiting a
