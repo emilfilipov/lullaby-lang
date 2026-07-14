@@ -994,6 +994,114 @@ pub(crate) fn native_aarch64_links_and_runs_under_docker() {
     );
 }
 
+/// End-to-end AArch64 verification of the `i64` scalar-math builtins
+/// (`abs`/`min`/`max`/`gcd`/`sign`/`clamp`): compile the builtin fixture to an
+/// aarch64 ELF, link it with `ld.lld -m aarch64linux`, run it under Docker's
+/// arm64 (QEMU) emulation, and assert the process exit code equals the
+/// interpreter's `run` result mod 256 (162). Every builtin is exercised, both
+/// inline in `main` and across a function boundary (`clip`/`reduce` helpers,
+/// including a `lo > hi` clamp). Gated on Docker+arm64 and `ld.lld`; skipped
+/// gracefully otherwise — the exact-byte unit tests in `aarch64.rs` pin the
+/// emitted encodings regardless.
+#[test]
+pub(crate) fn native_aarch64_math_builtins_link_and_run_parity() {
+    let Some(lld) = ld_lld_path() else {
+        eprintln!("ld.lld not found in the Rust sysroot; skipping AArch64 builtin link+run");
+        return;
+    };
+    if !docker_arm64_available() {
+        eprintln!("Docker arm64 emulation unavailable; skipping AArch64 builtin link+run");
+        return;
+    }
+    let fixture = workspace_root().join("tests/fixtures/valid/aarch64_math_builtins.lby");
+
+    // The expected exit code is the interpreter's `run` result mod 256.
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run interpreter");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let result: i64 = stdout(&run)
+        .lines()
+        .filter_map(|line| line.trim().parse::<i64>().ok())
+        .next_back()
+        .expect("interpreter prints an integer result");
+    assert_eq!(result, 162, "builtin fixture computes 162");
+    let expected_code = result.rem_euclid(256) as i32;
+
+    let dir = std::env::temp_dir().join("lullaby_aarch64_builtins_run");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    let obj = dir.join("prog.o");
+    let exe = dir.join("prog");
+
+    // 1. Emit the aarch64 ELF object; every function must compile (not skip).
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+            "-o",
+            obj.to_str().expect("obj path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("emit aarch64 object");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    let listing = stdout(&emit);
+    for name in ["reduce", "clip", "main"] {
+        assert!(
+            listing.contains(&format!("compiled {name}")),
+            "expected `{name}` compiled natively on AArch64: {listing}"
+        );
+    }
+
+    // 2. Link it into an arm64 executable with the cross-linker.
+    let link = Command::new(&lld)
+        .args([
+            "-m",
+            "aarch64linux",
+            "-o",
+            exe.to_str().expect("exe path"),
+            obj.to_str().expect("obj path"),
+        ])
+        .output()
+        .expect("run ld.lld");
+    assert!(
+        link.status.success(),
+        "ld.lld failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    // 3. Run under arm64 emulation (Windows bind mounts drop the exec bit).
+    let mount = format!("{}:/w", dir.display());
+    let run_exe = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--platform",
+            "linux/arm64",
+            "-v",
+            &mount,
+            "busybox",
+            "sh",
+            "-c",
+            "cp /w/prog /prog && chmod +x /prog && /prog",
+        ])
+        .output()
+        .expect("docker run arm64");
+
+    // 4. The container exit code must equal the interpreter result mod 256.
+    let code = run_exe.status.code().expect("container exit code");
+    assert_eq!(
+        code,
+        expected_code,
+        "aarch64 builtin exit {code} must equal interpreter result {result} mod 256 ({expected_code}); docker stderr: {}",
+        String::from_utf8_lossy(&run_exe.stderr)
+    );
+}
+
 /// Whether Docker can run a native `linux/amd64` container (no QEMU needed).
 pub(crate) fn docker_amd64_available() -> bool {
     Command::new("docker")

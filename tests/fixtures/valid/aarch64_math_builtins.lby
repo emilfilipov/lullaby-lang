@@ -1,0 +1,18 @@
+fn reduce n i64 d i64 -> i64
+    let g i64 = gcd(n, d)
+    n / g
+
+fn clip lo i64 hi i64 x i64 -> i64
+    clamp(x, lo, hi)
+
+fn main -> i64
+    let a i64 = abs(0 - 42)
+    let b i64 = min(7, 3)
+    let c i64 = max(0 - 4, 0 - 9)
+    let g i64 = gcd(48, 36)
+    let s1 i64 = sign(0 - 5)
+    let s2 i64 = sign(9)
+    let cl i64 = clamp(150, 0, 100)
+    let cl2 i64 = clip(5, 3, 4)
+    let r i64 = reduce(42, 56)
+    a + b + c + g + (s1 + 1) + s2 + cl + cl2 + r
