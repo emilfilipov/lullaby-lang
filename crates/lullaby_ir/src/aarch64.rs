@@ -19,6 +19,10 @@
 //!   `for` with `break`/`continue` (`b`/`b.cond`/`cbz` with fixed-up offsets);
 //! * inter-function calls under AAPCS64 (arguments in `x0..x7`, result in `x0`,
 //!   `bl` with an `R_AARCH64_CALL26` relocation, 16-byte stack alignment);
+//! * the `i64` scalar math builtins `abs`/`min`/`max`/`gcd`/`sign`/`clamp`,
+//!   lowered inline (branchless `cmp`+`csel`, `asr`/`eor`/`sub` abs, and an
+//!   unsigned `udiv`/`msub` Euclid loop for `gcd`), bit-for-bit with the
+//!   interpreters (the `f64` forms skip, since the core has no float support);
 //! * a freestanding `_start` that calls `main`, then invokes the Linux `exit`
 //!   syscall (`x8 = 93`, `svc #0`), so the object needs no libc.
 //!
@@ -154,6 +158,22 @@ fn cmp_imm0(rn: u32) -> u32 {
 /// (`csinc Xd, xzr, xzr, invert(cond)`).
 fn cset(rd: u32, cond: u32) -> u32 {
     0x9A80_0400 | (XZR << 16) | ((cond ^ 1) << 12) | (XZR << 5) | rd
+}
+
+/// `csel Xd, Xn, Xm, cond` — `Xd = cond ? Xn : Xm` (conditional select).
+fn csel(rd: u32, rn: u32, rm: u32, cond: u32) -> u32 {
+    0x9A80_0000 | (rm << 16) | (cond << 12) | (rn << 5) | rd
+}
+
+/// `udiv Xd, Xn, Xm` (unsigned division, truncating toward zero).
+fn udiv_reg(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x9AC0_0800 | (rm << 16) | (rn << 5) | rd
+}
+
+/// `asr Xd, Xn, #shift` — arithmetic shift right by an immediate
+/// (`sbfm Xd, Xn, #shift, #63`). Used for the two's-complement sign mask.
+fn asr_imm(rd: u32, rn: u32, shift: u32) -> u32 {
+    0x9340_0000 | ((shift & 0x3F) << 16) | (0x3F << 10) | (rn << 5) | rd
 }
 
 /// `str Xt, [Xn, #(8*slot)]` (unsigned scaled offset).
@@ -929,8 +949,112 @@ fn emit_compare(fg: &mut FnGen, cond: u32) {
     fg.emit(cset(0, cond));
 }
 
+/// Emit the branchless two's-complement `abs` of `reg` in place, using `tmp` as
+/// scratch: `tmp = reg >> 63` (sign mask), `reg ^= tmp`, `reg -= tmp`. Matches
+/// release `i64::abs`, so `abs(i64::MIN)` wraps back to `i64::MIN`. The unsigned
+/// magnitude it produces (`|x|` reinterpreted as a `u64`) is exactly what
+/// `gcd`'s Euclid loop consumes.
+fn emit_abs_in_place(fg: &mut FnGen, reg: u32, tmp: u32) {
+    fg.emit(asr_imm(tmp, reg, 63)); // tmp = sign mask (all 1s if reg < 0)
+    fg.emit(eor_reg(reg, reg, tmp)); // reg ^= mask
+    fg.emit(sub_reg(reg, reg, tmp)); // reg -= mask  -> |reg|
+}
+
+/// Lower an `i64` scalar math builtin (`abs`/`min`/`max`/`gcd`/`sign`/`clamp`)
+/// inline, bit-for-bit with the interpreters. Returns `Ok(true)` when the call
+/// matched a builtin (result left in `x0`), `Ok(false)` when it did not (so the
+/// caller falls through to the ordinary `bl` path). Only the `i64` argument
+/// shapes are recognized; an `f64` operand (which the AArch64 core has no float
+/// support for) leaves the whole function to skip gracefully to the interpreters,
+/// mirroring the x86-64 backend's builtin recognition.
+fn lower_builtin_call(fg: &mut FnGen, name: &str, args: &[BytecodeExpr]) -> Result<bool, String> {
+    // `abs(x)` on i64: the branchless two's-complement idiom, matching release
+    // `i64::abs` (`abs(i64::MIN)` wraps to `i64::MIN`).
+    if name == "abs" && args.len() == 1 && args[0].ty.name == "i64" {
+        lower_expr(fg, &args[0])?; // x in x0
+        emit_abs_in_place(fg, 0, 1);
+        return Ok(true);
+    }
+    // `min(a, b)` / `max(a, b)` on i64: `cmp` + signed `csel`, matching
+    // `i64::min`/`i64::max`. Evaluate left (spilled), right, then pop left.
+    if (name == "min" || name == "max")
+        && args.len() == 2
+        && args[0].ty.name == "i64"
+        && args[1].ty.name == "i64"
+    {
+        lower_expr(fg, &args[0])?; // left
+        fg.emit(push_reg(0));
+        lower_expr(fg, &args[1])?; // right in x0
+        fg.emit(pop_reg(1)); // x1 = left, x0 = right
+        fg.emit(cmp_reg(1, 0)); // compare left, right
+        // min: take left when left < right; max: take left when left > right.
+        let cond = if name == "min" { COND_LT } else { COND_GT };
+        fg.emit(csel(0, 1, 0, cond)); // x0 = cond ? left : right
+        return Ok(true);
+    }
+    // `gcd(a, b)` on i64: unsigned-magnitude Euclid with `udiv` + `msub`,
+    // matching `gcd_i64`. Every magnitude is bounded by 2^63, which fits a u64,
+    // so the u64 loop is bit-identical — including `gcd(i64::MIN, 0)`, where
+    // `|i64::MIN|` = 2^63 reinterprets back to `i64::MIN`.
+    if name == "gcd" && args.len() == 2 && args[0].ty.name == "i64" {
+        lower_expr(fg, &args[0])?; // a
+        fg.emit(push_reg(0));
+        lower_expr(fg, &args[1])?; // b in x0
+        fg.emit(pop_reg(1)); // x1 = a, x0 = b
+        emit_abs_in_place(fg, 1, 2); // x1 = |a| = x (dividend)
+        emit_abs_in_place(fg, 0, 2); // x0 = |b| = y (divisor)
+        // while y(x0) != 0 { r = x % y; x = y; y = r }; result = x(x1).
+        let top = fg.new_label();
+        let done = fg.new_label();
+        fg.bind(top);
+        fg.emit_cbz(0, done); // y == 0 -> done
+        fg.emit(udiv_reg(2, 1, 0)); // x2 = x / y  (unsigned quotient)
+        fg.emit(msub_reg(3, 2, 0, 1)); // x3 = x - q*y = x % y
+        fg.emit(mov_reg(1, 0)); // x = y
+        fg.emit(mov_reg(0, 3)); // y = r
+        fg.emit_b(top);
+        fg.bind(done);
+        fg.emit(mov_reg(0, 1)); // result = x
+        return Ok(true);
+    }
+    // `sign(x)` on i64 -> `-1`/`0`/`1`: `(x > 0) - (x < 0)` via two `cset`s,
+    // matching `i64::signum`.
+    if name == "sign" && args.len() == 1 && args[0].ty.name == "i64" {
+        lower_expr(fg, &args[0])?; // x in x0
+        fg.emit(cmp_imm0(0));
+        fg.emit(cset(1, COND_GT)); // x1 = (x > 0) ? 1 : 0
+        fg.emit(cset(2, COND_LT)); // x2 = (x < 0) ? 1 : 0
+        fg.emit(sub_reg(0, 1, 2)); // x0 = (x>0) - (x<0)
+        return Ok(true);
+    }
+    // `clamp(x, lo, hi)` on i64: apply the upper clamp then the lower clamp (the
+    // lower wins, applied last), each comparing the *original* x — matching the
+    // interpreters' `if x < lo { lo } else if x > hi { hi } else { x }` for every
+    // ordering of `lo`/`hi` (including `lo > hi`).
+    if name == "clamp" && args.len() == 3 && args[0].ty.name == "i64" {
+        lower_expr(fg, &args[0])?; // x
+        fg.emit(push_reg(0));
+        lower_expr(fg, &args[1])?; // lo
+        fg.emit(push_reg(0));
+        lower_expr(fg, &args[2])?; // hi in x0
+        fg.emit(pop_reg(1)); // x1 = lo
+        fg.emit(pop_reg(2)); // x2 = x (original, preserved)
+        fg.emit(mov_reg(3, 2)); // x3 = result, seeded with x
+        fg.emit(cmp_reg(2, 0)); // x vs hi
+        fg.emit(csel(3, 0, 3, COND_GT)); // x > hi -> take hi
+        fg.emit(cmp_reg(2, 1)); // x vs lo
+        fg.emit(csel(3, 1, 3, COND_LT)); // x < lo -> take lo (wins)
+        fg.emit(mov_reg(0, 3));
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Lower a direct call: evaluate each argument, marshal into `x0..x7`, then `bl`.
 fn lower_call(fg: &mut FnGen, name: &str, args: &[BytecodeExpr]) -> Result<(), String> {
+    if lower_builtin_call(fg, name, args)? {
+        return Ok(());
+    }
     if !fg.callable.contains(name) {
         return Err(format!(
             "call to `{name}` is not an AArch64-eligible compiled function"
@@ -1160,6 +1284,11 @@ mod tests {
         assert_eq!(sdiv_reg(0, 0, 1), 0x9AC1_0C00, "sdiv x0, x0, x1");
         assert_eq!(cmp_reg(0, 1), 0xEB01_001F, "cmp x0, x1");
         assert_eq!(mov_reg(1, 0), 0xAA00_03E1, "mov x1, x0");
+        // The scalar-math-builtin encoders, pinned against known-good hex.
+        assert_eq!(csel(0, 1, 2, COND_EQ), 0x9A82_0020, "csel x0, x1, x2, eq");
+        assert_eq!(udiv_reg(0, 1, 2), 0x9AC2_0820, "udiv x0, x1, x2");
+        assert_eq!(asr_imm(1, 0, 63), 0x937F_FC01, "asr x1, x0, #63");
+        assert_eq!(msub_reg(3, 2, 0, 1), 0x9B00_8443, "msub x3, x2, x0, x1");
     }
 
     fn i64(kind: BytecodeExprKind) -> BytecodeExpr {
@@ -1281,5 +1410,154 @@ mod tests {
         let error = emit_aarch64_program(&module, &target).expect_err("nothing eligible");
         assert_eq!(error.code, NATIVE_NO_ELIGIBLE_CODE);
         assert!(error.skipped.iter().any(|s| s.name == "main"));
+    }
+
+    // -- i64 scalar-math builtin lowering ------------------------------------
+
+    /// Lower a single `i64` builtin call with integer-literal arguments, in
+    /// isolation, and return the emitted (fixup-resolved) machine-code words.
+    fn builtin_words(name: &str, args: &[i64]) -> Vec<u32> {
+        let callable: HashSet<String> = HashSet::new();
+        let mut fg = FnGen {
+            code: Vec::new(),
+            fixups: Vec::new(),
+            labels: Vec::new(),
+            calls: Vec::new(),
+            loops: Vec::new(),
+            locals: HashMap::new(),
+            locals_size: 0,
+            callable: &callable,
+        };
+        let arg_exprs: Vec<BytecodeExpr> = args
+            .iter()
+            .map(|v| i64(BytecodeExprKind::Integer(*v)))
+            .collect();
+        let handled =
+            lower_builtin_call(&mut fg, name, &arg_exprs).expect("builtin lowers without error");
+        assert!(handled, "`{name}` must be recognized as an i64 builtin");
+        fg.resolve_fixups();
+        fg.code
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    /// Whether `needle` appears as a contiguous subsequence of `haystack`.
+    fn contains_seq(haystack: &[u32], needle: &[u32]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn abs_i64_lowers_to_sign_mask_idiom() {
+        // asr x1, x0, #63 ; eor x0, x0, x1 ; sub x0, x0, x1
+        let words = builtin_words("abs", &[-5]);
+        assert!(
+            contains_seq(
+                &words,
+                &[asr_imm(1, 0, 63), eor_reg(0, 0, 1), sub_reg(0, 0, 1)],
+            ),
+            "abs must emit the two's-complement sign-mask idiom: {words:08X?}"
+        );
+    }
+
+    #[test]
+    fn min_max_i64_lower_to_cmp_csel() {
+        // min: cmp x1, x0 ; csel x0, x1, x0, lt  (take left when left < right)
+        let min_words = builtin_words("min", &[7, 3]);
+        assert!(
+            contains_seq(&min_words, &[cmp_reg(1, 0), csel(0, 1, 0, COND_LT)]),
+            "min must be a signed cmp + csel(lt): {min_words:08X?}"
+        );
+        // max: cmp x1, x0 ; csel x0, x1, x0, gt
+        let max_words = builtin_words("max", &[7, 3]);
+        assert!(
+            contains_seq(&max_words, &[cmp_reg(1, 0), csel(0, 1, 0, COND_GT)]),
+            "max must be a signed cmp + csel(gt): {max_words:08X?}"
+        );
+    }
+
+    #[test]
+    fn gcd_i64_lowers_to_unsigned_euclid() {
+        // Two abs (magnitudes) + a udiv/msub remainder Euclid loop.
+        let words = builtin_words("gcd", &[48, 36]);
+        assert!(
+            contains_seq(&words, &[udiv_reg(2, 1, 0), msub_reg(3, 2, 0, 1)]),
+            "gcd must use an unsigned udiv + msub remainder: {words:08X?}"
+        );
+        // The abs of the dividend (|a| in x1) precedes the loop.
+        assert!(
+            contains_seq(
+                &words,
+                &[asr_imm(2, 1, 63), eor_reg(1, 1, 2), sub_reg(1, 1, 2)],
+            ),
+            "gcd must take the unsigned magnitude of its first operand: {words:08X?}"
+        );
+    }
+
+    #[test]
+    fn sign_i64_lowers_to_cmp_two_csets() {
+        // cmp x0, #0 ; cset x1, gt ; cset x2, lt ; sub x0, x1, x2
+        let words = builtin_words("sign", &[-7]);
+        assert!(
+            contains_seq(
+                &words,
+                &[
+                    cmp_imm0(0),
+                    cset(1, COND_GT),
+                    cset(2, COND_LT),
+                    sub_reg(0, 1, 2),
+                ],
+            ),
+            "sign must be (x>0)-(x<0): {words:08X?}"
+        );
+    }
+
+    #[test]
+    fn clamp_i64_lowers_to_upper_then_lower_csel() {
+        // upper: cmp x2, x0 ; csel x3, x0, x3, gt
+        // lower: cmp x2, x1 ; csel x3, x1, x3, lt   (lower wins, applied last)
+        let words = builtin_words("clamp", &[150, 0, 100]);
+        assert!(
+            contains_seq(
+                &words,
+                &[
+                    cmp_reg(2, 0),
+                    csel(3, 0, 3, COND_GT),
+                    cmp_reg(2, 1),
+                    csel(3, 1, 3, COND_LT),
+                ],
+            ),
+            "clamp must apply the upper then the lower clamp: {words:08X?}"
+        );
+    }
+
+    #[test]
+    fn f64_builtin_operand_is_not_recognized() {
+        // An f64-typed operand must NOT match the i64 builtin path (the whole
+        // function then skips gracefully — there is no AArch64 float support).
+        let callable: HashSet<String> = HashSet::new();
+        let mut fg = FnGen {
+            code: Vec::new(),
+            fixups: Vec::new(),
+            labels: Vec::new(),
+            calls: Vec::new(),
+            loops: Vec::new(),
+            locals: HashMap::new(),
+            locals_size: 0,
+            callable: &callable,
+        };
+        let f64_arg = BytecodeExpr {
+            kind: BytecodeExprKind::Float(1.5),
+            ty: TypeRef::new("f64"),
+            span: Span::new(1, 1),
+        };
+        assert!(
+            !lower_builtin_call(&mut fg, "abs", std::slice::from_ref(&f64_arg)).unwrap(),
+            "abs(f64) must not be recognized by the i64 builtin path"
+        );
+        assert!(
+            !lower_builtin_call(&mut fg, "sign", std::slice::from_ref(&f64_arg)).unwrap(),
+            "sign(f64) must not be recognized by the i64 builtin path"
+        );
     }
 }
