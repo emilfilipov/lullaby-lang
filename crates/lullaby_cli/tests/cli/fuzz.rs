@@ -237,6 +237,114 @@ fn gen_program(seed: u64) -> String {
     Gen::new(seed).program()
 }
 
+/// Generates one program that exercises **fat-pointer `array<i64>` parameters**:
+/// `main` builds an `array<i64>` literal and passes it to a helper that reads it
+/// **read-only** — via `for x in a`, `a[i]`, and/or `len(a)` — and returns an i64.
+///
+/// This is the differential net for the native calling-convention change. The
+/// helper compiles to native code as a fat pointer (a `(data_ptr, length)`
+/// descriptor) rather than demoting because its length is not inferable, and the
+/// linked result must match the interpreters. Every generated access is in bounds
+/// (the separate-length shape uses `n` in `1..=len`, index reads run `0..len-1`),
+/// so the program is divergence-free just like the scalar generator.
+fn gen_array_program(seed: u64) -> String {
+    let mut rng = Rng(seed | 1);
+    // A small array of random i64 literals (length 2..=8).
+    let len = rng.range(2, 8) as usize;
+    let elems: Vec<String> = (0..len).map(|_| rng.range(-40, 40).to_string()).collect();
+    let arr = format!("[{}]", elems.join(", "));
+    // Pick a read-only helper body shape.
+    let shape = rng.below(5);
+    let k = rng.range(-20, 20);
+    // `n` for the separate-length shape: in `1..=len` (always in bounds).
+    let n = rng.range(1, len as i64);
+    let helper = match shape {
+        // for-each sum
+        0 => "fn helper a array<i64> -> i64\n    let acc i64 = 0\n    for x in a\n        \
+              acc = acc + x\n    acc\n"
+            .to_string(),
+        // for-each predicate count
+        1 => format!(
+            "fn helper a array<i64> -> i64\n    let c i64 = 0\n    for x in a\n        \
+             if x > {k}\n            c = c + 1\n    c\n"
+        ),
+        // indexed sum via len(a)
+        2 => "fn helper a array<i64> -> i64\n    let acc i64 = 0\n    \
+              for i from 0 to len(a) - 1\n        acc = acc + a[i]\n    acc\n"
+            .to_string(),
+        // max scan (a[0] plus for-each)
+        3 => "fn helper a array<i64> -> i64\n    let best i64 = a[0]\n    for x in a\n        \
+              if x > best\n            best = x\n    best\n"
+            .to_string(),
+        // separate-length indexed count (`count_frequency_of` shape)
+        _ => "fn helper a array<i64> n, x i64 -> i64\n    let c i64 = 0\n    \
+              for i from 0 to n - 1\n        if a[i] == x\n            c = c + 1\n    c\n"
+            .to_string(),
+    };
+    let call = if shape == 4 {
+        let x = elems[rng.below(len as u64) as usize].clone();
+        format!("helper(xs, {n}, {x})")
+    } else {
+        "helper(xs)".to_string()
+    };
+    let bias = rng.range(-100, 100);
+    format!(
+        "{helper}\nfn main -> i64\n    let xs array<i64> = {arr}\n    \
+         let r i64 = {call}\n    r + {bias}\n"
+    )
+}
+
+/// Generates one program that exercises **fat-pointer `array<f64>` parameters**:
+/// `main` builds an `array<f64>` literal and passes it to a read-only helper that
+/// reads each element through an XMM register (via `for x in a`, `a[i]`, `len(a)`)
+/// and returns an i64 (a comparison count or a summed-then-compared boolean —
+/// there is no `f64`→`i64` cast in the native subset, so the helper never returns a
+/// float).
+///
+/// Every literal is a `N.5` value (exact in IEEE-754 binary, no dtoa rounding), and
+/// native `f64` arithmetic/comparison is bit-exact with the interpreters (no
+/// `--fast-math`), so the comparisons are deterministic and the program is
+/// divergence-free.
+fn gen_array_f64_program(seed: u64) -> String {
+    let mut rng = Rng(seed | 1);
+    let len = rng.range(2, 8) as usize;
+    let elems: Vec<String> = (0..len)
+        .map(|_| format!("{}.5", rng.range(-20, 20)))
+        .collect();
+    let arr = format!("[{}]", elems.join(", "));
+    let shape = rng.below(3);
+    let t = format!("{}.5", rng.range(-20, 20));
+    let n = rng.range(1, len as i64);
+    let helper = match shape {
+        // for-each comparison count
+        0 => format!(
+            "fn helper a array<f64> -> i64\n    let c i64 = 0\n    for x in a\n        \
+             if x > {t}\n            c = c + 1\n    c\n"
+        ),
+        // indexed comparison count with a separate length
+        1 => format!(
+            "fn helper a array<f64> n i64 -> i64\n    let c i64 = 0\n    \
+             for i from 0 to n - 1\n        if a[i] > {t}\n            c = c + 1\n    c\n"
+        ),
+        // summed via len(a) then compared to a threshold
+        _ => format!(
+            "fn helper a array<f64> -> i64\n    let acc f64 = 0.0\n    \
+             for i from 0 to len(a) - 1\n        acc = acc + a[i]\n    \
+             if acc > {t}\n        1\n    else\n        0\n"
+        ),
+    };
+    let call = if shape == 1 {
+        format!("helper(xs, {n})")
+    } else {
+        "helper(xs)".to_string()
+    };
+    let bias = rng.range(-100, 100);
+    format!(
+        "{helper}\nfn main -> i64\n    let xs array<f64> = {arr}\n    \
+         let r i64 = {call}\n    r + {bias}\n"
+    )
+}
+
 /// The result of running a program on one backend, reduced to a comparable form.
 #[derive(PartialEq, Eq, Debug)]
 enum Outcome {
@@ -360,6 +468,123 @@ fn fuzz_native_matches_interpreter_when_linkable() {
         assert_eq!(
             exit, expected as i32,
             "NATIVE MISCOMPILE on #{i} (seed {seed:#x}):\n{source}\n\
+             interpreter={expected}, native exit={exit}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_array_interpreters_agree() {
+    // Cross-check the three engines on fat-pointer `array<i64>`-parameter programs.
+    // Always runs (no toolchain needed); a divergence prints the reproducing program.
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0x2545_F491_4F6C_DD1Du64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_array_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "array backend divergence on program #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "array generator produced a non-i64 main on seed {seed:#x}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_array_f64_interpreters_agree() {
+    // Cross-check the three engines on fat-pointer `array<f64>`-parameter programs.
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0xB5A9_7D3C_11E6_82F7u64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_array_f64_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "array<f64> backend divergence on program #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "array<f64> generator produced a non-i64 main on seed {seed:#x}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_array_native_matches_interpreter_when_linkable() {
+    // Compile each fat-pointer `array<i64>`-parameter program to a real `.exe` and
+    // check its exit code against the interpreter result — the high-value oracle for
+    // the calling-convention change. Gated on the link toolchain; skips cleanly when
+    // absent. This ASSERTS the helper (a fat-pointer array parameter) compiles
+    // natively, so a regression that demoted it would fail here, not silently pass.
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native array differential fuzz");
+        return;
+    }
+    ensure_msvc_env();
+
+    const PROGRAMS: u64 = 80;
+    let base_seed = 0x7C6A_2F13_88BE_4D05u64;
+    let dir = std::env::temp_dir().join("lullaby_fuzz_native_array");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        // Alternate `array<i64>` and `array<f64>` element types so the fat-pointer
+        // path is exercised for both the integer (GPR) and float (XMM) element read.
+        let source = if i % 2 == 0 {
+            gen_array_program(seed)
+        } else {
+            gen_array_f64_program(seed)
+        };
+
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "interpreter divergence on native-array-fuzz #{i} (seed {seed:#x}):\n{source}"
+        );
+        let expected = match ast {
+            Outcome::Value(n) => n,
+            other => panic!("array generator produced {other:?} on seed {seed:#x}:\n{source}"),
+        };
+
+        let src_path = dir.join(format!("fuzz_arr_{i}.lby"));
+        let exe_path = dir.join(format!("fuzz_arr_{i}.exe"));
+        std::fs::write(&src_path, &source).expect("write fuzz source");
+        let _ = std::fs::remove_file(&exe_path);
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "-o",
+                exe_path.to_str().expect("exe path"),
+                src_path.to_str().expect("src path"),
+            ])
+            .output()
+            .expect("run native");
+        assert!(
+            emit.status.success(),
+            "native emit failed on array-fuzz #{i} (seed {seed:#x}) — the helper's \
+             fat-pointer array parameter must compile:\n{source}\n{}",
+            stderr(&emit)
+        );
+        assert!(
+            exe_path.is_file(),
+            "no linked exe on array-fuzz #{i} (seed {seed:#x}):\n{source}\n{}",
+            stdout(&emit)
+        );
+
+        let run = Command::new(&exe_path).output().expect("run fuzz exe");
+        let exit = run.status.code().expect("native exit code");
+        assert_eq!(
+            exit, expected as i32,
+            "NATIVE MISCOMPILE (fat array) on #{i} (seed {seed:#x}):\n{source}\n\
              interpreter={expected}, native exit={exit}"
         );
     }
