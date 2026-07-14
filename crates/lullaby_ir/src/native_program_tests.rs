@@ -226,6 +226,32 @@ fn ilp_unrolls_counting_sum_loop() {
 }
 
 #[test]
+fn div_and_mod_by_power_of_two_strength_reduce_to_shifts() {
+    // `x / 8` and `x % 8` on plain i64 lower to the signed shift idiom (sign
+    // bias + `sar`), not `idiv`. `div_qword` (F7 /7) must be absent; the
+    // rounding `sar rax, 3` (48 C1 F8 03) present.
+    for (body, shift_k) in [("x / 8\n", 3u8), ("x % 8\n", 3u8)] {
+        let src = format!("fn f x i64 -> i64\n    {body}\nfn main -> i64\n    f(100)\n");
+        let program = emit_native_program(&module_for(&src)).expect("emit native program");
+        let sec = COFF_HEADER_SIZE as usize;
+        let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+        let text_size = read_u32(&program.bytes, sec + 16) as usize;
+        let text = &program.bytes[text_offset..text_offset + text_size];
+        assert!(
+            text.windows(4).any(|w| w == [0x48, 0xC1, 0xF8, shift_k]),
+            "expected `sar rax, {shift_k}` strength-reduced shift for `{body}`"
+        );
+        // `idiv r/m64` is `48 F7 F8..FF`; ModRM reg field = 7 (F8-FF). Assert none.
+        assert!(
+            !text
+                .windows(3)
+                .any(|w| w[0] == 0x48 && w[1] == 0xF7 && (0xF8..=0xFF).contains(&w[2])),
+            "power-of-two `{body}` must not emit idiv"
+        );
+    }
+}
+
+#[test]
 fn affine_reduction_uses_closed_form_block_imul() {
     // `acc += 3*i + 5` is affine, so K iterations fold into one `imul rax,
     // <i>, block_a` (48 69 C? = imul rax, rbx/rsi, imm32) plus `add rax, block_b`

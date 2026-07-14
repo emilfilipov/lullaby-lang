@@ -1219,6 +1219,44 @@ pub(crate) fn lower_native_binary(
                     return Ok(());
                 }
             }
+            // Strength-reduce `/` and `%` by a positive power-of-two constant on
+            // plain `i64` into shifts, avoiding the ~20-40 cycle `idiv` (exactly
+            // as C does). The sign-bias `(x + (x>>63 >>> (64-k)))` makes the
+            // arithmetic shift round toward zero, matching `wrapping_div`/
+            // `wrapping_rem` bit-for-bit (including `i64::MIN`). Non-power-of-two
+            // divisors and the fixed-width kinds fall through to `idiv`.
+            if fixed_int_kind(left.ty.name.as_str()).is_none()
+                && matches!(op, BinaryOp::Divide | BinaryOp::Remainder)
+                && let BytecodeExprKind::Integer(divisor) = &right.kind
+                && *divisor >= 2
+                && (*divisor & (*divisor - 1)) == 0
+            {
+                let k = divisor.trailing_zeros() as u8; // 1..=62 for a positive i64
+                lower_native_expr(ctx, left, code)?; // x in rax
+                match op {
+                    BinaryOp::Divide => {
+                        code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                        code.extend_from_slice(&[0x48, 0xC1, 0xF9, 63]); // sar rcx, 63
+                        code.extend_from_slice(&[0x48, 0xC1, 0xE9, 64 - k]); // shr rcx, 64-k
+                        code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx
+                        code.extend_from_slice(&[0x48, 0xC1, 0xF8, k]); // sar rax, k
+                    }
+                    BinaryOp::Remainder => {
+                        // rem = x - (x / 2^k) * 2^k, reusing the same rounded quotient.
+                        code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (save x)
+                        code.extend_from_slice(&[0x48, 0x89, 0xC2]); // mov rdx, rax
+                        code.extend_from_slice(&[0x48, 0xC1, 0xFA, 63]); // sar rdx, 63
+                        code.extend_from_slice(&[0x48, 0xC1, 0xEA, 64 - k]); // shr rdx, 64-k
+                        code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+                        code.extend_from_slice(&[0x48, 0xC1, 0xF8, k]); // sar rax, k
+                        code.extend_from_slice(&[0x48, 0xC1, 0xE0, k]); // shl rax, k
+                        code.extend_from_slice(&[0x48, 0x29, 0xC1]); // sub rcx, rax
+                        code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
+                    }
+                    _ => unreachable!(),
+                }
+                return Ok(());
+            }
             lower_native_expr(ctx, left, code)?;
             code.push(0x50); // push rax (left)
             lower_native_expr(ctx, right, code)?; // right in rax
