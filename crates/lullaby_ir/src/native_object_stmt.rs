@@ -2924,11 +2924,8 @@ pub(crate) struct AffineReductionLoop {
     acc: PReg,
     counter: PReg,
     bound: SumBound,
-    /// Per-block: `acc += block_a*i + block_b` (`block_a = a*K`, `block_b =
-    /// a*K(K-1)/2 + K*b`).
-    block_a: i32,
-    block_b: i32,
-    /// Per-remainder-iteration: `acc += a*i + b`.
+    /// The addend is `a*i + b`; the whole loop closed-forms to
+    /// `acc += a*S + b*count` where `S = sum(i0..n-1)` and `count = n - i0`.
     a: i32,
     b: i32,
 }
@@ -2990,17 +2987,10 @@ pub(crate) fn detect_affine_reduction(
         return None;
     }
     let (a64, b64) = affine_form(&addend.kind, counter_name)?;
-    // The per-block and per-iteration coefficients must all fit an i32 immediate;
+    // The coefficients must fit an i32 immediate for the closed-form `imul`s;
     // otherwise fall through to the multi-accumulator reduction.
-    const K: i64 = 4;
     let a = i32::try_from(a64).ok()?;
     let b = i32::try_from(b64).ok()?;
-    let block_a = i32::try_from(a64.checked_mul(K)?).ok()?;
-    let block_b = i32::try_from(
-        a64.checked_mul(K * (K - 1) / 2)?
-            .checked_add(b64.checked_mul(K)?)?,
-    )
-    .ok()?;
     let bound = parse_reduction_bound(right, counter_name, acc_name)?;
     let acc = promoted_reg_of_name(ctx, acc_name)?;
     let counter = promoted_reg_of_name(ctx, counter_name)?;
@@ -3011,99 +3001,83 @@ pub(crate) fn detect_affine_reduction(
         acc,
         counter,
         bound,
-        block_a,
-        block_b,
         a,
         b,
     })
 }
 
-/// `imul rax, <counter>, imm32` — `rax = counter * imm32` (low 64 bits).
-fn emit_imul_rax_counter_imm(code: &mut Vec<u8>, counter: PReg, imm: i32) {
-    // imul r64, r/m64, imm32 = REX.W 69 /r id ; ModRM = 11 rax(000) <counter>.
-    code.extend_from_slice(&[0x48, 0x69, 0xC0 | counter.code3()]);
-    code.extend_from_slice(&imm.to_le_bytes());
+/// `sub r8, <counter>` — `r8 -= i0` to form `count = n - i0`.
+fn emit_sub_r8_counter(code: &mut Vec<u8>, counter: PReg) {
+    // sub r/m64, r64 = REX.WB 29 /r ; ModRM = 11 <counter> r8(000).
+    code.extend_from_slice(&[0x49, 0x29, 0xC0 | (counter.code3() << 3)]);
 }
 
-/// `add rax, imm32` (sign-extended).
-fn emit_add_rax_imm(code: &mut Vec<u8>, imm: i32) {
-    code.extend_from_slice(&[0x48, 0x05]);
-    code.extend_from_slice(&imm.to_le_bytes());
-}
-
+/// Emit the affine reduction `while i < n { acc += a*i + b; i += 1 }` as the O(1)
+/// closed form `acc += a*S + b*count`, where `count = n - i0` (kept in r8) and
+/// `S = sum(i0..n-1) = (i0+n-1)*count/2` (the exact wrapping halve of the
+/// counting sum). Reads i0/n/acc at run time; a `count <= 0` guard skips an empty
+/// loop and it seats `i = n` afterward. O(1) instead of O(n).
 pub(crate) fn emit_affine_reduction(
     ctx: &mut NativeCtx,
     plan: &AffineReductionLoop,
     code: &mut Vec<u8>,
 ) -> Result<(), String> {
-    const K: i64 = 4;
     let AffineReductionLoop {
-        acc,
-        counter,
-        block_a,
-        block_b,
-        a,
-        b,
-        ..
+        acc, counter, a, b, ..
     } = *plan;
-    const RCX: u8 = 1; // bound
-    const RDX: u8 = 2; // limit = bound - (K-1)
+    const RCX: u8 = 1;
 
-    // Bounds: rcx = bound, rdx = bound-(K-1). The affine block/remainder use only
-    // rax + the promoted counter (imul rax, counter, imm; add rax, imm), so rcx
-    // and rdx survive the loop untouched.
-    let skip_main_site = match &plan.bound {
-        SumBound::Const(bound) => {
-            emit_mov_scratch_imm(code, RCX, *bound as i32);
-            emit_mov_scratch_imm(code, RDX, (bound - (K - 1)) as i32);
-            None
-        }
+    // rcx = n.
+    match &plan.bound {
+        SumBound::Const(bound) => emit_mov_scratch_imm(code, RCX, *bound as i32),
         SumBound::Runtime(bound_expr) => {
             lower_native_expr(ctx, bound_expr, code)?; // rax = n
             code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
-            code.extend_from_slice(&[0x48, 0x83, 0xF9, K as u8]); // cmp rcx, K
-            code.extend_from_slice(&[0x0F, 0x8C]); // jl skip_main
-            let site = code.len();
-            code.extend_from_slice(&[0, 0, 0, 0]);
-            code.extend_from_slice(&[0x48, 0x89, 0xCA]); // mov rdx, rcx
-            code.extend_from_slice(&[0x48, 0x83, 0xEA, (K - 1) as u8]); // sub rdx, K-1
-            Some(site)
         }
-    };
-
-    // Blocked main loop: acc += block_a*i + block_b, i += K.
-    emit_align_loop_top(code);
-    let main_top = code.len();
-    emit_cmp_counter_scratch(code, counter, RDX);
-    code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end
-    let main_exit = code.len();
-    code.extend_from_slice(&[0, 0, 0, 0]);
-    emit_imul_rax_counter_imm(code, counter, block_a);
-    emit_add_rax_imm(code, block_b);
-    acc.add_rax(code);
-    counter.add_imm(code, K as i32);
-    emit_jmp_to(code, main_top);
-    let main_end = code.len();
-    patch_rel32_to(code, main_exit, main_end);
-
-    if let Some(site) = skip_main_site {
-        let here = code.len();
-        patch_rel32_to(code, site, here);
     }
 
-    // Scalar remainder: acc += a*i + b, i += 1.
-    let rem_top = code.len();
-    emit_cmp_counter_scratch(code, counter, RCX);
-    code.extend_from_slice(&[0x0F, 0x8D]); // jge rem_end
-    let rem_exit = code.len();
+    // r8 = count = n - i0. Skip (acc/i unchanged) when count <= 0.
+    code.extend_from_slice(&[0x49, 0x89, 0xC8]); // mov r8, rcx
+    emit_sub_r8_counter(code, counter); // sub r8, i0
+    code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+    code.extend_from_slice(&[0x0F, 0x8E]); // jle done
+    let done_site = code.len();
     code.extend_from_slice(&[0, 0, 0, 0]);
-    emit_imul_rax_counter_imm(code, counter, a);
-    emit_add_rax_imm(code, b);
-    acc.add_rax(code);
-    counter.add_imm(code, 1);
-    emit_jmp_to(code, rem_top);
-    let rem_end = code.len();
-    patch_rel32_to(code, rem_exit, rem_end);
+
+    // rax = A = i0 + n - 1.
+    counter.to_rax(code);
+    code.extend_from_slice(&[0x48, 0x01, 0xC8]); // add rax, rcx
+    code.extend_from_slice(&[0x48, 0x83, 0xE8, 0x01]); // sub rax, 1
+
+    // rax = S = A*count/2 (exact halve of whichever of A/count is even).
+    code.extend_from_slice(&[0x4C, 0x89, 0xC2]); // mov rdx, r8  (count copy)
+    code.extend_from_slice(&[0xF6, 0xC2, 0x01]); // test dl, 1
+    code.extend_from_slice(&[0x0F, 0x84]); // jz count_even
+    let count_even_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xD1, 0xF8]); // sar rax, 1
+    code.extend_from_slice(&[0xE9]); // jmp mul
+    let jmp_mul_site = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    let count_even = code.len();
+    patch_rel32_to(code, count_even_site, count_even);
+    code.extend_from_slice(&[0x48, 0xD1, 0xEA]); // shr rdx, 1
+    let mul = code.len();
+    patch_rel32_to(code, jmp_mul_site, mul);
+    code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC2]); // imul rax, rdx -> rax = S
+
+    // result = a*S + b*count.
+    code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, a
+    code.extend_from_slice(&a.to_le_bytes());
+    code.extend_from_slice(&[0x49, 0x69, 0xD0]); // imul rdx, r8, b
+    code.extend_from_slice(&b.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x01, 0xD0]); // add rax, rdx
+
+    acc.add_rax(code); // acc += a*S + b*count
+    emit_mov_counter_rcx(code, counter); // i = n
+
+    let done = code.len();
+    patch_rel32_to(code, done_site, done);
     Ok(())
 }
 

@@ -243,10 +243,11 @@ fn div_and_mod_by_power_of_two_strength_reduce_to_shifts() {
 }
 
 #[test]
-fn affine_reduction_uses_closed_form_block_imul() {
-    // `acc += 3*i + 5` is affine, so K iterations fold into one `imul rax,
-    // <i>, block_a` (48 69 C? = imul rax, rbx/rsi, imm32) plus `add rax, block_b`
-    // — one dependent op per block, which beats C. block_a = 3*4 = 12.
+fn affine_reduction_lowers_to_closed_form() {
+    // `acc += 3*i + 5` is affine, so the whole loop closed-forms to
+    // `acc += a*S + b*count` (no loop): `imul rax, rax, 3` (48 69 C0 03..) scales
+    // S by a, `imul rdx, r8, 5` (49 69 D0 05..) forms b*count, then `add rax, rdx`
+    // — and no backward loop jump remains.
     let program = emit_native_program(&module_for(concat!(
         "fn red n i64 -> i64\n",
         "    let acc i64 = 0\n",
@@ -263,15 +264,21 @@ fn affine_reduction_uses_closed_form_block_imul() {
     let text_offset = read_u32(&program.bytes, sec + 20) as usize;
     let text_size = read_u32(&program.bytes, sec + 16) as usize;
     let text = &program.bytes[text_offset..text_offset + text_size];
-    // `imul rax, <rbx|rsi>, 12` : 48 69 (C3|C6) 0C 00 00 00.
-    let has_block_imul = text.windows(7).any(|w| {
-        w[0..2] == [0x48, 0x69]
-            && (w[2] == 0xC3 || w[2] == 0xC6)
-            && w[3..7] == [0x0C, 0x00, 0x00, 0x00]
-    });
     assert!(
-        has_block_imul,
-        "expected the affine block-sum `imul rax, i, 12` (block_a = a*K = 12)"
+        text.windows(7)
+            .any(|w| w[0..3] == [0x48, 0x69, 0xC0] && w[3..7] == [0x03, 0x00, 0x00, 0x00]),
+        "expected `imul rax, rax, 3` (a*S) in the affine closed form"
+    );
+    assert!(
+        text.windows(7)
+            .any(|w| w[0..3] == [0x49, 0x69, 0xD0] && w[3..7] == [0x05, 0x00, 0x00, 0x00]),
+        "expected `imul rdx, r8, 5` (b*count) in the affine closed form"
+    );
+    assert!(
+        !text
+            .windows(5)
+            .any(|w| w[0] == 0xE9 && i32::from_le_bytes([w[1], w[2], w[3], w[4]]) < 0),
+        "the affine reduction is closed-form (O(1)); no backward loop jump should remain"
     );
 }
 
