@@ -237,6 +237,63 @@ fn gen_program(seed: u64) -> String {
     Gen::new(seed).program()
 }
 
+/// Generates one program that exercises **fat-pointer `array<i64>` parameters**:
+/// `main` builds an `array<i64>` literal and passes it to a helper that reads it
+/// **read-only** — via `for x in a`, `a[i]`, and/or `len(a)` — and returns an i64.
+///
+/// This is the differential net for the native calling-convention change. The
+/// helper compiles to native code as a fat pointer (a `(data_ptr, length)`
+/// descriptor) rather than demoting because its length is not inferable, and the
+/// linked result must match the interpreters. Every generated access is in bounds
+/// (the separate-length shape uses `n` in `1..=len`, index reads run `0..len-1`),
+/// so the program is divergence-free just like the scalar generator.
+fn gen_array_program(seed: u64) -> String {
+    let mut rng = Rng(seed | 1);
+    // A small array of random i64 literals (length 2..=8).
+    let len = rng.range(2, 8) as usize;
+    let elems: Vec<String> = (0..len).map(|_| rng.range(-40, 40).to_string()).collect();
+    let arr = format!("[{}]", elems.join(", "));
+    // Pick a read-only helper body shape.
+    let shape = rng.below(5);
+    let k = rng.range(-20, 20);
+    // `n` for the separate-length shape: in `1..=len` (always in bounds).
+    let n = rng.range(1, len as i64);
+    let helper = match shape {
+        // for-each sum
+        0 => "fn helper a array<i64> -> i64\n    let acc i64 = 0\n    for x in a\n        \
+              acc = acc + x\n    acc\n"
+            .to_string(),
+        // for-each predicate count
+        1 => format!(
+            "fn helper a array<i64> -> i64\n    let c i64 = 0\n    for x in a\n        \
+             if x > {k}\n            c = c + 1\n    c\n"
+        ),
+        // indexed sum via len(a)
+        2 => "fn helper a array<i64> -> i64\n    let acc i64 = 0\n    \
+              for i from 0 to len(a) - 1\n        acc = acc + a[i]\n    acc\n"
+            .to_string(),
+        // max scan (a[0] plus for-each)
+        3 => "fn helper a array<i64> -> i64\n    let best i64 = a[0]\n    for x in a\n        \
+              if x > best\n            best = x\n    best\n"
+            .to_string(),
+        // separate-length indexed count (`count_frequency_of` shape)
+        _ => "fn helper a array<i64> n, x i64 -> i64\n    let c i64 = 0\n    \
+              for i from 0 to n - 1\n        if a[i] == x\n            c = c + 1\n    c\n"
+            .to_string(),
+    };
+    let call = if shape == 4 {
+        let x = elems[rng.below(len as u64) as usize].clone();
+        format!("helper(xs, {n}, {x})")
+    } else {
+        "helper(xs)".to_string()
+    };
+    let bias = rng.range(-100, 100);
+    format!(
+        "{helper}\nfn main -> i64\n    let xs array<i64> = {arr}\n    \
+         let r i64 = {call}\n    r + {bias}\n"
+    )
+}
+
 /// The result of running a program on one backend, reduced to a comparable form.
 #[derive(PartialEq, Eq, Debug)]
 enum Outcome {
@@ -361,6 +418,28 @@ fn fuzz_native_matches_interpreter_when_linkable() {
             exit, expected as i32,
             "NATIVE MISCOMPILE on #{i} (seed {seed:#x}):\n{source}\n\
              interpreter={expected}, native exit={exit}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_array_interpreters_agree() {
+    // Cross-check the three engines on fat-pointer `array<i64>`-parameter programs.
+    // Always runs (no toolchain needed); a divergence prints the reproducing program.
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0x2545_F491_4F6C_DD1Du64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_array_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "array backend divergence on program #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "array generator produced a non-i64 main on seed {seed:#x}:\n{source}"
         );
     }
 }
