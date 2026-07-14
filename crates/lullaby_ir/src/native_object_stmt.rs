@@ -1065,7 +1065,20 @@ pub(crate) fn lower_native_stmt(
             Ok(())
         }
         BytecodeInstruction::Break(_) => {
-            let loop_ctx = loops.last_mut().ok_or("`break` outside a loop")?;
+            // RC stage 2: drop this loop's LIVE owned heap temporaries on the break
+            // edge before jumping out. Exactly-once safety: a dynamic iteration takes
+            // exactly one of {fallthrough back-edge, break, continue}; the fallthrough
+            // drop is emitted at end-of-body, which this `jmp end` skips, so no owned
+            // value is dropped on more than one edge. `live_drops` holds only locals
+            // whose `let` textually precedes this `break`, so each dropped slot is a
+            // live, uniquely-owned value.
+            let drops = loops
+                .last()
+                .ok_or("`break` outside a loop")?
+                .live_drops
+                .clone();
+            emit_owned_local_drops(ctx, &drops, code);
+            let loop_ctx = loops.last_mut().expect("loop present (checked above)");
             // jmp rel32 (target patched at loop end).
             code.push(0xE9);
             let site = code.len();
@@ -1074,7 +1087,19 @@ pub(crate) fn lower_native_stmt(
             Ok(())
         }
         BytecodeInstruction::Continue(_) => {
-            let loop_ctx = loops.last_mut().ok_or("`continue` outside a loop")?;
+            // RC stage 2: drop this loop's LIVE owned heap temporaries on the continue
+            // edge before jumping to the loop top / step block. The fallthrough drop is
+            // emitted at end-of-body, which this `continue` jump skips, so no owned
+            // value is dropped twice. This is the reclamation-critical early-exit case:
+            // a `continue` recurs every iteration, so leaking here exhausts the heap,
+            // whereas a `break` fires at most once.
+            let drops = loops
+                .last()
+                .ok_or("`continue` outside a loop")?
+                .live_drops
+                .clone();
+            emit_owned_local_drops(ctx, &drops, code);
+            let loop_ctx = loops.last_mut().expect("loop present (checked above)");
             match loop_ctx.continue_target {
                 Some(target) => emit_jmp_to(code, target),
                 None => {
@@ -3452,11 +3477,13 @@ pub(crate) fn lower_native_while(
         continue_target: Some(top),
         continue_sites: Vec::new(),
         break_sites: Vec::new(),
+        live_drops: Vec::new(),
     });
-    lower_native_stmts(ctx, body, code, loops)?;
+    lower_loop_body_with_drops(ctx, body, code, loops)?;
     // Reclaim per-iteration owned string temporaries on the fallthrough back-edge
-    // (RC drop insertion); `continue` (jumps to `top`) and `break` skip it and leak
-    // on those paths, which is safe.
+    // (RC drop insertion). `break`/`continue` now drop the live owned locals on their
+    // own edges (see `lower_loop_body_with_drops`); each dynamic iteration takes
+    // exactly one of {fallthrough, break, continue}, so no value is dropped twice.
     emit_loop_body_string_drops(ctx, body, code)?;
     let loop_ctx = loops.pop().expect("loop pushed");
 
@@ -3482,8 +3509,9 @@ pub(crate) fn lower_native_loop(
         continue_target: Some(top),
         continue_sites: Vec::new(),
         break_sites: Vec::new(),
+        live_drops: Vec::new(),
     });
-    lower_native_stmts(ctx, body, code, loops)?;
+    lower_loop_body_with_drops(ctx, body, code, loops)?;
     emit_loop_body_string_drops(ctx, body, code)?;
     let loop_ctx = loops.pop().expect("loop pushed");
 
@@ -3717,6 +3745,34 @@ pub(crate) fn emit_loop_body_string_drops(
     body: &[BytecodeInstruction],
     code: &mut Vec<u8>,
 ) -> Result<(), String> {
+    for (_idx, slot, drop_symbol) in collect_loop_body_drops(ctx, body) {
+        // mov rcx, [rbp - slot] ; call <drop_symbol>
+        code.extend_from_slice(&[0x48, 0x8B, 0x8D]);
+        code.extend_from_slice(&(-slot).to_le_bytes());
+        emit_call_symbol(ctx, drop_symbol, code);
+    }
+    Ok(())
+}
+
+/// Identify the uniquely-owned, borrow-only heap locals declared directly in a loop
+/// `body` that are droppable at scope exit. Returns `(body index, frame slot,
+/// drop-helper symbol)` for each — the SINGLE source of truth shared by the
+/// fallthrough back-edge drop ([`emit_loop_body_string_drops`]) and the early-exit
+/// (`break`/`continue`) drops ([`lower_loop_body_with_drops`]). Deriving both edge
+/// families from one predicate guarantees the early-exit drop set is exactly the
+/// fallthrough drop set, so a value dropped on an early edge is provably one that is
+/// also uniquely owned and dead — never a spurious slot.
+///
+/// The two cases mirror the shipped drop coverage: a `string` local (fresh alloc,
+/// borrow-only via `len(name)`; dropped by `rc_dec`) and an `array<string>` local (a
+/// `split`/`words` result, borrow-only via `len(name)`/`len(name[i])`; dropped
+/// recursively by `__lullaby_drop_string_array`). All are stack locals (a heap-using
+/// function is never register-promoted, so the pointer is always in a stack slot).
+pub(crate) fn collect_loop_body_drops(
+    ctx: &NativeCtx,
+    body: &[BytecodeInstruction],
+) -> Vec<(usize, i32, &'static str)> {
+    let mut drops = Vec::new();
     for (idx, stmt) in body.iter().enumerate() {
         let BytecodeInstruction::Let { name, value, .. } = stmt else {
             continue;
@@ -3742,10 +3798,51 @@ pub(crate) fn emit_loop_body_string_drops(
         if !string_local_borrow_only_stmts(name, &body[idx + 1..], allow_index) {
             continue;
         }
-        // mov rcx, [rbp - slot] ; call <drop_symbol>
+        drops.push((idx, slot, drop_symbol));
+    }
+    drops
+}
+
+/// Emit `mov rcx, [rbp - slot]; call <symbol>` for each owned local — the drop-site
+/// encoding shared by the fallthrough and early-exit edges. Identical bytes to the
+/// fallthrough loop-body drop, so no new free-list-touching machine code is
+/// introduced by the early-exit path.
+pub(crate) fn emit_owned_local_drops(
+    ctx: &mut NativeCtx,
+    drops: &[(i32, &'static str)],
+    code: &mut Vec<u8>,
+) {
+    for &(slot, symbol) in drops {
         code.extend_from_slice(&[0x48, 0x8B, 0x8D]);
         code.extend_from_slice(&(-slot).to_le_bytes());
-        emit_call_symbol(ctx, drop_symbol, code);
+        emit_call_symbol(ctx, symbol, code);
+    }
+}
+
+/// Lower a loop `body`, revealing each uniquely-owned droppable local into the
+/// innermost loop's `live_drops` set the moment its `let` has been lowered. Because
+/// the reveal happens AFTER lowering the declaring statement, a `break`/`continue`
+/// lowered inside any later top-level statement sees exactly the owned locals whose
+/// declaration textually precedes it — and never a slot whose `let` has not run
+/// (those are added only once their statement is reached). Droppable `let`s are
+/// always direct children of the loop body, so a `break`/`continue` located inside
+/// top-level statement `j` is reached only after every earlier statement (including
+/// each droppable `let` at index `< j`) has executed. This is what makes the
+/// early-exit drop provably fire on a LIVE value exactly once per dynamic path.
+pub(crate) fn lower_loop_body_with_drops(
+    ctx: &mut NativeCtx,
+    body: &[BytecodeInstruction],
+    code: &mut Vec<u8>,
+    loops: &mut Vec<NativeLoop>,
+) -> Result<(), String> {
+    let drops = collect_loop_body_drops(ctx, body);
+    for (j, stmt) in body.iter().enumerate() {
+        lower_native_stmt(ctx, stmt, code, loops)?;
+        if let Some(&(_, slot, symbol)) = drops.iter().find(|(idx, _, _)| *idx == j)
+            && let Some(top) = loops.last_mut()
+        {
+            top.live_drops.push((slot, symbol));
+        }
     }
     Ok(())
 }
@@ -4144,12 +4241,15 @@ pub(crate) fn lower_native_for(
         continue_target: None,
         continue_sites: Vec::new(),
         break_sites: Vec::new(),
+        live_drops: Vec::new(),
     });
-    lower_native_stmts(ctx, body, code, loops)?;
+    lower_loop_body_with_drops(ctx, body, code, loops)?;
     // Reclaim uniquely-owned per-iteration string temporaries on the fallthrough
-    // back-edge (RC drop insertion). Placed BEFORE the step label so a `continue`
-    // (which jumps to the step label) skips it — leaking on that path, which is
-    // safe — while the common no-`continue` body frees every iteration.
+    // back-edge (RC drop insertion). Placed BEFORE the step label. A `continue`
+    // (which jumps to the step label) and a `break` now drop the live owned locals
+    // on their OWN edge (see `lower_loop_body_with_drops`) before jumping, so every
+    // path frees each owned temporary exactly once — the fallthrough here, or the
+    // early-exit edge, never both.
     emit_loop_body_string_drops(ctx, body, code)?;
     let loop_ctx = loops.pop().expect("loop pushed");
 
