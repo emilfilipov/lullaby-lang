@@ -188,8 +188,22 @@ impl Gen {
                     } else {
                         self.rng.range(0, 40).to_string()
                     };
+                    // The addend is the bare counter (the closed-form counting
+                    // sum) or a pure polynomial in the counter (the
+                    // multi-accumulator / affine reduction paths).
+                    let addend = match self.rng.below(5) {
+                        0 => ctr.clone(),
+                        1 => format!("({ctr} * {ctr})"),
+                        2 => format!(
+                            "(({} * {ctr}) + {})",
+                            self.rng.range(-6, 6),
+                            self.rng.range(-9, 9)
+                        ),
+                        3 => format!("(({ctr} - {}) * {ctr})", self.rng.range(-4, 4)),
+                        _ => format!("({ctr} * {ctr} * {ctr})"),
+                    };
                     self.push_line(1, &format!("while {ctr} < {bound}"));
-                    self.push_line(2, &format!("{acc} = {acc} + {ctr}"));
+                    self.push_line(2, &format!("{acc} = {acc} + {addend}"));
                     self.push_line(2, &format!("{ctr} = {ctr} + 1"));
                 }
                 // Otherwise a new binding (also the fallback when `if`/`for` guards

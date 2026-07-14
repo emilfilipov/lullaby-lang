@@ -226,6 +226,70 @@ fn ilp_unrolls_counting_sum_loop() {
 }
 
 #[test]
+fn affine_reduction_uses_closed_form_block_imul() {
+    // `acc += 3*i + 5` is affine, so K iterations fold into one `imul rax,
+    // <i>, block_a` (48 69 C? = imul rax, rbx/rsi, imm32) plus `add rax, block_b`
+    // — one dependent op per block, which beats C. block_a = 3*4 = 12.
+    let program = emit_native_program(&module_for(concat!(
+        "fn red n i64 -> i64\n",
+        "    let acc i64 = 0\n",
+        "    let i i64 = 0\n",
+        "    while i < n\n",
+        "        acc = acc + ((3 * i) + 5)\n",
+        "        i = i + 1\n",
+        "    return acc\n\n",
+        "fn main -> i64\n",
+        "    red(1000)\n",
+    )))
+    .expect("emit native program");
+    let sec = COFF_HEADER_SIZE as usize;
+    let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+    let text_size = read_u32(&program.bytes, sec + 16) as usize;
+    let text = &program.bytes[text_offset..text_offset + text_size];
+    // `imul rax, <rbx|rsi>, 12` : 48 69 (C3|C6) 0C 00 00 00.
+    let has_block_imul = text.windows(7).any(|w| {
+        w[0..2] == [0x48, 0x69]
+            && (w[2] == 0xC3 || w[2] == 0xC6)
+            && w[3..7] == [0x0C, 0x00, 0x00, 0x00]
+    });
+    assert!(
+        has_block_imul,
+        "expected the affine block-sum `imul rax, i, 12` (block_a = a*K = 12)"
+    );
+}
+
+#[test]
+fn quadratic_reduction_uses_multi_accumulator() {
+    // `acc += i*i` is not affine, so it uses the multi-accumulator unroll: the
+    // three extra accumulators are zeroed (`xor r8,r8` = 4D 31 C0) and folded
+    // back in (`add rax, r8` into a lane, and `add <acc>, r8` = 4C 01 ..).
+    let program = emit_native_program(&module_for(concat!(
+        "fn red n i64 -> i64\n",
+        "    let acc i64 = 0\n",
+        "    let i i64 = 0\n",
+        "    while i < n\n",
+        "        acc = acc + (i * i)\n",
+        "        i = i + 1\n",
+        "    return acc\n\n",
+        "fn main -> i64\n",
+        "    red(1000)\n",
+    )))
+    .expect("emit native program");
+    let sec = COFF_HEADER_SIZE as usize;
+    let text_offset = read_u32(&program.bytes, sec + 20) as usize;
+    let text_size = read_u32(&program.bytes, sec + 16) as usize;
+    let text = &program.bytes[text_offset..text_offset + text_size];
+    assert!(
+        text.windows(3).any(|w| w == [0x4D, 0x31, 0xC0]),
+        "expected the multi-accumulator zeroing `xor r8, r8`"
+    );
+    assert!(
+        text.windows(3).any(|w| w == [0x49, 0x01, 0xC0]),
+        "expected an accumulator lane add `add r8, rax`"
+    );
+}
+
+#[test]
 fn ilp_unrolls_runtime_bound_counting_sum() {
     // `while i < n` (a *runtime* i64 bound) also lowers to the blocked ILP loop:
     // the block-sum `lea rax, [i*4 + 6]` must appear, and — because the counter

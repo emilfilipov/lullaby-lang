@@ -2562,11 +2562,13 @@ pub(crate) fn emit_lea_rax_index4_plus(code: &mut Vec<u8>, index: PReg, disp: i3
 /// Emit the ILP-unrolled counting-sum loop: a blocked main loop summing `K`
 /// consecutive counter values per iteration into `acc` (one dependent add per
 /// block), then a scalar remainder loop for the final `< K` iterations.
-/// `cmp <counter>, <reg>` where `reg` is `rcx` or `rdx` — a promoted-register
-/// counter compared directly against a scratch register (`cmp r/m64, r64`,
-/// REX.W 39 /r; ModRM = 11 <reg> <counter>).
-fn emit_cmp_counter_scratch(code: &mut Vec<u8>, counter: PReg, scratch3: u8) {
-    code.extend_from_slice(&[0x48, 0x39, 0xC0 | (scratch3 << 3) | counter.code3()]);
+/// `cmp <counter>, <reg>` — a promoted-register counter compared directly
+/// against a scratch register given by its full number (`rcx`=1, `rdx`=2,
+/// `r11`=11, …). `cmp r/m64, r64` is REX.W(+R for r8..r15) 39 /r; ModRM =
+/// 11 (reg&7) <counter>.
+fn emit_cmp_counter_scratch(code: &mut Vec<u8>, counter: PReg, reg: u8) {
+    let rex = 0x48 | if reg >= 8 { 0x04 } else { 0 };
+    code.extend_from_slice(&[rex, 0x39, 0xC0 | ((reg & 7) << 3) | counter.code3()]);
 }
 
 pub(crate) fn emit_sum_reduction(
@@ -2651,6 +2653,452 @@ fn emit_mov_scratch_imm(code: &mut Vec<u8>, scratch3: u8, imm: i32) {
     code.extend_from_slice(&imm.to_le_bytes());
 }
 
+/// A general reduction `while i < BOUND { acc = acc + EXPR; i = i + 1 }` where
+/// `EXPR` is a **pure polynomial in the counter** (integer literals, the counter
+/// `i`, and `+`/`-`/`*` only — no other variable, no division, no call, so it
+/// cannot fault and is side-effect free). Distinct from the counting-sum
+/// reduction (`EXPR == i`, which has a cheaper closed form). The naive lowering
+/// serializes on the `acc` dependency (one add per element, latency-bound —
+/// ~2.5× slower than C on `acc += i*i`); the multi-accumulator unroll spreads
+/// the adds across four independent accumulators to break that chain, matching
+/// C's ILP on sum-of-squares / dot-product / weighted-sum shapes.
+pub(crate) struct GeneralReductionLoop {
+    acc: PReg,
+    counter: PReg,
+    bound: SumBound,
+    addend: BytecodeExpr,
+}
+
+/// True when `expr` is a pure polynomial in `counter` — the safe class the
+/// multi-accumulator reduction may re-evaluate at several counter values: an
+/// integer literal, the counter itself, or `+`/`-`/`*` of such. Any other
+/// variable, operator, index, or call disqualifies it (a non-counter variable
+/// could be loop-variant; `/`/`%` could divide by zero; a call could fault or
+/// have effects).
+fn is_pure_counter_poly(expr: &BytecodeExprKind, counter: &str) -> bool {
+    match expr {
+        BytecodeExprKind::Integer(_) => true,
+        BytecodeExprKind::Variable(name) => name == counter,
+        BytecodeExprKind::Binary { left, op, right } => {
+            matches!(op, BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply)
+                && is_pure_counter_poly(&left.kind, counter)
+                && is_pure_counter_poly(&right.kind, counter)
+        }
+        _ => false,
+    }
+}
+
+/// If `stmt` is `acc = acc + EXPR` (via `=` with an `acc + …` RHS) or
+/// `acc += EXPR`, return `EXPR`.
+fn reduction_addend(stmt: &BytecodeInstruction, acc: &str) -> Option<BytecodeExpr> {
+    let BytecodeInstruction::Assign {
+        name,
+        path,
+        op,
+        value,
+        ..
+    } = stmt
+    else {
+        return None;
+    };
+    if name != acc || !path.is_empty() {
+        return None;
+    }
+    match op {
+        AssignOp::Add => Some(value.clone()),
+        AssignOp::Replace => match &value.kind {
+            BytecodeExprKind::Binary {
+                left,
+                op: BinaryOp::Add,
+                right,
+            } if matches!(&left.kind, BytecodeExprKind::Variable(v) if v == acc) => {
+                Some(right.as_ref().clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Parse `i < BOUND` where `BOUND` is a constant `≥ 8` or a loop-invariant `i64`
+/// variable distinct from `counter`/`acc`, shared by both reduction detectors.
+fn parse_reduction_bound(
+    right: &BytecodeExpr,
+    counter_name: &str,
+    acc_name: &str,
+) -> Option<SumBound> {
+    match &right.kind {
+        BytecodeExprKind::Integer(value) => {
+            if *value < 8 || i32::try_from(*value).is_err() {
+                return None;
+            }
+            Some(SumBound::Const(*value))
+        }
+        BytecodeExprKind::Variable(bound_name)
+            if right.ty.name == "i64" && bound_name != counter_name && bound_name != acc_name =>
+        {
+            Some(SumBound::Runtime(right.clone()))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn detect_general_reduction(
+    ctx: &NativeCtx,
+    condition: &BytecodeExpr,
+    body: &[BytecodeInstruction],
+) -> Option<GeneralReductionLoop> {
+    let BytecodeExprKind::Binary {
+        left,
+        op: BinaryOp::Less,
+        right,
+    } = &condition.kind
+    else {
+        return None;
+    };
+    let BytecodeExprKind::Variable(counter_name) = &left.kind else {
+        return None;
+    };
+    if left.ty.name != "i64" {
+        return None;
+    }
+    // Body: exactly `[ acc = acc + EXPR, i = i + 1 ]`.
+    let [acc_stmt, step_stmt] = body else {
+        return None;
+    };
+    let BytecodeInstruction::Assign { name: acc_name, .. } = acc_stmt else {
+        return None;
+    };
+    if acc_name == counter_name {
+        return None;
+    }
+    let addend = reduction_addend(acc_stmt, acc_name)?;
+    // The addend must be a pure polynomial in the counter — never the bare
+    // counter (that is the cheaper closed-form counting sum, detected first) and
+    // never referencing the accumulator (`is_pure_counter_poly` forbids any
+    // non-counter variable).
+    if !is_pure_counter_poly(&addend.kind, counter_name) {
+        return None;
+    }
+    if !is_promoted_self_add(step_stmt, counter_name, &AddendCheck::One) {
+        return None;
+    }
+    let bound = parse_reduction_bound(right, counter_name, acc_name)?;
+    let acc = promoted_reg_of_name(ctx, acc_name)?;
+    let counter = promoted_reg_of_name(ctx, counter_name)?;
+    if acc == counter {
+        return None;
+    }
+    Some(GeneralReductionLoop {
+        acc,
+        counter,
+        bound,
+        addend,
+    })
+}
+
+/// `add <r8|r9|r10>, rax` — accumulate rax into an extra scratch accumulator.
+fn emit_add_scratch_acc_rax(code: &mut Vec<u8>, acc_index: u8) {
+    // add r/m64, r64 = REX.WB 01 /r ; reg = rax(000), rm = r8+acc_index.
+    code.extend_from_slice(&[0x49, 0x01, 0xC0 | acc_index]);
+}
+
+/// `add <acc>, <r8|r9|r10>` — fold an extra accumulator into the promoted `acc`.
+fn emit_add_acc_scratch(code: &mut Vec<u8>, acc: PReg, acc_index: u8) {
+    // add r/m64, r64 = REX.WR 01 /r ; reg = r8+acc_index (REX.R), rm = acc.
+    code.extend_from_slice(&[0x4C, 0x01, 0xC0 | (acc_index << 3) | acc.code3()]);
+}
+
+/// Emit the multi-accumulator ILP reduction. Four iterations per block, each
+/// evaluating `EXPR` at the running counter and adding into one of four
+/// independent accumulators (the promoted `acc` plus `r8`/`r9`/`r10`), so the
+/// per-iteration `acc` adds no longer form a single serial chain. A scalar
+/// remainder finishes the final `< 4` iterations. Bit-identical to the serial
+/// loop under wrapping arithmetic (addition is associative mod 2^64).
+pub(crate) fn emit_general_reduction(
+    ctx: &mut NativeCtx,
+    plan: &GeneralReductionLoop,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    const K: i64 = 4;
+    let GeneralReductionLoop {
+        acc,
+        counter,
+        addend,
+        ..
+    } = plan;
+    let (acc, counter) = (*acc, *counter);
+    const RDX: u8 = 2; // limit = bound - (K-1)
+    const R11: u8 = 11; // bound
+
+    // Zero the three extra accumulators FIRST — before the runtime `n < K` guard,
+    // which skips the blocked loop but still falls through to the accumulator
+    // combine, so they must already be zero on that path.
+    code.extend_from_slice(&[0x4D, 0x31, 0xC0]); // xor r8, r8
+    code.extend_from_slice(&[0x4D, 0x31, 0xC9]); // xor r9, r9
+    code.extend_from_slice(&[0x4D, 0x31, 0xD2]); // xor r10, r10
+
+    // Materialize the bounds. `EXPR` lowering uses only rax/rcx and the stack, so
+    // the bound (r11) and limit (rdx) survive it; the three extra accumulators
+    // (r8/r9/r10) do too. r11/rdx/r8/r9/r10 are all caller-saved scratch, dead
+    // before and after the loop.
+    let skip_main_site = match &plan.bound {
+        SumBound::Const(bound) => {
+            // mov r11, bound ; mov rdx, bound-(K-1).
+            code.extend_from_slice(&[0x49, 0xC7, 0xC3]); // mov r11, imm32
+            code.extend_from_slice(&(*bound as i32).to_le_bytes());
+            emit_mov_scratch_imm(code, RDX, (bound - (K - 1)) as i32);
+            None
+        }
+        SumBound::Runtime(bound_expr) => {
+            lower_native_expr(ctx, bound_expr, code)?; // rax = n
+            code.extend_from_slice(&[0x49, 0x89, 0xC3]); // mov r11, rax
+            code.extend_from_slice(&[0x49, 0x83, 0xFB, K as u8]); // cmp r11, K
+            code.extend_from_slice(&[0x0F, 0x8C]); // jl skip_main
+            let site = code.len();
+            code.extend_from_slice(&[0, 0, 0, 0]);
+            code.extend_from_slice(&[0x4C, 0x89, 0xDA]); // mov rdx, r11
+            code.extend_from_slice(&[0x48, 0x83, 0xEA, (K - 1) as u8]); // sub rdx, K-1
+            Some(site)
+        }
+    };
+
+    // Blocked main loop: while i < bound-(K-1), do K iterations into K accumulators.
+    let main_top = code.len();
+    emit_cmp_counter_scratch(code, counter, RDX); // cmp i, rdx
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end
+    let main_exit = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    for lane in 0..K {
+        lower_native_expr(ctx, addend, code)?; // rax = EXPR at current i
+        if lane == 0 {
+            acc.add_rax(code); // acc += rax
+        } else {
+            emit_add_scratch_acc_rax(code, (lane - 1) as u8); // r{8+lane-1} += rax
+        }
+        counter.add_imm(code, 1); // i += 1
+    }
+    emit_jmp_to(code, main_top);
+    let main_end = code.len();
+    patch_rel32_to(code, main_exit, main_end);
+
+    if let Some(site) = skip_main_site {
+        let here = code.len();
+        patch_rel32_to(code, site, here);
+    }
+
+    // Fold the extra accumulators into `acc`: acc += r8 + r9 + r10.
+    emit_add_acc_scratch(code, acc, 0); // acc += r8
+    emit_add_acc_scratch(code, acc, 1); // acc += r9
+    emit_add_acc_scratch(code, acc, 2); // acc += r10
+
+    // Scalar remainder: while i < bound, acc += EXPR; i += 1.
+    let rem_top = code.len();
+    emit_cmp_counter_scratch(code, counter, R11); // cmp i, r11 (bound)
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge rem_end
+    let rem_exit = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    lower_native_expr(ctx, addend, code)?; // rax = EXPR
+    acc.add_rax(code); // acc += rax
+    counter.add_imm(code, 1); // i += 1
+    emit_jmp_to(code, rem_top);
+    let rem_end = code.len();
+    patch_rel32_to(code, rem_exit, rem_end);
+    Ok(())
+}
+
+/// A reduction whose addend is **affine** in the counter — `acc += a*i + b` for
+/// integer constants `a`, `b` (the counting sum is `a=1, b=0`; `2*i`, `3*i+5`,
+/// `(i-2)`, `i+i` all qualify). The block sum `sum_{j<K}(a*(i+j)+b) = a*K*i +
+/// (a*K(K-1)/2 + K*b)` is exact under wrapping, so K iterations fold into a
+/// single `imul`+`add`+`acc-add` — one dependent op per K iterations, beating C's
+/// per-element loop. Quadratic-and-up addends fall to the multi-accumulator path.
+pub(crate) struct AffineReductionLoop {
+    acc: PReg,
+    counter: PReg,
+    bound: SumBound,
+    /// Per-block: `acc += block_a*i + block_b` (`block_a = a*K`, `block_b =
+    /// a*K(K-1)/2 + K*b`).
+    block_a: i32,
+    block_b: i32,
+    /// Per-remainder-iteration: `acc += a*i + b`.
+    a: i32,
+    b: i32,
+}
+
+/// The affine form `(a, b)` of `expr` as `a*counter + b` (wrapping i64
+/// coefficients), or `None` if it is not affine in the counter (a non-counter
+/// variable, a product of two counter-dependent factors, division, or a call).
+fn affine_form(expr: &BytecodeExprKind, counter: &str) -> Option<(i64, i64)> {
+    match expr {
+        BytecodeExprKind::Integer(c) => Some((0, *c)),
+        BytecodeExprKind::Variable(name) if name == counter => Some((1, 0)),
+        BytecodeExprKind::Binary { left, op, right } => {
+            let (la, lb) = affine_form(&left.kind, counter)?;
+            let (ra, rb) = affine_form(&right.kind, counter)?;
+            match op {
+                BinaryOp::Add => Some((la.wrapping_add(ra), lb.wrapping_add(rb))),
+                BinaryOp::Subtract => Some((la.wrapping_sub(ra), lb.wrapping_sub(rb))),
+                // Affine × affine is affine only if a factor is constant (its
+                // slope is 0); otherwise the product is quadratic.
+                BinaryOp::Multiply if la == 0 => Some((lb.wrapping_mul(ra), lb.wrapping_mul(rb))),
+                BinaryOp::Multiply if ra == 0 => Some((rb.wrapping_mul(la), rb.wrapping_mul(lb))),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn detect_affine_reduction(
+    ctx: &NativeCtx,
+    condition: &BytecodeExpr,
+    body: &[BytecodeInstruction],
+) -> Option<AffineReductionLoop> {
+    let BytecodeExprKind::Binary {
+        left,
+        op: BinaryOp::Less,
+        right,
+    } = &condition.kind
+    else {
+        return None;
+    };
+    let BytecodeExprKind::Variable(counter_name) = &left.kind else {
+        return None;
+    };
+    if left.ty.name != "i64" {
+        return None;
+    }
+    let [acc_stmt, step_stmt] = body else {
+        return None;
+    };
+    let BytecodeInstruction::Assign { name: acc_name, .. } = acc_stmt else {
+        return None;
+    };
+    if acc_name == counter_name {
+        return None;
+    }
+    let addend = reduction_addend(acc_stmt, acc_name)?;
+    if !is_promoted_self_add(step_stmt, counter_name, &AddendCheck::One) {
+        return None;
+    }
+    let (a64, b64) = affine_form(&addend.kind, counter_name)?;
+    // The per-block and per-iteration coefficients must all fit an i32 immediate;
+    // otherwise fall through to the multi-accumulator reduction.
+    const K: i64 = 4;
+    let a = i32::try_from(a64).ok()?;
+    let b = i32::try_from(b64).ok()?;
+    let block_a = i32::try_from(a64.checked_mul(K)?).ok()?;
+    let block_b = i32::try_from(
+        a64.checked_mul(K * (K - 1) / 2)?
+            .checked_add(b64.checked_mul(K)?)?,
+    )
+    .ok()?;
+    let bound = parse_reduction_bound(right, counter_name, acc_name)?;
+    let acc = promoted_reg_of_name(ctx, acc_name)?;
+    let counter = promoted_reg_of_name(ctx, counter_name)?;
+    if acc == counter {
+        return None;
+    }
+    Some(AffineReductionLoop {
+        acc,
+        counter,
+        bound,
+        block_a,
+        block_b,
+        a,
+        b,
+    })
+}
+
+/// `imul rax, <counter>, imm32` — `rax = counter * imm32` (low 64 bits).
+fn emit_imul_rax_counter_imm(code: &mut Vec<u8>, counter: PReg, imm: i32) {
+    // imul r64, r/m64, imm32 = REX.W 69 /r id ; ModRM = 11 rax(000) <counter>.
+    code.extend_from_slice(&[0x48, 0x69, 0xC0 | counter.code3()]);
+    code.extend_from_slice(&imm.to_le_bytes());
+}
+
+/// `add rax, imm32` (sign-extended).
+fn emit_add_rax_imm(code: &mut Vec<u8>, imm: i32) {
+    code.extend_from_slice(&[0x48, 0x05]);
+    code.extend_from_slice(&imm.to_le_bytes());
+}
+
+pub(crate) fn emit_affine_reduction(
+    ctx: &mut NativeCtx,
+    plan: &AffineReductionLoop,
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    const K: i64 = 4;
+    let AffineReductionLoop {
+        acc,
+        counter,
+        block_a,
+        block_b,
+        a,
+        b,
+        ..
+    } = *plan;
+    const RCX: u8 = 1; // bound
+    const RDX: u8 = 2; // limit = bound - (K-1)
+
+    // Bounds: rcx = bound, rdx = bound-(K-1). The affine block/remainder use only
+    // rax + the promoted counter (imul rax, counter, imm; add rax, imm), so rcx
+    // and rdx survive the loop untouched.
+    let skip_main_site = match &plan.bound {
+        SumBound::Const(bound) => {
+            emit_mov_scratch_imm(code, RCX, *bound as i32);
+            emit_mov_scratch_imm(code, RDX, (bound - (K - 1)) as i32);
+            None
+        }
+        SumBound::Runtime(bound_expr) => {
+            lower_native_expr(ctx, bound_expr, code)?; // rax = n
+            code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+            code.extend_from_slice(&[0x48, 0x83, 0xF9, K as u8]); // cmp rcx, K
+            code.extend_from_slice(&[0x0F, 0x8C]); // jl skip_main
+            let site = code.len();
+            code.extend_from_slice(&[0, 0, 0, 0]);
+            code.extend_from_slice(&[0x48, 0x89, 0xCA]); // mov rdx, rcx
+            code.extend_from_slice(&[0x48, 0x83, 0xEA, (K - 1) as u8]); // sub rdx, K-1
+            Some(site)
+        }
+    };
+
+    // Blocked main loop: acc += block_a*i + block_b, i += K.
+    let main_top = code.len();
+    emit_cmp_counter_scratch(code, counter, RDX);
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge main_end
+    let main_exit = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    emit_imul_rax_counter_imm(code, counter, block_a);
+    emit_add_rax_imm(code, block_b);
+    acc.add_rax(code);
+    counter.add_imm(code, K as i32);
+    emit_jmp_to(code, main_top);
+    let main_end = code.len();
+    patch_rel32_to(code, main_exit, main_end);
+
+    if let Some(site) = skip_main_site {
+        let here = code.len();
+        patch_rel32_to(code, site, here);
+    }
+
+    // Scalar remainder: acc += a*i + b, i += 1.
+    let rem_top = code.len();
+    emit_cmp_counter_scratch(code, counter, RCX);
+    code.extend_from_slice(&[0x0F, 0x8D]); // jge rem_end
+    let rem_exit = code.len();
+    code.extend_from_slice(&[0, 0, 0, 0]);
+    emit_imul_rax_counter_imm(code, counter, a);
+    emit_add_rax_imm(code, b);
+    acc.add_rax(code);
+    counter.add_imm(code, 1);
+    emit_jmp_to(code, rem_top);
+    let rem_end = code.len();
+    patch_rel32_to(code, rem_exit, rem_end);
+    Ok(())
+}
+
 pub(crate) fn lower_native_while(
     ctx: &mut NativeCtx,
     condition: &BytecodeExpr,
@@ -2663,6 +3111,22 @@ pub(crate) fn lower_native_while(
     // the exact shape falls through to the general loop lowering below.
     if let Some(plan) = detect_sum_reduction(ctx, condition, body) {
         emit_sum_reduction(ctx, &plan, code)?;
+        return Ok(());
+    }
+    // Affine reduction: `acc += a*i + b`. The block sum folds K iterations into a
+    // single `imul`+`add` (one dependent op per K iterations), beating C's
+    // per-element loop. Tried before the multi-accumulator because the closed
+    // form is strictly faster when the addend is affine.
+    if let Some(plan) = detect_affine_reduction(ctx, condition, body) {
+        emit_affine_reduction(ctx, &plan, code)?;
+        return Ok(());
+    }
+    // General multi-accumulator reduction: `acc = acc + EXPR` where `EXPR` is a
+    // pure polynomial in the counter (sum-of-squares, weighted sums, …). Four
+    // independent accumulators break the serial `acc` dependency chain that made
+    // the naive scalar loop ~2.5× slower than C.
+    if let Some(plan) = detect_general_reduction(ctx, condition, body) {
+        emit_general_reduction(ctx, &plan, code)?;
         return Ok(());
     }
 
