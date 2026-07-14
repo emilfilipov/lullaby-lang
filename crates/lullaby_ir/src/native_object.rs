@@ -3761,6 +3761,16 @@ pub(crate) struct NativeLoop {
     continue_sites: Vec<usize>,
     /// Patch sites (offsets of 4-byte rel32 fields) for `break` jumps.
     break_sites: Vec<usize>,
+    /// RC scope-based drop insertion (stage 2), early-exit edges. The uniquely-owned,
+    /// borrow-only heap locals declared directly in THIS loop's body that are LIVE at
+    /// the current lowering position — i.e. their `let` has already been lowered. A
+    /// `break`/`continue` drops exactly this set before jumping, so a value declared
+    /// in the loop body is reclaimed on the early-exit edge too (not only the
+    /// fallthrough back-edge). It is revealed incrementally as each top-level body
+    /// statement is lowered (see `lower_loop_body_with_drops`), so an early exit only
+    /// ever drops locals whose declaration textually precedes it — never a slot whose
+    /// `let` has not run. Each entry is `(frame slot, drop-helper symbol)`.
+    live_drops: Vec<(i32, &'static str)>,
 }
 
 #[path = "native_object_stmt.rs"]

@@ -3097,6 +3097,97 @@ fn rc_drop_inserted_for_owned_loop_string_but_not_when_it_escapes() {
 }
 
 #[test]
+fn rc_drop_inserted_on_break_and_continue_early_exit_edges() {
+    // RC stage 2: a uniquely-owned, borrow-only loop string is now dropped on the
+    // `break`/`continue` early-exit edges too, not only the fallthrough back-edge.
+    // The drop SITE is `mov rcx, [rbp - slot]` (48 8B 8D disp32) immediately followed
+    // by a `call` (E8) — a shape the runtime helpers never emit (no rbp frame), so it
+    // uniquely marks a drop in a user function. Counting sites lets us prove the
+    // early-exit edge added exactly one more drop than the fallthrough-only baseline.
+    let count_drop_sites = |program: &NativeProgram| -> usize {
+        program
+            .bytes
+            .windows(8)
+            .filter(|w| w[0..3] == [0x48, 0x8B, 0x8D] && w[7] == 0xE8)
+            .count()
+    };
+
+    // Baseline: no early exit — one fallthrough drop of `s`.
+    let baseline = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let total i64 = 0\n",
+        "    for i from 0 to 10\n",
+        "        let s string = to_string(i) + \"!\"\n",
+        "        total = total + len(s)\n",
+        "    total\n",
+    )))
+    .expect("emit baseline program");
+    let baseline_sites = count_drop_sites(&baseline);
+    assert!(
+        baseline_sites >= 1,
+        "the fallthrough back-edge must drop the owned loop string"
+    );
+
+    // Same loop with a conditional `continue`: the continue edge drops `s` too, so
+    // there is exactly one more drop site than the baseline (continue-edge + fallthrough).
+    let with_continue = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let total i64 = 0\n",
+        "    for i from 0 to 10\n",
+        "        let s string = to_string(i) + \"!\"\n",
+        "        total = total + len(s)\n",
+        "        if i > 5\n",
+        "            continue\n",
+        "        total = total + 1\n",
+        "    total\n",
+    )))
+    .expect("emit continue program");
+    assert_eq!(
+        count_drop_sites(&with_continue),
+        baseline_sites + 1,
+        "a `continue` must drop the live owned string on its edge (one extra drop site)"
+    );
+
+    // Same loop with a conditional `break`: the break edge drops `s` too.
+    let with_break = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let total i64 = 0\n",
+        "    for i from 0 to 10\n",
+        "        let s string = to_string(i) + \"!\"\n",
+        "        total = total + len(s)\n",
+        "        if i > 5\n",
+        "            break\n",
+        "    total\n",
+    )))
+    .expect("emit break program");
+    assert_eq!(
+        count_drop_sites(&with_break),
+        baseline_sites + 1,
+        "a `break` must drop the live owned string on its edge (one extra drop site)"
+    );
+
+    // Default-deny still holds on early-exit edges: a `continue` BEFORE the owned
+    // `let` must not drop a slot whose `let` has not run — the early-exit drop set is
+    // revealed only as declarations are lowered, so there is no extra drop here.
+    let continue_before_let = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let total i64 = 0\n",
+        "    for i from 0 to 10\n",
+        "        if i > 5\n",
+        "            continue\n",
+        "        let s string = to_string(i) + \"!\"\n",
+        "        total = total + len(s)\n",
+        "    total\n",
+    )))
+    .expect("emit continue-before-let program");
+    assert_eq!(
+        count_drop_sites(&continue_before_let),
+        baseline_sites,
+        "a `continue` textually before the owned `let` must NOT drop that slot"
+    );
+}
+
+#[test]
 fn upper_lower_helpers_fold_ascii_case() {
     // The uppercase helper subtracts 0x20 (`83 E9 20`) from a byte in `a..=z`; the
     // lowercase helper adds 0x20 (`83 C1 20`) to a byte in `A..=Z`. Both allocate a

@@ -345,6 +345,79 @@ fn gen_array_f64_program(seed: u64) -> String {
     )
 }
 
+/// Generates one program that exercises **RC drop insertion on loop EARLY-EXIT
+/// edges** (memory-model stage 2): a loop allocates a fresh, uniquely-owned `string`
+/// each iteration, borrows it via `len`, and may `break`/`continue` before reaching
+/// the fallthrough back-edge. Drop insertion is behavior-neutral to the *computed
+/// value* — it only reclaims memory — so any drop-induced miscompile (a clobbered
+/// accumulator across the `call rc_dec`, a corrupted still-live value, or an
+/// unbalanced free that corrupts the heap and returns garbage) surfaces as a
+/// native/interpreter exit-code divergence. The nested shape additionally checks that
+/// an inner `break`/`continue` drops only the inner loop's owned string while the
+/// outer string stays live across the inner loop and is dropped on the outer edge.
+fn gen_string_loop_program(seed: u64) -> String {
+    let mut rng = Rng(seed ^ 0x5DEE_CE66_D1CE_B00Du64);
+    let hi = rng.range(3, 30);
+    // A fresh, uniquely-owned string expression in the counter `i` (each of these
+    // native builtins always allocates a new record, so it is droppable).
+    let fresh = |rng: &mut Rng| -> String {
+        match rng.below(4) {
+            0 => "to_string(i) + \"!!\"".to_string(),
+            1 => "trim(to_string(i * 3))".to_string(),
+            2 => "substring(to_string(i * 7 + 1), 0, 1)".to_string(),
+            _ => "repeat(\"ab\", 2)".to_string(),
+        }
+    };
+
+    if rng.chance(3) {
+        // Nested shape: an outer owned string live across an inner loop whose own
+        // owned string exits early.
+        let hi2 = rng.range(2, 12);
+        let k = rng.range(2, 5);
+        let inner_exit = if rng.chance(2) {
+            format!("            if j % {k} == 0\n                continue\n")
+        } else {
+            format!(
+                "            if j >= {c}\n                break\n",
+                c = rng.range(1, hi2)
+            )
+        };
+        let of = fresh(&mut rng);
+        let jf = match rng.below(3) {
+            0 => "to_string(j) + \".\"".to_string(),
+            1 => "trim(to_string(j * 2))".to_string(),
+            _ => "substring(to_string(j + 5), 0, 1)".to_string(),
+        };
+        return format!(
+            "fn main -> i64\n    let total i64 = 0\n    for i from 0 to {hi}\n        \
+             let outer string = {of}\n        total = total + len(outer)\n        \
+             for j from 0 to {hi2}\n            let inner string = {jf}\n            \
+             total = total + len(inner)\n{inner_exit}            total = total + 1\n        \
+             total = total + len(outer)\n    total\n"
+        );
+    }
+
+    // Single-loop shape with an optional early exit before the fallthrough drop.
+    let f = fresh(&mut rng);
+    let exit = match rng.below(3) {
+        0 => {
+            let k = rng.range(2, 5);
+            format!("        if i % {k} == 0\n            continue\n")
+        }
+        1 => format!(
+            "        if i >= {c}\n            break\n",
+            c = rng.range(1, hi)
+        ),
+        // No early exit — a plain fallthrough loop (still a valid oracle case).
+        _ => String::new(),
+    };
+    format!(
+        "fn main -> i64\n    let total i64 = 0\n    for i from 0 to {hi}\n        \
+         let s string = {f}\n        total = total + len(s)\n{exit}        \
+         total = total + 1\n    total\n"
+    )
+}
+
 /// The result of running a program on one backend, reduced to a comparable form.
 #[derive(PartialEq, Eq, Debug)]
 enum Outcome {
@@ -585,6 +658,100 @@ fn fuzz_array_native_matches_interpreter_when_linkable() {
         assert_eq!(
             exit, expected as i32,
             "NATIVE MISCOMPILE (fat array) on #{i} (seed {seed:#x}):\n{source}\n\
+             interpreter={expected}, native exit={exit}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_string_loop_interpreters_agree() {
+    // Cross-check the three engines on loop programs that allocate/borrow a fresh
+    // per-iteration string with `break`/`continue`. Always runs (no toolchain needed).
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0x3C79_AC49_2E6D_1F55u64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_string_loop_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "string-loop backend divergence on program #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "string-loop generator produced a non-i64 main on seed {seed:#x}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_string_loop_native_matches_interpreter_when_linkable() {
+    // The high-value oracle for RC drop insertion on loop early-exit edges: compile
+    // each generated string-loop program to a real `.exe` and check its exit code
+    // against the interpreter. Because drops are behavior-neutral to the computed
+    // value, ANY divergence here is a drop-induced miscompile (a clobbered live
+    // accumulator across `call rc_dec`, or an unbalanced free that corrupts the heap).
+    // ASSERTS `main` compiles natively so a regression that demoted it (hiding the
+    // drop path) fails loudly rather than silently passing on the interpreter.
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native string-loop fuzz");
+        return;
+    }
+    ensure_msvc_env();
+
+    const PROGRAMS: u64 = 100;
+    let base_seed = 0x6EA3_55C1_9B02_7DF1u64;
+    let dir = std::env::temp_dir().join("lullaby_fuzz_native_string_loop");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_string_loop_program(seed);
+
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "interpreter divergence on native-string-loop-fuzz #{i} (seed {seed:#x}):\n{source}"
+        );
+        let expected = match ast {
+            Outcome::Value(n) => n,
+            other => {
+                panic!("string-loop generator produced {other:?} on seed {seed:#x}:\n{source}")
+            }
+        };
+
+        let src_path = dir.join(format!("fuzz_sl_{i}.lby"));
+        let exe_path = dir.join(format!("fuzz_sl_{i}.exe"));
+        std::fs::write(&src_path, &source).expect("write fuzz source");
+        let _ = std::fs::remove_file(&exe_path);
+
+        let emit = lullaby()
+            .args([
+                "native",
+                "-o",
+                exe_path.to_str().expect("exe path"),
+                src_path.to_str().expect("src path"),
+            ])
+            .output()
+            .expect("run native");
+        assert!(
+            emit.status.success(),
+            "native emit failed on string-loop-fuzz #{i} (seed {seed:#x}):\n{source}\n{}",
+            stderr(&emit)
+        );
+        assert!(
+            exe_path.is_file(),
+            "no linked exe on string-loop-fuzz #{i} (seed {seed:#x}) — main must compile \
+             natively:\n{source}\n{}",
+            stdout(&emit)
+        );
+
+        let run = Command::new(&exe_path).output().expect("run fuzz exe");
+        let exit = run.status.code().expect("native exit code");
+        assert_eq!(
+            exit, expected as i32,
+            "NATIVE MISCOMPILE (string-loop RC drop) on #{i} (seed {seed:#x}):\n{source}\n\
              interpreter={expected}, native exit={exit}"
         );
     }

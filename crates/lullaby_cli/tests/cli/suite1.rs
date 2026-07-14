@@ -1141,6 +1141,111 @@ pub(crate) fn native_rc_array_string_reclaim_execution_parity_when_linkable() {
     );
 }
 
+/// RC stage 2, `continue` early-exit edge: a uniquely-owned per-iteration string is
+/// dropped on the `continue` edge, not only the fallthrough back-edge. The fixture
+/// allocates `to_string(i) + "…"` each pass and, on every EVEN iteration, `continue`s
+/// BEFORE reaching the fallthrough drop — so those 150k iterations are reclaimed
+/// solely by the new continue-edge drop. Over 300k iterations (~8 MB of records) in
+/// the fixed ~1 MiB heap, completing with the interpreter's result proves the
+/// continue-edge drop reclaims (a heap-exhaustion crash would mean it leaked; a
+/// free-list-corrupting double-free would crash or return the wrong value).
+#[test]
+pub(crate) fn native_rc_string_continue_reclaim_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_rc_string_continue_reclaim.lby");
+    let out = std::env::temp_dir().join("lullaby_native_rc_string_continue_reclaim.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(
+        interp, 4_838_906,
+        "sum of len(to_string(i)+\"!!!!!!!!!!\") for i in 0..=300000, plus 1 per odd i"
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld and/or kernel32.lib not available; skipping continue-reclaim parity");
+        return;
+    }
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native `continue`-edge drop must reclaim the owned string each iteration \
+         (a crash here means the even-iteration temporaries leaked or double-freed)"
+    );
+}
+
+/// RC stage 2, `break` early-exit edge (small-loop no-double-free proof): the loop
+/// allocates a fresh string per pass and `break`s at `i == 4`. Iterations 0..4 fall
+/// through (fallthrough drop); `i == 4` breaks (break-edge drop). Five strings, each
+/// dropped exactly once — a double-free on the break edge would corrupt the free
+/// list and crash or return the wrong value, so a correct exit code proves the
+/// break-edge drop is balanced.
+#[test]
+pub(crate) fn native_rc_string_break_reclaim_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/run_rc_string_break_reclaim.lby");
+    let out = std::env::temp_dir().join("lullaby_native_rc_string_break_reclaim.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(
+        interp, 25,
+        "5 iterations of len(to_string(i)+\"xxxx\") for i in 0..=4"
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld and/or kernel32.lib not available; skipping break-reclaim parity");
+        return;
+    }
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native `break`-edge drop must reclaim the owned string exactly once (no double-free)"
+    );
+}
+
 /// An inline-conditional condition must be `bool` (`L0305`, shared with `if`).
 #[test]
 pub(crate) fn rejects_conditional_non_bool_condition() {
