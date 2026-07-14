@@ -1466,9 +1466,14 @@ impl<'a> IrRuntime<'a> {
                     (left.into_string()? + &right.as_string()?).into(),
                 ))
             }
-            BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
-            BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
-            BinaryOp::Multiply => Ok(Value::I64(left.as_i64()? * right.as_i64()?)),
+            // Plain `i64` `+`/`-`/`*` wrap on overflow, matching the native backend
+            // (`add`/`sub`/`imul` keep the low 64 bits), the typed fixed-width path
+            // above, and the `/`/`%` cases below. `wrapping_*` (not `+`/`-`/`*`)
+            // keeps the result deterministic across debug/release — a plain `*`
+            // panics on overflow only in debug.
+            BinaryOp::Add => Ok(Value::I64(left.as_i64()?.wrapping_add(right.as_i64()?))),
+            BinaryOp::Subtract => Ok(Value::I64(left.as_i64()?.wrapping_sub(right.as_i64()?))),
+            BinaryOp::Multiply => Ok(Value::I64(left.as_i64()?.wrapping_mul(right.as_i64()?))),
             BinaryOp::Divide => {
                 let divisor = right.as_i64()?;
                 if divisor == 0 {

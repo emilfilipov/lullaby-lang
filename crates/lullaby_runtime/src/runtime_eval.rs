@@ -522,9 +522,15 @@ impl<'a> Runtime<'a> {
                     (left.as_concat_string()? + &right.as_concat_string()?).into(),
                 ))
             }
-            BinaryOp::Add => Ok(Value::I64(left.as_i64()? + right.as_i64()?)),
-            BinaryOp::Subtract => Ok(Value::I64(left.as_i64()? - right.as_i64()?)),
-            BinaryOp::Multiply => Ok(Value::I64(left.as_i64()? * right.as_i64()?)),
+            // Plain `i64` `+`/`-`/`*` wrap on overflow (two's complement), matching
+            // the native backend (`add`/`sub`/`imul` keep the low 64 bits) and the
+            // `/`/`%` cases below. Using `wrapping_*` rather than `+`/`-`/`*` keeps
+            // the result deterministic across debug/release (a plain `*` panics on
+            // overflow only in debug). Explicit overflow handling is the
+            // `checked_*`/`saturating_*`/`overflowing_*` builtins.
+            BinaryOp::Add => Ok(Value::I64(left.as_i64()?.wrapping_add(right.as_i64()?))),
+            BinaryOp::Subtract => Ok(Value::I64(left.as_i64()?.wrapping_sub(right.as_i64()?))),
+            BinaryOp::Multiply => Ok(Value::I64(left.as_i64()?.wrapping_mul(right.as_i64()?))),
             BinaryOp::Divide => {
                 let divisor = right.as_i64()?;
                 if divisor == 0 {

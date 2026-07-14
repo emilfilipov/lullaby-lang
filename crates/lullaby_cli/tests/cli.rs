@@ -1242,6 +1242,9 @@ pub(crate) fn llvm_readobj_path() -> Option<PathBuf> {
 #[path = "cli/suite3.rs"]
 mod suite3;
 
+#[path = "cli/fuzz.rs"]
+mod fuzz;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {
