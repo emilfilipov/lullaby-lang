@@ -1,0 +1,26 @@
+# Block (multi-statement) arm bodies: an arm runs its statements, then its final
+# expression is the arm's value. Here the `Circle` arm prints a side effect and
+# then yields a `string`, exercised through a `return match ...` in value
+# position. Arm-scoped payload bindings (`r`) are visible to the block.
+
+enum Shape
+    Circle i64
+    Rect i64 i64
+    Empty
+
+fn describe s Shape -> string
+    return match s
+        Circle(r) ->
+            println("saw circle")
+            let area i64 = r * r
+            "circle:" + to_string(area)
+        Rect(w, h) ->
+            println("saw rect")
+            "rect:" + to_string(w * h)
+        Empty -> "empty"
+
+fn main -> i64
+    println(describe(Circle(3)))
+    println(describe(Rect(2, 5)))
+    println(describe(Empty))
+    len(describe(Empty))

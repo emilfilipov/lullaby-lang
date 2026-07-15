@@ -76,13 +76,32 @@ fn area s Shape -> f64
 
 - Payload bindings (`r`, `w`, `h`) introduce locals scoped to that arm, typed by
   the variant's declared payload types.
-- Like `if`/`else` and `try`/`catch`, a `match` is an expression: when every arm
-  yields the same type it produces that value (so it can be a function's final
-  expression); otherwise it is a void statement.
-- Matching must be **exhaustive** over the enum's variants. A wildcard arm
-  `_ -> expr` covers the rest; a non-exhaustive match without `_` is a
-  compile-time error.
+- An arm body is either an inline expression or an indented **block** whose final
+  expression is the arm's value; the block may run several statements (side
+  effects, mutations of an enclosing binding, nested `match`es) first.
+- Like `if`/`else` and `try`/`catch`, a `match` is an **expression**: when every
+  arm yields the same type it produces that value; otherwise it is a void
+  statement. Its value is usable in value position — a `let`/assignment
+  right-hand side (`let x = match ...`), a `return` value, a function's final
+  (tail) expression, and a nested arm's value. Using a `match` where a value is
+  required but the arms yield differing types is rejected with `L0440`.
+- Matching must be **exhaustive** over the enum's variants, in value position and
+  statement position alike. A wildcard arm `_ -> expr` covers the rest; a
+  non-exhaustive match without `_` is a compile-time error (`L0384`).
 - A duplicate or unknown variant arm is a compile-time error.
+
+Implementation surface: value-position `match` is delivered on the three
+interpreter tiers (AST, IR, bytecode VM) at parity. The IR/bytecode lowerer
+desugars a value-position `match` into a hoisted result temporary written by the
+arms (the same shape as the `?` and inline-conditional desugars), so no new IR or
+bytecode node is required; the AST interpreter evaluates the arm blocks against
+the live environment so their side effects and mutations are observed. The native
+and WASM backends do not yet compile `match`, so a function that uses one is
+demoted to the interpreter via the existing gate (a clean skip, never a wrong
+result). Nesting a `match` inside a larger expression — for example directly as a
+call argument, `f(match ...)` — is not yet parsed (the flat expression parser
+cannot span the indented arm block) and is a planned follow-up; the current
+positions cover the common `let`/`return`/tail/nested-arm uses.
 
 ## Representation and backends
 

@@ -2178,6 +2178,69 @@ fn rejects_match_arm_with_unknown_variant() {
 }
 
 #[test]
+fn accepts_match_expression_in_let_position() {
+    // A `match` used as a `let`-binding value: every arm yields `i64`, so the
+    // match's value type is `i64` and initializes `x`. The block arm bodies and
+    // payload binding also type-check.
+    let source = concat!(
+        "enum Shape\n    Circle i64\n    Rect i64 i64\n    Empty\n\n",
+        "fn area s Shape -> i64\n",
+        "    let a i64 = match s\n",
+        "        Circle(r) ->\n",
+        "            let sq i64 = r * r\n",
+        "            sq\n",
+        "        Rect(w, h) -> w * h\n",
+        "        Empty -> 0\n",
+        "    a + 1\n\n",
+        "fn main -> i64\n    area(Circle(3))\n",
+    );
+    validate_source(source).expect("match-expression in let position type-checks");
+}
+
+#[test]
+fn rejects_incompatible_match_arm_types_in_value_position() {
+    // When a `match` is used as a value (here a `let` binding), its arms must all
+    // yield the same type. An `i64` arm and a `string` arm cannot, so the match
+    // has no value type and cannot initialize the binding: `L0440`.
+    let source = concat!(
+        "enum P\n    A\n    B\n\n",
+        "fn f p P -> i64\n",
+        "    let x i64 = match p\n",
+        "        A -> 1\n",
+        "        B -> \"two\"\n",
+        "    x\n\n",
+        "fn main -> i64\n    f(A)\n",
+    );
+    let diagnostics = validate_source(source).expect_err("semantic");
+    assert!(
+        diagnostics.iter().any(|d| d.code == "L0440"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn rejects_non_exhaustive_match_expression_in_let() {
+    // Exhaustiveness applies to a value-position `match` exactly as to a statement
+    // `match`: variant `C` has no arm and there is no `_`, so `L0440`'s sibling
+    // exhaustiveness diagnostic `L0384` fires even though the match is a `let`
+    // initializer.
+    let source = concat!(
+        "enum P\n    A\n    B\n    C\n\n",
+        "fn f p P -> i64\n",
+        "    let x i64 = match p\n",
+        "        A -> 1\n",
+        "        B -> 2\n",
+        "    x\n\n",
+        "fn main -> i64\n    f(A)\n",
+    );
+    let diagnostics = validate_source(source).expect_err("semantic");
+    assert!(
+        diagnostics.iter().any(|d| d.code == "L0384"),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn accepts_annotated_option_and_result_construction() {
     let source = concat!(
         "fn main -> i64\n",

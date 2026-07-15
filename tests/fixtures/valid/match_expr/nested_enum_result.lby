@@ -1,0 +1,49 @@
+# A `match` expression nested as another `match` expression's arm value, whose
+# overall result type is a user enum. The `let c Color = match ...` binding flows
+# the enum result type through both levels.
+
+enum Color
+    Red
+    Green
+    Blue
+enum P
+    Even
+    Odd
+enum B
+    Yes
+    No
+
+fn parity n i64 -> P
+    if n % 2 == 0
+        Even
+    else
+        Odd
+
+fn small n i64 -> B
+    if n < 10
+        Yes
+    else
+        No
+
+fn pick n i64 -> Color
+    let c Color = match parity(n)
+        Even -> match small(n)
+            Yes -> Red
+            No -> Green
+        Odd -> Blue
+    c
+
+fn rank c Color -> i64
+    match c
+        Red -> 1
+        Green -> 2
+        Blue -> 3
+
+fn main -> i64
+    let x i64 = rank(pick(4))
+    let y i64 = rank(pick(14))
+    let z i64 = rank(pick(3))
+    println(to_string(x))
+    println(to_string(y))
+    println(to_string(z))
+    x * 100 + y * 10 + z

@@ -42,7 +42,27 @@ C++ — within +4.7% of Python while keeping full static typing. The remaining g
 is concentrated in string/parse-heavy code; on structured and numeric code
 Lullaby already beats Python.
 
-**Native performance** (x86-64, best-of-N whole-program wall time vs `cl /O2`):
+**Native performance** (x86-64, best-of-N whole-program wall time vs `cl /O2`).
+Every tier below is correctness-checked against the C reference on each run;
+**native-vs-C is the headline**, the interpreter rows are development-tier
+diagnostics (regenerate with `benchmarks/run_*.ps1`):
+
+| Workload | native vs C | bytecode | ir | ast |
+| --- | ---: | ---: | ---: | ---: |
+| `fib(40)` recursion | **0.99×** (1.43 vs 1.45 ns/call) | 247 | 268 | 266 |
+| `sum 0..N` loop | **~0.04× — ~24× faster** (closed form) | 78 | 157 | 156 |
+| `gcd(i,1071)` loop | **1.00×** (11.06 vs 11.08 ns/gcd) | 195 | 300 | 303 |
+| `array<i64>` reduction | 9.1× (0.72 vs 0.079 ns/elem) | 70 | 98 | 106 |
+| string char-scan | 39× (25.3 vs 0.65 ns/char) | 163 | 315 | 166 |
+| CSV parse + sum | 30× (31.8 vs 1.04 ns/char) | 246 | 524 | 408 |
+
+<sub>Interpreter columns are the tier's ns/op (native/C ns/op in the vs-C cell).
+Native beats C on the scalar loop (recognized and emitted as an O(1) closed
+form) and matches it on recursion and `gcd`. The array and string/CSV shapes are
+the open native gaps: the string scan is ~39× C because `for c in s` currently
+lowers to indexed code-point access (measured O(n²) per scan), and the array
+reduction copies the array by value on each call — both tracked in
+[`documents/optimization_opportunities.md`](documents/optimization_opportunities.md).</sub>
 
 - Prime sieve: **at parity with C** (0.99–1.01×, at/below C++) and **17–27×
   faster than CPython**.
