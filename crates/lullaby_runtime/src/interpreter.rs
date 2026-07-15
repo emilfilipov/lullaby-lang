@@ -10,10 +10,32 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use std::collections::VecDeque;
+
 use lullaby_diagnostics::Span;
-use lullaby_parser::{BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt};
+use lullaby_parser::{ActorDecl, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt};
 
 use crate::*;
+
+/// One scheduled actor: its declared type name and its private `state`, held as
+/// an ordered `(field, value)` list exactly like a struct's fields. The state is
+/// touched only by the actor's own handlers, one message at a time, so it is a
+/// single-writer resource with no locking.
+#[derive(Debug, Clone)]
+pub(crate) struct ActorInstance {
+    pub(crate) actor_name: String,
+    pub(crate) state: Vec<(String, Value)>,
+}
+
+/// One pending message on the global mailbox: which actor it targets, which
+/// handler to run, and the (already-evaluated, moved-across-the-boundary)
+/// argument values. Drained FIFO before `main` returns.
+#[derive(Debug, Clone)]
+pub(crate) struct ActorMessage {
+    pub(crate) actor_id: usize,
+    pub(crate) handler: String,
+    pub(crate) args: Vec<Value>,
+}
 
 pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
     run_main_with_args(program, Vec::new())
@@ -41,7 +63,12 @@ fn run_main_shared(arc: Arc<Program>, args: Vec<String>) -> Result<Value, Runtim
     }
     let mut runtime = Runtime::new(&arc, Arc::clone(&arc))?;
     runtime.program_args = args;
-    runtime.call_function("main", Vec::new())
+    let result = runtime.call_function("main", Vec::new())?;
+    // Graceful drain: process every outstanding actor message (run-to-completion,
+    // one at a time, FIFO) before the program exits, so a `tell` with an
+    // observable side effect (e.g. `print`) produces deterministic output.
+    runtime.drain_actors()?;
+    Ok(result)
 }
 
 /// Run a single named zero-argument function against `program` through the AST
@@ -52,7 +79,9 @@ fn run_main_shared(arc: Arc<Program>, args: Vec<String>) -> Result<Value, Runtim
 pub fn run_named_function(program: &Program, name: &str) -> Result<Value, RuntimeError> {
     let arc = Arc::new(program.clone());
     let mut runtime = Runtime::new(&arc, Arc::clone(&arc))?;
-    runtime.call_function(name, Vec::new())
+    let result = runtime.call_function(name, Vec::new())?;
+    runtime.drain_actors()?;
+    Ok(result)
 }
 
 /// Register every `ExprKind::Closure` reachable from a block of statements into
@@ -167,6 +196,17 @@ fn collect_closures_in_expr<'a>(
                 collect_closures_in_expr(arg, table);
             }
         }
+        ExprKind::Spawn { args, .. } => {
+            for arg in args {
+                collect_closures_in_expr(arg, table);
+            }
+        }
+        ExprKind::Tell { target, args, .. } => {
+            collect_closures_in_expr(target, table);
+            for arg in args {
+                collect_closures_in_expr(arg, table);
+            }
+        }
         ExprKind::StructLiteral { fields, .. } => {
             for (_, value) in fields {
                 collect_closures_in_expr(value, table);
@@ -277,6 +317,19 @@ pub(crate) struct Runtime<'a> {
     /// invocation looks its body up here — the runtime value stays backend-neutral
     /// and stores no AST node. Bodies borrow the program with lifetime `'a`.
     pub(crate) closures: HashMap<usize, (Vec<String>, &'a Expr)>,
+    /// Declared actor types, keyed by name and borrowed from the program. Used by
+    /// `spawn` to construct an instance and by `tell`/drain to dispatch a message
+    /// to the right handler body.
+    pub(crate) actors: HashMap<&'a str, &'a ActorDecl>,
+    /// Live actor instances. A `Value::ActorRef(i)` indexes this vector; the slot
+    /// holds the actor's private `state`. Instances live until the program ends
+    /// (stage 1 has no explicit `stop`).
+    pub(crate) actor_instances: Vec<ActorInstance>,
+    /// The global message mailbox: a FIFO queue of pending deliveries. `tell`
+    /// enqueues; `drain_actors` (run before `main` returns) dequeues one message
+    /// at a time and runs its handler to completion. Single-threaded and
+    /// deterministic: the same program always produces the same output.
+    pub(crate) actor_mailbox: VecDeque<ActorMessage>,
     /// A free-list of reusable per-call environments. Function invocation is on the
     /// hot path and each call needs a fresh `Env`; rather than allocate one (its
     /// scope `Vec` plus a first-scope `Vec` that grows as parameters bind) on every
@@ -361,6 +414,12 @@ impl<'a> Runtime<'a> {
             }
         }
 
+        let actors = program
+            .actors
+            .iter()
+            .map(|actor| (actor.name.as_str(), actor))
+            .collect::<HashMap<_, _>>();
+
         let async_functions = program
             .functions
             .iter()
@@ -407,6 +466,9 @@ impl<'a> Runtime<'a> {
             extern_functions,
             pending_try_return: None,
             closures,
+            actors,
+            actor_instances: Vec::new(),
+            actor_mailbox: VecDeque::new(),
             env_pool: Vec::new(),
         })
     }
@@ -1009,6 +1071,10 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
         }
         ExprKind::Call { name: callee, args } => {
             callee == name || args.iter().any(|arg| expr_mentions_var(arg, name))
+        }
+        ExprKind::Spawn { args, .. } => args.iter().any(|arg| expr_mentions_var(arg, name)),
+        ExprKind::Tell { target, args, .. } => {
+            expr_mentions_var(target, name) || args.iter().any(|arg| expr_mentions_var(arg, name))
         }
         ExprKind::StructLiteral { fields, .. } => fields
             .iter()

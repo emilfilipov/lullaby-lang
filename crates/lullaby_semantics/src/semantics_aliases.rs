@@ -201,6 +201,68 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                     is_public: decl.is_public,
                 })
                 .collect(),
+            // An actor's state-field, init-parameter, handler-parameter, and
+            // reply types may name aliases; resolve them all so the checker and
+            // interpreter never see an alias. Handler/init bodies are rewritten
+            // through the same `rewrite_stmt_types` mapping as function bodies.
+            actors: program
+                .actors
+                .iter()
+                .map(|decl| lullaby_parser::ActorDecl {
+                    name: decl.name.clone(),
+                    state: decl
+                        .state
+                        .iter()
+                        .map(|field| StructField {
+                            name: field.name.clone(),
+                            ty: resolve_alias_type(&field.ty, &map),
+                        })
+                        .collect(),
+                    init: decl.init.as_ref().map(|init| lullaby_parser::ActorInit {
+                        params: init
+                            .params
+                            .iter()
+                            .map(|param| Param {
+                                name: param.name.clone(),
+                                ty: resolve_alias_type(&param.ty, &map),
+                            })
+                            .collect(),
+                        body: init
+                            .body
+                            .iter()
+                            .map(|stmt| rewrite_stmt_types(stmt, &map))
+                            .collect(),
+                        span: init.span,
+                    }),
+                    handlers: decl
+                        .handlers
+                        .iter()
+                        .map(|handler| lullaby_parser::ActorHandler {
+                            name: handler.name.clone(),
+                            params: handler
+                                .params
+                                .iter()
+                                .map(|param| Param {
+                                    name: param.name.clone(),
+                                    ty: resolve_alias_type(&param.ty, &map),
+                                })
+                                .collect(),
+                            reply_type: handler
+                                .reply_type
+                                .as_ref()
+                                .map(|ty| resolve_alias_type(ty, &map)),
+                            body: handler
+                                .body
+                                .iter()
+                                .map(|stmt| rewrite_stmt_types(stmt, &map))
+                                .collect(),
+                            span: handler.span,
+                        })
+                        .collect(),
+                    span: decl.span,
+                    is_public: decl.is_public,
+                })
+                .collect(),
         },
         diagnostics,
     )

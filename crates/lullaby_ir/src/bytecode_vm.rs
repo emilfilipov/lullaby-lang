@@ -2228,6 +2228,18 @@ impl<'a> Lowerer<'a> {
                 });
                 (IrExprKind::Closure { id: *id }, ty)
             }
+            // Actors (stage 1: `spawn`/`tell`) run only on the AST interpreter.
+            // Reject an actor program here with a dedicated, clearly-reported
+            // diagnostic (`L0355`) so the IR interpreter and the bytecode VM never
+            // silently diverge from the AST semantics; the native/WASM backends
+            // detect actors earlier and cleanly skip (`L0339`/`L0338`).
+            ExprKind::Spawn { .. } | ExprKind::Tell { .. } => {
+                return Err(IrLoweringError::new(
+                    "actors (`spawn`/`tell`) run only on the default (AST) interpreter; the IR and bytecode backends do not support them yet — run this program with `lullaby run` (the default backend)",
+                    Some(expr.span),
+                )
+                .with_code("L0355"));
+            }
         };
 
         Ok(IrExpr {

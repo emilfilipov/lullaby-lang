@@ -362,6 +362,35 @@ struct Checker<'a> {
     /// spurious `L0306` "unknown variable" diagnostics on top of the real
     /// constant error.
     consts: HashMap<String, TypeRef>,
+    /// Declared actor types, keyed by actor name. Each entry records the actor's
+    /// `init` parameter types (or `None` when the actor declares no `init`) and
+    /// its message handlers' signatures, so `spawn`/`tell` sites can be typed and
+    /// argument-checked. The private `state` fields are validated from the AST
+    /// (`self.program.actors`) and are deliberately not exposed here — they are
+    /// unreachable from outside the actor.
+    actors: HashMap<String, ActorTypeInfo>,
+}
+
+/// The externally visible signature surface of an actor: its `init` parameter
+/// types and its message handlers. Used to type and argument-check `spawn` and
+/// `tell` expressions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActorTypeInfo {
+    /// `init` parameter types in order, or `None` when the actor has no `init`
+    /// (its `state` is zero-initialized and `spawn` takes no arguments).
+    init_params: Option<Vec<TypeRef>>,
+    /// Message handlers, keyed by handler name.
+    handlers: HashMap<String, HandlerSig>,
+}
+
+/// A single actor handler's checkable signature: its parameter types and its
+/// optional reply type. `reply_type = None` marks a fire-and-forget (`tell`)
+/// handler; `Some(T)` marks a request-reply (`ask`) handler that `tell` may not
+/// target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HandlerSig {
+    params: Vec<TypeRef>,
+    reply_type: Option<TypeRef>,
 }
 
 impl<'a> Checker<'a> {
@@ -391,12 +420,14 @@ impl<'a> Checker<'a> {
             deferred_diagnostics: Vec::new(),
             inference_failed: HashSet::new(),
             consts: HashMap::new(),
+            actors: HashMap::new(),
         }
     }
 
     fn validate(&mut self) {
         self.collect_structs();
         self.collect_enums();
+        self.collect_actors();
         self.validate_declared_type_wf();
         self.collect_traits();
         self.collect_signatures();
@@ -470,6 +501,368 @@ impl<'a> Checker<'a> {
                     None => self.validate_function(method),
                 }
             }
+        }
+        self.validate_actors();
+    }
+
+    /// Register every actor's externally visible signature (`init` parameters and
+    /// handler signatures) and check declaration-level well-formedness: unique
+    /// actor names (not colliding with a struct/enum), unique handler names, and
+    /// unique state field names (`L0348`).
+    fn collect_actors(&mut self) {
+        for decl in &self.program.actors {
+            if self.actors.contains_key(&decl.name)
+                || self.structs.contains_key(&decl.name)
+                || self.enums.contains_key(&decl.name)
+            {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0348",
+                    format!(
+                        "`{}` is already declared; an actor name must be unique across actors, structs, and enums",
+                        decl.name
+                    ),
+                    None,
+                    decl.span,
+                ));
+                continue;
+            }
+            // Unique state field names.
+            let mut seen_fields = HashSet::new();
+            for field in &decl.state {
+                if !seen_fields.insert(field.name.clone()) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0348",
+                        format!(
+                            "duplicate state field `{}` in actor `{}`",
+                            field.name, decl.name
+                        ),
+                        None,
+                        decl.span,
+                    ));
+                }
+            }
+            // Unique handler names; build the handler signature map.
+            let mut handlers: HashMap<String, HandlerSig> = HashMap::new();
+            for handler in &decl.handlers {
+                if handlers.contains_key(&handler.name) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0348",
+                        format!(
+                            "duplicate handler `{}` in actor `{}`",
+                            handler.name, decl.name
+                        ),
+                        None,
+                        handler.span,
+                    ));
+                    continue;
+                }
+                handlers.insert(
+                    handler.name.clone(),
+                    HandlerSig {
+                        params: handler.params.iter().map(|p| p.ty.clone()).collect(),
+                        reply_type: handler.reply_type.clone(),
+                    },
+                );
+            }
+            let init_params = decl
+                .init
+                .as_ref()
+                .map(|init| init.params.iter().map(|p| p.ty.clone()).collect());
+            self.actors.insert(
+                decl.name.clone(),
+                ActorTypeInfo {
+                    init_params,
+                    handlers,
+                },
+            );
+        }
+    }
+
+    /// Validate every actor's `init` and handler bodies. Each is checked like an
+    /// ordinary function whose scope is the actor's `state` fields (assignable
+    /// locals) plus the handler/init parameters; a reply (`ask`) handler's body
+    /// must end in a value of its declared reply type. Also validates the
+    /// well-formedness of state-field, init-parameter, and handler-parameter
+    /// types. An actor with no handlers is rejected (`L0348`).
+    fn validate_actors(&mut self) {
+        for decl in &self.program.actors {
+            if decl.handlers.is_empty() {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0348",
+                    format!("actor `{}` declares no `on` handlers", decl.name),
+                    None,
+                    decl.span,
+                ));
+            }
+            // State field types must be well-formed.
+            for field in &decl.state {
+                self.validate_type_wf(&field.ty, decl.span, Some(&decl.name), &[]);
+            }
+            // The `init` constructor: check its parameter types and its body with
+            // the state fields (assignable) plus the parameters in scope.
+            if let Some(init) = &decl.init {
+                for param in &init.params {
+                    self.validate_type_wf(&param.ty, init.span, Some(&decl.name), &[]);
+                }
+                let mut scope = self.actor_body_scope(decl, &init.params);
+                let synth = self.synth_actor_function(
+                    &format!("actor {}.init", decl.name),
+                    TypeRef::new("void"),
+                );
+                self.check_function_body(&init.body, &mut scope, &synth);
+            }
+            // Each handler: check its parameter types and its body. A reply
+            // handler's body must produce a value of the reply type.
+            for handler in &decl.handlers {
+                for param in &handler.params {
+                    self.validate_type_wf(&param.ty, handler.span, Some(&decl.name), &[]);
+                }
+                if let Some(reply) = &handler.reply_type {
+                    self.validate_type_wf(reply, handler.span, Some(&decl.name), &[]);
+                }
+                let return_type = handler
+                    .reply_type
+                    .clone()
+                    .unwrap_or_else(|| TypeRef::new("void"));
+                let mut scope = self.actor_body_scope(decl, &handler.params);
+                let synth = self.synth_actor_function(
+                    &format!("actor {}.{}", decl.name, handler.name),
+                    return_type.clone(),
+                );
+                let block_type = self.check_function_body(&handler.body, &mut scope, &synth);
+                if !return_type.is_void() && block_type.as_ref() != Some(&return_type) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0348",
+                        format!(
+                            "handler `{}` of actor `{}` declares reply type `{}` but has no final value of that type",
+                            handler.name, decl.name, return_type.name
+                        ),
+                        Some(format!("actor {}.{}", decl.name, handler.name)),
+                        handler.span,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Build the local scope for an actor `init`/handler body: the actor's state
+    /// fields (mutable, assignable locals) with the handler/init parameters
+    /// layered on top (a parameter shadows a state field of the same name).
+    fn actor_body_scope(
+        &self,
+        decl: &lullaby_parser::ActorDecl,
+        params: &[lullaby_parser::Param],
+    ) -> Scope {
+        let mut scope = Scope::default();
+        for field in &decl.state {
+            scope.locals.insert(field.name.clone(), field.ty.clone());
+        }
+        for param in params {
+            scope.locals.insert(param.name.clone(), param.ty.clone());
+        }
+        scope
+    }
+
+    /// Synthesize a throwaway `Function` for an actor `init`/handler body so the
+    /// existing body checker can name diagnostics and drive
+    /// tail-value/return-type handling. Its `params`/`body` are empty (the real
+    /// scope and body are passed separately to `check_function_body`); only its
+    /// `name` and `return_type` are consulted.
+    fn synth_actor_function(&self, name: &str, return_type: TypeRef) -> Function {
+        Function {
+            name: name.to_string(),
+            type_params: Vec::new(),
+            params: Vec::new(),
+            return_type,
+            body: Vec::new(),
+            span: Span::new(1, 1),
+            is_public: false,
+            is_async: false,
+            is_extern: false,
+            is_export: false,
+        }
+    }
+
+    /// Type-check a `spawn NAME(args)` expression, producing `Actor<NAME>`.
+    /// Rejects an unknown actor, an argument count that does not match the
+    /// actor's `init`, an argument whose type differs from the corresponding
+    /// `init` parameter, and a non-sendable argument (`L0349`/`L0353`).
+    fn check_spawn(
+        &mut self,
+        actor: &str,
+        args: &[Expr],
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let arg_types: Vec<Option<TypeRef>> = args
+            .iter()
+            .map(|arg| self.check_expr(arg, scope, function))
+            .collect();
+        let Some(info) = self.actors.get(actor) else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0349",
+                format!("`spawn` names unknown actor `{actor}`"),
+                Some(function.name.clone()),
+                span,
+            ));
+            return None;
+        };
+        let expected: Vec<TypeRef> = info.init_params.clone().unwrap_or_default();
+        let init_note = if info.init_params.is_some() {
+            format!("actor `{actor}`'s `init`")
+        } else {
+            format!("actor `{actor}` (which declares no `init`)")
+        };
+        if args.len() != expected.len() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0349",
+                format!(
+                    "`spawn {actor}` expects {} argument(s) for {init_note} but got {}",
+                    expected.len(),
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+        } else {
+            for (index, (arg, param_ty)) in args.iter().zip(expected.iter()).enumerate() {
+                if let Some(actual) = &arg_types[index] {
+                    if actual != param_ty {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0349",
+                            format!(
+                                "`spawn {actor}` argument {} expects `{}` but got `{}`",
+                                index + 1,
+                                param_ty.name,
+                                actual.name
+                            ),
+                            Some(function.name.clone()),
+                            arg.span,
+                        ));
+                    }
+                    self.check_sendable(actual, arg.span, function, "spawned into an actor");
+                }
+            }
+        }
+        Some(generic_type("Actor", &[TypeRef::new(actor)]))
+    }
+
+    /// Type-check a `tell TARGET.HANDLER(args)` expression, producing `void`.
+    /// The target must be an `Actor<T>` handle, the handler must exist and must
+    /// be a fire-and-forget (`tell`) handler — not a reply (`ask`) handler — and
+    /// the arguments must match the handler's parameters in count, type, and
+    /// sendability (`L0352`/`L0353`).
+    fn check_tell(
+        &mut self,
+        target: &Expr,
+        handler: &str,
+        args: &[Expr],
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) -> Option<TypeRef> {
+        let target_type = self.check_expr(target, scope, function);
+        let arg_types: Vec<Option<TypeRef>> = args
+            .iter()
+            .map(|arg| self.check_expr(arg, scope, function))
+            .collect();
+        let Some(target_type) = target_type else {
+            return Some(TypeRef::new("void"));
+        };
+        let Some(actor_name) = actor_handle_target(&target_type) else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0352",
+                format!(
+                    "`tell` target must be an `Actor<T>` handle but got `{}`",
+                    target_type.name
+                ),
+                Some(function.name.clone()),
+                target.span,
+            ));
+            return Some(TypeRef::new("void"));
+        };
+        let Some(info) = self.actors.get(&actor_name) else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0352",
+                format!("`Actor<{actor_name}>` does not name a declared actor"),
+                Some(function.name.clone()),
+                target.span,
+            ));
+            return Some(TypeRef::new("void"));
+        };
+        let Some(sig) = info.handlers.get(handler).cloned() else {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0352",
+                format!("actor `{actor_name}` has no handler `{handler}`"),
+                Some(function.name.clone()),
+                span,
+            ));
+            return Some(TypeRef::new("void"));
+        };
+        if sig.reply_type.is_some() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0352",
+                format!(
+                    "cannot `tell` handler `{handler}` of actor `{actor_name}`: it declares a reply type (`-> T`), so it is an `ask` handler; request-reply (`ask`) is a later stage"
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+            return Some(TypeRef::new("void"));
+        }
+        if args.len() != sig.params.len() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0352",
+                format!(
+                    "`tell {actor_name}.{handler}` expects {} argument(s) but got {}",
+                    sig.params.len(),
+                    args.len()
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
+        } else {
+            for (index, (arg, param_ty)) in args.iter().zip(sig.params.iter()).enumerate() {
+                if let Some(actual) = &arg_types[index] {
+                    if actual != param_ty {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0352",
+                            format!(
+                                "`tell {actor_name}.{handler}` argument {} expects `{}` but got `{}`",
+                                index + 1,
+                                param_ty.name,
+                                actual.name
+                            ),
+                            Some(function.name.clone()),
+                            arg.span,
+                        ));
+                    }
+                    self.check_sendable(actual, arg.span, function, "sent in an actor message");
+                }
+            }
+        }
+        Some(TypeRef::new("void"))
+    }
+
+    /// Enforce that a value crossing an actor boundary is **sendable**: it must
+    /// not be (or transitively contain) a non-atomic `rc<T>`, a borrowed
+    /// `ref<T>`, or a raw `ptr<T>` — none of which may be aliased into a second
+    /// actor's isolated heap. A violation is `L0353`. This is the structural,
+    /// compiler-derived analogue of Rust's `Send`; keeping `rc`/`ref`/`ptr` off
+    /// the wire is exactly what lets per-actor reference counting stay
+    /// non-atomic.
+    fn check_sendable(&mut self, ty: &TypeRef, span: Span, function: &Function, context: &str) {
+        if let Some(offender) = first_non_sendable(ty) {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0353",
+                format!(
+                    "value of type `{}` cannot be {context}: `{}` is not sendable across an actor boundary (a non-atomic `rc`/`ref`/`ptr` must not be shared between actors)",
+                    ty.name, offender
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
         }
     }
 
@@ -1116,10 +1509,44 @@ impl<'a> Checker<'a> {
         type_params_in_scope: &[String],
     ) {
         let (head, args) = split_named_type(ty);
+        // `Actor<Name>` is the actor-handle type: exactly one argument naming a
+        // declared actor. Handle it before recursing into the arguments, because
+        // the sole argument names an actor (which is *not* a standalone value
+        // type and would otherwise be flagged by the bare-actor rule below).
+        if head == "Actor" {
+            match args.as_slice() {
+                [arg] if self.actors.contains_key(&arg.name) => {}
+                _ => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0354",
+                        format!(
+                            "`{}` is not a valid actor handle type; write `Actor<Name>` where `Name` is a declared actor",
+                            ty.name
+                        ),
+                        owner.map(str::to_string),
+                        span,
+                    ));
+                }
+            }
+            return;
+        }
         for arg in &args {
             self.validate_type_wf(arg, span, owner, type_params_in_scope);
         }
         if type_params_in_scope.iter().any(|p| p == &head) {
+            return;
+        }
+        // A bare actor name is not a value type: an actor is reachable only
+        // through an `Actor<Name>` handle, never stored or passed by value.
+        if self.actors.contains_key(&head) && args.is_empty() {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0354",
+                format!(
+                    "actor `{head}` cannot be used as a value type; use the handle type `Actor<{head}>`"
+                ),
+                owner.map(str::to_string),
+                span,
+            ));
             return;
         }
         if let Some(params) = self.struct_type_params.get(&head) {
@@ -1673,6 +2100,21 @@ impl<'a> Checker<'a> {
                     ));
                     return None;
                 };
+                // An actor's `state` is private: an external write through an
+                // `Actor<T>` handle (`c.count = ...`) is rejected (`L0354`).
+                if !path.is_empty()
+                    && let Some(actor_name) = actor_handle_target(&root)
+                {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0354",
+                        format!(
+                            "cannot assign to the private state of `Actor<{actor_name}>`; actor state is reachable only from the actor's own handlers"
+                        ),
+                        Some(function.name.clone()),
+                        *span,
+                    ));
+                    return None;
+                }
                 // Walk any `.field` path to the mutated field's type.
                 let expected = self.resolve_field_path(&root, path, *span, scope, function)?;
                 let target = if path.is_empty() {
@@ -2151,6 +2593,17 @@ impl<'a> Checker<'a> {
                     self.check_freed_uses(arg, freed, function);
                 }
             }
+            ExprKind::Spawn { args, .. } => {
+                for arg in args {
+                    self.check_freed_uses(arg, freed, function);
+                }
+            }
+            ExprKind::Tell { target, args, .. } => {
+                self.check_freed_uses(target, freed, function);
+                for arg in args {
+                    self.check_freed_uses(arg, freed, function);
+                }
+            }
             ExprKind::StructLiteral { fields, .. } => {
                 for (_, value) in fields {
                     self.check_freed_uses(value, freed, function);
@@ -2556,8 +3009,30 @@ impl<'a> Checker<'a> {
             ExprKind::StructLiteral { name, fields } => {
                 self.check_struct_literal(name, fields, expected, expr.span, scope, function)
             }
+            ExprKind::Spawn { actor, args } => {
+                self.check_spawn(actor, args, expr.span, scope, function)
+            }
+            ExprKind::Tell {
+                target,
+                handler,
+                args,
+            } => self.check_tell(target, handler, args, expr.span, scope, function),
             ExprKind::Field { target, field } => {
                 let target_type = self.check_expr(target, scope, function)?;
+                // An actor's `state` is private: an `Actor<T>` handle exposes no
+                // fields, so any field access on one is rejected (`L0354`). This
+                // is what keeps actor state single-writer and race-free.
+                if let Some(actor_name) = actor_handle_target(&target_type) {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0354",
+                        format!(
+                            "cannot access field `{field}` on `Actor<{actor_name}>`: an actor's `state` is private and reachable only from its own handlers"
+                        ),
+                        Some(function.name.clone()),
+                        expr.span,
+                    ));
+                    return None;
+                }
                 match self.struct_fields_for(&target_type) {
                     Some(fields) => match fields.iter().find(|f| &f.name == field) {
                         Some(matched) => Some(matched.ty.clone()),
@@ -3369,6 +3844,35 @@ fn same_orderable_scalar(left: &Option<TypeRef>, right: &Option<TypeRef>) -> boo
         (left, right),
         (Some(l), Some(r)) if l == r && matches!(l.name.as_str(), "char" | "byte")
     )
+}
+
+/// The actor name `T` of an `Actor<T>` handle spelling, if `ty` is one.
+fn actor_handle_target(ty: &TypeRef) -> Option<String> {
+    ty.generic_arg("Actor").map(|inner| inner.name)
+}
+
+/// The first non-sendable type spelling embedded in `ty`, or `None` when every
+/// part of `ty` is sendable across an actor boundary. A non-atomic `rc<T>`, a
+/// borrowed `ref<T>`, and a raw `ptr<T>` are the non-sendable heads; everything
+/// else (scalars, `string`, `char`, `byte`, `Actor<T>` handles, and structural
+/// containers whose arguments are all sendable) is sendable. The check recurses
+/// into the type arguments of compound spellings so a `list<rc<i64>>` or a
+/// `result<i64, ptr<byte>>` is caught by its offending part.
+fn first_non_sendable(ty: &TypeRef) -> Option<String> {
+    let (head, args) = split_named_type(ty);
+    if matches!(head.as_str(), "rc" | "ref" | "ptr") {
+        return Some(ty.name.clone());
+    }
+    // Legacy `ptr_T` spelling produced by `alloc` is also a raw pointer.
+    if ty.name.starts_with("ptr_") {
+        return Some(ty.name.clone());
+    }
+    for arg in &args {
+        if let Some(offender) = first_non_sendable(arg) {
+            return Some(offender);
+        }
+    }
+    None
 }
 
 /// If `expr` is a resource-freeing call (`dealloc(x)` or `rc_release(x)`) whose

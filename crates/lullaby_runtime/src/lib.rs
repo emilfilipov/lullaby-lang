@@ -44,7 +44,8 @@ pub use runtime_os::*;
 // and the standard-library/diagnostics types they name. `AssignOp` is also used
 // by `apply_compound` below.
 pub(crate) use interpreter::{
-    CallFrame, Control, Env, ParallelCallable, Runtime, index_into, statement_span,
+    ActorInstance, ActorMessage, CallFrame, Control, Env, ParallelCallable, Runtime, index_into,
+    statement_span,
 };
 pub(crate) use lullaby_diagnostics::{Span, TraceFrame};
 pub(crate) use lullaby_parser::{
@@ -85,6 +86,7 @@ pub fn value_type_name(value: &Value) -> String {
         Value::Future(_) => "Future".to_string(),
         Value::Mutex(_) => "Mutex".to_string(),
         Value::Atomic(_) => "atomic_i64".to_string(),
+        Value::ActorRef(_) => "Actor".to_string(),
         Value::Void => "void".to_string(),
     }
 }
@@ -181,6 +183,12 @@ pub enum Value {
     /// `Arc<AtomicI64>` so cross-thread updates are lock-free and visible to
     /// every holder.
     Atomic(SharedAtomic),
+    /// A typed actor handle `Actor<T>`: an index into the interpreter's actor
+    /// table (the actor's mailbox + private state). It is the only way to reach
+    /// an actor and carries no reference into the actor's private heap; it is
+    /// itself sendable, so actors can address one another. The value is just the
+    /// table index, so the `Value` cell stays small.
+    ActorRef(usize),
     Void,
 }
 
@@ -270,6 +278,7 @@ impl fmt::Display for Value {
             Self::Future(_) => write!(formatter, "future"),
             Self::Mutex(_) => write!(formatter, "mutex"),
             Self::Atomic(_) => write!(formatter, "atomic"),
+            Self::ActorRef(id) => write!(formatter, "actor({id})"),
             Self::Void => write!(formatter, "void"),
         }
     }
@@ -352,6 +361,9 @@ mod builtins;
 
 #[path = "runtime_eval.rs"]
 mod eval;
+
+#[path = "runtime_actor.rs"]
+mod actor;
 
 /// Apply a compound assignment operator (`+=` etc.) to `current` and `rhs`,
 /// supporting i64 and f64.

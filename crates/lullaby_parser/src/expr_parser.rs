@@ -419,6 +419,68 @@ impl<'a> ExprParser<'a> {
                 kind: ExprKind::Bool(false),
                 span: token.span,
             }),
+            // `spawn NAME(args)` is the actor-spawn form: the `spawn` identifier
+            // followed by an actor type name (an identifier, not `(`). The bare
+            // `spawn(...)` builtin call — `spawn` immediately followed by `(` —
+            // still parses through the ordinary identifier-call path below, so the
+            // delivered thread `spawn` builtin keeps working.
+            TokenKind::Identifier(ref name)
+                if name == "spawn"
+                    && matches!(
+                        self.peek().map(|token| &token.kind),
+                        Some(TokenKind::Identifier(_))
+                    ) =>
+            {
+                let actor = match self.peek().map(|token| token.kind.clone()) {
+                    Some(TokenKind::Identifier(actor)) => {
+                        self.cursor += 1;
+                        actor
+                    }
+                    // The guard already proved the next token is an identifier.
+                    _ => unreachable!("spawn actor name is an identifier"),
+                };
+                if !self.eat_symbol("(") {
+                    return Err("expected `(` after actor name in `spawn`".to_string());
+                }
+                let mut args = Vec::new();
+                if !self.eat_symbol(")") {
+                    loop {
+                        args.push(self.parse_conditional()?);
+                        if self.eat_symbol(")") {
+                            break;
+                        }
+                        if !self.eat_symbol(",") {
+                            return Err("expected `,` or `)` in spawn arguments".to_string());
+                        }
+                    }
+                }
+                Ok(Expr {
+                    kind: ExprKind::Spawn { actor, args },
+                    span: token.span,
+                })
+            }
+            // `tell TARGET.HANDLER(args)`: a fire-and-forget message send. The
+            // operand parses as an ordinary postfix expression, which turns the
+            // method-call syntax `c.increment(5)` into a `Call{increment,[c,5]}`
+            // (UFCS). We split that back into the target (first argument) and the
+            // handler name plus its remaining arguments.
+            TokenKind::Keyword(Keyword::Tell) => {
+                let operand = self.parse_postfix()?;
+                match operand.kind {
+                    ExprKind::Call { name, mut args } if !args.is_empty() => {
+                        let target = args.remove(0);
+                        Ok(Expr {
+                            kind: ExprKind::Tell {
+                                target: Box::new(target),
+                                handler: name,
+                                args,
+                            },
+                            span: token.span,
+                        })
+                    }
+                    _ => Err("`tell` expects `target.handler(args)`".to_string()),
+                }
+            }
             TokenKind::Identifier(name) => {
                 if self.eat_symbol("(") {
                     // Named-field construction `Name(field: expr, ...)` is

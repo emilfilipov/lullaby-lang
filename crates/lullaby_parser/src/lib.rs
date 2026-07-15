@@ -97,6 +97,7 @@ impl<'a> Parser<'a> {
         let mut traits = Vec::new();
         let mut impls = Vec::new();
         let mut consts = Vec::new();
+        let mut actors = Vec::new();
         self.skip_newlines();
 
         // Leading `import NAME` lines: zero or more, before any declaration.
@@ -194,6 +195,10 @@ impl<'a> Parser<'a> {
                 if let Some(declaration) = self.parse_trait(is_public) {
                     traits.push(declaration);
                 }
+            } else if self.eat_keyword(Keyword::Actor).is_some() {
+                if let Some(declaration) = self.parse_actor(is_public) {
+                    actors.push(declaration);
+                }
             } else if !is_public && self.eat_keyword(Keyword::Impl).is_some() {
                 if let Some(declaration) = self.parse_impl() {
                     impls.push(declaration);
@@ -204,7 +209,7 @@ impl<'a> Parser<'a> {
                 let token = self.peek();
                 self.error(
                     "L0201",
-                    "`pub` must prefix a `fn`, `struct`, `enum`, `alias`, `const`, or `trait` declaration",
+                    "`pub` must prefix a `fn`, `struct`, `enum`, `alias`, `const`, `trait`, or `actor` declaration",
                     token.span,
                 );
                 self.advance();
@@ -231,7 +236,118 @@ impl<'a> Parser<'a> {
             traits,
             impls,
             consts,
+            actors,
         }
+    }
+
+    /// Parse an actor declaration `actor NAME`: a mandatory `state` block of
+    /// `field type` lines, an optional `init <params>` constructor, and one or
+    /// more `on <handler> <params> [-> T]` message handlers, each with an
+    /// indented body. Sections appear in that order but `state` is the only
+    /// required one; `init` is optional and at most one; at least one `on`
+    /// handler is expected (enforced in semantics). All three inner keywords
+    /// (`state`, `init`, `on`) are contextual identifiers recognized only here,
+    /// so existing code that uses them as ordinary names is unaffected.
+    fn parse_actor(&mut self, is_public: bool) -> Option<ActorDecl> {
+        let span = self.previous().span;
+        let name = self.expect_identifier("expected actor name after `actor`")?;
+        self.expect_newline("expected newline after actor name");
+        self.expect(TokenKindRef::Indent, "expected indented actor body")?;
+
+        let mut state = Vec::new();
+        let mut init: Option<ActorInit> = None;
+        let mut handlers = Vec::new();
+
+        while !self.at(TokenKindRef::Dedent) && !self.at(TokenKindRef::Eof) {
+            match &self.peek().kind {
+                TokenKind::Identifier(word) if word == "state" => {
+                    self.advance();
+                    state = self.parse_actor_state()?;
+                }
+                TokenKind::Identifier(word) if word == "init" => {
+                    let init_span = self.peek().span;
+                    self.advance();
+                    let params = self.parse_param_list()?;
+                    self.expect_newline("expected newline after actor init parameters");
+                    self.expect(TokenKindRef::Indent, "expected indented actor init body")?;
+                    let body = self.parse_block(&[BlockEnd::Dedent]);
+                    self.expect(TokenKindRef::Dedent, "expected actor init body dedent")?;
+                    init = Some(ActorInit {
+                        params,
+                        body,
+                        span: init_span,
+                    });
+                }
+                TokenKind::Identifier(word) if word == "on" => {
+                    let handler_span = self.peek().span;
+                    self.advance();
+                    let handler = self.parse_actor_handler(handler_span)?;
+                    handlers.push(handler);
+                }
+                _ => {
+                    self.error(
+                        "L0201",
+                        "expected `state`, `init`, or `on` in actor body",
+                        self.peek().span,
+                    );
+                    return None;
+                }
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKindRef::Dedent, "expected actor body dedent")?;
+        Some(ActorDecl {
+            name,
+            state,
+            init,
+            handlers,
+            span,
+            is_public,
+        })
+    }
+
+    /// Parse the `state` block of an actor: an indented list of `field type`
+    /// lines, exactly like a struct body.
+    fn parse_actor_state(&mut self) -> Option<Vec<StructField>> {
+        self.expect_newline("expected newline after `state`");
+        self.expect(TokenKindRef::Indent, "expected indented actor state fields")?;
+        let mut fields = Vec::new();
+        while !self.at(TokenKindRef::Dedent) && !self.at(TokenKindRef::Eof) {
+            let field_name = self.expect_identifier("expected state field name")?;
+            let ty = self.expect_type("expected state field type")?;
+            self.expect_newline("expected newline after state field");
+            fields.push(StructField {
+                name: field_name,
+                ty,
+            });
+        }
+        self.expect(TokenKindRef::Dedent, "expected actor state dedent")?;
+        Some(fields)
+    }
+
+    /// Parse a single `on <name> <params> [-> T]` handler and its indented body
+    /// (the `on` keyword-word has already been consumed). A `-> T` clause marks a
+    /// reply (`ask`) handler; its absence marks a fire-and-forget (`tell`)
+    /// handler.
+    fn parse_actor_handler(&mut self, span: Span) -> Option<ActorHandler> {
+        let name = self.expect_identifier("expected handler name after `on`")?;
+        let params = self.parse_param_list()?;
+        let reply_type = if self.eat(TokenKindRef::Arrow) {
+            Some(self.expect_type("expected handler reply type after `->`")?)
+        } else {
+            None
+        };
+        self.expect_newline("expected newline after actor handler signature");
+        self.expect(TokenKindRef::Indent, "expected indented actor handler body")?;
+        let body = self.parse_block(&[BlockEnd::Dedent]);
+        self.expect(TokenKindRef::Dedent, "expected actor handler body dedent")?;
+        Some(ActorHandler {
+            name,
+            params,
+            reply_type,
+            body,
+            span,
+        })
     }
 
     /// Parse `const NAME type = <expr>`. Unlike a `let`, the type annotation is

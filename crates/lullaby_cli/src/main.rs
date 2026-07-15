@@ -327,6 +327,23 @@ fn wasm_file(path: PathBuf, output: Option<PathBuf>, mode: OutputMode) -> Result
         }
     };
 
+    // A program that declares actors is not eligible for the WebAssembly
+    // backend — actors run on the interpreter. Skip cleanly with `L0338` rather
+    // than attempting (and failing) to lower `spawn`/`tell`, so there is never a
+    // miscompile.
+    if !compiled.checked.program.actors.is_empty() {
+        let report = DiagnosticReport::new(
+            "L0338",
+            DiagnosticPhase::Ir,
+            "no functions were eligible for the WebAssembly scalar subset: this program uses actors, which run on the interpreter",
+        )
+        .with_source_path(compiled.path.display().to_string())
+        .with_note(
+            "actors (`actor`/`spawn`/`tell`) are not compiled to WebAssembly; run the program with `lullaby run` (the default backend)",
+        );
+        return Err(format_reports(&[report], mode, Some(&compiled.source)));
+    }
+
     let module = lower(&compiled.checked).map_err(|error| {
         format_reports(
             &[ir_report(error, &compiled.path)],
@@ -447,6 +464,23 @@ fn native_file(
             ));
         }
     };
+
+    // A program that declares actors is native-ineligible — actors run on the
+    // interpreter. Skip cleanly with `L0339` (no eligible function) rather than
+    // attempting to lower `spawn`/`tell`, so a native build never miscompiles an
+    // actor program.
+    if !compiled.checked.program.actors.is_empty() {
+        let report = DiagnosticReport::new(
+            "L0339",
+            DiagnosticPhase::Ir,
+            "no functions were eligible for native compilation: this program uses actors, which run on the interpreter",
+        )
+        .with_source_path(compiled.path.display().to_string())
+        .with_note(
+            "actors (`actor`/`spawn`/`tell`) are not compiled to native code; run the program with `lullaby run` (the default backend)",
+        );
+        return Err(format_reports(&[report], mode, Some(&compiled.source)));
+    }
 
     let module = lower(&compiled.checked).map_err(|error| {
         format_reports(
@@ -1378,7 +1412,8 @@ fn runtime_report(error: RuntimeError, path: &Path) -> DiagnosticReport {
 }
 
 fn ir_report(error: lullaby_ir::IrLoweringError, path: &Path) -> DiagnosticReport {
-    let mut report = DiagnosticReport::new("L0501", DiagnosticPhase::Ir, error.message)
+    let code = error.code.unwrap_or("L0501");
+    let mut report = DiagnosticReport::new(code, DiagnosticPhase::Ir, error.message)
         .with_source_path(path.display().to_string());
     if let Some(span) = error.span {
         report = report.with_span(span);

@@ -1,0 +1,29 @@
+# Multiple actors plus actor-to-actor messaging: a `Forwarder` holds another
+# actor's handle in its private state (handles are sendable, so one actor can
+# address another) and `tell`s that sink actor from inside its own handler. This
+# exercises a handler enqueueing a new message during the drain.
+actor Logger
+    state
+        seen i64
+
+    on log msg string
+        seen += 1
+        println("log: " + msg)
+
+actor Forwarder
+    state
+        sink Actor<Logger>
+
+    init target Actor<Logger>
+        sink = target
+
+    on forward msg string
+        tell sink.log(msg)
+
+fn main -> i64
+    let logger Actor<Logger> = spawn Logger()
+    let fwd Actor<Forwarder> = spawn Forwarder(logger)
+    tell fwd.forward("one")
+    tell fwd.forward("two")
+    tell logger.log("direct")
+    0

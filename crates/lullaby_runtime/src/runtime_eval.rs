@@ -361,6 +361,32 @@ impl<'a> Runtime<'a> {
                 };
                 Self::builtin_substring(vec![target, start, end])
             }
+            // `spawn NAME(args)`: construct the actor, run its `init` with the
+            // evaluated arguments, register it on the scheduler, and yield the
+            // handle. Delegated to the actor scheduler module.
+            ExprKind::Spawn { actor, args } => {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval_expr(arg, env)?);
+                }
+                self.spawn_actor(actor, values)
+            }
+            // `tell TARGET.HANDLER(args)`: evaluate the target handle and the
+            // arguments, enqueue the message on the actor's mailbox, and return
+            // `void`. Messages are drained (run-to-completion, one at a time)
+            // before `main` returns.
+            ExprKind::Tell {
+                target,
+                handler,
+                args,
+            } => {
+                let target = self.eval_expr(target, env)?;
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval_expr(arg, env)?);
+                }
+                self.tell_actor(target, handler, values)
+            }
         };
         result.map_err(|error| self.annotate_error(error, expr.span))
     }

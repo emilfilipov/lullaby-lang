@@ -1,0 +1,13 @@
+# A non-atomic `rc<T>` is not sendable across an actor boundary. -> L0353
+actor Sink
+    state
+        n i64
+
+    on take handle rc<i64>
+        n += 1
+
+fn main -> i64
+    let s Actor<Sink> = spawn Sink()
+    let r rc<i64> = rc_new(5)
+    tell s.take(r)
+    0

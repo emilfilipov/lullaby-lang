@@ -1,9 +1,60 @@
 # Lullaby Concurrency Model Design — Actors + Intra-Actor Async
 
-**Status:** Design proposal, 2026-07-14. Not implemented. This document proposes
-the concrete, buildable shape of Lullaby's **safe-tier concurrency model**:
-real parallelism via **actors on a thread pool**, with **structured
-`async`/`await` for concurrency *within* a single actor**.
+**Status:** Design proposal, 2026-07-14. **Stage 1 delivered, 2026-07-15**
+(actor core + `spawn` + fire-and-forget `tell`, on the AST interpreter — see
+"Stage 1 delivery" below). This document proposes the concrete, buildable shape
+of Lullaby's **safe-tier concurrency model**: real parallelism via **actors on a
+thread pool**, with **structured `async`/`await` for concurrency *within* a
+single actor**.
+
+## Stage 1 delivery (2026-07-15)
+
+Stage 1 of §5.2 — the **actor core** — is implemented and test-locked. Delivered
+surface, exactly as the decided syntax in
+[execution_tiers_and_1_0_scope.md](execution_tiers_and_1_0_scope.md):
+
+- **`actor Name`** blocks with a `state` section (private fields, `name Type`
+  like a struct), an optional **`init <params>`** constructor, and one or more
+  **`on <handler> <params>`** message handlers. A handler with no `-> T` is a
+  fire-and-forget **tell** handler. (A handler *may* be declared with `-> T` — a
+  reply/`ask` handler — and its body is type-checked, but `ask` is stage 2, so
+  `tell`ing one is rejected.) The three inner section words (`state`, `init`,
+  `on`) are **contextual** — recognized only inside an `actor` block — so
+  existing code using them as identifiers is unaffected; `actor` and `tell` are
+  keywords, and `spawn` stays the contextual form `spawn NAME(...)` (the
+  delivered thread `spawn(...)` builtin is unchanged).
+- **`spawn NAME(args)`** constructs an actor (zero-initializing `state`, then
+  running `init`), schedules it, and yields a typed handle **`Actor<Name>`**. The
+  handle is sendable, so actors can address one another.
+- **`tell handle.handler(args)`** enqueues a fire-and-forget message and returns
+  `void` immediately.
+- **Semantics:** the `actor` block, the `Actor<Name>` handle type, `spawn`, and
+  `tell` are fully type-checked; **sendability** is enforced (a non-atomic
+  `rc<T>`/`ref<T>`/`ptr<T>` message argument is rejected — `L0353` — which is
+  what keeps per-actor RC non-atomic); actor `state` is private (no external
+  read/write — `L0354`). Diagnostics: `L0348` (actor declaration), `L0349`
+  (`spawn`), `L0352` (`tell`), `L0353` (sendability), `L0354` (state privacy /
+  actor-as-value).
+- **Runtime (AST interpreter):** a real mailbox + single-threaded **cooperative,
+  deterministic** scheduler. `spawn` builds an actor with its own state; `tell`
+  enqueues; every outstanding message is drained **run-to-completion, one at a
+  time (FIFO)** before `main` returns (a graceful drain), so a `tell` with an
+  observable side effect produces the same output on every run. One message runs
+  at a time and each actor's `state` is touched only by its own handlers, so the
+  state is a single-writer resource with no data races.
+- **Backends:** actors run on the **AST interpreter only** this stage. The
+  IR interpreter and bytecode VM **reject** an actor program with a dedicated
+  `L0355` (never silently diverging); the native and WASM backends **cleanly
+  skip** it (`L0339`/`L0338`) and it runs on the interpreter — no miscompile.
+- **Deferred to later stages (not built):** `ask`/`Future`/`await` request-reply
+  (stage 2); move/`shared` message semantics + `copy` and the use-after-send
+  analysis (stage 3); supervision/failure (stage 4); back-pressure, `try_tell`,
+  `join_all`/`select` (stage 5); native/WASM actor codegen (stage 6); and the IR
+  and bytecode interpreters (an actor program currently rejects there rather than
+  running).
+
+The rest of this document is the original design proposal (the full model); the
+above is the slice that is live today.
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 The decided direction and its rationale are fixed in
