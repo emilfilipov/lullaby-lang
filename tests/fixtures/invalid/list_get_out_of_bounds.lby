@@ -1,0 +1,9 @@
+# Safe-tier failure: a `get` past the end of a list is a bounds/contract
+# violation that ABORTS with diagnostic L0413 on every backend. `get` returns the
+# element directly (not an option), so an out-of-range index is a bug, not a
+# recoverable value.
+fn main -> i64
+    let xs list<i64> = list_new()
+    xs = push(xs, 1)
+    xs = push(xs, 2)
+    get(xs, 5)

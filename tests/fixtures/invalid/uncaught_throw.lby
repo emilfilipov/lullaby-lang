@@ -1,0 +1,7 @@
+# A `throw` that escapes every enclosing `try`/`catch` aborts with L0420 on every
+# backend. This is the recoverable model's boundary: `throw` is catchable, but an
+# UNCAUGHT throw terminates the program with a clear diagnostic rather than
+# silently continuing.
+fn main -> i64
+    throw "unhandled"
+    0

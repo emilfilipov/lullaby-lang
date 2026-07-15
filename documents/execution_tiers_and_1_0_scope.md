@@ -63,6 +63,33 @@ runtime they assume. Conceptually this is Rust's `core` vs `std` + `no_std` +
 The safe tier is *built on* primitives that also exist in the freestanding tier
 (static-buffer arenas, value types, bounds checks with a pluggable panic hook).
 
+## Failure semantics (decided — A5)
+
+Both tiers share one failure model, split into two disjoint families:
+
+- **Contract / memory-safety violations abort — they do not unwind.** An
+  out-of-bounds index, an out-of-range slice, a `pop` of an empty list, a
+  divide-by-zero, a zero loop step: each is a *bug*, and it terminates the
+  program **deterministically** with a clear `L####` diagnostic. It is **not**
+  catchable — a safety abort propagates straight through any `try`/`catch`. No
+  stack unwinding, no allocation on the abort path, so the guarantee holds under
+  the GC-free arena model and in freestanding code. There is no forced-`unwrap`
+  that panics on `none`; `option`/`result` payloads are reached only through an
+  exhaustive `match` or the recoverable `?`.
+- **Modeled failures are recoverable values**, flowing through `result`/`option`,
+  the postfix `?` operator, and `throw`/`try`/`catch`. They let the program keep
+  running to a normal exit. Panics (aborts) are therefore reserved for bugs.
+
+The three interpreters enforce this identically; **native** expresses the same
+aborts as a hardware trap (`ud2` → `STATUS_ILLEGAL_INSTRUCTION` for bounds/heap,
+`#DE` for divide-by-zero) because native code has no diagnostic printer. In the
+**freestanding tier** the terminal action is routed to a **user-provided panic
+handler** instead of an OS abort, so a kernel/embedded target chooses what a
+contract failure does — the check machinery is identical, only the panic sink is
+pluggable. The canonical statement, the full violation→diagnostic table, and the
+recoverable surface live in `documents/lullaby_error_handling.md`
+("Safe-Tier Failure Semantics").
+
 ## Memory model (decided)
 
 - **PRIMARY — arena / region allocation.** Bump-allocate (faster than `malloc`),

@@ -1,0 +1,34 @@
+# Recoverable failures are NOT aborts: they flow through `throw`/`catch` and the
+# postfix `?` operator and let the program continue to a normal exit. This is the
+# other half of the safe-tier failure contract (see documents/lullaby_error_handling.md):
+# contract violations abort, but modeled/expected failures stay recoverable.
+
+# A `throw` caught by `catch` recovers and yields a value.
+fn guarded n i64 -> i64
+    try
+        if n < 0
+            throw "negative"
+        n * 2
+    catch message
+        len(message)
+
+# `?` on a `none` propagates the `none` to the caller (recoverable), rather than
+# aborting. There is no forced "unwrap" that panics on `none` in Lullaby.
+fn lookup present bool -> option<i64>
+    if present
+        return some(7)
+    none
+
+fn use_lookup present bool -> option<i64>
+    let v i64 = lookup(present)?
+    some(v + 1)
+
+fn fold o option<i64> -> i64
+    match o
+        some(v) -> v
+        none -> 100
+
+fn main -> i64
+    # guarded(5) = 10 (no throw); guarded(-1) = len("negative") = 8 (caught).
+    # use_lookup(true) = some(8) -> 8; use_lookup(false) = none -> 100.
+    guarded(5) + guarded(0 - 1) + fold(use_lookup(true)) + fold(use_lookup(false))

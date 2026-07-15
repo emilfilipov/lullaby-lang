@@ -1,0 +1,7 @@
+# Safe-tier failure: division by a runtime zero is a contract violation that
+# ABORTS with diagnostic L0404 on every backend (it is not catchable). The
+# divisor comes from `len("")` so it is a genuine runtime `0`, not a literal the
+# const evaluator could reject at compile time.
+fn main -> i64
+    let zero i64 = len("")
+    10 / zero
