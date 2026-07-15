@@ -126,7 +126,27 @@ These are toolchain-completeness items, not language decisions.
 | B2 | Concrete stdlib contents | PLANNED | enumerate near finish | — |
 | B3 | Stable-grade toolchain | PLANNED | test runner + DWARF + LSP/pkg | — |
 
-## Delivery progress (updated 2026-07-15)
+## Delivery progress (updated 2026-07-16)
+
+- **Freestanding `no-runtime` tier — stage 1 SHIPPED** (main `f6186d3`). Module-level
+  `no-runtime` directive + semantic gate: **L0441** rejects every heap/runtime path
+  (heap types nesting-aware, actors/spawn/tell/await/async, closures, alloc/dealloc,
+  and any expression whose value type is heap/runtime) in a no-runtime module; the
+  allowed subset is scalars/fixed-arrays/scalar-aggregates/option/result/control-flow
+  + the raw-pointer/`unsafe` surface. Reviewed PASS (adversarial gate-soundness probes
+  — type-alias-hidden string, nested `option<list>`, cross-module imported heap helper
+  — all rejected). Stages 2+ (static-buffer arenas, inline asm operands, MMIO/port-IO,
+  interrupt/naked, direct-ELF/flat-binary) remain — the long pole to kernel capability.
+- **Actors — stage 1 shipped; stage 2 (`ask`/`await`/`Future` request-response) IN
+  FLIGHT** on the AST interpreter tier (IR/bytecode/native/WASM keep clean deferral).
+- **B1 closures native — stage 1 (scalar-capture direct-call) IN FLIGHT.** Interpreters
+  run all closures; native currently skips cleanly (L0339). Deeper captures / HOF /
+  escape defer to later stages.
+- **Follow-up (trivial, queued):** freestanding formatter emits a double blank line
+  after the directive + repositions header comments (idempotent, cosmetic); cross-module
+  L0441 span attributed to the importing file. Fold into a later freestanding stage.
+
+### Progress as of 2026-07-15
 
 - **A1 generic user types — mostly shipped.** Frontend complete: generic structs,
   enums, methods, multi-parameter types, and trait bounds on generic types all run
