@@ -1663,6 +1663,45 @@ fn skips_struct_with_f32_field() {
 }
 
 #[test]
+fn skips_list_of_struct_string_field_when_pushing_a_variable() {
+    // A `list<struct-with-string-field>` classifies as a native collection type, but
+    // storing a struct *variable* into an element slot has no sound lowering: a struct
+    // value is stack-flattened everywhere except in a collection slot, so a struct
+    // local is a run of frame words, NOT the `[nwords][field words]` heap block that
+    // `__lullaby_struct_copy` deep-copies (it reads the count at `[ptr - 8]` and walks
+    // off into a neighbouring frame word → a corrupt scalar + bad string pointer,
+    // i.e. SIGSEGV). The store path rejects a non-constructor `HeapStruct` value, so
+    // `main` is demoted and — nothing else eligible — the emitter reports `L0339`: a
+    // clean skip, exactly as the backend behaved before a struct-string was a native
+    // type. (This is the reviewer's `min_list` repro.)
+    let err = emit_native_program(&module_for(
+            "struct Rec\n    name string\n    id i64\n\nfn main -> i64\n    let bucket list<Rec> = list_new()\n    let r Rec = Rec(\"hello\", 3)\n    bucket = push(bucket, r)\n    let got Rec = get(bucket, 0)\n    return len(got.name) + got.id\n",
+        ))
+        .expect_err("pushing a struct-string variable into a list is not native");
+    assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+    assert!(err.skipped.iter().any(|s| s.name == "main"));
+}
+
+#[test]
+fn compiles_list_of_struct_string_field_with_inline_constructor() {
+    // The companion positive case: pushing an INLINE constructor into the same
+    // `list<struct-with-string-field>` stays native-eligible — the fresh struct block
+    // is built directly on the heap by `lower_heap_struct_construct` (already an
+    // independent snapshot), so no stack->heap bridge is needed. `main` builds the
+    // list, `get`s the element (the heap->stack bridge), and reads its fields.
+    let program = emit_native_program(&module_for(
+            "struct Rec\n    name string\n    id i64\n\nfn main -> i64\n    let bucket list<Rec> = list_new()\n    bucket = push(bucket, Rec(\"hello\", 3))\n    let got Rec = get(bucket, 0)\n    return len(got.name) + got.id\n",
+        ))
+        .expect("inline struct-string push is native");
+    assert_eq!(program.compiled, vec!["main".to_string()]);
+    assert!(
+        program.skipped.is_empty(),
+        "no skips: {:?}",
+        program.skipped
+    );
+}
+
+#[test]
 fn emits_rdata_and_bss_for_string_len() {
     // A `main` deriving an i64 from `len` over string literals is eligible for
     // native codegen and gains `.rdata` (the constants) + `.bss` (the heap).

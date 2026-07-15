@@ -559,6 +559,72 @@ fn gen_arena_struct_string_program(seed: u64) -> String {
     format!("{rec}{h}{main}")
 }
 
+/// Generates a program that builds a `list<Rec>` where `Rec` carries a `string`
+/// field, in one of three push styles, then reads a retrieved element's fields:
+///
+/// - **inline constructor** (`bucket = push(bucket, Rec(expr, k))`) — native-eligible;
+///   the fresh struct block is built directly on the heap, so it must run
+///   native==interpreter;
+/// - **struct variable** (`let r Rec = Rec(expr, k)` then `push(bucket, r)`) — the
+///   native backend must SKIP cleanly (a stack-flattened struct value has no
+///   `[nwords]` heap block for `__lullaby_struct_copy` to deep-copy);
+/// - **per-iteration temp in a loop** (the `esc_list` shape) — same struct-variable
+///   push, inside a `while`, which must also skip cleanly.
+///
+/// The struct-variable styles are exactly the previously-unexercised composition that
+/// used to SIGSEGV in native codegen. After the soundness fix each program either runs
+/// native==interpreter (inline) or is a clean skip (variable) — never a produced exe
+/// that crashes. The differential harness ([`fuzz_list_struct_string_native_no_crash_when_linkable`])
+/// accepts both outcomes and only fails on a produced exe that diverges.
+fn gen_list_struct_string_program(seed: u64) -> String {
+    let mut rng = Rng(seed ^ 0x6D2B_79F5_A1C3_04E9u64);
+    let rec = "struct Rec\n    name string\n    id i64\n\n";
+    let bias = rng.range(-30, 30);
+    let n = rng.range(2, 5);
+    // 0 = inline constructors (native-eligible), 1 = struct variables (skip),
+    // 2 = per-iteration struct temp pushed in a loop (skip; the `esc_list` shape).
+    let style = rng.below(3);
+
+    fn name_expr(rng: &mut Rng, k: &str) -> String {
+        match rng.below(4) {
+            0 => format!("to_string({k})"),
+            1 => format!("to_string({k}) + \"!\""),
+            2 => format!("trim(to_string({k} * 2))"),
+            _ => "\"item\"".to_string(),
+        }
+    }
+
+    let mut body = String::from("\n\nfn main -> i64\n    let bucket list<Rec> = list_new()\n");
+    match style {
+        2 => {
+            let ne = name_expr(&mut rng, "i");
+            body.push_str(&format!(
+                "    let i i64 = 0\n    while i < {n}\n        let r Rec = Rec({ne}, i)\n        \
+                 bucket = push(bucket, r)\n        i += 1\n"
+            ));
+        }
+        1 => {
+            for k in 0..n {
+                let ne = name_expr(&mut rng, &k.to_string());
+                body.push_str(&format!(
+                    "    let r{k} Rec = Rec({ne}, {k})\n    bucket = push(bucket, r{k})\n"
+                ));
+            }
+        }
+        _ => {
+            for k in 0..n {
+                let ne = name_expr(&mut rng, &k.to_string());
+                body.push_str(&format!("    bucket = push(bucket, Rec({ne}, {k}))\n"));
+            }
+        }
+    }
+    let idx = rng.range(0, n - 1);
+    body.push_str(&format!(
+        "    let got Rec = get(bucket, {idx})\n    len(got.name) + got.id + {bias}\n"
+    ));
+    format!("{rec}{body}")
+}
+
 /// The result of running a program on one backend, reduced to a comparable form.
 #[derive(PartialEq, Eq, Debug)]
 enum Outcome {
@@ -1082,5 +1148,94 @@ fn fuzz_arena_struct_string_native_matches_interpreter_when_linkable() {
             "NATIVE MISCOMPILE (arena struct-string) on #{i} (seed {seed:#x}):\n{source}\n\
              interpreter={expected}, native exit={exit}"
         );
+    }
+}
+
+#[test]
+fn fuzz_list_struct_string_interpreters_agree() {
+    // Cross-check the three engines on `list<struct-with-string-field>` programs that
+    // build the list via inline constructors, struct variables, or a per-iteration
+    // loop temp. Always runs (no toolchain needed).
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0x4C7B_2E91_D3A6_08F1u64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_list_struct_string_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "backend divergence on list-struct-string-fuzz #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "generator produced a non-i64 main on seed {seed:#x}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_list_struct_string_native_no_crash_when_linkable() {
+    // The regression oracle for `list<struct-with-string-field>` when a struct
+    // VARIABLE (or a per-iteration loop temp) is pushed — the previously-unexercised
+    // shape that used to SIGSEGV in native codegen. After the soundness fix each
+    // program must EITHER compile and run native==interpreter (the inline-constructor
+    // shape) OR skip cleanly (the struct-variable shape: no exe emitted, a controlled
+    // L0339 diagnostic). The ONLY failure is a produced exe whose exit diverges from
+    // the interpreter (a real miscompile — including a crash, which surfaces as a
+    // non-matching exit code). Gated on the link toolchain; skips when absent.
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native list-struct-string fuzz");
+        return;
+    }
+    ensure_msvc_env();
+
+    const PROGRAMS: u64 = 100;
+    let base_seed = 0x7A3F_D18C_44B0_92E5u64;
+    let dir = std::env::temp_dir().join("lullaby_fuzz_native_list_struct_string");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_list_struct_string_program(seed);
+
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "interpreter divergence on native-list-struct-string-fuzz #{i} (seed {seed:#x}):\n{source}"
+        );
+        let expected = match ast {
+            Outcome::Value(n) => n,
+            other => panic!(
+                "list-struct-string generator produced {other:?} on seed {seed:#x}:\n{source}"
+            ),
+        };
+
+        let src_path = dir.join(format!("fuzz_lss_{i}.lby"));
+        let exe_path = dir.join(format!("fuzz_lss_{i}.exe"));
+        std::fs::write(&src_path, &source).expect("write fuzz source");
+        let _ = std::fs::remove_file(&exe_path);
+
+        let _emit = lullaby()
+            .args([
+                "native",
+                "-o",
+                exe_path.to_str().expect("exe path"),
+                src_path.to_str().expect("src path"),
+            ])
+            .output()
+            .expect("run native");
+
+        // A produced exe MUST match the interpreter; no exe is a clean default-deny
+        // skip of the struct-variable push (the correct outcome, not a miscompile).
+        if exe_path.is_file() {
+            let run = Command::new(&exe_path).output().expect("run fuzz exe");
+            let exit = run.status.code().expect("native exit code");
+            assert_eq!(
+                exit, expected as i32,
+                "NATIVE MISCOMPILE (list struct-string) on #{i} (seed {seed:#x}):\n{source}\n\
+                 interpreter={expected}, native exit={exit}"
+            );
+        }
     }
 }
