@@ -1,0 +1,42 @@
+# Arena reclamation of monomorphized heap-`T` generic values. Each `*_part`
+# helper is a provably-local heap-using LEAF (scalar return, no user calls, no
+# loop) that constructs a heap-`T` generic value with a fresh `string` field /
+# payload kept local (read only via `len`/`match`), so it routes through a
+# function-scoped arena and rewinds the bump pointer on return — reclaiming the
+# instantiation's string record. `main` calls each 300_001 times; every call's
+# region is reclaimed at return, so the process completes in the fixed 1 MiB heap
+# despite allocating far more in aggregate. `rc_free` no-ops in arena mode, so the
+# recursive drop-glue and the arena rewind coexist without a double-free. The
+# `Opt<string>` leaf proves the enum-payload string is reclaimed too. This is the
+# arena analogue of run_arena_struct_string_field_reclaim.lby.
+
+struct Box<T>
+    value T
+
+struct Pair<K, V>
+    key K
+    value V
+
+enum Opt<T>
+    present T
+    absent
+
+fn box_part x i64 -> i64
+    let b Box<string> = Box(to_string(x) + "!!!!!!!!!!")
+    len(b.value)
+
+fn pair_part x i64 -> i64
+    let p Pair<string, i64> = Pair(to_string(x) + "??????????", x)
+    len(p.key) + p.value
+
+fn opt_part x i64 -> i64
+    let o Opt<string> = present(to_string(x) + "**********")
+    match o
+        present(s) -> len(s)
+        absent -> 0
+
+fn main -> i64
+    let total i64 = 0
+    for i from 0 to 300000
+        total = total + box_part(i) + pair_part(i) + opt_part(i)
+    total

@@ -1,0 +1,29 @@
+# RC / free-list reclamation of monomorphized heap-`T` generic values allocated
+# per iteration. `sweep` calls a user function (`tick`), so it is NOT arena-routed
+# and keeps the RC codegen: each iteration constructs a `Box<string>` and a
+# `Pair<string, i64>` (each allocating one immutable string record), and the
+# borrow-only struct temps' `string` fields are `rc_dec`'d on the loop edge —
+# freeing the records onto the free list for the next iteration to reuse. Over
+# 300_001 iterations that is far more than the fixed 1 MiB heap, so completing with
+# the interpreter's exact result proves the recursive drop-glue reclaims each
+# monomorphized instantiation's string field exactly once (a leak exhausts the
+# heap; a double-free corrupts the free list). This is the heap-`T` generic
+# analogue of run_rc_struct_string_field_reclaim.lby.
+
+struct Box<T>
+    value T
+
+struct Pair<K, V>
+    key K
+    value V
+
+fn tick x i64 -> i64
+    x
+
+fn main -> i64
+    let total i64 = 0
+    for i from 0 to 300000
+        let b Box<string> = Box(to_string(i) + "!!!!!!!!!!")
+        let p Pair<string, i64> = Pair(to_string(i) + "??????????", i)
+        total = total + len(b.value) + len(p.key) + p.value
+    tick(total)

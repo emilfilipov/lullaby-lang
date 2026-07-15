@@ -1388,3 +1388,161 @@ fn fuzz_generic_scalar_native_matches_interpreter_when_linkable() {
         );
     }
 }
+
+/// Generates a program exercising **native monomorphization of user generic types
+/// with a HEAP (`string`) type argument** — the one-level heap-`T` increment. Fixed
+/// generic declarations (`Box<T>`, `Pair<K, V>`, `Opt<T>`) are instantiated with a
+/// `string` argument and randomized ASCII strings (so `len` is the byte count on
+/// both native and the interpreters), exercising construction, string field/payload
+/// read, value-semantic copy, `match` over a string-payload enum, passing/returning
+/// a heap-`T` value across a boundary, and a per-iteration RECLAIM loop (a fresh
+/// `Box<string>` each iteration, borrow-only). Half the programs (a coin flip) add
+/// an ESCAPING reassignment of an outer `Box<string>` inside the loop — the
+/// adversarial case for the arena escape analysis: native must recognize the
+/// heap-carrying generic store, stay off the arena path, and still agree with the
+/// interpreters (a wrong classification would arena-reclaim a live record and
+/// diverge/crash). All arithmetic is wrapping `i64`, so `main` returns an `i64`.
+fn gen_generic_heap_string_program(seed: u64) -> String {
+    let mut rng = Rng(seed ^ 0x51ED_270B_2E07_6E11u64);
+    let decls = "struct Box<T>\n    value T\n\n\
+                 struct Pair<K, V>\n    key K\n    value V\n\n\
+                 enum Opt<T>\n    present T\n    absent\n\n\
+                 fn box_len b Box<string> -> i64\n    len(b.value)\n\n\
+                 fn pair_sum p Pair<string, i64> -> i64\n    len(p.key) + p.value\n\n\
+                 fn opt_len o Opt<string> f i64 -> i64\n    match o\n        \
+                 present(s) -> len(s)\n        absent -> f\n\n";
+
+    let la = rng.range(1, 12) as usize;
+    let lb = rng.range(1, 12) as usize;
+    let lc = rng.range(1, 12) as usize;
+    let n = rng.range(3, 40);
+    let val = rng.range(-500, 500);
+    let present = rng.chance(2);
+    let fallback = rng.range(-200, 200);
+    let escape = rng.chance(2);
+
+    let sa = "a".repeat(la);
+    let sb = "b".repeat(lb);
+    let sc = "c".repeat(lc);
+
+    let mut body = String::from("fn main -> i64\n");
+    body.push_str(&format!("    let a Box<string> = Box(\"{sa}\")\n"));
+    // Value-semantic copy: `c` shares the immutable string word with `a`.
+    body.push_str("    let c Box<string> = a\n");
+    body.push_str(&format!(
+        "    let p Pair<string, i64> = Pair(\"{sb}\", {val})\n"
+    ));
+    let opt_ctor = if present {
+        format!("present(\"{sc}\")")
+    } else {
+        "absent".to_string()
+    };
+    body.push_str(&format!("    let o Opt<string> = {opt_ctor}\n"));
+    body.push_str("    let acc i64 = 0\n");
+    if escape {
+        // An outer heap-`T` generic reassigned inside the loop — an ESCAPE, so the
+        // function must stay off the arena path (RC). Read after the loop.
+        body.push_str("    let esc Box<string> = Box(\"seed\")\n");
+    }
+    body.push_str(&format!("    for i from 0 to {n}\n"));
+    // A confined per-iteration reclaim temp (borrow-only, dropped each edge).
+    body.push_str("        let t Box<string> = Box(to_string(i) + \"xyz\")\n");
+    body.push_str("        acc = acc + len(t.value)\n");
+    if escape {
+        body.push_str("        if i == 0\n");
+        body.push_str("            esc = Box(to_string(i) + \"qq\")\n");
+    }
+    let esc_term = if escape { " + box_len(esc)" } else { "" };
+    body.push_str(&format!(
+        "    box_len(a) + len(c.value) + pair_sum(p) + opt_len(o, {fallback}) + acc{esc_term}\n"
+    ));
+    format!("{decls}{body}")
+}
+
+#[test]
+fn fuzz_generic_heap_string_interpreters_agree() {
+    // Cross-check the three engines on heap-`T` user-generic programs (`string` T).
+    // Always runs (no toolchain needed); a divergence prints the reproducing program.
+    const PROGRAMS: u64 = 2000;
+    let base_seed = 0x2545_F491_4F6C_DD1Du64;
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_generic_heap_string_program(seed);
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "generic-heap-string backend divergence on program #{i} (seed {seed:#x}):\n{source}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}"
+        );
+        assert!(
+            ast != Outcome::Other,
+            "generic-heap-string generator produced a non-i64 main on seed {seed:#x}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn fuzz_generic_heap_string_native_matches_interpreter_when_linkable() {
+    // The value-neutrality + reclamation-soundness oracle for native monomorphization
+    // of heap-`T` user generics. Each program instantiates `Box<string>`,
+    // `Pair<string, i64>`, and `Opt<string>`, with a per-iteration reclaim loop and
+    // (half the time) an escaping outer-`Box<string>` reassignment. A produced exe
+    // MUST match the interpreter exit code; a clean skip (no exe) is also acceptable
+    // (default-deny) — the ONLY failure is a produced exe whose exit diverges (a real
+    // miscompile, including a crash from a bad arena reclaim). Gated on the link
+    // toolchain; skips cleanly when absent.
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32.lib unavailable; skipping native generic-heap-string fuzz");
+        return;
+    }
+    ensure_msvc_env();
+
+    const PROGRAMS: u64 = 100;
+    let base_seed = 0xB5C0_FBCF_EC4A_3E5Fu64;
+    let dir = std::env::temp_dir().join("lullaby_fuzz_native_generic_heap_string");
+    let _ = std::fs::create_dir_all(&dir);
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let source = gen_generic_heap_string_program(seed);
+
+        let (ast, ir, bc) = run_interpreters(&source);
+        assert!(
+            ast == ir && ir == bc,
+            "interpreter divergence on native-generic-heap-string-fuzz #{i} (seed {seed:#x}):\n{source}"
+        );
+        let expected = match ast {
+            Outcome::Value(n) => n,
+            other => panic!(
+                "generic-heap-string generator produced {other:?} on seed {seed:#x}:\n{source}"
+            ),
+        };
+
+        let src_path = dir.join(format!("fuzz_ghs_{i}.lby"));
+        let exe_path = dir.join(format!("fuzz_ghs_{i}.exe"));
+        std::fs::write(&src_path, &source).expect("write fuzz source");
+        let _ = std::fs::remove_file(&exe_path);
+
+        let _emit = lullaby()
+            .args([
+                "native",
+                "-o",
+                exe_path.to_str().expect("exe path"),
+                src_path.to_str().expect("src path"),
+            ])
+            .output()
+            .expect("run native");
+
+        // A produced exe MUST match the interpreter; no exe is a clean default-deny
+        // skip (never a miscompile).
+        if exe_path.is_file() {
+            let run = Command::new(&exe_path).output().expect("run fuzz exe");
+            let exit = run.status.code().expect("native exit code");
+            assert_eq!(
+                exit, expected as i32,
+                "NATIVE MISCOMPILE (generic heap-string) on #{i} (seed {seed:#x}):\n{source}\n\
+                 interpreter={expected}, native exit={exit}"
+            );
+        }
+    }
+}

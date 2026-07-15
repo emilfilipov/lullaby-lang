@@ -293,18 +293,23 @@ pub(crate) fn resolve_native_type(
                     .map(|(fname, fty)| (fname.clone(), substitute_type(fty, &subst)))
                     .collect();
                 let native = resolve_struct_fields(&head, &concrete_fields, structs, enums)?;
-                // Scalar-`T` scope gate (default-deny). Only compile a generic
-                // instantiation natively when EVERY field, after substitution,
-                // resolves to a scalar or a scalar-only aggregate. A heap-typed field
-                // introduced by a heap type argument (`Box<string>` -> a `string`
-                // field) or a field that becomes heap-typed after substitution
-                // (`Stack<i64>` -> a `list<i64>` field) is DEFERRED to the
-                // interpreters as a clean follow-up (heap-`T` needs per-instantiation
-                // drop-glue/reclamation). Skipping here keeps native default-deny.
-                if !is_scalar_only_layout(&native) {
+                // Native-supported-layout scope gate (default-deny), mirroring the
+                // non-generic heap-field aggregate boundary. A monomorphized generic
+                // struct compiles natively when its whole layout is scalar-only OR its
+                // fields are scalars plus one-level immutable `string` words (a heap
+                // type argument like `Box<string>` -> a `string` field, or
+                // `Pair<string, i64>`). Such a `string` field is stored/copied/dropped
+                // exactly as a hand-written string-field struct (shared immutable word;
+                // the recursive `rc_dec` drop-glue reclaims it, composing with RC +
+                // arena). A DEEPER heap shape is still DEFERRED: a mutable heap field
+                // (`Stack<i64>` -> a `list<i64>` field), a nested heap-carrying
+                // aggregate, or a two-level `string` nesting — exactly what the
+                // non-generic path also defers. Skipping here keeps native default-deny.
+                if !is_native_supported_generic_layout(&native) {
                     return Err(format!(
-                        "generic struct instantiation `{name}` has a heap-typed field after \
-                         substitution; heap type arguments are deferred to the interpreters"
+                        "generic struct instantiation `{name}` has a deeper-than-one-level heap \
+                         field after substitution (a mutable heap value or a nested heap-carrying \
+                         aggregate); it is deferred to the interpreters"
                     ));
                 }
                 return Ok(native);
@@ -364,6 +369,56 @@ pub(crate) fn is_scalar_only_layout(ty: &NativeType) -> bool {
             .iter()
             .all(|v| v.payload.iter().all(is_scalar_only_layout)),
     }
+}
+
+/// The native-supported-layout gate for a monomorphized user-generic instantiation
+/// (`Box<string>`, `Pair<string, i64>`, `Opt<string>`, `Either<i64, string>`). It
+/// WIDENS [`is_scalar_only_layout`] to the exact boundary the non-generic heap-field
+/// aggregate path supports: a scalar-only layout, OR a `struct`/`enum` whose
+/// **immediate** fields/variant payloads are scalars plus **one-level** immutable
+/// `string` words. A one-level `string` field/payload is a shared immutable pointer
+/// word — stored, value-copied, and reclaimed (by the recursive `rc_dec` drop-glue
+/// composing with the arena rewind) exactly as a hand-written string-field
+/// struct/enum. Anything DEEPER stays deferred (default-deny), matching what the
+/// non-generic path also defers:
+/// - a MUTABLE heap field/payload (`list`/`map`, i.e. `Stack<i64>`'s `list<i64>`);
+/// - a nested heap-carrying aggregate (`HeapStruct`, a struct/enum used as a
+///   collection/payload slot) — e.g. a nested generic aggregate;
+/// - a two-level `string` nesting (a `string` inside a nested aggregate field).
+///
+/// The gate keys purely on the resolved layout, so a monomorphized `Box<string>`
+/// (layout `Struct { name: "Box", fields: [("value", String)] }`) is accepted
+/// identically to a hand-written `struct { value string }`, which is why the whole
+/// existing heap-field machinery (construction, flat-word value copy, the
+/// `is_owning_struct_with_strings` recursive drop-glue, arena escape analysis)
+/// applies unchanged and the result stays value-neutral.
+pub(crate) fn is_native_supported_generic_layout(ty: &NativeType) -> bool {
+    // A whole scalar-only layout is always supported (the scalar-`T` case).
+    if is_scalar_only_layout(ty) {
+        return true;
+    }
+    match ty {
+        // Immediate fields may add one-level immutable `string` words; any nested
+        // aggregate field must itself be scalar-only (no deeper `string`).
+        NativeType::Struct { fields, .. } => {
+            fields.iter().all(|(_, f)| is_one_level_string_or_scalar(f))
+        }
+        // Immediate variant payloads may add one-level immutable `string` words.
+        NativeType::Enum { variants, .. } => variants
+            .iter()
+            .all(|v| v.payload.iter().all(is_one_level_string_or_scalar)),
+        _ => false,
+    }
+}
+
+/// A field/payload slot that a monomorphized generic instantiation may carry at the
+/// TOP level: an immutable `string` word, or an entirely scalar-only cell/aggregate.
+/// A nested aggregate must be scalar-only here (a `string` reachable only through a
+/// nested aggregate is a two-level nesting and stays deferred), and a mutable heap
+/// value (`list`/`map`/`HeapStruct`/`FatArray`) is rejected by falling through
+/// [`is_scalar_only_layout`].
+fn is_one_level_string_or_scalar(ty: &NativeType) -> bool {
+    matches!(ty, NativeType::String) || is_scalar_only_layout(ty)
 }
 
 /// Resolve a struct's `(field, type)` list into a stack-flattened
@@ -570,17 +625,21 @@ fn resolve_enum_type(
         variants,
         payload_words,
     };
-    // Scalar-`T` scope gate (default-deny), mirroring the generic-struct path: a
-    // user generic enum instantiation compiles natively only when its whole layout
-    // is scalar-only. A heap-typed payload introduced by a heap type argument
-    // (`Opt<string>`) or one that becomes heap-typed after substitution
-    // (`Tree<i64>`'s `list<Tree<i64>>`) is DEFERRED to the interpreters. Built-in
-    // `option`/`result` and non-generic user enums keep their existing string/heap
-    // payload support (they are not gated here).
-    if user_generic && !is_scalar_only_layout(&native) {
+    // Native-supported-layout scope gate (default-deny), mirroring the generic-struct
+    // path: a user generic enum instantiation compiles natively when its whole layout
+    // is scalar-only OR its variant payloads are scalars plus one-level immutable
+    // `string` words (a heap type argument like `Opt<string>` -> a `string` payload,
+    // or `Either<i64, string>`). Such a `string` payload is the same shared immutable
+    // word a non-generic string-payload enum uses. A DEEPER heap payload is still
+    // DEFERRED: a mutable-aggregate payload (`Stack<i64>`'s `list<Tree<i64>>`, an
+    // `option<struct>`-shaped nested aggregate) or a two-level `string` nesting.
+    // Built-in `option`/`result` and non-generic user enums keep their existing
+    // string/one-level-aggregate payload support (they are not gated here).
+    if user_generic && !is_native_supported_generic_layout(&native) {
         return Err(format!(
-            "generic enum instantiation `{}` has a heap-typed payload after substitution; \
-             heap type arguments are deferred to the interpreters",
+            "generic enum instantiation `{}` has a deeper-than-one-level heap payload after \
+             substitution (a mutable heap value or a nested heap-carrying aggregate); it is \
+             deferred to the interpreters",
             ty.name
         ));
     }

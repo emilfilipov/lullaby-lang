@@ -2010,6 +2010,179 @@ pub(crate) fn native_struct_string_field_arena_reclaim_execution_parity_when_lin
     );
 }
 
+/// Execution parity for **native monomorphization of heap-`T` user generics** —
+/// `Box<string>`, `Pair<string, i64>`, `Opt<string>` each instantiated with a
+/// `string` type argument (a one-level heap field/payload after substitution).
+/// Exercises construction, string field/payload read, value-semantic copy, and
+/// passing/returning a heap-`T` generic value across function boundaries. Every
+/// function must compile natively (a monomorphized `Box<string>` has the layout of
+/// a hand-written string-field struct), and the `.exe` exit code must equal the
+/// interpreter result (mod 256) — value-neutral.
+#[test]
+pub(crate) fn native_generic_heap_string_execution_parity_when_linkable() {
+    let fixture = workspace_root().join("tests/fixtures/valid/native_generic_heap_string.lby");
+    let out = std::env::temp_dir().join("lullaby_native_generic_heap_string.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+    let emit_out = stdout(&emit);
+    for name in ["box_len", "rebox", "pair_sum", "opt_len", "main"] {
+        assert!(
+            emit_out.contains(&format!("compiled {name}")),
+            "expected `{name}` to compile natively (heap-`T` generic): {emit_out}"
+        );
+    }
+
+    for backend in ["ast", "ir", "bytecode"] {
+        let run = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        assert!(run.status.success(), "{backend}: {}", stderr(&run));
+        let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+        assert_eq!(
+            interp, 63,
+            "{backend}: heap-`T` generic fixture main computes 63"
+        );
+    }
+
+    if !out.is_file() {
+        eprintln!("no native exe produced; skipping heap-`T` generic run");
+        return;
+    }
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(
+        exit,
+        63_i32.rem_euclid(256),
+        "native heap-`T` generic exit code must equal the interpreter result (mod 256)"
+    );
+}
+
+/// RC / free-list reclamation of monomorphized heap-`T` generic values allocated
+/// per iteration. `sweep` calls a user function, so it keeps the RC codegen: each
+/// iteration builds a `Box<string>` and a `Pair<string, i64>`, and the recursive
+/// struct-string drop-glue `rc_dec`s each instantiation's `string` field on the
+/// loop edge, freeing the record for reuse. Over 300_001 iterations that is far
+/// more than the fixed 1 MiB heap, so a correct exit code equal to the interpreter
+/// proves the monomorphized instantiation's string field is reclaimed exactly once
+/// (a leak exhausts the heap; a double-free corrupts the free list).
+#[test]
+pub(crate) fn native_generic_heap_string_rc_reclaim_execution_parity_when_linkable() {
+    let fixture =
+        workspace_root().join("tests/fixtures/valid/run_rc_generic_heap_string_reclaim.lby");
+    let out = std::env::temp_dir().join("lullaby_native_generic_heap_string_rc_reclaim.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(
+        interp, 45_009_527_812,
+        "sum of len(b.value)+len(p.key)+p.value over Box<string>/Pair<string,i64> for i in 0..=300000"
+    );
+
+    if !out.is_file() {
+        eprintln!("no native exe produced; skipping heap-`T` generic RC reclaim run");
+        return;
+    }
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native heap-`T` generic RC-reclaimed loop must complete with the interpreter's \
+         result (a crash here means the heap exhausted — reclamation regressed)"
+    );
+}
+
+/// Arena reclamation of monomorphized heap-`T` generic values. Each `*_part`
+/// helper is a provably-local heap-using LEAF that builds a heap-`T` generic value
+/// (`Box<string>`, `Pair<string, i64>`, `Opt<string>`) kept local, so it routes
+/// through a function-scoped arena and rewinds the bump pointer on return. `main`
+/// calls each 300_001 times; every call's region — including the instantiation's
+/// string record — is reclaimed at return, so the process completes in the fixed
+/// 1 MiB heap. The `Opt<string>` leaf proves the enum-payload string is reclaimed
+/// too (an enum local has no per-temp RC drop-glue, so ONLY the arena rewind bounds
+/// it). `rc_free` no-ops in arena mode, so drop-glue and rewind coexist without a
+/// double-free. The arena analogue of the RC reclaim test above.
+#[test]
+pub(crate) fn native_generic_heap_string_arena_reclaim_execution_parity_when_linkable() {
+    let fixture =
+        workspace_root().join("tests/fixtures/valid/run_arena_generic_heap_string_reclaim.lby");
+    let out = std::env::temp_dir().join("lullaby_native_generic_heap_string_arena_reclaim.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(emit.status.success(), "{}", stderr(&emit));
+
+    let run = lullaby()
+        .args(["run", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(run.status.success(), "{}", stderr(&run));
+    let interp: i64 = stdout(&run).trim().parse().expect("interpreter i64");
+    assert_eq!(
+        interp, 45_014_216_718,
+        "sum of box_part(i)+pair_part(i)+opt_part(i) for i in 0..=300000"
+    );
+
+    if !out.is_file() {
+        eprintln!("no native exe produced; skipping heap-`T` generic arena reclaim run");
+        return;
+    }
+    let exe = Command::new(&out).output().expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    let expected = if cfg!(windows) {
+        interp as i32
+    } else {
+        interp.rem_euclid(256) as i32
+    };
+    assert_eq!(
+        exit, expected,
+        "native heap-`T` generic arena-reclaimed loop must complete with the interpreter's \
+         result (a crash here means the per-call arena reset regressed)"
+    );
+}
+
 /// Best-effort execution parity for **native `for c in s` over multi-byte UTF-8**.
 /// The `for c in s` loop is lowered to a forward byte cursor (O(N)) that decodes
 /// each code point in place; this fixture iterates strings whose characters span

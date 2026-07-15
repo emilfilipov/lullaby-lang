@@ -1723,20 +1723,40 @@ fn compiles_generic_enum_with_scalar_type_argument() {
 }
 
 #[test]
-fn skips_generic_struct_with_heap_string_type_argument() {
-    // DEFAULT-DENY: a scalar-`T` increment. A generic struct instantiated with a
-    // HEAP type argument (`Box<string>` -> a `string` field after substitution) is
-    // DEFERRED to the interpreters as a clean follow-up (heap-`T` needs
-    // per-instantiation drop-glue/reclamation). Even though native already supports
-    // a hand-written string-field struct, the monomorphization scalar-only gate
-    // rejects the instantiation, so `main` is demoted and — nothing else eligible —
-    // the emitter reports `L0339`: a clean skip, never a miscompile.
-    let err = emit_native_program(&module_for(
-            "struct Box<T>\n    value T\n\nfn main -> i64\n    let b Box<string> = Box(\"hi\")\n    return len(b.value)\n",
+fn compiles_generic_struct_with_string_type_argument() {
+    // HEAP-`T` monomorphization: a generic struct instantiated with a `string` type
+    // argument (`Box<string>` -> a one-level `string` field after substitution) now
+    // compiles natively, with a layout byte-identical to a hand-written
+    // `struct { value string }`. Construction, field read (`len(b.value)`), and a
+    // value-semantic copy all compile — the `string` field is a shared immutable
+    // pointer word.
+    let program = emit_native_program(&module_for(
+            "struct Box<T>\n    value T\n\nfn main -> i64\n    let b Box<string> = Box(\"hi\")\n    let c Box<string> = b\n    return len(b.value) + len(c.value)\n",
         ))
-        .expect_err("heap-T generic struct is deferred");
-    assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
-    assert!(err.skipped.iter().any(|s| s.name == "main"));
+        .expect("string-T generic struct is native");
+    assert_eq!(program.compiled, vec!["main".to_string()]);
+    assert!(
+        program.skipped.is_empty(),
+        "no skips: {:?}",
+        program.skipped
+    );
+}
+
+#[test]
+fn compiles_multi_param_generic_struct_with_string_and_scalar() {
+    // A two-parameter `Pair<K, V>` instantiated `Pair<string, i64>`: one one-level
+    // `string` field alongside a scalar field — a flat two-word aggregate with the
+    // string word shared on copy. Compiles natively.
+    let program = emit_native_program(&module_for(
+            "struct Pair<K, V>\n    key K\n    value V\n\nfn main -> i64\n    let p Pair<string, i64> = Pair(key: \"id\", value: 7)\n    return len(p.key) + p.value\n",
+        ))
+        .expect("string+scalar generic struct is native");
+    assert_eq!(program.compiled, vec!["main".to_string()]);
+    assert!(
+        program.skipped.is_empty(),
+        "no skips: {:?}",
+        program.skipped
+    );
 }
 
 #[test]
@@ -1753,14 +1773,64 @@ fn skips_generic_struct_whose_field_becomes_heap_after_substitution() {
 }
 
 #[test]
-fn skips_generic_enum_with_heap_string_payload() {
-    // DEFAULT-DENY: a generic enum instantiated so a payload becomes heap-typed
-    // (`Either<i64, string>` -> a `string` payload) is deferred to the interpreters,
-    // exactly like the generic-struct heap-`T` case.
-    let err = emit_native_program(&module_for(
-            "enum Either<L, R>\n    left L\n    right R\n\nfn fold e Either<i64, string> -> i64\n    match e\n        left(x) -> x\n        right(s) -> len(s)\n\nfn main -> i64\n    let e Either<i64, string> = left(3)\n    return fold(e)\n",
-        ))
-        .expect_err("heap-payload generic enum is deferred");
+fn compiles_generic_enum_with_string_payload() {
+    // HEAP-`T` monomorphization: a generic enum instantiated so a payload becomes a
+    // one-level `string` (`Opt<string>` -> `present(string)`, `Either<i64, string>`
+    // -> a `string` right payload) now compiles natively — the same shared immutable
+    // payload word a non-generic string-payload enum uses. Construction of a payload
+    // and a unit variant plus an exhaustive `match` binding the string payload all
+    // compile.
+    let program = emit_native_program(&module_for(concat!(
+        "enum Opt<T>\n    present T\n    absent\n\n",
+        "enum Either<L, R>\n    left L\n    right R\n\n",
+        "fn opt_len o Opt<string> -> i64\n    match o\n        present(s) -> len(s)\n        absent -> 0\n\n",
+        "fn either_len e Either<i64, string> -> i64\n    match e\n        left(x) -> x\n        right(s) -> len(s)\n\n",
+        "fn main -> i64\n    let o Opt<string> = present(\"hello\")\n    let m Opt<string> = absent\n    let e Either<i64, string> = right(\"hi\")\n    return opt_len(o) + opt_len(m) + either_len(e)\n",
+    )))
+    .expect("string-payload generic enum is native");
+    assert_eq!(
+        program.compiled,
+        vec![
+            "opt_len".to_string(),
+            "either_len".to_string(),
+            "main".to_string()
+        ]
+    );
+    assert!(
+        program.skipped.is_empty(),
+        "no skips: {:?}",
+        program.skipped
+    );
+}
+
+#[test]
+fn skips_generic_struct_with_nested_generic_aggregate_field() {
+    // DEFAULT-DENY at the one-level boundary: `struct Wrap<T> { inner Box<T> }` with
+    // `Wrap<string>` substitutes `inner` to `Box<string>` — a NESTED heap-carrying
+    // aggregate (a `string` reachable only through a nested struct field, i.e. a
+    // two-level nesting). That is deeper than the one-level `string`-field support,
+    // so the whole function skips cleanly, exactly as the non-generic path defers a
+    // two-level heap nesting.
+    let err = emit_native_program(&module_for(concat!(
+        "struct Box<T>\n    value T\n\n",
+        "struct Wrap<T>\n    inner Box<T>\n    tag i64\n\n",
+        "fn main -> i64\n    let w Wrap<string> = Wrap(Box(\"hi\"), 1)\n    return len(w.inner.value) + w.tag\n",
+    )))
+    .expect_err("nested-generic-aggregate heap field is deferred");
+    assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
+    assert!(err.skipped.iter().any(|s| s.name == "main"));
+}
+
+#[test]
+fn skips_generic_enum_with_mutable_aggregate_payload() {
+    // DEFAULT-DENY: a generic enum instantiated so a payload becomes a MUTABLE heap
+    // aggregate (`Opt<list<i64>>` -> a `list<i64>` payload) is deferred — only a
+    // one-level `string` payload is in the native heap-`T` subset.
+    let err = emit_native_program(&module_for(concat!(
+        "enum Opt<T>\n    present T\n    absent\n\n",
+        "fn main -> i64\n    let xs list<i64> = list_new()\n    let o Opt<list<i64>> = present(xs)\n    return 0\n",
+    )))
+    .expect_err("mutable-aggregate-payload generic enum is deferred");
     assert_eq!(err.code, NATIVE_NO_ELIGIBLE_CODE);
     assert!(err.skipped.iter().any(|s| s.name == "main"));
 }
@@ -3890,6 +3960,103 @@ fn arena_not_used_when_a_struct_string_escapes_a_confined_loop() {
     assert!(
         !has_arena_prologue(&program),
         "a loop storing a heap-carrying struct to an outer var must NOT be arena-confined"
+    );
+}
+
+#[test]
+fn generic_struct_string_loop_temp_uses_recursive_drop() {
+    // A monomorphized heap-`T` generic struct (`Box<string>`) reuses the recursive
+    // heap-field drop-glue unchanged: its layout is byte-identical to a hand-written
+    // `struct { value string }`, so a uniquely-owned, borrow-only `Box<string>` loop
+    // temp is reclaimed by one `rc_dec` on the string field at each loop edge. The
+    // string field is a fresh alloc and the local is read only via `len(b.value)`, so
+    // the ONLY source of an `rc_dec` reference is that per-field drop.
+    let program = emit_native_program(&module_for(concat!(
+        "struct Box<T>\n    value T\n\n",
+        "fn scan n i64 -> i64\n",
+        "    let total i64 = 0\n",
+        "    let i i64 = 0\n",
+        "    loop\n",
+        "        if i >= n\n",
+        "            break\n",
+        "        let b Box<string> = Box(to_string(i) + \"!!!!!!!!!!\")\n",
+        "        total = total + len(b.value)\n",
+        "        i = i + 1\n",
+        "    total\n\n",
+        "fn main -> i64\n    scan(3)\n",
+    )))
+    .expect("emit generic Box<string> loop program");
+    assert!(
+        program.compiled.contains(&"scan".to_string()),
+        "a Box<string> loop function must compile: {:?}",
+        program.skipped
+    );
+    assert!(
+        coff_symbol(&program.bytes, RC_DEC_SYMBOL).is_some_and(|(s, _)| s == 1),
+        "an owned borrow-only Box<string> loop temp must be recursively dropped \
+         (rc_dec per string field)"
+    );
+}
+
+#[test]
+fn generic_struct_string_reclaim_on_arena_path() {
+    // The heap-`T` generic drop-glue composing with the ARENA path: `build_len` is a
+    // provably-local heap-using LEAF constructing a `Box<string>` kept local, so it is
+    // arena-eligible — its region is reclaimed by the bump-pointer rewind on return,
+    // and `rc_free` no-ops in arena mode, so the drop-glue and rewind coexist without
+    // a double-free.
+    let program = emit_native_program(&module_for(concat!(
+        "struct Box<T>\n    value T\n\n",
+        "fn build_len x i64 -> i64\n",
+        "    let b Box<string> = Box(to_string(x) + \"!!!!!!!!!!\")\n",
+        "    len(b.value)\n\n",
+        "fn main -> i64\n    build_len(5)\n",
+    )))
+    .expect("emit generic Box<string> arena reclaim program");
+    assert!(
+        program.compiled.contains(&"build_len".to_string()),
+        "the Box<string> arena reclaim function must compile: {:?}",
+        program.skipped
+    );
+    assert!(
+        has_arena_prologue(&program),
+        "a provably-local Box<string> heap function must take the arena path"
+    );
+}
+
+#[test]
+fn arena_not_used_when_a_generic_heap_string_escapes_a_confined_loop() {
+    // Default-deny soundness for heap-`T` generics: a monomorphized `Box<string>`
+    // value transitively carries heap, so storing it into an iteration-outliving
+    // location is an ESCAPE. `f` reassigns the outer `acc` (a `Box<string>`) inside a
+    // loop; were the loop treated as "confined", a per-iteration arena sub-region
+    // rewind would reclaim a record `acc` still references — a use-after-free once a
+    // later allocation reuses the rewound bytes. The escape analysis now recognizes a
+    // heap-carrying generic INSTANTIATION (`Box<string>`, added to the heap set by its
+    // full spelling), so `f` is NOT arena-routed, keeping it sound (it stays on the RC
+    // path, which never rewinds a live value).
+    let program = emit_native_program(&module_for(concat!(
+        "struct Box<T>\n    value T\n\n",
+        "fn f n i64 -> i64\n",
+        "    let acc Box<string> = Box(\"start\")\n",
+        "    let total i64 = 0\n",
+        "    for i from 1 to n\n",
+        "        if i == 1\n",
+        "            acc = Box(to_string(i) + \"Z\")\n",
+        "        let scratch string = to_string(i) + \"0123456789\"\n",
+        "        total = total + len(acc.value) + len(scratch)\n",
+        "    total\n\n",
+        "fn main -> i64\n    f(5)\n",
+    )))
+    .expect("emit generic Box<string> escape program");
+    assert!(
+        program.compiled.contains(&"f".to_string()),
+        "the function still compiles (on the RC path): {:?}",
+        program.skipped
+    );
+    assert!(
+        !has_arena_prologue(&program),
+        "a loop storing a heap-carrying Box<string> to an outer var must NOT be arena-confined"
     );
 }
 
