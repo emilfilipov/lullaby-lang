@@ -67,6 +67,18 @@ On open and change the server runs the same pipeline as `lullaby check`: lex, th
 
 Lullaby spans are single 1-based `line`/`column` points. They are converted to 0-based LSP ranges. Because a span has no length, the end is widened to cover the identifier/number/keyword token that starts at that column (scanning the document line for word characters); when the position is not on a word character the range falls back to a single character. Each diagnostic is published as an LSP `Diagnostic` with `severity = 1` (Error), `source = "lullaby"`, the Lullaby `code`, and the message, via a `textDocument/publishDiagnostics` notification.
 
+## Module And Project Awareness
+
+`crates/lullaby_lsp/src/project.rs` makes the server work correctly for multi-file projects, which the single-document pipeline could not: a `pub` symbol defined in an imported module used to read as "undefined", and hover/go-to-definition could never leave the open buffer. The server now runs the **same** module resolution the CLI uses, from the shared `lullaby_loader` crate (extracted from the CLI precisely so the server can depend on it — the CLI depends on `lullaby_lsp`, so the loader could not stay in the CLI without a dependency cycle).
+
+The path is engaged conservatively. A document is analyzed module-aware only when it uses `import` **or** lives inside a `lullaby.json` project (found by walking up from the file's directory for a manifest and resolving it into the project's `src` search directories). A lone file with no imports and no project falls through to the unchanged single-document pipeline, so single-file behavior is byte-for-byte as before.
+
+- **Open-buffer overlay.** Every open document is supplied to the loader as a `SourceOverlay` (`overlay_key(path) -> live text`), so the editor's current, possibly-unsaved buffers are analyzed instead of stale on-disk bytes. The loader reads a module from the overlay when present and from disk otherwise; the CLI never passes an overlay, so its on-disk behavior is unchanged.
+- **Diagnostics.** The open buffer's own lex/parse errors are reported directly from the buffer (authoritative positions, no loader run). Otherwise the loader runs over the file's project: loader diagnostics (`L0391` no-shadowing, `L0392` visibility, `L0393` cycle, `L0397` missing module) are filtered to those whose source path is this file; then `validate` runs over the merged program, and semantic diagnostics are attributed back to the open file by their enclosing-function name (top-level names are globally unique across a merged project under `L0391`), falling back to whether the span lands within the open file's own extent for the rare function-less diagnostic. A symbol defined in an imported module therefore no longer reads as undefined, while a genuine error in the open file is still reported at its real position.
+- **Hover and go-to-definition.** When buffer-local resolution finds nothing, the loader's per-module views (`LoadedProgram.modules`, each carrying a module's name/path/source/AST) are searched for a declaration of the identifier. Hover renders that declaration's signature from the other file; go-to-definition returns a `Location` whose URI is the other file's `file://` URI (built by percent-encoding the path) and whose range covers the declaration's name.
+
+Every fallible step degrades to single-document analysis rather than failing: a non-`file://` URI (e.g. an unsaved `untitled:` buffer), a malformed manifest, a missing import, or a mid-edit buffer never panics the server.
+
 ## Formatting
 
 `textDocument/formatting` looks up the stored document text and runs the canonical formatter (`lullaby_parser::format_program`) after a successful lex+parse. It returns a single full-document `TextEdit` whose range spans the entire current document. If the document does not parse, or is already canonical, it returns no edits.
@@ -125,6 +137,8 @@ Go-to-definition returns a `Location` in the same document:
 - `hover` over a function name returns its signature; over a typed local returns its type; over whitespace or an unknown identifier returns `null`.
 - `definition` on a call jumps to the function declaration's name range; on a local jumps to its `let` line; on an unresolved position returns `null`.
 
+`project.rs` additionally carries filesystem-backed tests over a real two-file project (`main.lby` importing a `pub` symbol from `math.lby`): an imported symbol is not flagged undefined; a genuine type error in the entry is still reported at the correct 0-based range while the imported symbol is not; cross-module go-to-definition points at the other file's URI and declaration line; cross-module hover shows the imported signature; an unsaved-buffer overlay is analyzed in preference to broken on-disk bytes; and a lone no-import file produces byte-identical diagnostics to the single-document pipeline (regression guard). URI/path round-trips (Unix and percent-encoded Windows drive) and non-`file://` rejection are unit-tested. The `lullaby_loader` crate tests the overlay precedence and per-module exposure directly.
+
 The transport module additionally tests the framed read/write loop end to end over in-memory byte buffers (initialize -> didOpen -> shutdown -> exit).
 
 ## Deferred Features
@@ -135,5 +149,6 @@ The following are intentionally out of scope for this increment and can be layer
 - References, document symbols, workspace symbols. (Hover and go-to-definition are now supported; see the section above.)
 - Incremental (range) document sync.
 - Code actions / quick fixes (for example applying the formatter or diagnostic-directed edits).
-- Multi-file / project-aware analysis (imports and `lullaby.json` search directories); the server currently analyzes each open document in isolation.
+
+Module- and project-aware analysis (imports and `lullaby.json` search directories) is now supported — see "Module And Project Awareness" above.
 - Reporting more than the first failing phase's diagnostics at once.

@@ -19,10 +19,10 @@ use serde_json::{Value, json};
 
 /// The identifier under the cursor: its text plus the 0-based line and the
 /// 0-based start column of the word it belongs to.
-struct WordAt {
-    name: String,
-    line: usize,
-    start: usize,
+pub(crate) struct WordAt {
+    pub(crate) name: String,
+    pub(crate) line: usize,
+    pub(crate) start: usize,
 }
 
 /// Compute the hover result for a position, or `None` when there is nothing to
@@ -105,14 +105,14 @@ fn check(text: &str) -> Option<CheckedProgram> {
 }
 
 /// Wrap markdown in an LSP `Hover` value.
-fn hover_value(markdown: String) -> Value {
+pub(crate) fn hover_value(markdown: String) -> Value {
     json!({ "contents": { "kind": "markdown", "value": markdown } })
 }
 
 /// The identifier at a 0-based `(line, character)` position, or `None` if the
 /// position is not on a word character. The returned `start` is the 0-based
 /// column of the first character of the word.
-fn word_at(text: &str, line: usize, character: usize) -> Option<WordAt> {
+pub(crate) fn word_at(text: &str, line: usize, character: usize) -> Option<WordAt> {
     let source_line = text.lines().nth(line)?;
     let chars: Vec<char> = source_line.chars().collect();
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
@@ -142,7 +142,7 @@ fn word_at(text: &str, line: usize, character: usize) -> Option<WordAt> {
 }
 
 /// Hover markdown for a top-level declaration named `name`, if any.
-fn declaration_hover(program: &Program, name: &str) -> Option<String> {
+pub(crate) fn declaration_hover(program: &Program, name: &str) -> Option<String> {
     if let Some(func) = program.functions.iter().find(|f| f.name == name) {
         return Some(format!(
             "```lullaby\n{}\n```",
@@ -294,7 +294,7 @@ fn enclosing_function(program: &Program, line: usize) -> Option<&Function> {
 }
 
 /// The 0-based declaration line of a top-level declaration named `name`.
-fn declaration_line(program: &Program, name: &str) -> Option<usize> {
+pub(crate) fn declaration_line(program: &Program, name: &str) -> Option<usize> {
     if let Some(func) = program.functions.iter().find(|f| f.name == name) {
         return Some(func.span.line.saturating_sub(1));
     }
@@ -312,7 +312,7 @@ fn declaration_line(program: &Program, name: &str) -> Option<usize> {
 
 /// A 0-based LSP range covering `name` on `line` in `text`, found by searching
 /// the line text for the identifier as a whole word. `None` if not found.
-fn name_range_on_line(text: &str, line: usize, name: &str) -> Option<Value> {
+pub(crate) fn name_range_on_line(text: &str, line: usize, name: &str) -> Option<Value> {
     let source_line = text.lines().nth(line)?;
     let chars: Vec<char> = source_line.chars().collect();
     let needle: Vec<char> = name.chars().collect();
@@ -338,7 +338,7 @@ fn name_range_on_line(text: &str, line: usize, name: &str) -> Option<Value> {
 }
 
 /// A zero-width LSP range at `(line, character)`.
-fn point_range(line: usize, character: usize) -> Value {
+pub(crate) fn point_range(line: usize, character: usize) -> Value {
     json!({
         "start": { "line": line, "character": character },
         "end": { "line": line, "character": character },

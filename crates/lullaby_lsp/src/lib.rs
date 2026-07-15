@@ -11,7 +11,10 @@
 //!   held in an in-memory map.
 //! - Diagnostics: on open/change the existing lex -> parse -> semantic pipeline
 //!   runs over the document and the results are published as
-//!   `textDocument/publishDiagnostics`.
+//!   `textDocument/publishDiagnostics`. When the document uses `import` or is
+//!   part of a `lullaby.json` project, the shared module loader runs so
+//!   diagnostics reflect the merged program (imported symbols resolve, and the
+//!   loader's cross-module diagnostics surface) — see [`project`].
 //! - Formatting: `textDocument/formatting` returns a single full-document
 //!   `TextEdit` produced by the canonical formatter, or no edits when the
 //!   document does not parse.
@@ -28,6 +31,7 @@ use serde_json::{Value, json};
 
 mod analysis;
 mod diagnostics;
+mod project;
 mod transport;
 
 pub use transport::run_stdio;
@@ -207,8 +211,8 @@ fn handle_did_open(state: &mut ServerState, params: &Value) -> Vec<Message> {
     };
     let text = doc["text"].as_str().unwrap_or_default().to_string();
     let uri = uri.to_string();
-    state.documents.insert(uri.clone(), text.clone());
-    vec![publish_diagnostics(&uri, &text)]
+    state.documents.insert(uri.clone(), text);
+    vec![publish_diagnostics(state, &uri)]
 }
 
 /// `textDocument/didChange` (full sync): replace the text and republish.
@@ -227,8 +231,8 @@ fn handle_did_change(state: &mut ServerState, params: &Value) -> Vec<Message> {
     };
     let uri = uri.to_string();
     let text = text.to_string();
-    state.documents.insert(uri.clone(), text.clone());
-    vec![publish_diagnostics(&uri, &text)]
+    state.documents.insert(uri.clone(), text);
+    vec![publish_diagnostics(state, &uri)]
 }
 
 /// `textDocument/didClose`: drop the document and clear its diagnostics.
@@ -244,9 +248,11 @@ fn handle_did_close(state: &mut ServerState, params: &Value) -> Vec<Message> {
     )]
 }
 
-/// Run the pipeline over `text` and build a `publishDiagnostics` notification.
-fn publish_diagnostics(uri: &str, text: &str) -> Message {
-    let items = diagnostics::compute(text);
+/// Run the (module-aware) pipeline for `uri` and build a `publishDiagnostics`
+/// notification. Cross-file resolution consults every open document in `state`.
+fn publish_diagnostics(state: &ServerState, uri: &str) -> Message {
+    let text = state.documents.get(uri).map(String::as_str).unwrap_or("");
+    let items = project::diagnostics(uri, text, &state.documents);
     Message::notification(
         "textDocument/publishDiagnostics",
         json!({ "uri": uri, "diagnostics": items }),
@@ -278,10 +284,13 @@ fn handle_formatting(state: &ServerState, params: &Value) -> Value {
 /// LSP `Hover`, or `null` when there is nothing to show (whitespace, an unknown
 /// identifier, or a document that does not parse).
 fn handle_hover(state: &ServerState, params: &Value) -> Value {
+    let Some(uri) = params["textDocument"]["uri"].as_str() else {
+        return Value::Null;
+    };
     let Some((text, line, character)) = position_of(state, params) else {
         return Value::Null;
     };
-    analysis::hover(text, line, character).unwrap_or(Value::Null)
+    project::hover(uri, text, line, character, &state.documents)
 }
 
 /// `textDocument/definition`: resolve the identifier under the cursor to its
@@ -293,7 +302,7 @@ fn handle_definition(state: &ServerState, params: &Value) -> Value {
     let Some((text, line, character)) = position_of(state, params) else {
         return Value::Null;
     };
-    analysis::definition(text, uri, line, character).unwrap_or(Value::Null)
+    project::definition(uri, text, line, character, &state.documents)
 }
 
 /// Look up the open document text plus the 0-based `(line, character)` for a

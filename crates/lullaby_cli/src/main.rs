@@ -16,12 +16,10 @@ use lullaby_ir::{
     run_bytecode_main_with_args, run_main_with_args as run_ir_main_with_args,
 };
 use lullaby_lexer::{CANONICAL_EXTENSION, Diagnostic, lex_with_comments, validate_source_path};
+use lullaby_loader::{loader, manifest};
 use lullaby_parser::{format_program_with_comments, parse};
 use lullaby_runtime::{ErrorCategory, RuntimeError, Value, run_main_with_args, run_named_function};
 use lullaby_semantics::{CheckedProgram, validate, validate_executable};
-
-mod loader;
-mod manifest;
 
 fn main() -> ExitCode {
     match run() {

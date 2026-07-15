@@ -65,10 +65,16 @@ missing ones are the ones users notice fastest in a real editor.
   regex TextMate grammars (which also do not ship — see below).
 - **Incremental sync** — only full-document sync. Fine for small files; large
   files re-lex/re-parse/re-check the whole document on every keystroke.
-- **Multi-file / project awareness** — the server is **single-document**: hover
-  and definition resolve only within the open buffer. It does not run the module
-  loader, so go-to-definition across `import`ed modules and cross-file diagnostics
-  do not work. This is a real limitation now that projects are multi-file.
+- **Multi-file / project awareness** — *addressed.* The server now runs the
+  shared module loader (`lullaby_loader`, extracted from the CLI) over a file's
+  project when it uses `import` or lives in a `lullaby.json` project, with the
+  editor's open buffers supplied as an overlay: diagnostics reflect the merged
+  program (imported `pub` symbols resolve; the loader's `L0391`/`L0392`/`L0393`/
+  `L0397` for the open file surface) while the open file's own lex/parse/semantic
+  errors stay at their real positions, and hover/go-to-definition cross module
+  boundaries to an imported declaration in another file. A lone no-import file is
+  unchanged (single-document fallback). See `documents/lsp_design.md` → "Module
+  And Project Awareness".
 - **No shipped editor client / extension** — there is **no** VS Code extension,
   no `package.json` client, no TextMate grammar, no `.vsix` anywhere in the repo.
   A server with no packaged client is not an editor experience a 1.0 user can
@@ -82,9 +88,9 @@ missing ones are the ones users notice fastest in a real editor.
    experience. *Highest leverage, mostly packaging work.*
 2. **Completion** (keywords, builtins, in-scope functions/locals/types). The
    feature whose absence most signals "immature."
-3. **Cross-file resolution** — run the module loader so diagnostics, hover, and
-   definition work across `import`ed files. Now mandatory because projects are
-   multi-file.
+3. **Cross-file resolution** — *done.* The server runs the module loader so
+   diagnostics, hover, and definition work across `import`ed files (module/
+   project-aware, with an open-buffer overlay and single-document fallback).
 4. **Document symbols** (outline) — cheap given the parsed AST already in hand;
    large credibility-per-effort.
 
@@ -251,8 +257,8 @@ backend coverage), each small, none deep.
 **Must-do for 1.0-stable (roughly ordered by leverage):**
 1. **DWARF line tables (ELF + Mach-O)** — the explicit B3 item; largest effort.
 2. **A shipped editor client** (VS Code extension + grammar) fronting the LSP.
-3. **LSP completion** + **cross-file resolution** (run the module loader in the
-   server).
+3. **LSP completion** (cross-file resolution — running the module loader in the
+   server — is now done).
 4. **Test filtering** + **test backend selection** (run the suite on native, not
    just the AST interpreter).
 5. **Manifest `version` field + schema validation**, and document the manifest as
