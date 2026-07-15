@@ -1,0 +1,11 @@
+# Wrong instantiation of a multi-parameter generic type: `Pair` declares two type
+# parameters but the annotation supplies only one type argument. Rejected with
+# L0454 (type-argument arity).
+
+struct Pair<K, V>
+    key K
+    value V
+
+fn main -> i64
+    let p Pair<i64> = Pair(key: 1, value: 2)
+    0

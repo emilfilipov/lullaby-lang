@@ -2424,6 +2424,19 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|| TypeRef::new(param))
             })
             .collect();
+        // Each concrete type argument must satisfy the bounds declared for its
+        // parameter position (`struct Sorted<T: Ord>` / `impl Sorted<T: Ord>`).
+        // Only enforced for a purely inferred instantiation: when an `expected`
+        // annotation pinned the type, that annotation is itself bound-checked by
+        // `validate_type_wf`, so re-checking here would double-report.
+        if expected.is_none() {
+            let in_scope: Vec<String> = function
+                .type_params
+                .iter()
+                .map(|tp| tp.name.clone())
+                .collect();
+            self.enforce_type_arg_bounds(name, &type_args, &in_scope, Some(&function.name), span);
+        }
         Some(generic_type(name, &type_args))
     }
 
@@ -2608,6 +2621,25 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|| TypeRef::new(param))
             })
             .collect();
+        // Each concrete type argument must satisfy the bounds declared for its
+        // parameter position (`enum Opt<T: Show>` / `impl Opt<T: Show>`). Only
+        // enforced for a purely inferred instantiation: when an `expected`
+        // annotation pinned the type, that annotation is itself bound-checked by
+        // `validate_type_wf`, so re-checking here would double-report.
+        if expected.is_none() {
+            let in_scope: Vec<String> = function
+                .type_params
+                .iter()
+                .map(|tp| tp.name.clone())
+                .collect();
+            self.enforce_type_arg_bounds(
+                enum_name,
+                &type_args,
+                &in_scope,
+                Some(&function.name),
+                span,
+            );
+        }
         Some(generic_type(enum_name, &type_args))
     }
 
@@ -3090,6 +3122,19 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|| TypeRef::new(param))
             })
             .collect();
+        // Each concrete type argument must satisfy the bounds declared for its
+        // parameter position (`struct Sorted<T: Ord>` / `impl Sorted<T: Ord>`).
+        // Only enforced for a purely inferred instantiation: when an `expected`
+        // annotation pinned the type, that annotation is itself bound-checked by
+        // `validate_type_wf`, so re-checking here would double-report.
+        if expected.is_none() {
+            let in_scope: Vec<String> = function
+                .type_params
+                .iter()
+                .map(|tp| tp.name.clone())
+                .collect();
+            self.enforce_type_arg_bounds(name, &type_args, &in_scope, Some(&function.name), span);
+        }
         Some(generic_type(name, &type_args))
     }
 

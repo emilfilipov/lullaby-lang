@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AssignOp, BinaryOp, EnumVariant, Expr, ExprKind, Function, INFERRED_RETURN, MatchArm,
-    MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt, StructField, TypeRef, UnaryOp,
-    function_type, generic_type,
+    MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt, StructField, TypeParam, TypeRef,
+    UnaryOp, function_type, generic_type,
 };
 
 mod semantics_aliases;
@@ -300,6 +300,16 @@ struct Checker<'a> {
     /// `enums` so a use site can build the parameter -> concrete-type substitution
     /// for variant construction, `match`, and instantiation checking.
     enum_type_params: HashMap<String, Vec<String>>,
+    /// Trait bounds on each generic type's parameters, keyed by the type name
+    /// (struct or enum) and indexed by type-parameter position. Each entry is the
+    /// set of trait names that a concrete argument in that position must satisfy.
+    /// The bounds are the union of those written on the type declaration
+    /// (`struct Sorted<T: Ord>`) and those written on any inherent impl of the
+    /// type (`impl Sorted<T: Ord>`); position `i` collects every trait required of
+    /// the `i`-th parameter. Used both to enforce bounds at each instantiation
+    /// (`L0400`) and to make the bound's trait methods callable on a `T` value
+    /// inside the type's methods.
+    generic_type_bounds: HashMap<String, Vec<Vec<String>>>,
     /// Variant name -> (owning enum name, payload types). Variant names are
     /// globally unique across all enums, so this resolves construction directly.
     /// For a generic enum the payload types mention the enum's type parameters.
@@ -368,6 +378,7 @@ impl<'a> Checker<'a> {
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_type_params: HashMap::new(),
+            generic_type_bounds: HashMap::new(),
             variants: HashMap::new(),
             traits: HashMap::new(),
             trait_methods: HashMap::new(),
@@ -390,6 +401,7 @@ impl<'a> Checker<'a> {
         self.collect_traits();
         self.collect_signatures();
         self.collect_impls();
+        self.collect_generic_type_bounds();
         // Resolve the return type of every function declared without `-> T`
         // before any body is validated, so call sites see concrete return types.
         self.resolve_inferred_returns();
@@ -423,9 +435,131 @@ impl<'a> Checker<'a> {
         // Validate each impl method body like an ordinary function. Its `self`
         // parameter already carries the implementing type, so field access and
         // trait-method calls on `self` resolve normally.
+        //
+        // For an inherent impl of a generic type, a method body may call a bound
+        // trait's methods on a `T` value. The bound can be declared either on the
+        // type (`struct Sorted<T: Ord>`) or on the impl (`impl Sorted<T: Ord>`);
+        // both are unioned into `generic_type_bounds`. We attach that union onto a
+        // clone of the method's type parameters (position-matched) so the body's
+        // trait-method resolution (`type_param_has_bound`) sees the bound
+        // regardless of where it was written.
         for decl in &self.program.impls {
+            let type_bounds = if decl.is_inherent() {
+                self.generic_type_bounds.get(&decl.type_name).cloned()
+            } else {
+                None
+            };
             for method in &decl.methods {
-                self.validate_function(method);
+                match &type_bounds {
+                    // `generic_type_bounds` only retains types that carry at least
+                    // one bound, so `Some` always means there is a bound to merge.
+                    Some(bounds) => {
+                        let mut method = method.clone();
+                        for (index, tp) in method.type_params.iter_mut().enumerate() {
+                            let Some(extra) = bounds.get(index) else {
+                                continue;
+                            };
+                            for bound in extra {
+                                if !tp.bounds.contains(bound) {
+                                    tp.bounds.push(bound.clone());
+                                }
+                            }
+                        }
+                        self.validate_function(&method);
+                    }
+                    None => self.validate_function(method),
+                }
+            }
+        }
+    }
+
+    /// Build `generic_type_bounds`: for every generic struct and enum, the set of
+    /// trait bounds required of each type parameter position. The bounds are the
+    /// union of those written on the type declaration (`struct Sorted<T: Ord>`,
+    /// `enum Opt<T: Show>`) and those written on any inherent impl of that type
+    /// (`impl Sorted<T: Ord>`). Runs after `collect_impls` so every inherent impl
+    /// is known. Position `i` in the returned vector holds the trait names for the
+    /// `i`-th parameter; a type with no bounds anywhere maps to all-empty vectors
+    /// (and is treated as unbounded at instantiation).
+    fn collect_generic_type_bounds(&mut self) {
+        let mut bounds: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+        let mut merge = |name: &str, type_params: &[TypeParam]| {
+            let entry = bounds
+                .entry(name.to_string())
+                .or_insert_with(|| vec![Vec::new(); type_params.len()]);
+            if entry.len() < type_params.len() {
+                entry.resize(type_params.len(), Vec::new());
+            }
+            for (index, tp) in type_params.iter().enumerate() {
+                for bound in &tp.bounds {
+                    if !entry[index].contains(bound) {
+                        entry[index].push(bound.clone());
+                    }
+                }
+            }
+        };
+        for decl in &self.program.structs {
+            merge(&decl.name, &decl.type_params);
+        }
+        for decl in &self.program.enums {
+            merge(&decl.name, &decl.type_params);
+        }
+        for decl in &self.program.impls {
+            if decl.is_inherent() {
+                merge(&decl.type_name, &decl.type_params);
+            }
+        }
+        // Drop entries with no bounds at all so `generic_type_bounds` lookups are a
+        // fast "is anything required here" test.
+        bounds.retain(|_, positions| positions.iter().any(|b| !b.is_empty()));
+        self.generic_type_bounds = bounds;
+    }
+
+    /// Enforce that every concrete type argument in a generic instantiation
+    /// satisfies the bounds declared for that parameter position (`L0400`).
+    /// `owner` is the enclosing function/method name for diagnostics; a type
+    /// argument that is itself an in-scope type variable is skipped (its bound, if
+    /// any, is enforced where that outer variable is pinned). Only the top-level
+    /// head of `type_args` is checked here; nested spellings are validated by the
+    /// caller that walks them (`validate_type_wf`) or by their own construction.
+    fn enforce_type_arg_bounds(
+        &mut self,
+        head: &str,
+        type_args: &[TypeRef],
+        type_params_in_scope: &[String],
+        owner: Option<&str>,
+        span: Span,
+    ) {
+        let Some(bounds) = self.generic_type_bounds.get(head).cloned() else {
+            return;
+        };
+        for (index, arg) in type_args.iter().enumerate() {
+            let Some(required) = bounds.get(index) else {
+                continue;
+            };
+            if required.is_empty() {
+                continue;
+            }
+            // A bare type-variable argument cannot be checked concretely here.
+            if type_params_in_scope.iter().any(|p| p == &arg.name) {
+                continue;
+            }
+            let dispatch = dispatch_type_name(arg);
+            for bound in required {
+                if !self
+                    .impl_traits
+                    .contains(&(dispatch.clone(), bound.clone()))
+                {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0400",
+                        format!(
+                            "type `{}` for type parameter of generic type `{head}` does not implement bound trait `{bound}`",
+                            arg.name
+                        ),
+                        owner.map(str::to_string),
+                        span,
+                    ));
+                }
             }
         }
     }
@@ -972,6 +1106,8 @@ impl<'a> Checker<'a> {
                     owner.map(str::to_string),
                     span,
                 ));
+            } else {
+                self.enforce_type_arg_bounds(&head, &args, type_params_in_scope, owner, span);
             }
         } else if let Some(params) = self.enum_type_params.get(&head) {
             let expected = params.len();
@@ -986,6 +1122,8 @@ impl<'a> Checker<'a> {
                     owner.map(str::to_string),
                     span,
                 ));
+            } else {
+                self.enforce_type_arg_bounds(&head, &args, type_params_in_scope, owner, span);
             }
         }
     }

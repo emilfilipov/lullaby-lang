@@ -1384,6 +1384,10 @@ mod suite9;
 #[path = "cli/suite10.rs"]
 mod suite10;
 
+// -- Multi-parameter + bounded generic types, stage 5 ------------------------
+#[path = "cli/suite11.rs"]
+mod suite11;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

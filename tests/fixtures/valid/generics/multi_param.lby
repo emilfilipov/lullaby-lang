@@ -1,0 +1,44 @@
+# Stage-5 user-defined generics: multi-parameter generic types. `Pair<K, V>`
+# declares two independent type parameters, each used by a field, and a
+# two-parameter inherent impl `impl Pair<K, V>` whose methods return each
+# parameter. Two distinct instantiations (`Pair<i64, bool>` and
+# `Pair<string, i64>`) infer `K` and `V` independently — from named construction,
+# from the annotation, and through method return types. A generic `enum
+# Either<L, R>` mirrors the same two-parameter shape on the enum side, with an
+# exhaustive `match` binding each variant payload at its concrete type. Because
+# generics are erased on the interpreters, the program runs byte-for-byte
+# identically on ast / ir / bytecode.
+
+struct Pair<K, V>
+    key K
+    value V
+
+impl Pair<K, V>
+    # Returns the second field as the concrete `V` (bool for Pair<i64, bool>,
+    # i64 for Pair<string, i64>).
+    fn get_value self -> V
+        self.value
+    # Returns the first field as the concrete `K`.
+    fn get_key self -> K
+        self.key
+
+enum Either<L, R>
+    left L
+    right R
+
+# Collapses an `Either<i64, string>` to an i64: the `left` payload is used
+# directly, the `right` payload (a string) contributes its length.
+fn fold e Either<i64, string> -> i64
+    match e
+        left(x) -> x
+        right(s) -> len(s)
+
+fn main -> i64
+    let a Pair<i64, bool> = Pair(key: 10, value: true)
+    let b Pair<string, i64> = Pair(key: "id", value: 32)
+    # a.get_value() is bool at the Pair<i64, bool> instantiation.
+    let extra i64 = 5 if a.get_value() else 0
+    let hit Either<i64, string> = left(3)
+    let miss Either<i64, string> = right("hello")
+    # a.get_key()=10 + b.get_value()=32 + extra=5 + fold(hit)=3 + fold(miss)=5
+    a.get_key() + b.get_value() + extra + fold(hit) + fold(miss)
