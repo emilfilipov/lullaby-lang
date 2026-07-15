@@ -1,0 +1,7 @@
+# Safe-tier failure: popping an empty list is a contract violation that ABORTS
+# with diagnostic L0413 on every backend. There is no value to remove, so this is
+# a bug rather than a recoverable error.
+fn main -> i64
+    let xs list<i64> = list_new()
+    let ys list<i64> = pop(xs)
+    len(ys)

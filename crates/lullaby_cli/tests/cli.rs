@@ -1392,6 +1392,10 @@ mod suite11;
 #[path = "cli/suite12.rs"]
 mod suite12;
 
+// -- Safe-tier failure semantics (A5): abort vs recoverable, backend-consistent
+#[path = "cli/suite13.rs"]
+mod suite13;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

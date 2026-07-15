@@ -35,7 +35,51 @@ The implemented runtime categories are:
 - `ir`: typed IR lowering failures reported before an IR or bytecode backend starts executing.
 - `bytecode`: compiled `.lbc` artifact loading failures before bytecode execution starts.
 
-Language-level `try`, `catch`, recovery blocks, and compact `!0xXX` error tokens are planned and are not accepted by the current parser. Planned syntax keywords now produce `L0211 [parser error]` so users can distinguish future syntax from malformed code.
+Language-level `throw`/`try`/`catch` and the postfix `?` propagation operator on `option`/`result` are implemented (see "Safe-Tier Failure Semantics" below and the fixtures `run_error_handling.lby`, `run_error_propagation.lby`). The compact `!0xXX` error-token surface remains planned; unimplemented planned keywords still produce `L0211 [parser error]` so users can distinguish future syntax from malformed code.
+
+## Safe-Tier Failure Semantics (decision A5)
+
+Lullaby's safe tier splits every runtime failure into two **disjoint** families with different guarantees. This is the decided A5 contract (`documents/road_to_1_0_stable.md`): *abort-with-diagnostic, no unwinding; recoverable errors flow through `result`/`?`/`throw`/`catch`, so panics are for bugs.*
+
+### Aborts — contract / memory-safety violations (bugs)
+
+A **contract violation** is a bug in the program: it indicates the code reached a state its own invariants were supposed to prevent. In the safe tier such a violation **aborts the program immediately** with a clear stable `L####` diagnostic and a non-zero exit status. It does **not** unwind the stack, does **not** run any `catch`, and is **not** recoverable — there is nothing sensible to recover *to*, and pretending otherwise would let a corrupted state propagate. Aborts are deterministic and allocation-free, which keeps them compatible with the GC-free arena model and the freestanding tier.
+
+The contract violations and their diagnostics:
+
+| Violation | Diagnostic | Notes |
+| :--- | :--- | :--- |
+| Array / `array<T>` index out of bounds (incl. negative) | `L0413` | `a[i]` on the interpreters; native traps (see below). |
+| `string` index / substring range out of bounds | `L0413` | Char-indexed. |
+| `list<T>` `get`/`set` index out of bounds | `L0413` | `get` returns the element directly, so out-of-range is a bug. |
+| `pop` of an empty `list<T>` | `L0413` | No element to remove. |
+| Index target is not indexable | `L0412` | Normally prevented statically (`L0325`). |
+| Division / remainder by zero (`/`, `%`, `/=`) | `L0404` | Integer div/rem by a runtime `0`. |
+| `for … by 0` (zero loop step) | `L0411` | A non-terminating loop is rejected. |
+| `array_fill` with a negative length | `L0433` | |
+| Wrong runtime value kind (should be unreachable after checks) | `L0407`/`L0408`/`L0409`/`L0417`/`L0418`/`L0421` | Type checker normally prevents these; if reached they abort, never silently coerce. |
+
+There is deliberately **no forced-`unwrap` operator** that panics on `none`/`err`. An `option`/`result` payload is reached only through an **exhaustive `match`** (non-exhaustive is the compile error `L0384`) or the postfix **`?`** operator (recoverable — below). So "unwrap on `none`" is not an abort in Lullaby: it is either a compile-time error or a recoverable propagation. This is a stronger safety story than a language with an abort-on-`none` `unwrap`.
+
+### Recoverable — modeled / expected failures
+
+A **modeled failure** is an outcome the program anticipates (a parse can fail, a lookup can miss, a resource can be unavailable). These are **values**, not aborts, and flow through:
+
+- **`result<T, E>` / `option<T>`** returned from functions and consumed by `match`.
+- **`?`** — postfix propagation: `expr?` yields the payload on `ok`/`some` and otherwise returns the failure (`err(e)`/`none`) from the enclosing function unchanged. The enclosing return type must be compatible (`L0427`/`L0428`/`L0429`).
+- **`throw` / `try` / `catch`** — `throw "msg"` raises a catchable user error (`L0420`); a surrounding `try` … `catch name` recovers it and binds the message. `assert(cond)` raises the same catchable `L0420` on a false condition.
+
+A recoverable failure lets the program **continue to a normal exit**. Only a `throw` that escapes *every* enclosing `try`/`catch` becomes the abort `L0420` ("uncaught thrown error") — the boundary of the recoverable model.
+
+### The line between them
+
+`try`/`catch` catches **only** user-thrown `L0420` (from `throw`/`assert`). A contract-violation abort (`L0404`, `L0413`, `L0412`, `L0411`, `L0433`, …) propagates straight through any `catch` and terminates the program. This is the "no unwinding through a safety abort" rule: a safety abort is not an exception you can intercept.
+
+### Backend consistency and the freestanding tier
+
+The three interpreters (AST, IR, bytecode) enforce this identically — same diagnostic code and message for each violation, and `try`/`catch` recovers only `L0420` on all three (regression-locked by `crates/lullaby_cli/tests/cli/suite13.rs`). The **native** backend turns the same contract violations into a hardware trap rather than a formatted diagnostic: an out-of-bounds index, an out-of-range substring, an empty-separator `split`, and heap exhaustion emit a `ud2` illegal-instruction trap, which surfaces as `STATUS_ILLEGAL_INSTRUCTION` (`0xC000001D`) on Windows; an integer divide-by-zero surfaces as the CPU `#DE` (`STATUS_INTEGER_DIVIDE_BY_ZERO`, `0xC0000094`). Both are defined, deterministic, non-zero-exit aborts with no unwinding — the same guarantee, expressed as a trap because native code has no diagnostic printer. See `documents/native_backend_contract.md`.
+
+In the **freestanding / `no-runtime` tier** the safe-tier guarantee is preserved but the abort is routed to a **user-provided panic handler** (cf. Rust's `#[panic_handler]`) instead of an OS abort, so a kernel or embedded target decides what a bounds/contract failure does (halt, reset, log). The check machinery is the same; only the terminal action is pluggable. See `documents/execution_tiers_and_1_0_scope.md`.
 
 ## Epic 6 Diagnostics UX
 
