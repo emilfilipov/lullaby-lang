@@ -126,6 +126,28 @@ These are toolchain-completeness items, not language decisions.
 | B2 | Concrete stdlib contents | PLANNED | enumerate near finish | — |
 | B3 | Stable-grade toolchain | PLANNED | test runner + DWARF + LSP/pkg | — |
 
-**Scheduling note.** A1 (generics design spike) and A2 (named constants) are startable
-now (parser/semantics are free). A3/A4/A5 touch native codegen and are queued behind
-the in-flight native-aggregate work.
+## Delivery progress (updated 2026-07-15)
+
+- **A1 generic user types — mostly shipped.** Frontend complete: generic structs,
+  enums, methods, multi-parameter types, and trait bounds on generic types all run
+  on the three interpreters (erasure). Native scalar-`T` monomorphization
+  implemented (in review). Deferred: heap-`T` native monomorphization
+  (per-instantiation drop-glue) and native inherent-method dispatch.
+- **A2 const — SHIPPED** (named compile-time constants; const-sized arrays deferred).
+- **A3 FFI callbacks — not started** (queued behind native).
+- **A4 wrapping default + checked ops — SHIPPED** (i64 + fixed-width
+  `checked_`/`saturating_`/`wrapping_` + `checked_div`/`checked_rem`; wrapping default
+  documented).
+- **A5 safe-tier failure semantics — SHIPPED on the interpreters** (audit confirmed
+  conformance; regression-locked by `suite13`; canonical doc written). Follow-up: a
+  native safety gap (list `get`/`set`/`pop` unchecked) is being fixed to trap like
+  the interpreters.
+- **B1 closures native / B2 stdlib stable-vs-extended tagging / B3 toolchain (DWARF,
+  LSP/pkg maturity) — not started.**
+- **Native optimization backlog:** O(n²) `for c in s` → O(n) SHIPPED (native strings
+  ~2.4× C, from ~40×); scalars ≤ C. Array pass-by-ref measured a regression and was
+  reverted; array-scan descriptor register-promotion is the remaining lever.
+- **File-size backlog:** parser, semantics helpers, runtime, ir_optimizer,
+  native_object_stmt (5,634→1,156), and native_object (4,519→1,477) all split under
+  the cap; `semantics_checker_calls.rs` + `bytecode_vm.rs` remain (high-risk method
+  partitions).
