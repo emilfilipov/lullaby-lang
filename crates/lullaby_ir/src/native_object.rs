@@ -2706,19 +2706,21 @@ fn resolve_native_type(
                         "struct `{name}` field `{field_name}` is an f32; f32 struct fields are not in the native subset (an f64 field is fine)"
                     ));
                 }
-                // A heap-value field (`string`/`list`/`map`) inside an aggregate is
+                // A MUTABLE heap-value field (`list`/`map`) inside an aggregate is
                 // deferred: the aggregate copy/pass paths move flat words and would
-                // share (not deep-copy) the referenced heap block, breaking value
-                // semantics for a mutable list/map field. A string field is
-                // immutable but still out of this increment's scope (aggregates of
-                // heap values are deferred), so reject it too — the function skips.
-                if matches!(
-                    native,
-                    NativeType::String | NativeType::List { .. } | NativeType::Map { .. }
-                ) {
+                // SHARE (not deep-copy) the referenced heap block, breaking value
+                // semantics for a mutable list/map field. A `string` field IS
+                // supported: strings are immutable, so the flat word copy that the
+                // struct construction/boundary/`match` paths already emit shares the
+                // record pointer, which IS its value-semantic copy (exactly like a
+                // `string` list element or enum payload). So permit `String` here and
+                // reject only the mutable `List`/`Map` fields — the function then
+                // skips gracefully for those.
+                if matches!(native, NativeType::List { .. } | NativeType::Map { .. }) {
                     return Err(format!(
-                        "struct `{name}` field `{field_name}` is a heap value \
-                         (string/list/map); heap-value struct fields are not in the native subset"
+                        "struct `{name}` field `{field_name}` is a mutable heap value \
+                         (list/map); mutable heap-value struct fields are not in the native \
+                         subset (a `string` field is supported)"
                     ));
                 }
                 fields.push((field_name.clone(), native));
