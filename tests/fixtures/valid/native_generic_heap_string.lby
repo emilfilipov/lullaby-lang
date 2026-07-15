@@ -1,0 +1,62 @@
+# Native monomorphization of user-defined generic types with a HEAP (`string`)
+# type argument — the one-level heap-`T` increment. `Box<string>`, `Pair<string,
+# i64>`, and `Opt<string>` each monomorphize to a layout byte-identical to a
+# hand-written string-field struct / string-payload enum: the `string` field or
+# payload is a single immutable pointer word, shared on the value-semantic copy.
+# Exercises construction, string-field/payload read, value-semantic copy, and
+# passing/returning a heap-`T` generic value across function boundaries. `main`
+# returns an i64, so the native `.exe` exit code must equal the interpreter result.
+
+struct Box<T>
+    value T
+
+struct Pair<K, V>
+    key K
+    value V
+
+enum Opt<T>
+    present T
+    absent
+
+# Read the `string` field of a monomorphized `Box<string>` (T = string).
+fn box_len b Box<string> -> i64
+    len(b.value)
+
+# Take a `Box<string>` by value and return a FRESH one; the caller's argument is
+# unchanged (value semantics across the by-hidden-pointer aggregate ABI, which
+# copies the immutable string word).
+fn rebox b Box<string> new string -> Box<string>
+    Box(new)
+
+# A two-parameter generic struct with a one-level `string` field plus a scalar.
+fn pair_sum p Pair<string, i64> -> i64
+    len(p.key) + p.value
+
+# `match` over a monomorphized generic enum with a `string` payload bound at `s`.
+fn opt_len o Opt<string> fallback i64 -> i64
+    match o
+        present(s) -> len(s)
+        absent -> fallback
+
+fn main -> i64
+    let a Box<string> = Box("hello")               # len 5
+    let c Box<string> = a                            # value-semantic copy (shared word)
+    let d Box<string> = rebox(a, "worldwide")        # len 9; `a` unchanged
+    let p Pair<string, i64> = Pair(key: "id", value: 7)   # 2 + 7 = 9
+    let o Opt<string> = present("hi")                # len 2
+    let miss Opt<string> = absent
+    let ok i64 = 0
+    # box_len(a)=5 proves `a` survived both the copy and `rebox`.
+    if box_len(a) == 5
+        ok += 1
+    if len(c.value) == 5
+        ok += 2
+    if box_len(d) == 9
+        ok += 4
+    if pair_sum(p) == 9
+        ok += 8
+    if opt_len(o, 0) == 2
+        ok += 16
+    if opt_len(miss, 100) == 100
+        ok += 32
+    ok

@@ -849,7 +849,19 @@ impl<'a> NativeCtx<'a> {
             is_arena,
             arena_mark_slot,
             arena_loop_mark_base,
-            heap_aggregates: heap_carrying_aggregates(structs, enums),
+            // Non-generic heap-carrying aggregate NAMES plus the heap-`T`
+            // user-generic INSTANTIATION spellings used in this function
+            // (`Box<string>`, `Opt<string>`), so the lowering-time loop confinement
+            // check treats a monomorphized heap-`T` value as heap — consistent with
+            // the module-wide `arena_eligible_functions` gate. Scalar instantiations
+            // are never added, so scalar-generic codegen is byte-identical.
+            heap_aggregates: {
+                let mut aggs = heap_carrying_aggregates(structs, enums);
+                aggs.extend(heap_carrying_generic_instantiations(
+                    function, structs, enums, &aggs,
+                ));
+                aggs
+            },
         })
     }
 
