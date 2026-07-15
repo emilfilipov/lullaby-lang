@@ -263,6 +263,9 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                     is_public: decl.is_public,
                 })
                 .collect(),
+            // The freestanding-tier directive is a whole-module property; alias
+            // resolution preserves it so the tier gate still fires downstream.
+            is_no_runtime: program.is_no_runtime,
         },
         diagnostics,
     )

@@ -1,0 +1,317 @@
+//! CLI integration tests, part 15 — the freestanding / kernel tier, stage 1:
+//! the module-level `no-runtime` directive and its enforcement gate.
+//!
+//! Stage 1 delivers the tier gate + the allowed/rejected boundary. A module that
+//! opens with the `no-runtime` directive is compiled in the freestanding tier;
+//! semantic analysis rejects, with `L0441`, any construct that requires the
+//! safe-tier runtime — a growable `list`/`map`, string building, an `rc`/`ref`
+//! handle, an `actor`/`spawn`/`tell`, a heap closure, or a host-allocator builtin
+//! (`alloc`/`dealloc`). What stays allowed is the safe-arena-kernel core: scalars,
+//! fixed `array<T>`, structs/enums over scalar fields, control flow, functions,
+//! and the raw hardware surface (`unsafe` + `ptr<T>` + the `ptr_*`/`volatile_*`
+//! builtins).
+//!
+//! The enforcement is purely compile-time: a `no-runtime` program that stays in
+//! the allowed subset type-checks and runs on every interpreter with normal
+//! results, and — when its `main` is a native-eligible scalar function — still
+//! compiles under `lullaby native --freestanding` (the directive is the semantic
+//! gate; `--freestanding` is the orthogonal no-CRT output contract).
+//!
+//! The later freestanding stages (static-buffer arenas, inline-asm operand
+//! binding, MMIO/port-IO, interrupt/`naked`/`entry` functions, the pluggable
+//! panic handler, and direct-ELF/flat-binary output) are out of scope here.
+
+use crate::*;
+
+/// Run a valid fixture on `backend` and return the captured output.
+fn run_backend(fixture: &str, backend: &str) -> std::process::Output {
+    let path = workspace_root().join(fixture);
+    lullaby()
+        .args([
+            "run",
+            "--backend",
+            backend,
+            path.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli")
+}
+
+/// Assert that `fixture` is rejected by `lullaby check` with the freestanding-tier
+/// violation diagnostic `L0441`.
+fn assert_no_runtime_rejected(fixture: &str) {
+    let path = workspace_root().join(fixture);
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let stderr = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "{fixture} should be rejected but exited 0. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("L0441"),
+        "{fixture} should report the `no-runtime` violation L0441. stderr: {stderr}"
+    );
+}
+
+/// Assert that a rejected `no-runtime` fixture ALSO fails to run on every
+/// interpreter (the gate is enforced on the run path, not only `check`).
+fn assert_no_runtime_rejected_on_interpreters(fixture: &str) {
+    let path = workspace_root().join(fixture);
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                path.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        let stderr = stderr(&output);
+        assert!(
+            !output.status.success(),
+            "[{backend}] {fixture} should be rejected but ran. stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("L0441"),
+            "[{backend}] {fixture} should report L0441. stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn no_runtime_scalar_core_runs_on_all_interpreters() {
+    // A `no-runtime` module using only the allowed subset (scalars, a fixed
+    // `array<i64>`, a scalar struct, control flow) type-checks and runs with the
+    // same result on all three interpreters: manhattan((3,4)) + sum[1,4,9,16] = 37.
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(
+            "tests/fixtures/valid/no_runtime/freestanding_scalar_core.lby",
+            backend,
+        );
+        assert!(
+            output.status.success(),
+            "[{backend}] scalar-core no-runtime program should run: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "37",
+            "[{backend}] scalar-core should compute 37"
+        );
+    }
+}
+
+#[test]
+fn no_runtime_raw_pointer_surface_is_allowed() {
+    // `unsafe` blocks and the raw `ptr<T>` / `ptr_read` / `ptr_write` builtins are
+    // part of the freestanding core, NOT rejected by the gate. The module
+    // type-checks and runs on every interpreter (main = 52).
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(
+            "tests/fixtures/valid/no_runtime/freestanding_raw_pointer.lby",
+            backend,
+        );
+        assert!(
+            output.status.success(),
+            "[{backend}] raw-pointer no-runtime program should run: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "52",
+            "[{backend}] raw-pointer program should compute 52"
+        );
+    }
+}
+
+#[test]
+fn no_runtime_scalar_core_compiles_freestanding_native() {
+    // The scalar-core `main` is native-eligible, so `lullaby native --freestanding`
+    // compiles it (the `no-runtime` directive composes with the existing
+    // `--freestanding` no-CRT output path). When the linker + kernel32 are
+    // available, the exit code equals the interpreter result (37).
+    let fixture =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_scalar_core.lby");
+    let out = std::env::temp_dir().join("lullaby_no_runtime_scalar_core.exe");
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--freestanding",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        emit.status.success(),
+        "freestanding native compile of a no-runtime scalar module should succeed: {}",
+        stderr(&emit)
+    );
+    let listing = stdout(&emit);
+    assert!(
+        listing.contains("freestanding (no-std)"),
+        "expected the freestanding no-CRT notice: {listing}"
+    );
+    assert!(
+        listing.contains("compiled main"),
+        "expected `main` compiled: {listing}"
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!(
+            "rust-lld and/or kernel32.lib not available; skipping freestanding \
+             link+run parity (compile check already ran)"
+        );
+        return;
+    }
+    assert!(out.is_file(), "expected linked exe at {}", out.display());
+    let exe = std::process::Command::new(&out)
+        .output()
+        .expect("run native exe");
+    let exit = exe.status.code().expect("native exit code");
+    assert_eq!(
+        exit, 37,
+        "freestanding native exit code must equal the interpreter result"
+    );
+}
+
+#[test]
+fn no_runtime_growable_list_is_rejected() {
+    // A growable `list<T>` push calls the host allocator — hidden allocation.
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/list_growth.lby");
+    assert_no_runtime_rejected_on_interpreters("tests/fixtures/invalid/no_runtime/list_growth.lby");
+}
+
+#[test]
+fn no_runtime_growable_map_is_rejected() {
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/map_growth.lby");
+    assert_no_runtime_rejected_on_interpreters("tests/fixtures/invalid/no_runtime/map_growth.lby");
+}
+
+#[test]
+fn no_runtime_string_building_is_rejected() {
+    // Building a `string` at runtime (`to_string`) allocates a growable heap string.
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/string_build.lby");
+    assert_no_runtime_rejected_on_interpreters(
+        "tests/fixtures/invalid/no_runtime/string_build.lby",
+    );
+}
+
+#[test]
+fn no_runtime_rc_handle_is_rejected() {
+    // Reference counting is a safe-tier-only tool (never present in `no-runtime`).
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/rc_handle.lby");
+    assert_no_runtime_rejected_on_interpreters("tests/fixtures/invalid/no_runtime/rc_handle.lby");
+}
+
+#[test]
+fn no_runtime_ref_handle_is_rejected() {
+    // A borrowed `ref<T>` handle is part of the RC surface the tier drops.
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/ref_handle.lby");
+    assert_no_runtime_rejected_on_interpreters("tests/fixtures/invalid/no_runtime/ref_handle.lby");
+}
+
+#[test]
+fn no_runtime_actor_and_spawn_are_rejected() {
+    // Actors need the runtime scheduler; the declaration, `spawn`, and `tell` are
+    // each rejected.
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/actor_spawn.lby");
+    assert_no_runtime_rejected_on_interpreters("tests/fixtures/invalid/no_runtime/actor_spawn.lby");
+}
+
+#[test]
+fn no_runtime_heap_closure_is_rejected() {
+    // A closure literal needs a heap-allocated capture environment.
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/heap_closure.lby");
+    assert_no_runtime_rejected_on_interpreters(
+        "tests/fixtures/invalid/no_runtime/heap_closure.lby",
+    );
+}
+
+#[test]
+fn no_runtime_host_allocator_builtin_is_rejected() {
+    // `alloc` requests memory from the host allocator.
+    assert_no_runtime_rejected("tests/fixtures/invalid/no_runtime/host_alloc.lby");
+    assert_no_runtime_rejected_on_interpreters("tests/fixtures/invalid/no_runtime/host_alloc.lby");
+}
+
+#[test]
+fn misplaced_no_runtime_directive_is_rejected() {
+    // The directive is only valid as the first non-comment line of the module; a
+    // later occurrence is a parse-time misplacement (`L0201`), not a declaration.
+    let temp = std::env::temp_dir().join("lullaby_no_runtime_misplaced.lby");
+    std::fs::write(&temp, "fn main -> i64\n    0\nno-runtime\n").expect("write temp");
+    let output = lullaby()
+        .args(["check", temp.to_str().expect("temp path")])
+        .output()
+        .expect("run cli");
+    let stderr = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "a misplaced `no-runtime` directive should be rejected. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("L0201") && stderr.contains("no-runtime"),
+        "expected an L0201 misplacement error naming the directive. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn no_runtime_directive_survives_fmt_round_trip() {
+    // `lullaby fmt` re-emits the `no-runtime` directive at the top of the module,
+    // and re-formatting the output is a fixed point (idempotent).
+    let path =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_scalar_core.lby");
+    let first = lullaby()
+        .args(["fmt", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run fmt");
+    assert!(first.status.success(), "fmt failed: {}", stderr(&first));
+    let formatted = stdout(&first);
+    assert!(
+        formatted.starts_with("no-runtime\n"),
+        "fmt must re-emit the `no-runtime` directive first: {formatted}"
+    );
+
+    let temp = std::env::temp_dir().join("lullaby_no_runtime_fmt_idempotent.lby");
+    std::fs::write(&temp, &formatted).expect("write temp");
+    let second = lullaby()
+        .args(["fmt", temp.to_str().expect("temp path")])
+        .output()
+        .expect("run fmt again");
+    assert!(
+        second.status.success(),
+        "second fmt failed: {}",
+        stderr(&second)
+    );
+    assert_eq!(stdout(&second), formatted, "fmt must be idempotent");
+}
+
+#[test]
+fn ordinary_program_without_directive_is_unaffected() {
+    // A program WITHOUT the `no-runtime` directive is completely unaffected by the
+    // gate: it may freely use a growable `list`, and it runs normally.
+    let temp = std::env::temp_dir().join("lullaby_no_runtime_absent.lby");
+    std::fs::write(
+        &temp,
+        "fn main -> i64\n    let xs list<i64> = list_new()\n    xs = push(xs, 7)\n    len(xs)\n",
+    )
+    .expect("write temp");
+    let output = lullaby()
+        .args(["run", temp.to_str().expect("temp path")])
+        .output()
+        .expect("run cli");
+    assert!(
+        output.status.success(),
+        "a non-`no-runtime` program using `list` should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output).trim(), "1", "one push -> len 1");
+}

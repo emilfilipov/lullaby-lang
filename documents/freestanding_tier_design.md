@@ -1,9 +1,11 @@
 # Lullaby Freestanding / `no-runtime` (Kernel) Tier — Design Proposal
 
-**Status:** Design proposal, 2026-07-14. Not implemented. This document proposes
-the concrete, buildable shape of Lullaby's **freestanding / `no-runtime` tier** —
-the capability set that makes 1.0 a systems language you can write a kernel, boot
-code, embedded firmware, and FFI shims in.
+**Status:** Design proposal, 2026-07-14. **Stage 1 (the tier gate + enforcement)
+is delivered** (2026-07-15) — see §10.2 stage 1 and the "Stage 1 delivery" note
+at the end of §10.2. This document proposes the concrete, buildable shape of
+Lullaby's **freestanding / `no-runtime` tier** — the capability set that makes 1.0
+a systems language you can write a kernel, boot code, embedded firmware, and FFI
+shims in.
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 The decided direction, the two-tier identity, and the 10-item kernel checklist are
@@ -865,11 +867,16 @@ kernel is expressible and testable on the interpreters), then the hardware edge
 (asm/MMIO/ISR), then the kernel output formats — each stage a complete, tested
 increment.**
 
-1. **Tier gate + enforcement.** The `no-runtime` module directive; unavailability of
-   RC/actors/growable-heap (`L0441`); the two-hard-rules classifier over the existing
-   escape/drop passes; `never` type. Value-neutral for existing programs. Verified by
-   fixtures that a `no-runtime` module rejects `rc`/`spawn`/`list.push` and accepts
-   scalar/struct/array/`region` code, on all three interpreters.
+1. **Tier gate + enforcement.** ✅ **DELIVERED (2026-07-15).** The `no-runtime` module
+   directive; unavailability of RC/actors/growable-heap (`L0441`); the two-hard-rules
+   classifier over the existing escape/drop passes; `never` type. Value-neutral for
+   existing programs. Verified by fixtures that a `no-runtime` module rejects
+   `rc`/`spawn`/`list.push` and accepts scalar/struct/array/`region` code, on all three
+   interpreters. (`never`, and the two-hard-rules classification driven by the
+   escape/drop *pass annotations*, arrive with their consuming stages — the panic
+   handler in stage 3 and static-buffer arenas in stage 2; stage 1 enforces the
+   allowed/rejected boundary directly over the AST + checked expression types, which is
+   sufficient and complete for the gate.)
 2. **Static-buffer arenas.** `region … in <buffer>` + fixed-buffer
    `__lullaby_arena_alloc`/reset + overflow→panic; folds into the delivered region
    work. Bounded-heap reclaim fixture + overflow-calls-handler fixture.
@@ -903,6 +910,47 @@ increment.**
 
 Stages 1–9 are the freestanding 1.0 deliverable (the canonical 10-item checklist);
 stage 10 is spot convenience only.
+
+### 10.3 Stage 1 delivery (2026-07-15)
+
+The tier gate and its enforcement are implemented and test-locked. What shipped:
+
+- **Directive & lexing.** `no-runtime` is the one hyphenated Lullaby keyword. The
+  lexer (`crates/lullaby_lexer/src/lib.rs`) recognizes the exact contiguous spelling
+  `no-runtime` as a single `Keyword::NoRuntime` token; a bare `no`/`runtime` and a
+  spaced `no - runtime` subtraction remain ordinary identifiers/operators.
+- **Parser & AST.** The parser (`crates/lullaby_parser/src/lib.rs`) accepts the
+  directive only as the first non-comment line (before any `import`/declaration);
+  a later occurrence is an `L0201` misplacement. The flag rides on
+  `Program::is_no_runtime` (serde-defaulted, so existing artifacts stay valid), the
+  formatter re-emits it, and the module loader marks the merged unit `no-runtime`
+  if **any** module opts in (conservative default-deny; per-module granularity in
+  mixed-tier projects is a later stage).
+- **Enforcement.** `crates/lullaby_semantics/src/semantics_no_runtime.rs` runs after
+  the main checker (so it can consult the recorded per-expression types) and, only
+  for a `no-runtime` module, emits `L0441` for: a heap/runtime **type** anywhere in
+  a signature/field/payload/alias/const spelling (`list`/`map`/`string`/`rc`/`ref`/
+  `Future`/`Actor`, nesting-aware); an **actor** declaration, `spawn`, `tell`,
+  `await`, or `async fn`; a **closure literal**; the host-allocator builtins
+  `alloc`/`dealloc`; and any **expression whose value type** is one of those
+  heap/runtime types (catching string building and collection builders without an
+  annotation). A module without the directive is entirely unaffected.
+- **Allowed core (verified to run).** Scalars, fixed `array<T>`, structs/enums over
+  scalar fields, `option`/`result`, control flow, functions, and the raw hardware
+  surface (`unsafe` + raw `ptr<T>` + `ptr_read`/`ptr_write`/`volatile_*`/`int_to_ptr`/
+  `ptr_to_int`) all type-check and run on the three interpreters, and a scalar-`main`
+  `no-runtime` module still compiles under `lullaby native --freestanding`.
+- **Tests.** `crates/lullaby_cli/tests/cli/suite15.rs` plus the fixtures under
+  `tests/fixtures/valid/no_runtime/` and `tests/fixtures/invalid/no_runtime/`, and
+  lexer unit tests for the hyphenated keyword.
+
+Explicitly **not** in stage 1 (later freestanding stages, unchanged from §10.2):
+static-buffer-backed arenas (§5), the pluggable `panic fn`/`never`/parameterized
+bounds check (§8), the completed raw-pointer surface `addr_of`/`ptr_offset`/`ptr_cast`
+(§2.2), `repr`/`packed`/`align` (§7), real inline `asm` operand binding (§3),
+MMIO/port-IO/privileged intrinsics (§4), `interrupt`/`naked` functions (§6), and
+`entry`/`section`/direct-ELF/flat-binary output (§9). Stage 1 deliberately does **not**
+reject the raw/`unsafe`/`ptr` primitives that already exist — they are the kernel core.
 
 ---
 

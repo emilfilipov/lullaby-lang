@@ -1,0 +1,9 @@
+# A `no-runtime` module may not build a closure literal: capturing the enclosing
+# scope needs a heap-allocated environment. Rejected with L0441. (Referring to a
+# top-level `fn` by name — a bare function pointer — stays allowed.)
+no-runtime
+
+fn main -> i64
+    let n i64 = 10
+    let add_n fn(i64) -> i64 = fn x i64 -> x + n
+    add_n(5)

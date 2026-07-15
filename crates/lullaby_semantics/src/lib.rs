@@ -10,6 +10,7 @@ use lullaby_parser::{
 mod semantics_aliases;
 mod semantics_consts;
 mod semantics_generics;
+mod semantics_no_runtime;
 
 // Re-export the generic-inference helpers at the crate root so the public API
 // (`lullaby_semantics::unify_param`, ...) stays stable and the checker modules
@@ -90,6 +91,18 @@ pub fn validate(program: &Program) -> Result<CheckedProgram, Vec<SemanticDiagnos
     checker.diagnostics = alias_diagnostics;
     checker.diagnostics.extend(const_diagnostics);
     checker.validate();
+    // Freestanding-tier gate: in a `no-runtime` module, reject any construct that
+    // requires the safe-tier runtime (growable heap allocation, actors/`spawn`/
+    // `tell`, heap closures, `rc`/`ref` handles, host-allocator builtins) with
+    // `L0441`. A no-op for a module without the directive, so ordinary programs are
+    // completely unaffected. Runs after the main pass so it can consult the
+    // recorded per-expression types (to catch heap-typed values without an
+    // annotation, e.g. string building).
+    semantics_no_runtime::enforce(
+        &resolved,
+        &checker.expression_types,
+        &mut checker.diagnostics,
+    );
     if !checker.diagnostics.is_empty() {
         return Err(std::mem::take(&mut checker.diagnostics));
     }

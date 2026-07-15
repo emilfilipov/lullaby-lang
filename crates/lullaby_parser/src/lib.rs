@@ -100,6 +100,18 @@ impl<'a> Parser<'a> {
         let mut actors = Vec::new();
         self.skip_newlines();
 
+        // The optional `no-runtime` module directive: when present it is the first
+        // non-comment line and marks the whole compilation unit as freestanding
+        // (`no-runtime`) tier. It appears at most once, before any `import` or
+        // declaration; a second occurrence, or one after any declaration, falls
+        // through to the ordinary top-level error path below.
+        let mut is_no_runtime = false;
+        if self.eat_keyword(Keyword::NoRuntime).is_some() {
+            is_no_runtime = true;
+            self.expect_newline("expected newline after `no-runtime` directive");
+            self.skip_newlines();
+        }
+
         // Leading `import NAME` lines: zero or more, before any declaration.
         while self.eat_keyword(Keyword::Import).is_some() {
             if let Some(name) = self.expect_identifier("expected module name after `import`") {
@@ -213,6 +225,17 @@ impl<'a> Parser<'a> {
                     token.span,
                 );
                 self.advance();
+            } else if self.at_any_keyword(&[Keyword::NoRuntime]) {
+                // A `no-runtime` directive is only valid as the first non-comment
+                // line of the module. A later occurrence (a second one, or one
+                // after a declaration) is a misplacement, not a declaration.
+                let token = self.peek().clone();
+                self.error(
+                    "L0201",
+                    "the `no-runtime` directive must be the first line of the module",
+                    token.span,
+                );
+                self.advance();
             } else if self.reject_planned_syntax().is_some() {
                 self.skip_planned_syntax();
             } else {
@@ -237,6 +260,7 @@ impl<'a> Parser<'a> {
             impls,
             consts,
             actors,
+            is_no_runtime,
         }
     }
 

@@ -69,6 +69,15 @@ pub fn format_program_with_comments(program: &Program, comments: &[Comment]) -> 
     items.sort_by_key(TopItem::line);
 
     let mut emitter = Emitter::new(comments);
+    // The `no-runtime` module directive, when present, is re-emitted as the first
+    // line of the file (a blank line separates it from the first declaration), so
+    // formatting a freestanding module round-trips the directive.
+    if program.is_no_runtime {
+        emitter.out.push_str("no-runtime\n");
+        if !items.is_empty() {
+            emitter.out.push('\n');
+        }
+    }
     for index in 0..items.len() {
         // A blank line separates consecutive top-level declarations; any leading
         // comments for the next item are flushed after this separator (attached

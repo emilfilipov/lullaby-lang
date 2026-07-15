@@ -1404,6 +1404,10 @@ mod suite14;
 #[path = "cli/ffi_callbacks.rs"]
 mod ffi_callbacks;
 
+// -- Freestanding / kernel tier, stage 1: the `no-runtime` directive + tier gate
+#[path = "cli/suite15.rs"]
+mod suite15;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

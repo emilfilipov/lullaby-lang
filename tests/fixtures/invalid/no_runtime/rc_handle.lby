@@ -1,0 +1,8 @@
+# A `no-runtime` module may not use a reference-counted `rc<T>` handle: RC is a
+# safe-tier-only tool (implicit inc/dec is hidden control flow, and it allocates).
+# Rejected with L0441.
+no-runtime
+
+fn main -> i64
+    let h rc<i64> = rc_new(41)
+    rc_get(h)

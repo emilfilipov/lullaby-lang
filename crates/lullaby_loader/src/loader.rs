@@ -814,6 +814,12 @@ fn merge(modules: &[Module]) -> Program {
     let mut impls = Vec::new();
     let mut consts = Vec::new();
     let mut actors = Vec::new();
+    // The merged compilation unit is freestanding if any module declares the
+    // `no-runtime` directive. This is the conservative (default-deny) choice for
+    // the tier gate: a `no-runtime` module in the build enforces the freestanding
+    // rules over the merged program. Per-module tier granularity in mixed-tier
+    // multi-file projects is a later freestanding-tier stage.
+    let mut is_no_runtime = false;
     for module in modules {
         functions.extend(module.program.functions.iter().cloned());
         aliases.extend(module.program.aliases.iter().cloned());
@@ -823,6 +829,7 @@ fn merge(modules: &[Module]) -> Program {
         impls.extend(module.program.impls.iter().cloned());
         consts.extend(module.program.consts.iter().cloned());
         actors.extend(module.program.actors.iter().cloned());
+        is_no_runtime = is_no_runtime || module.program.is_no_runtime;
     }
     Program {
         functions,
@@ -834,6 +841,7 @@ fn merge(modules: &[Module]) -> Program {
         impls,
         consts,
         actors,
+        is_no_runtime,
     }
 }
 

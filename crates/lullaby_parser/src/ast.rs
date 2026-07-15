@@ -36,6 +36,15 @@ pub struct Program {
     /// artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<ActorDecl>,
+    /// True when the module opens with the `no-runtime` freestanding-tier
+    /// directive (the first non-comment line). It marks every declaration in the
+    /// compilation unit as freestanding: semantic analysis rejects any construct
+    /// that requires the safe-tier runtime (growable heap allocation, actors/
+    /// `spawn`/`tell`, heap closures, `rc`/`ref` handles) with `L0441`. A module
+    /// without the directive is completely unaffected. Serde-defaulted to `false`
+    /// so existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_no_runtime: bool,
 }
 
 /// An actor declaration: `actor NAME` followed by a `state` block of private

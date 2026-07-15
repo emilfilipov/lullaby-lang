@@ -1,0 +1,19 @@
+# A `no-runtime` module may not declare or drive an actor: actors require the
+# Lullaby runtime scheduler (hidden control flow + mailbox allocation). The
+# declaration, the `spawn`, and the `tell` are each rejected with L0441.
+no-runtime
+
+actor Counter
+    state
+        count i64
+
+    init start i64
+        count = start
+
+    on add amount i64
+        count += amount
+
+fn main -> i64
+    let c Actor<Counter> = spawn Counter(0)
+    tell c.add(5)
+    0

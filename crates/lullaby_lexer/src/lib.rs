@@ -91,6 +91,15 @@ pub enum Keyword {
     /// `tell` — a fire-and-forget message send `tell handle.handler(args)` that
     /// enqueues onto an actor's mailbox and returns `void`.
     Tell,
+    /// `no-runtime` — the module-level freestanding-tier directive. When it is the
+    /// first non-comment line of a `.lby` file, the module is compiled in the
+    /// freestanding (`no-runtime`) tier: the compiler rejects any construct that
+    /// requires the safe-tier runtime (a growable heap allocation, an actor/`spawn`/
+    /// `tell`, a heap closure, an `rc`/`ref` handle, …). This is the one hyphenated
+    /// Lullaby keyword; the lexer recognizes the exact contiguous spelling
+    /// `no-runtime` as a single token (a bare `no` and a bare `runtime` remain
+    /// ordinary identifiers).
+    NoRuntime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +356,20 @@ impl<'a> Lexer<'a> {
                     index += 1;
                 }
                 let text: String = chars[start..index].iter().collect();
+                // `no-runtime` is the one hyphenated keyword. When the identifier
+                // `no` is immediately followed by the exact contiguous spelling
+                // `-runtime` (bounded by a non-identifier char), lex the whole run
+                // as a single `NoRuntime` keyword token rather than `no` `-`
+                // `runtime`. A bare `no` or `runtime`, or a `no - runtime`
+                // subtraction with surrounding spaces, is unaffected.
+                if text == "no" && starts_with_bounded(&chars, index, "-runtime") {
+                    index += "-runtime".len();
+                    self.tokens.push(Token::new(
+                        TokenKind::Keyword(Keyword::NoRuntime),
+                        Span::new(line_number, column),
+                    ));
+                    continue;
+                }
                 let kind = keyword(&text)
                     .map(TokenKind::Keyword)
                     .unwrap_or(TokenKind::Identifier(text));
@@ -461,6 +484,23 @@ impl<'a> Lexer<'a> {
         ));
         index
     }
+}
+
+/// True when `chars[at..]` begins with the exact characters of `pat` and the
+/// character immediately after the match (if any) is not an identifier-continue
+/// char. Used to recognize the hyphenated `no-runtime` keyword as a single token
+/// without swallowing a longer identifier-like run (`no-runtimex` does not match).
+fn starts_with_bounded(chars: &[char], at: usize, pat: &str) -> bool {
+    let pat_chars: Vec<char> = pat.chars().collect();
+    if chars.len() < at + pat_chars.len() {
+        return false;
+    }
+    if chars[at..at + pat_chars.len()] != pat_chars[..] {
+        return false;
+    }
+    !chars
+        .get(at + pat_chars.len())
+        .is_some_and(|next| is_identifier_continue(*next))
 }
 
 fn count_indent(line: &str) -> usize {
@@ -635,6 +675,53 @@ mod tests {
                 .iter()
                 .any(|token| token.kind == TokenKind::Symbol("~".to_string())),
             "expected a `~` symbol token, got {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn lexes_no_runtime_directive_as_one_keyword() {
+        // `no-runtime` at the top of a module lexes as a single NoRuntime keyword,
+        // not as `no` `-` `runtime`.
+        let tokens = lex("no-runtime\nfn main -> i64\n    0\n").expect("lex");
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::NoRuntime)),
+            "expected a NoRuntime keyword token, got {tokens:?}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Symbol("-".to_string())),
+            "`no-runtime` must not be split into a `-` subtraction: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn bare_no_and_runtime_stay_identifiers() {
+        // A bare `no` / `runtime`, and a spaced `no - runtime` subtraction, are
+        // ordinary identifiers/operators — only the contiguous `no-runtime` is the
+        // keyword.
+        let tokens = lex("fn f no i64, runtime i64 -> i64\n    no - runtime\n").expect("lex");
+        assert!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == TokenKind::Identifier("no".to_string()))
+                .count()
+                >= 1,
+            "`no` should be an identifier: {tokens:?}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Symbol("-".to_string())),
+            "spaced `no - runtime` should keep its `-`: {tokens:?}"
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::NoRuntime)),
+            "spaced `no - runtime` must not lex as the NoRuntime keyword: {tokens:?}"
         );
     }
 
