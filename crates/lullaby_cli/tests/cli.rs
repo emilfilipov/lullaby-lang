@@ -1396,6 +1396,10 @@ mod suite12;
 #[path = "cli/suite13.rs"]
 mod suite13;
 
+// -- Actor concurrency model, stage 1: `actor`/`state`/`init`/`on`, `spawn`, `tell`
+#[path = "cli/suite14.rs"]
+mod suite14;
+
 // -- FFI callbacks (A3): passing a Lullaby function to C as a C-ABI function pointer
 #[path = "cli/ffi_callbacks.rs"]
 mod ffi_callbacks;

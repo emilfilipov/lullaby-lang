@@ -19,8 +19,8 @@
 //! formatting a commented file is idempotent.
 
 use crate::{
-    AliasDecl, AssignOp, BinaryOp, ConstDecl, EnumDecl, Expr, ExprKind, Function, IfBranch,
-    ImplDecl, MatchArm, MatchPattern, MethodSig, Param, Place, Program, RegionDecl, Stmt,
+    ActorDecl, AliasDecl, AssignOp, BinaryOp, ConstDecl, EnumDecl, Expr, ExprKind, Function,
+    IfBranch, ImplDecl, MatchArm, MatchPattern, MethodSig, Param, Place, Program, RegionDecl, Stmt,
     StructDecl, TraitDecl, TypeParam, UnaryOp,
 };
 use lullaby_lexer::Comment;
@@ -60,6 +60,9 @@ pub fn format_program_with_comments(program: &Program, comments: &[Comment]) -> 
     for decl in &program.impls {
         items.push(TopItem::Impl(decl));
     }
+    for decl in &program.actors {
+        items.push(TopItem::Actor(decl));
+    }
     for function in &program.functions {
         items.push(TopItem::Function(function));
     }
@@ -94,6 +97,7 @@ enum TopItem<'a> {
     Enum(&'a EnumDecl),
     Trait(&'a TraitDecl),
     Impl(&'a ImplDecl),
+    Actor(&'a ActorDecl),
     Function(&'a Function),
 }
 
@@ -106,6 +110,7 @@ impl TopItem<'_> {
             TopItem::Enum(decl) => decl.span.line,
             TopItem::Trait(decl) => decl.span.line,
             TopItem::Impl(decl) => decl.span.line,
+            TopItem::Actor(decl) => decl.span.line,
             TopItem::Function(function) => function.span.line,
         }
     }
@@ -244,8 +249,59 @@ fn render_item(emitter: &mut Emitter, item: &TopItem, block_next: usize) {
         TopItem::Enum(decl) => render_enum(emitter, decl, block_next),
         TopItem::Trait(decl) => render_trait(emitter, decl, block_next),
         TopItem::Impl(decl) => render_impl(emitter, decl, block_next),
+        TopItem::Actor(decl) => render_actor(emitter, decl, block_next),
         TopItem::Function(function) => render_function(emitter, function, block_next),
     }
+}
+
+/// Render an actor declaration: the `actor NAME` header, then the canonical
+/// section order `state` / `init` / `on` handlers. Section order is normalized
+/// (the AST buckets them), so the output is idempotent regardless of the source
+/// ordering.
+fn render_actor(emitter: &mut Emitter, decl: &ActorDecl, block_next: usize) {
+    let mut header = String::new();
+    if decl.is_public {
+        header.push_str("pub ");
+    }
+    header.push_str(&format!("actor {}", decl.name));
+    emitter.emit_line(0, decl.span.line, &header);
+
+    // `state` block (spanless fields, like a struct body).
+    emitter.push_field_line(1, "state");
+    for field in &decl.state {
+        emitter.push_field_line(2, &format!("{} {}", field.name, field.ty.name));
+    }
+
+    // Optional `init <params>` constructor.
+    if let Some(init) = &decl.init {
+        let mut init_header = String::from("init");
+        init_header.push_str(&render_params(&init.params));
+        let following = decl
+            .handlers
+            .first()
+            .map(|handler| handler.span.line)
+            .unwrap_or(block_next);
+        emitter.emit_line(1, init.span.line, &init_header);
+        render_block(emitter, &init.body, 2, following);
+    }
+
+    // `on <name> <params> [-> T]` handlers.
+    for index in 0..decl.handlers.len() {
+        let handler = &decl.handlers[index];
+        let mut handler_header = format!("on {}", handler.name);
+        handler_header.push_str(&render_params(&handler.params));
+        if let Some(reply) = &handler.reply_type {
+            handler_header.push_str(&format!(" -> {}", reply.name));
+        }
+        let following = decl
+            .handlers
+            .get(index + 1)
+            .map(|next| next.span.line)
+            .unwrap_or(block_next);
+        emitter.emit_line(1, handler.span.line, &handler_header);
+        render_block(emitter, &handler.body, 2, following);
+    }
+    emitter.flush_block_end(block_next, 1);
 }
 
 fn render_alias(alias: &AliasDecl) -> String {
@@ -886,6 +942,21 @@ fn render_expr(expr: &Expr) -> String {
             let start = start.as_deref().map(render_expr).unwrap_or_default();
             let end = end.as_deref().map(render_expr).unwrap_or_default();
             format!("{}[{start}:{end}]", render_postfix_target(target))
+        }
+        // `spawn NAME(args)` — construct and schedule an actor.
+        ExprKind::Spawn { actor, args } => {
+            let args = args.iter().map(render_expr).collect::<Vec<_>>().join(", ");
+            format!("spawn {actor}({args})")
+        }
+        // `tell TARGET.HANDLER(args)` — a fire-and-forget message send. Rendered
+        // back in method-call syntax so it re-parses to the same `Tell` node.
+        ExprKind::Tell {
+            target,
+            handler,
+            args,
+        } => {
+            let args = args.iter().map(render_expr).collect::<Vec<_>>().join(", ");
+            format!("tell {}.{handler}({args})", render_postfix_target(target))
         }
     }
 }

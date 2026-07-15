@@ -30,6 +30,66 @@ pub struct Program {
     /// artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consts: Vec<ConstDecl>,
+    /// Actor declarations (`actor NAME` with a `state` section, an optional
+    /// `init`, and `on <handler>` message handlers), in source order. Empty for a
+    /// program that declares no actors. Serde-defaulted so existing single-file
+    /// artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actors: Vec<ActorDecl>,
+}
+
+/// An actor declaration: `actor NAME` followed by a `state` block of private
+/// fields, an optional `init <params>` constructor, and one or more
+/// `on <handler> <params> [-> T]` message handlers. An actor bundles isolated
+/// private state with the message handlers that are the only way to touch it —
+/// the single-writer invariant that removes data races. A handler declared
+/// without `-> T` is a **tell** (fire-and-forget) handler; a handler declared
+/// with `-> T` is a **reply** (`ask`) handler (declaration is accepted so
+/// stage-1 diagnostics can reject `tell`ing one, but `ask` itself is a later
+/// stage).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActorDecl {
+    pub name: String,
+    /// The actor's private state fields, declared `name Type` exactly like
+    /// `struct` fields. Only the actor's own handlers may read or write them.
+    pub state: Vec<StructField>,
+    /// The optional `init <params>` constructor, run once on `spawn` before the
+    /// actor begins consuming messages. Absent when the actor declares no `init`
+    /// (its state is then zero-initialized and `spawn` takes no arguments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init: Option<ActorInit>,
+    pub handlers: Vec<ActorHandler>,
+    pub span: Span,
+    /// True when the declaration is exported with `pub`. Serde-defaulted to
+    /// `false` so existing single-file artifacts and AST snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_public: bool,
+}
+
+/// An actor's `init <params>` constructor: the parameters it takes at `spawn`
+/// time and the body that initializes the actor's `state`. The body runs with
+/// the state fields in scope as assignable locals (zero-initialized before it
+/// runs) and the parameters bound; its purpose is to set up `state`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActorInit {
+    pub params: Vec<Param>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// A single actor message handler: `on <name> <params> [-> reply_type]` and its
+/// body. The body runs with the actor's `state` fields in scope as mutable
+/// locals and the handler parameters bound. `reply_type` is `None` for a
+/// fire-and-forget **tell** handler and `Some(T)` for a request-reply (`ask`)
+/// handler whose trailing expression is the reply value of type `T`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActorHandler {
+    pub name: String,
+    pub params: Vec<Param>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_type: Option<TypeRef>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 /// A named compile-time constant declaration: `const NAME type = <expr>`. The
@@ -739,6 +799,25 @@ pub enum ExprKind {
     /// signal, and the IR lowerer desugars it into `let`/`match`/`return` so no
     /// IR node (and thus no native/WASM backend change) is needed.
     Try(Box<Expr>),
+    /// `spawn NAME(args)`: construct an actor of type `NAME`, run its `init`
+    /// with `args`, schedule it, and yield a typed handle `Actor<NAME>`. The
+    /// handle is the only way to reach the actor; it carries no reference into
+    /// the actor's private heap. Only the AST interpreter runs actors; the
+    /// IR/bytecode/native/WASM backends reject or cleanly skip an actor program.
+    Spawn {
+        actor: String,
+        args: Vec<Expr>,
+    },
+    /// `tell TARGET.HANDLER(args)`: enqueue a fire-and-forget message onto the
+    /// actor addressed by `target` (an `Actor<T>` handle) and return `void`
+    /// immediately. Valid only for a handler declared without a `-> T` reply
+    /// type. `args` are the handler arguments (the target is `target`, not part
+    /// of `args`).
+    Tell {
+        target: Box<Expr>,
+        handler: String,
+        args: Vec<Expr>,
+    },
     /// An inline closure literal `fn PARAMS -> EXPR`: an anonymous function value
     /// that captures the enclosing scope's locals by value at evaluation time.
     /// `params` are `name type` pairs (explicit types, no parens, like a

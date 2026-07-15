@@ -1,0 +1,28 @@
+# Stage-1 actor demo: a counter actor with private state, spawned and driven by
+# several fire-and-forget `tell`s, plus an observable side effect (`report`
+# prints). Actors process messages run-to-completion, one at a time, during the
+# graceful drain before `main` returns, so the output is deterministic: `main`'s
+# own line prints first, then the drained handler output.
+actor Counter
+    state
+        count i64
+        name string
+
+    init start i64 label string
+        count = start
+        name = label
+
+    on add amount i64
+        count += amount
+
+    on report
+        println(name + " = " + to_string(count))
+
+fn main -> i64
+    let c Actor<Counter> = spawn Counter(0, "hits")
+    tell c.add(5)
+    tell c.add(10)
+    tell c.add(2)
+    tell c.report()
+    println("main done")
+    0

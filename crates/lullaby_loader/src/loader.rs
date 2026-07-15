@@ -421,6 +421,9 @@ fn declared_names(program: &Program) -> HashSet<String> {
     for decl in &program.consts {
         names.insert(decl.name.clone());
     }
+    for decl in &program.actors {
+        names.insert(decl.name.clone());
+    }
     names
 }
 
@@ -448,6 +451,11 @@ fn public_names(program: &Program) -> HashSet<String> {
         }
     }
     for decl in &program.consts {
+        if decl.is_public {
+            names.insert(decl.name.clone());
+        }
+    }
+    for decl in &program.actors {
         if decl.is_public {
             names.insert(decl.name.clone());
         }
@@ -499,6 +507,9 @@ fn module_declarations(program: &Program) -> Vec<(String, Span)> {
         items.push((alias.name.clone(), alias.span));
     }
     for decl in &program.consts {
+        items.push((decl.name.clone(), decl.span));
+    }
+    for decl in &program.actors {
         items.push((decl.name.clone(), decl.span));
     }
     items
@@ -714,6 +725,21 @@ fn collect_expr_references(expr: &Expr, out: &mut Vec<(String, Span)>) {
         ExprKind::Field { target, .. } => collect_expr_references(target, out),
         ExprKind::Await { expr } => collect_expr_references(expr, out),
         ExprKind::Try(inner) => collect_expr_references(inner, out),
+        // `spawn NAME(args)` names an actor declaration (a top-level name).
+        ExprKind::Spawn { actor, args } => {
+            out.push((actor.clone(), expr.span));
+            for arg in args {
+                collect_expr_references(arg, out);
+            }
+        }
+        // `tell TARGET.HANDLER(args)`: the handler is not a top-level name, but the
+        // target and arguments may reference top-level declarations.
+        ExprKind::Tell { target, args, .. } => {
+            collect_expr_references(target, out);
+            for arg in args {
+                collect_expr_references(arg, out);
+            }
+        }
         // A closure body may reference top-level names (call a function), so
         // recurse into it for module dependency analysis.
         ExprKind::Closure { body, .. } => collect_expr_references(body, out),
@@ -787,6 +813,7 @@ fn merge(modules: &[Module]) -> Program {
     let mut traits = Vec::new();
     let mut impls = Vec::new();
     let mut consts = Vec::new();
+    let mut actors = Vec::new();
     for module in modules {
         functions.extend(module.program.functions.iter().cloned());
         aliases.extend(module.program.aliases.iter().cloned());
@@ -795,6 +822,7 @@ fn merge(modules: &[Module]) -> Program {
         traits.extend(module.program.traits.iter().cloned());
         impls.extend(module.program.impls.iter().cloned());
         consts.extend(module.program.consts.iter().cloned());
+        actors.extend(module.program.actors.iter().cloned());
     }
     Program {
         functions,
@@ -805,6 +833,7 @@ fn merge(modules: &[Module]) -> Program {
         traits,
         impls,
         consts,
+        actors,
     }
 }
 

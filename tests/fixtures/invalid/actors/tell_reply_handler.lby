@@ -1,0 +1,13 @@
+# `tell` targets a reply (`ask`) handler declared `-> T`. Stage 1 only supports
+# fire-and-forget `tell`; request-reply (`ask`) is a later stage. -> L0352
+actor Bank
+    state
+        balance i64
+
+    on balance_of -> i64
+        balance
+
+fn main -> i64
+    let b Actor<Bank> = spawn Bank()
+    tell b.balance_of()
+    0

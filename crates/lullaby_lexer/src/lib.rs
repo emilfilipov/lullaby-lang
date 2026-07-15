@@ -85,6 +85,12 @@ pub enum Keyword {
     Extern,
     Export,
     Asm,
+    /// `actor` — introduces a concurrent actor declaration (`actor Name` with a
+    /// `state` section, an optional `init`, and `on <handler>` message handlers).
+    Actor,
+    /// `tell` — a fire-and-forget message send `tell handle.handler(args)` that
+    /// enqueues onto an actor's mailbox and returns `void`.
+    Tell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +527,8 @@ fn keyword(text: &str) -> Option<Keyword> {
         "extern" => Keyword::Extern,
         "export" => Keyword::Export,
         "asm" => Keyword::Asm,
+        "actor" => Keyword::Actor,
+        "tell" => Keyword::Tell,
         _ => return None,
     })
 }

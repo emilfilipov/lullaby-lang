@@ -1,0 +1,12 @@
+# `tell` names a handler the actor does not declare. -> L0352
+actor Worker
+    state
+        n i64
+
+    on run
+        n += 1
+
+fn main -> i64
+    let w Actor<Worker> = spawn Worker()
+    tell w.stop()
+    0

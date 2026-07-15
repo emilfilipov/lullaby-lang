@@ -424,6 +424,11 @@ pub enum IrCleanupRole {
 pub struct IrLoweringError {
     pub message: String,
     pub span: Option<Span>,
+    /// An optional dedicated diagnostic code. Most IR-lowering failures share the
+    /// generic `L0501` code (assigned by the CLI reporter); a few carry a specific
+    /// code — e.g. an actor program rejected here reports `L0355` — which the
+    /// reporter uses in place of `L0501`.
+    pub code: Option<&'static str>,
 }
 
 impl IrLoweringError {
@@ -431,7 +436,15 @@ impl IrLoweringError {
         Self {
             message: message.into(),
             span,
+            code: None,
         }
+    }
+
+    /// Attach a specific diagnostic code to this error (overriding the generic
+    /// `L0501` the reporter would otherwise use).
+    fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
     }
 }
 

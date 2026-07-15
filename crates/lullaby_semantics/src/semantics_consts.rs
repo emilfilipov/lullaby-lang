@@ -480,6 +480,22 @@ impl Folder<'_> {
                 self.fold_stmts(&mut method.body, &mut local);
             }
         }
+        // Fold constants inside actor `init` and handler bodies too, threading the
+        // actor's state fields plus the init/handler parameters as locals so a
+        // constant reference in a handler is folded like one in a function.
+        for decl in &mut program.actors {
+            let state: HashSet<String> = decl.state.iter().map(|f| f.name.clone()).collect();
+            if let Some(init) = &mut decl.init {
+                let mut local: HashSet<String> = state.clone();
+                local.extend(init.params.iter().map(|p| p.name.clone()));
+                self.fold_stmts(&mut init.body, &mut local);
+            }
+            for handler in &mut decl.handlers {
+                let mut local: HashSet<String> = state.clone();
+                local.extend(handler.params.iter().map(|p| p.name.clone()));
+                self.fold_stmts(&mut handler.body, &mut local);
+            }
+        }
     }
 
     /// Fold a statement list, threading `local` so a `let` binds its name for the
@@ -661,6 +677,17 @@ impl Folder<'_> {
                 }
                 if let Some(end) = end {
                     self.fold_expr(end, local);
+                }
+            }
+            ExprKind::Spawn { args, .. } => {
+                for arg in args {
+                    self.fold_expr(arg, local);
+                }
+            }
+            ExprKind::Tell { target, args, .. } => {
+                self.fold_expr(target, local);
+                for arg in args {
+                    self.fold_expr(arg, local);
                 }
             }
         }
