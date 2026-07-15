@@ -1,0 +1,13 @@
+# Instantiation violating a trait bound on a generic type: `Ranked<T: Rank>`
+# requires its type argument to implement `Rank`, but `i64` does not. Rejected
+# with L0400 (bound not satisfied by the type argument).
+
+trait Rank
+    fn rank self -> i64
+
+struct Ranked<T: Rank>
+    item T
+
+fn main -> i64
+    let bad Ranked<i64> = Ranked(5)
+    0

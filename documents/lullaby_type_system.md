@@ -24,9 +24,12 @@ The compiler validates, with real (space-separated, colon-free) syntax:
 - **Reference/function:** `rc<T>`/`ref<T>`/`ptr<T>` and function values `fn(T) -> R`.
 - **Generics and traits:** generic functions `fn name<T> ...` with call-site
   inference and trait bounds `<T: Trait>`; `trait`/`impl` with receiver-type
-  dispatch; and single-parameter generic user structs `struct Box<T>` and enums
-  `enum Opt<T>` with inference-directed construction (see "Generic User Structs"
-  and "Generic User Enums").
+  dispatch; and generic user structs `struct Box<T>` and enums `enum Opt<T>` with
+  inference-directed construction, including **multiple type parameters**
+  (`struct Pair<K, V>`, `enum Either<L, R>`) and **trait bounds on a type
+  parameter** (`struct Sorted<T: Ord>`) enforced at each instantiation (see
+  "Generic User Structs", "Generic User Enums", and "Multiple Type Parameters and
+  Bounds").
 
 Local binding inference:
 - Explicit local annotations use `let name Type = expression` (no colon).
@@ -275,13 +278,14 @@ layout) treat a function that uses a generic struct as ineligible for now and
 cleanly skip it to the interpreter (`L0339`), never miscompiling; per-instantiation
 monomorphization on those backends is a later stage.
 
-Stage 1 covers a **single-parameter generic `struct` with a scalar type
-parameter**; methods on generic types ship too (see "Methods on Generic Types").
-Heap-typed `T` (`string`/`list`/`map`/heap struct), multiple type parameters, and
-bounds on a generic type (`struct Sorted<T: Compare>`) are staged next. Trait
-objects (`dyn`) and associated types remain on the roadmap; the built-in generics
-`option`, `result`, `list`, `map`, `array`, `rc`, `ref`, and `ptr` are available
-today.
+A generic `struct` may declare **multiple type parameters** and **bounds** on a
+parameter (`struct Pair<K, V>`, `struct Sorted<T: Ord>`); both are covered under
+"Multiple Type Parameters and Bounds". Methods on generic types ship too (see
+"Methods on Generic Types"). Heap-typed `T` (`string`/`list`/`map`/heap struct)
+runs on the interpreters today; native/WASM monomorphization for heap `T` is a
+later stage. Trait objects (`dyn`) and associated types remain on the roadmap; the
+built-in generics `option`, `result`, `list`, `map`, `array`, `rc`, `ref`, and
+`ptr` are available today.
 
 ### Generic User Enums
 
@@ -338,9 +342,10 @@ so every instantiation shares one runtime shape and produces identical results o
 `ast`/`ir`/`bytecode`. The native and WASM backends treat a function that uses a
 generic enum as ineligible for now and cleanly skip it to the interpreter
 (`L0339`/`L0338`), never miscompiling; per-instantiation monomorphization is a
-later stage. Stage A1 covers a **single-parameter generic `enum`** plus the
-recursion-through-indirection rule; methods, heap-`T` native monomorphization,
-multiple parameters, and bounds are staged next.
+later stage. A generic `enum` may declare **multiple type parameters**
+(`enum Either<L, R>`) and **bounds** on a parameter, plus the
+recursion-through-indirection rule; see "Multiple Type Parameters and Bounds".
+Heap-`T` native monomorphization is staged next.
 
 ### Methods on Generic Types
 
@@ -386,8 +391,86 @@ runtime, so a program calling generic-type methods runs identically on
 `ast`/`ir`/`bytecode`. A function that calls a generic-type method is
 native-ineligible for now and cleanly skips to the interpreter (`L0339`), never
 miscompiling; per-instantiation monomorphization on the native/WASM backends is a
-later stage, as are multiple type parameters and bounds on a generic type
-(`impl Sorted<T: Compare>`).
+later stage. An inherent impl may itself carry multiple type parameters and
+bounds (`impl Pair<K, V>`, `impl Sorted<T: Ord>`); see "Multiple Type Parameters
+and Bounds".
+
+### Multiple Type Parameters and Bounds
+
+A generic type may declare **more than one type parameter**, and each is inferred
+independently. Two parameters are written in the angle-bracket list exactly as a
+generic function declares them:
+
+```lullaby
+struct Pair<K, V>
+    key K
+    value V
+
+enum Either<L, R>
+    left L
+    right R
+
+impl Pair<K, V>
+    fn get_key self -> K              # returns the first field as the concrete K
+        self.key
+    fn get_value self -> V            # returns the second field as the concrete V
+        self.value
+
+fn main -> i64
+    let a Pair<i64, bool> = Pair(key: 10, value: true)   # K = i64, V = bool
+    let b Pair<string, i64> = Pair(key: "id", value: 32) # K = string, V = i64
+    a.get_key() + b.get_value()                          # 10 + 32 = 42
+```
+
+Every parameter must be pinned — by the annotation or by the constructor's
+arguments — and each field/variant substitutes its own parameter, so `a.get_key()`
+is `i64` and `b.get_value()` is `i64`. Spelling a multi-parameter type with the
+wrong number of arguments (`Pair<i64>`) is `L0454`. An inherent `impl` restates
+the full parameter list (`impl Pair<K, V>`), and a method resolves each parameter
+from the receiver's instantiation.
+
+A **trait bound** on a type parameter constrains which types may instantiate it,
+so the type's methods may call the bound trait's methods on a `T` value. The bound
+is written on the declaration (`struct Sorted<T: Ord>`, `enum Holder<T: Show>`) and
+propagates into the type's inherent-impl methods; it may equivalently be written on
+the impl (`impl Sorted<T: Ord>`). Bounds reuse the same grammar and dispatch as
+bounds on generic functions (`<T: A + B>`):
+
+```lullaby
+trait Rank
+    fn rank self -> i64
+
+struct Card
+    value i64
+
+impl Rank for Card
+    fn rank self -> i64
+        self.value * 10
+
+struct Ranked<T: Rank>
+    item T
+
+impl Ranked<T>
+    fn score self -> i64
+        self.item.rank() + 100        # `T: Rank` lets a T value call rank()
+
+fn main -> i64
+    let c Ranked<Card> = Ranked(Card(4))
+    c.score()                          # 4*10 + 100 = 140
+```
+
+**Bounds are enforced at every instantiation.** A concrete type argument must
+implement each trait its parameter position requires; `Ranked<i64>` — where `i64`
+does not implement `Rank` — is rejected with `L0400` (the same unsatisfied-bound
+diagnostic used for bounded generic functions). A bare in-scope type variable used
+as a type argument is not checked concretely (its bound is enforced where that
+outer variable is pinned).
+
+Like the rest of the generics surface, multi-parameter and bounded generic types
+run by **type erasure** on the three interpreters, so a program using them runs
+byte-for-byte identically on `ast`/`ir`/`bytecode`. A function that uses one is
+native-ineligible for now and cleanly skips to the interpreter (`L0339`), never
+miscompiling.
 
 ## Type Aliases
 
