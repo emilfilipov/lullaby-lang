@@ -24,11 +24,60 @@ use lullaby_parser::{
     parse,
 };
 
+/// An in-memory override of on-disk source: `overlay_key(path) -> source text`.
+///
+/// When a module's resolved path is present in the overlay, the loader uses the
+/// overlay's text instead of reading the file from disk. The CLI never uses this
+/// (it always passes an empty overlay, so behavior is byte-for-byte the on-disk
+/// path); the language server uses it to analyze the editor's live, possibly
+/// unsaved buffers. Keys must be produced with [`overlay_key`] so callers and the
+/// loader normalize paths identically.
+pub type SourceOverlay = HashMap<PathBuf, String>;
+
+/// Normalize a path into the key form used by [`SourceOverlay`]. Canonicalizes
+/// when the file exists on disk (so the same file reached by different spellings
+/// maps to one key), and falls back to the path as-written for a not-yet-saved
+/// buffer whose file does not exist.
+pub fn overlay_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// One loaded module exposed to callers: its module name, resolved path, source
+/// text, and parsed AST. This is the per-file view the merged [`Program`]
+/// deliberately flattens away; tools that need file identity (the language
+/// server, for cross-file go-to-definition and hover) read it from here.
+#[derive(Debug, Clone)]
+pub struct ModuleSource {
+    pub name: String,
+    pub path: PathBuf,
+    pub source: String,
+    pub program: Program,
+}
+
 /// A merged multi-file program plus the source text of the entry file (used for
 /// verbose diagnostic rendering downstream, exactly like the single-file path).
+///
+/// `modules` additionally exposes each loaded module (name, path, source, AST)
+/// in load order, so a consumer can recover the file identity the merged
+/// `program` flattens away. The CLI ignores it; the language server uses it for
+/// cross-file resolution.
 pub struct LoadedProgram {
     pub program: Program,
     pub entry_source: String,
+    pub modules: Vec<ModuleSource>,
+}
+
+/// Snapshot the internal modules as the public [`ModuleSource`] view.
+fn module_sources(modules: &[Module]) -> Vec<ModuleSource> {
+    modules
+        .iter()
+        .map(|module| ModuleSource {
+            name: module.name.clone(),
+            path: module.path.clone(),
+            source: module.source.clone(),
+            program: module.program.clone(),
+        })
+        .collect()
 }
 
 /// One parsed module: its resolved path, source text, parsed AST, and the set
@@ -54,6 +103,17 @@ struct Module {
 pub fn load_program_in_project(
     entry: &Path,
     search_dirs: &[PathBuf],
+) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
+    load_program_in_project_with_overlay(entry, search_dirs, &SourceOverlay::new())
+}
+
+/// Like [`load_program_in_project`], but any module whose resolved path is in
+/// `overlay` is read from the overlay's in-memory text instead of from disk.
+/// Passing an empty overlay is identical to [`load_program_in_project`].
+pub fn load_program_in_project_with_overlay(
+    entry: &Path,
+    search_dirs: &[PathBuf],
+    overlay: &SourceOverlay,
 ) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
     if let Err(diagnostic) = validate_source_path(entry) {
         return Err(vec![
@@ -82,6 +142,7 @@ pub fn load_program_in_project(
         entry,
         &dir,
         search_dirs,
+        overlay,
         &mut modules,
         &mut loaded,
         &mut visiting,
@@ -111,6 +172,7 @@ pub fn load_program_in_project(
     Ok(LoadedProgram {
         program: merged,
         entry_source,
+        modules: module_sources(&modules),
     })
 }
 
@@ -122,6 +184,16 @@ pub fn load_program_in_project(
 /// module imports are still included, so unused-but-broken modules are caught.
 pub fn load_library_project(
     search_dirs: &[PathBuf],
+) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
+    load_library_project_with_overlay(search_dirs, &SourceOverlay::new())
+}
+
+/// Like [`load_library_project`], but any module whose resolved path is in
+/// `overlay` is read from the overlay's in-memory text instead of from disk.
+/// Passing an empty overlay is identical to [`load_library_project`].
+pub fn load_library_project_with_overlay(
+    search_dirs: &[PathBuf],
+    overlay: &SourceOverlay,
 ) -> Result<LoadedProgram, Vec<DiagnosticReport>> {
     let mut modules: Vec<Module> = Vec::new();
     let mut loaded: HashMap<String, usize> = HashMap::new();
@@ -154,6 +226,7 @@ pub fn load_library_project(
             root,
             &dir,
             search_dirs,
+            overlay,
             &mut modules,
             &mut loaded,
             &mut visiting,
@@ -181,6 +254,7 @@ pub fn load_library_project(
     Ok(LoadedProgram {
         program: merged,
         entry_source,
+        modules: module_sources(&modules),
     })
 }
 
@@ -192,6 +266,7 @@ fn load_module(
     path: &Path,
     dir: &Path,
     search_dirs: &[PathBuf],
+    overlay: &SourceOverlay,
     modules: &mut Vec<Module>,
     loaded: &mut HashMap<String, usize>,
     visiting: &mut HashSet<String>,
@@ -201,22 +276,27 @@ fn load_module(
         return;
     }
 
-    let source = match std::fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => {
-            diagnostics.push(
-                DiagnosticReport::new(
-                    "L0397",
-                    DiagnosticPhase::Loader,
-                    format!(
-                        "failed to read module `{name}` at `{}`: {error}",
-                        path.display()
-                    ),
-                )
-                .with_source_path(path.display().to_string()),
-            );
-            return;
-        }
+    // An overlay entry (the editor's live buffer) takes precedence over disk;
+    // fall back to reading the file when there is none.
+    let source = match overlay.get(&overlay_key(path)) {
+        Some(source) => source.clone(),
+        None => match std::fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) => {
+                diagnostics.push(
+                    DiagnosticReport::new(
+                        "L0397",
+                        DiagnosticPhase::Loader,
+                        format!(
+                            "failed to read module `{name}` at `{}`: {error}",
+                            path.display()
+                        ),
+                    )
+                    .with_source_path(path.display().to_string()),
+                );
+                return;
+            }
+        },
     };
 
     let tokens = match lex(&source) {
@@ -294,6 +374,7 @@ fn load_module(
             &import_path,
             &import_dir,
             search_dirs,
+            overlay,
             modules,
             loaded,
             visiting,
@@ -724,5 +805,98 @@ fn merge(modules: &[Module]) -> Program {
         traits,
         impls,
         consts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A unique on-disk directory, cleaned up on drop.
+    struct TempDir {
+        dir: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("lullaby_loader_{}_{unique}", std::process::id()));
+            fs::create_dir_all(&dir).expect("create temp dir");
+            Self { dir }
+        }
+
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.dir.join(name);
+            fs::write(&path, contents).expect("write file");
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn exposes_each_loaded_module_with_file_identity() {
+        let temp = TempDir::new();
+        let entry = temp.write(
+            "main.lby",
+            "import math\n\nfn main -> i64\n    return square(3)\n",
+        );
+        temp.write("math.lby", "pub fn square x i64 -> i64\n    return x * x\n");
+
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        // The merged program flattens both files' functions together...
+        assert!(loaded.program.functions.iter().any(|f| f.name == "square"));
+        assert!(loaded.program.functions.iter().any(|f| f.name == "main"));
+        // ...while `modules` preserves per-file identity for tooling.
+        let math = loaded
+            .modules
+            .iter()
+            .find(|module| module.name == "math")
+            .expect("math module exposed");
+        assert!(math.program.functions.iter().any(|f| f.name == "square"));
+        assert!(math.path.ends_with("math.lby"));
+    }
+
+    #[test]
+    fn overlay_takes_precedence_over_disk() {
+        let temp = TempDir::new();
+        // On-disk entry references an undefined name; the overlay replaces it with
+        // a valid buffer, so the load succeeds.
+        let entry = temp.write("main.lby", "fn main -> i64\n    return nope(0)\n");
+        let mut overlay = SourceOverlay::new();
+        overlay.insert(
+            overlay_key(&entry),
+            "fn main -> i64\n    return 0\n".to_string(),
+        );
+
+        let loaded = load_program_in_project_with_overlay(&entry, &[], &overlay)
+            .expect("overlay buffer loads");
+        assert_eq!(loaded.entry_source, "fn main -> i64\n    return 0\n");
+
+        // Without the overlay the on-disk (broken) source is what loads.
+        let disk = load_program_in_project(&entry, &[]).expect("disk load parses");
+        assert!(disk.entry_source.contains("nope"));
+    }
+
+    #[test]
+    fn empty_overlay_matches_the_on_disk_path() {
+        let temp = TempDir::new();
+        let entry = temp.write("main.lby", "fn main -> i64\n    return 7\n");
+        let with_overlay =
+            load_program_in_project_with_overlay(&entry, &[], &SourceOverlay::new()).expect("ok");
+        let plain = load_program_in_project(&entry, &[]).expect("ok");
+        assert_eq!(with_overlay.entry_source, plain.entry_source);
+        assert_eq!(
+            with_overlay.program.functions.len(),
+            plain.program.functions.len()
+        );
     }
 }

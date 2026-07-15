@@ -8,9 +8,10 @@
 //! convert them to 0-based LSP ranges and widen the end to cover the identifier
 //! or token that starts at that position when there is one.
 
+use lullaby_diagnostics::DiagnosticReport;
 use lullaby_lexer::{Span, lex, lex_with_comments};
-use lullaby_parser::{format_program_with_comments, parse};
-use lullaby_semantics::validate;
+use lullaby_parser::{Program, format_program_with_comments, parse};
+use lullaby_semantics::{SemanticDiagnostic, validate};
 use serde_json::{Value, json};
 
 /// LSP diagnostic severity: 1 = Error.
@@ -20,39 +21,58 @@ const SEVERITY_ERROR: i64 = 1;
 ///
 /// Returns the list of LSP `Diagnostic` JSON values (possibly empty). Runs
 /// lex -> parse -> semantic validation and reports whichever stage first fails.
+/// This is the single-document pipeline; module/project awareness lives in
+/// [`crate::project`], which reuses the helpers below.
 pub fn compute(text: &str) -> Vec<Value> {
-    let tokens = match lex(text) {
-        Ok(tokens) => tokens,
-        Err(diagnostics) => {
-            return diagnostics
-                .into_iter()
-                .map(|d| lsp_diagnostic(text, d.code, &d.message, d.span))
-                .collect();
-        }
-    };
-
-    let program = match parse(&tokens) {
+    let program = match lex_parse_lsp(text) {
         Ok(program) => program,
-        Err(diagnostics) => {
-            return diagnostics
-                .into_iter()
-                .map(|d| lsp_diagnostic(text, d.code, &d.message, d.span))
-                .collect();
-        }
+        Err(items) => return items,
     };
-
     match validate(&program) {
         Ok(_) => Vec::new(),
         Err(diagnostics) => diagnostics
             .into_iter()
-            .map(|d| {
-                // A semantic diagnostic may lack a span; fall back to the top of
-                // the document so the marker is still visible.
-                let span = d.span.unwrap_or(Span::new(1, 1));
-                lsp_diagnostic(text, d.code, &d.message, span)
-            })
+            .map(|diagnostic| semantic_diag_to_lsp(text, diagnostic))
             .collect(),
     }
+}
+
+/// Lex and parse `text`, returning the parsed [`Program`] or the lex/parse
+/// diagnostics already rendered as LSP `Diagnostic` JSON values. The rendered
+/// positions match the single-document pipeline exactly.
+pub(crate) fn lex_parse_lsp(text: &str) -> Result<Program, Vec<Value>> {
+    let tokens = match lex(text) {
+        Ok(tokens) => tokens,
+        Err(diagnostics) => {
+            return Err(diagnostics
+                .into_iter()
+                .map(|d| lsp_diagnostic(text, d.code, &d.message, d.span))
+                .collect());
+        }
+    };
+    match parse(&tokens) {
+        Ok(program) => Ok(program),
+        Err(diagnostics) => Err(diagnostics
+            .into_iter()
+            .map(|d| lsp_diagnostic(text, d.code, &d.message, d.span))
+            .collect()),
+    }
+}
+
+/// Render one semantic diagnostic as an LSP `Diagnostic` JSON value. A semantic
+/// diagnostic may lack a span; fall back to the top of the document so the
+/// marker is still visible.
+pub(crate) fn semantic_diag_to_lsp(text: &str, diagnostic: SemanticDiagnostic) -> Value {
+    let span = diagnostic.span.unwrap_or(Span::new(1, 1));
+    lsp_diagnostic(text, diagnostic.code, &diagnostic.message, span)
+}
+
+/// Render one loader diagnostic report (import resolution / cross-module
+/// visibility / no-shadowing) as an LSP `Diagnostic` JSON value, positioned by
+/// the report's span against the open document.
+pub(crate) fn report_to_lsp(text: &str, report: &DiagnosticReport) -> Value {
+    let span = report.span.unwrap_or(Span::new(1, 1));
+    lsp_diagnostic(text, &report.code, &report.message, span)
 }
 
 /// Canonically format a document's source, or `None` if it does not lex/parse.
