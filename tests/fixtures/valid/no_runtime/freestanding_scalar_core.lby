@@ -1,0 +1,30 @@
+# A freestanding (`no-runtime`) module that stays inside the safe-arena-kernel
+# core: scalars, a fixed `array<i64>`, a struct with scalar fields, and control
+# flow. It carries the `no-runtime` directive (so the tier gate is active) yet
+# type-checks and runs on every interpreter, and — because `main` is a
+# purely-scalar eligible function — compiles under `lullaby native --freestanding`.
+no-runtime
+
+struct Point
+    x i64
+    y i64
+
+fn manhattan p Point -> i64
+    let d i64 = p.x
+    if d < 0
+        d = 0 - d
+    let e i64 = p.y
+    if e < 0
+        e = 0 - e
+    d + e
+
+fn main -> i64
+    let far Point = Point(3, 4)
+    let base i64 = manhattan(far)
+    let squares array<i64> = [1, 4, 9, 16]
+    let total i64 = base
+    let i i64 = 0
+    while i < 4
+        total += squares[i]
+        i += 1
+    total

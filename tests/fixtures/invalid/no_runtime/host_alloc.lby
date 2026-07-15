@@ -1,0 +1,11 @@
+# A `no-runtime` module may not call the host-allocator builtins. `alloc` requests
+# memory from the host allocator (unacceptable in an interrupt handler or boot
+# path); a kernel uses a raw `ptr<T>` over caller-provided memory instead. The
+# `ptr<T>` type and `ptr_read` themselves stay allowed — only `alloc` is rejected
+# with L0441.
+no-runtime
+
+fn main -> i64
+    unsafe
+        let p = alloc(7)
+        ptr_read(p)

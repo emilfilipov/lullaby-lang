@@ -1,0 +1,8 @@
+# A `no-runtime` module may not grow a heap collection: a `list<T>` push calls the
+# host allocator. Rejected with L0441.
+no-runtime
+
+fn main -> i64
+    let xs list<i64> = list_new()
+    xs = push(xs, 7)
+    len(xs)

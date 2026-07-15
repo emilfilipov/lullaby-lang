@@ -1,0 +1,24 @@
+# A freestanding (`no-runtime`) module exercising the raw hardware surface that
+# the tier keeps available: an `unsafe` block and the delivered `ptr<T>` /
+# `ptr_read` / `ptr_write` / `volatile_*` builtins. These are NOT rejected by the
+# `no-runtime` gate (only growable-heap / runtime constructs are). `poke` takes a
+# caller-provided `ptr<i64>` — no host allocation — so the module type-checks and
+# runs on the interpreters; `main` stays scalar.
+no-runtime
+
+fn poke p ptr<i64> value i64 -> i64
+    unsafe
+        ptr_write(p, value)
+        let read i64 = ptr_read(p)
+        read + 1
+
+fn clamp_low x, floor i64 -> i64
+    if x < floor
+        floor
+    else
+        x
+
+fn main -> i64
+    let a i64 = clamp_low(3, 10)
+    let b i64 = clamp_low(42, 10)
+    a + b

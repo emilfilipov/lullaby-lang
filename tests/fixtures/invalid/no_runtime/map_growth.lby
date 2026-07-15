@@ -1,0 +1,8 @@
+# A `no-runtime` module may not grow a heap `map<K, V>` (host allocation).
+# Rejected with L0441.
+no-runtime
+
+fn main -> i64
+    let m map<i64, i64> = map_new()
+    m = map_set(m, 1, 100)
+    7
