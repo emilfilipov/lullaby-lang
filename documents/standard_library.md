@@ -11,7 +11,49 @@ modules and `import` cover *your own* multi-file code; see
 
 Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 
-## Built-in types
+## API stability
+
+Every item in this prelude carries one of three **stability levels**, tagging how
+firm its API is for the 1.0 line. Each `##` section below is marked with its level;
+where a section mixes levels, the exceptions are called out inline on the affected
+rows.
+
+- **Stable** — frozen for 1.0. These names, signatures, and semantics carry a
+  strong compatibility promise: no breaking changes across the 1.x series
+  (additions are allowed; removals and signature-breaking changes are not). The
+  Stable core is the primitives and their conversions, the `list`/`map`/`string`
+  and array core, core math and the bitwise intrinsics, basic file/stream/process
+  I/O, and the memory-model + error-handling surface.
+- **Extended** — ships in 1.0 and is fully implemented, but is **not** frozen: the
+  signature or behaviour may still evolve within the 1.x line. This covers the
+  higher-order / closure-dependent collection ops, transcendental math, stdin,
+  time/clocks, OS randomness, the raw-pointer/unsafe intrinsics, live process
+  handles, and the WASM/DOM host-interop shims — surface whose final shape depends
+  on work still in progress (generics, native closure codegen, the unsafe/
+  freestanding tier).
+- **Experimental** — ships, but the design is actively in flux; **expect breaking
+  changes** before it stabilizes. This is the whole concurrency / atomics /
+  networking surface, whose current form is an early increment ahead of the
+  concurrency-model and networking-selector designs.
+
+> **This tagging is a first-pass, provisional pass — not the final frozen list.**
+> It applies the [road_to_1_0_stable.md](road_to_1_0_stable.md) **B2** posture
+> (freeze a small stable core, version the rest as extended/experimental) to the
+> currently-implemented surface enumerated in
+> [stdlib_surface_catalog.md](stdlib_surface_catalog.md). The Stable / Extended /
+> Experimental split will be **finalized at the 1.0 release**, informed by
+> dogfooding — and the stdlib may still gain items before then (e.g. from A3 FFI
+> callbacks and native closures), so nothing here is a committed freeze yet. Where
+> the catalog was unsure, the item is tagged **Experimental** rather than promised
+> as Stable (the conservative choice).
+
+## Built-in types  — **Stable**
+
+The primitive scalars, `array`/`list`/`map`, `option`/`result`, `struct`/`enum`,
+first-class `fn` types, and the `rc`/`ref`/`ptr` reference types below are the
+frozen 1.0 type vocabulary. (Closure *literals* that produce `fn` values are a
+language feature tagged **Extended** under the Closures section below; the
+`fn(...) -> R` *type* itself is Stable.)
 
 | Type | Meaning |
 |------|---------|
@@ -36,7 +78,12 @@ Signatures use the language's own spelling: `name param Type ... -> ReturnType`.
 | `fn(T1, T2) -> R` | first-class function value |
 | `rc<T>` / `ref<T>` / `ptr<T>` | reference-counted / borrowed / raw reference |
 
-## Conversion and formatting
+## Conversion and formatting  — **Stable**
+
+The conversion/formatting builtins here, the fixed-width-integer and `f32`
+surface, the typed literal suffixes, and the overflow-aware arithmetic family
+(`checked_*` / `saturating_*` / `wrapping_*`) below are all **Stable** — they
+ratify the A4 wrapping-default decision and are backend-agreed.
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
@@ -127,7 +174,7 @@ backends lower the fixed-width `checked_*`/`saturating_*`/`wrapping_*` add/sub/m
 forms directly; the `i64` forms and `checked_div`/`checked_rem` are not yet lowered
 there, so a function using one is cleanly skipped and runs on the interpreters.
 
-## Character classification
+## Character classification  — **Stable**
 
 Deterministic `char -> bool` predicates for classifying a single Unicode scalar.
 Each takes exactly one `char` argument and returns a `bool`; passing a non-`char`
@@ -142,7 +189,13 @@ argument is a compile-time `L0389` type error.
 | `is_upper` | `is_upper(c char) -> bool` | uppercase (Unicode) |
 | `is_lower` | `is_lower(c char) -> bool` | lowercase (Unicode) |
 
-## Collections
+## Collections  — **Stable** (higher-order ops **Extended**)
+
+The `list`/`array`/`map` core below is **Stable**. The four higher-order,
+closure-taking operations — `sort_by`, `list_map`, `list_filter`, `list_reduce`
+(tagged **Extended** on their rows) — are interpreter-only today and their final
+shape depends on generics and native closure codegen, so they are **not** frozen
+yet.
 
 | Function | Signature | Notes |
 |----------|-----------|-------|
@@ -157,15 +210,15 @@ argument is a compile-time `L0389` type error.
 | `concat` | `concat(a list<T>, b list<T>) -> list<T>` | `b`'s elements appended to `a` (both lists must have the same element type; returns a new list) |
 | `slice` | `slice(l list<T>, start i64, end i64) -> list<T>` | half-open range `[start, end)`; `start`/`end` are clamped into `[0, len]` and `start >= end` yields an empty list (returns a new list) |
 | `sort` | `sort(l list<T>) -> list<T>` | elements sorted ascending (returns a new list); `T` is `i64`, `f64` (total order via `total_cmp`, so `NaN` sorts deterministically), or `string` (lexicographic by Unicode scalar order); the sort is stable |
-| `sort_by` | `sort_by(l list<T>, cmp fn(T, T) -> i64) -> list<T>` | stable sort ordered by the comparator: `cmp(a, b)` returns negative if `a` precedes `b`, `0` if equal, positive if after; equal elements keep their input order, and a comparator error propagates (interpreter-level; the native/WASM backends fall back to the interpreter) |
+| `sort_by` **(Extended)** | `sort_by(l list<T>, cmp fn(T, T) -> i64) -> list<T>` | stable sort ordered by the comparator: `cmp(a, b)` returns negative if `a` precedes `b`, `0` if equal, positive if after; equal elements keep their input order, and a comparator error propagates (interpreter-level; the native/WASM backends fall back to the interpreter) |
 | `list_index_of` | `list_index_of(l list<T>, x T) -> i64` | index of the first element equal to `x`, or `-1` if absent (`x` must match the element type `T`) |
 | `list_contains` | `list_contains(l list<T>, x T) -> bool` | whether any element equals `x` (`x` must match the element type `T`) |
 | `list_sum` | `list_sum(l list<T>) -> T` | sum of a numeric list (`T` is `i64` or `f64`); `i64` sums **wrap** (matching `+`), `f64` sums as `f64`; an empty list yields `0`/`0.0` |
 | `list_min` | `list_min(l list<T>) -> option<T>` | smallest element of a numeric list (`T` is `i64` or `f64`), or `none` on an empty list |
 | `list_max` | `list_max(l list<T>) -> option<T>` | largest element of a numeric list (`T` is `i64` or `f64`), or `none` on an empty list |
-| `list_map` | `list_map(l list<T>, f fn(T) -> U) -> list<U>` | apply `f` to each element in order, returning the mapped `list<U>`; `f` may be a named function or a closure literal (interpreter-level; the native/WASM backends fall back to the interpreter) |
-| `list_filter` | `list_filter(l list<T>, pred fn(T) -> bool) -> list<T>` | keep the elements for which `pred` returns `true`, order preserved (returns a new list; interpreter-level with native/WASM fallback) |
-| `list_reduce` | `list_reduce(l list<T>, init U, f fn(U, T) -> U) -> U` | left fold: `acc = init`, then `acc = f(acc, element)` for each element in order, returning the final accumulator (interpreter-level with native/WASM fallback) |
+| `list_map` **(Extended)** | `list_map(l list<T>, f fn(T) -> U) -> list<U>` | apply `f` to each element in order, returning the mapped `list<U>`; `f` may be a named function or a closure literal (interpreter-level; the native/WASM backends fall back to the interpreter) |
+| `list_filter` **(Extended)** | `list_filter(l list<T>, pred fn(T) -> bool) -> list<T>` | keep the elements for which `pred` returns `true`, order preserved (returns a new list; interpreter-level with native/WASM fallback) |
+| `list_reduce` **(Extended)** | `list_reduce(l list<T>, init U, f fn(U, T) -> U) -> U` | left fold: `acc = init`, then `acc = f(acc, element)` for each element in order, returning the final accumulator (interpreter-level with native/WASM fallback) |
 | `map_new` | `map_new() -> map<K, V>` | key/value types inferred from context |
 | `map_set` | `map_set(m map<K, V>, k K, v V) -> map<K, V>` | insert/replace |
 | `map_get` | `map_get(m map<K, V>, k K) -> option<V>` | `some`/`none` |
@@ -187,7 +240,10 @@ today); until then `map_keys` + `map_values`/`map_get` are the iteration surface
 A function that iterates a `map` is interpreter-tier — the native i64-scalar
 backend cleanly skips it (`L0339`), like every other heap builtin.
 
-## Strings
+## Strings  — **Stable**
+
+The entire string surface below — the core operations, `chars`/`string_from_chars`,
+the bytes/UTF-8 primitives, and the number parsers — is **Stable**.
 
 `substring(s, start, end)`, `find(s, needle) -> i64` (`-1` if absent),
 `contains(s, needle) -> bool`, `split(s, sep) -> array<string>`,
@@ -241,7 +297,12 @@ or `` ... as f64 ``), so the `ok`/`err` outcome and the message text are
 byte-for-byte identical on the AST, IR, and bytecode backends. A wrong argument
 type or arity reports the string-builtin family code `L0375`.
 
-## Math
+## Math  — **Stable** (transcendentals **Extended**)
+
+The core scalar math (`abs`, `min`, `max`, `pow`, `clamp`, `sign`, `gcd`, `sqrt`,
+`floor`, `ceil`, `round`) and all six bitwise intrinsics below are **Stable**. The
+transcendental family (`sin`/`cos`/`tan`/`atan`/`atan2`/`exp`/`ln`/`log10`) is
+**Extended** — interpreter-only and a candidate to move into a `math` module.
 
 `abs`, `min`, `max`, `pow`, `clamp` are type-directed over `i64` and `f64`
 (matching operands); `sqrt`, `floor`, `ceil`, `round` take and return `f64`.
@@ -261,7 +322,7 @@ Three further numeric helpers round out the scalar toolkit:
 `i64::MIN` (its own magnitude); every other input yields the exact
 mathematical GCD.
 
-The transcendental builtins take and return `f64`: `sin`, `cos`, `tan`, `atan`,
+The transcendental builtins (**Extended** — not frozen) take and return `f64`: `sin`, `cos`, `tan`, `atan`,
 `exp` (e^x), `ln` (natural log), and `log10` are unary; `atan2(y, x)` takes two
 `f64`s and returns the angle in radians. Undefined inputs follow platform `f64`
 semantics (`NaN`/`inf`) and are bit-identical across the AST, IR, and bytecode
@@ -291,17 +352,23 @@ deterministic and produce identical results on the AST, IR, and bytecode
 backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
 (runtime).
 
-## Standard streams and I/O
+## Standard streams and I/O  — mixed (**Stable** core; some **Extended**)
 
-- Streams: `print(text)`, `println(text)`, `warn(text)` (stderr), `flush()` — each `-> void`.
-- WebAssembly host log: `wasm_log(x i64) -> void`. On the interpreters it prints
+**Stable:** the standard streams (`print`/`println`/`warn`/`flush`), the one-shot
+text-file, line/byte, and filesystem-query/directory builtins, and the one-shot
+system commands (`sys_status`/`sys_output`). **Extended** (fully implemented but
+not frozen, tagged inline below): the WASM/DOM host-interop shims (coupled to the
+host-import ABI), stdin (`read_line`/`read_all`), time/clocks, and OS randomness.
+
+- Streams: `print(text)`, `println(text)`, `warn(text)` (stderr), `flush()` — each `-> void`. (**Stable**)
+- WebAssembly host log (**Extended**): `wasm_log(x i64) -> void`. On the interpreters it prints
   the value as a stdout line; on the WebAssembly backend (`lullaby wasm`) it
   lowers to a call of the imported host function `env.log_i64`, letting an
   eligible exported function report values to its host. Because it is understood
   by the WASM backend, a function that calls only `wasm_log` (and the scalar
   subset) still compiles to `.wasm`.
-- JS/DOM host interop (the browser-host layer, built on the same import
-  mechanism as `wasm_log`):
+- JS/DOM host interop (**Extended**; the browser-host layer, built on the same
+  import mechanism as `wasm_log`):
   - `console_log(s string) -> void` — on the interpreters it prints the string as
     a stdout line; on the WebAssembly backend it lowers to a call of the imported
     host function `env.console_log(ptr i32, len i32)`, passing the string's
@@ -330,7 +397,7 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   buffered streams are deferred. Wrong argument types or arities report `L0333`;
   a failed read/metadata query reports `L0414`; a failed write/create/remove
   reports `L0415`.
-- Standard input: `read_line() -> option<string>` reads one line from stdin with
+- Standard input (**Extended**): `read_line() -> option<string>` reads one line from stdin with
   the trailing newline (and a preceding CRLF `\r`) removed — `none` at
   end-of-input, `some(line)` otherwise, and `some("")` for a blank line so EOF
   and an empty line stay distinct. `read_all() -> string` reads the whole of
@@ -341,7 +408,7 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   skipped by the native i64-scalar backend, like `read_file`).
 - System commands: `sys_status(program, args array<string>) -> i64`,
   `sys_output(program, args array<string>) -> string` (no shell).
-- Time and clocks:
+- Time and clocks (**Extended**):
   - `mono_now() -> i64` — a **monotonic** clock reading in **nanoseconds** since a
     fixed per-process baseline (established on first use). It is guaranteed
     non-decreasing within a run and is unaffected by wall-clock adjustments, so it
@@ -355,7 +422,7 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   - These are interpreter/runtime builtins; the native and WebAssembly backends
     are subsets that do not provide them. Wrong argument types or arities are
     compile-time semantic diagnostics (`L0312`/`L0313`).
-- OS randomness:
+- OS randomness (**Extended**):
   - `os_random(len i64) -> result<list<byte>, string>` — returns `len`
     **cryptographically-secure random bytes** drawn directly from the operating
     system's CSPRNG as `ok(list<byte>)`, or `err(message)` if the OS RNG fails.
@@ -372,7 +439,10 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
     are subsets that do not provide it. Wrong argument types or arities are
     compile-time semantic diagnostics (`L0312`/`L0313`).
 
-## Process and environment
+## Process and environment  — **Stable** (live process handles **Extended**)
+
+`env` and `args` are **Stable**. The live-child `process` handle surface
+(`proc_spawn`/`proc_wait`/`proc_stdout`/`proc_stderr`/`proc_kill`) is **Extended**.
 
 - `env(name string) -> option<string>` reads an environment variable, returning
   `some(value)` when set and `none` otherwise.
@@ -381,7 +451,7 @@ backends. A wrong argument type or arity reports `L0374` (semantic) or `L0417`
   trailing tokens after the source path as those program arguments.
 - Wrong argument types or arities to `env`/`args` report `L0332`.
 
-### Live external processes
+### Live external processes  — **Extended**
 
 `sys_status`/`sys_output` above are **one-shot**: they run a command to
 completion and hand back just the exit code or captured stdout. The `process`
@@ -414,7 +484,11 @@ Processes run identically on the AST, IR, and bytecode backends.
 - Wrong argument types or arities to the `proc_*` builtins report `L0335` (the
   shared socket/network handle diagnostic family).
 
-## Closures
+## Closures  — **Extended**
+
+Closures are fully implemented on the interpreters but **not** frozen: the body is
+a single expression today (multi-statement bodies deferred) and native codegen is
+the pending B1 work, so the surface may still evolve.
 
 An inline **closure literal** `fn PARAMS -> EXPR` is an anonymous function value
 that captures the enclosing scope's locals. It reuses the `fn` keyword (no new
@@ -459,7 +533,14 @@ Closures run on the AST, IR, and bytecode interpreters at parity. The native and
 WASM backends do not compile closures in this increment: a function that
 constructs or calls a closure is skipped and runs on the interpreters instead.
 
-## Concurrency
+## Concurrency  — **Experimental**
+
+This whole surface (`parallel_map`; channels/threads/mutex; and the atomics +
+memory-ordering set below) is **Experimental** — an early increment. The fixed
+`spawn(Chan, i64)` worker shape, `i64`-only channels, absence of `select`/`async`,
+and the single `atomic_i64` width are known limitations; the actor-model direction
+in [concurrency_design.md](concurrency_design.md) will reshape it. **Expect
+breaking changes.**
 
 - `parallel_map(f fn(i64) -> i64, args list<i64>) -> list<i64>` evaluates
   `f(arg)` for every element of `args` concurrently on separate OS threads and
@@ -563,7 +644,13 @@ Memory orderings and fences (delivered):
   `atomic_bool`, and weak CAS remain deferred; see
   [atomics_design.md](atomics_design.md).
 
-## Networking
+## Networking  — **Experimental**
+
+The entire networking surface (TCP, UDP, and the HTTP/1.1 client) is
+**Experimental**. Per [stdlib_surface_catalog.md](stdlib_surface_catalog.md), HTTP
+is slated to *leave* the prelude for a source `http` module, and a readiness
+selector (epoll/kqueue/IOCP) plus higher-level connection abstractions are
+post-1.0; the current shape is an early increment. **Expect breaking changes.**
 
 A `Socket` is an opaque handle to an OS network resource (TCP listener, TCP
 stream, or UDP socket), backed by a per-runtime handle table (like a heap
@@ -644,14 +731,25 @@ bytecode backends.
   `examples/valid/http_server/` (`server.lby` plus the reusable `http.lby`
   module).
 
-## Memory and references
+## Memory and references  — **Stable** (raw-pointer/unsafe intrinsics **Extended**)
+
+The memory-model core is **Stable**: the heap intrinsics
+(`alloc`/`load`/`store`/`dealloc`), reference counting (`rc_*`, `rc_borrow`,
+`ref_get`), and the compile-time layout queries (`size_of`/`align_of`/`offset_of`).
+The raw-pointer / unsafe intrinsics — `ptr_read`, `ptr_write`, `ptr_to_int`,
+`int_to_ptr`, `volatile_load`, `volatile_store` — are **Extended**, tied to the
+still-maturing unsafe/freestanding tier.
 
 - Heap: `alloc(value)`, `load(ptr)`, `store(ptr, value)`, `dealloc(ptr)`.
 - Reference counting: `rc_new(value)`, `rc_clone(rc<T>)`, `rc_release(rc<T>)`,
   `rc_get(rc<T>)`, `rc_borrow(rc<T>) -> ref<T>`, `ref_get(ref<T>)`.
 - Raw pointers (inside `unsafe`): `ptr_read(ptr<T>)`, `ptr_write(ptr<T>, value)`.
 
-### Raw-memory layout and pointer intrinsics
+### Raw-memory layout and pointer intrinsics  — layout queries **Stable**, unsafe casts **Extended**
+
+`size_of`/`align_of`/`offset_of` are **Stable**; the `unsafe` pointer/integer
+casts and volatile accesses (`ptr_to_int`/`int_to_ptr`/`volatile_load`/
+`volatile_store`) are **Extended**.
 
 These builtins expose the raw-memory model that systems and FFI code need. The
 layout is the **C-natural layout**:
@@ -689,13 +787,13 @@ Builtins:
   like `load`/`store` over the single-threaded abstract heap; the volatility
   guarantee is realized by the native backend.
 
-## Error handling
+## Error handling  — **Stable**
 
 - `throw EXPR` raises a `string` error; `try` / `catch NAME` recovers.
 - `result<T, E>` with `ok`/`err` plus `match` is the value-based alternative;
   `option<T>` (`some`/`none`) models absence.
 
-## Testing
+## Testing  — **Stable**
 
 - `assert(cond bool) -> void` raises a catchable runtime error with the message
   `assertion failed` (the same error path `throw` uses, so `try`/`catch` recovers

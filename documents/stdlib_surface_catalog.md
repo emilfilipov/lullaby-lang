@@ -429,6 +429,11 @@ they cannot silently change.
 
 ## First-pass stable-vs-extended proposal (input to B2, NOT a freeze)
 
+> **First-pass tags applied:** this proposal has been carried into
+> [standard_library.md](standard_library.md), whose "API stability" section and
+> per-section **Stable / Extended / Experimental** tags are the reader-facing
+> rendering of the split below (still provisional, to be finalized at 1.0).
+>
 > **This is a proposal to inform the eventual B2 decision, not a final freeze.**
 > It applies the B2 posture ("freeze a small stable core, version the rest as
 > extended/experimental") to the inventory above. It is deliberately conservative:
