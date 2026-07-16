@@ -109,6 +109,19 @@ pub(crate) fn lower_native_function(
         let on_stack = reg >= 4;
         let stack_disp = 48 + (reg as i32 - 4) * 8;
         match local.ty {
+            // A `void` parameter carries no value, so there is no incoming register
+            // or stack word to spill. The parameter resolver never yields `Void`
+            // (only the return-only resolver does), so this is unreachable in
+            // practice — but it is refused rather than skipped over silently, so
+            // that if a frontend change ever admitted a void parameter the function
+            // would skip cleanly (`L0339`) instead of consuming a register slot that
+            // the caller never filled and shifting every later argument.
+            NativeType::Void => {
+                return Err(format!(
+                    "parameter `{}` is `void`; a void parameter is not in the native subset",
+                    param.name
+                ));
+            }
             NativeType::F64 | NativeType::F32 => {
                 if on_stack {
                     // A float stack argument is already a raw 8-byte word; copy it
@@ -209,11 +222,20 @@ pub(crate) fn lower_native_function(
     // normally, then lower the tail expression and emit the return epilogue so
     // the result in rax is returned rather than being clobbered by the
     // fallthrough safety epilogue below.
+    //
+    // A VOID function has no value position at all, so its tail is never routed
+    // through `lower_return_value`: it falls through to the ordinary statement
+    // lowering below, which evaluates the tail for its effects and lets the
+    // fallthrough epilogue return without writing a result. (The `!expr.ty.is_void()`
+    // check alone is not this guard — a void function may still end in a
+    // non-void expression statement, whose value is discarded, not returned.)
     let instructions = &function.instructions;
-    let tail_is_value_expr = matches!(
-        instructions.last(),
-        Some(BytecodeInstruction::Expr(expr)) if !expr.ty.is_void()
-    );
+    let returns_void = function.return_type.is_void();
+    let tail_is_value_expr = !returns_void
+        && matches!(
+            instructions.last(),
+            Some(BytecodeInstruction::Expr(expr)) if !expr.ty.is_void()
+        );
     // A function whose last statement is an `asm` block is trusted to leave the
     // return value in `rax`. Lower the head, emit the asm bytes, then emit the
     // normal epilogue so `rax` is returned intact rather than being clobbered by
@@ -224,8 +246,10 @@ pub(crate) fn lower_native_function(
     // each arm's tail is routed to the function's return convention and converges
     // after the match, where the epilogue returns it. (An arm that itself ends in an
     // explicit `return` emits its own epilogue and never reaches the shared end.)
-    let tail_is_value_match = !function.return_type.is_void()
-        && matches!(instructions.last(), Some(BytecodeInstruction::Match { .. }));
+    // (A VOID function's tail `match` is NOT a value position: it stays false here
+    // and lowers as an ordinary statement `match` — `is_value: false` — below.)
+    let tail_is_value_match =
+        !returns_void && matches!(instructions.last(), Some(BytecodeInstruction::Match { .. }));
     // A function whose last statement is an `if`/`elif`/`else` producing the
     // function's value (e.g. a body ending in `if c\n a\n else\n b`): each branch's
     // tail is routed to the function's return convention (the hidden aggregate
@@ -236,8 +260,11 @@ pub(crate) fn lower_native_function(
     // or float return nothing ever writes the hidden result pointer / `xmm0`, so the
     // caller reads its own uninitialized scratch (a silently wrong value, or a wild
     // pointer dereference for a heap payload).
-    let tail_is_value_if = !function.return_type.is_void()
-        && matches!(instructions.last(), Some(BytecodeInstruction::If { .. }));
+    // (A VOID function's tail `if` is likewise NOT a value position: it stays false
+    // here and lowers as an ordinary statement `if` — `is_value: false` — below,
+    // which is why a void body ending in a non-exhaustive `if` is fine.)
+    let tail_is_value_if =
+        !returns_void && matches!(instructions.last(), Some(BytecodeInstruction::If { .. }));
     // Default-deny: a value-position tail `if`/`match` is only lowerable when every
     // branch/arm provably yields the value (an exhaustive chain whose paths all end
     // in a tail expression, a `return`, or a nested yielding `if`/`match`). A tail
@@ -302,9 +329,16 @@ pub(crate) fn lower_native_function(
         lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
     }
 
-    // Fallthrough epilogue: functions in this subset are non-void and expected to
-    // return on every path, but emit a safe `xor eax,eax` + epilogue so a missing
-    // tail return cannot run off the end of the section.
+    // Fallthrough epilogue. For a VALUE-returning function this is a safety net:
+    // such a function is expected to return on every path, but a `xor eax,eax` +
+    // epilogue means a missing tail return cannot run off the end of the section.
+    //
+    // For a VOID function this is the NORMAL return path — a void body simply runs
+    // its statements and falls out the bottom. The `xor rax,rax` is not a result
+    // (`rax` is undefined on return from a void function and the caller must not
+    // read it); it is retained unconditionally because zeroing a caller-saved
+    // register is harmless under Win64 and keeping one shared exit avoids
+    // branching the emitter on a distinction that has no correctness content.
     code.extend_from_slice(&[0x48, 0x31, 0xC0]); // xor rax, rax
     emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
 
@@ -496,6 +530,16 @@ pub(crate) fn lower_native_stmt(
             // xmm0 and stores the whole word; an aggregate `let` materializes each
             // flattened scalar word directly into its slots.
             match ctx.local(name)?.ty {
+                // A `void` local has no value to store. `resolve_native_type` never
+                // yields `Void`, so a local can never carry it and this is
+                // unreachable in practice; refusing it keeps the default-deny
+                // posture (the function skips cleanly) rather than binding a name to
+                // a zero-word slot.
+                NativeType::Void => {
+                    return Err(format!(
+                        "local `{name}` is `void`; a void binding is not in the native subset"
+                    ));
+                }
                 // An `i64` scalar or a string/list/map/heap-struct (a pointer word)
                 // uses the register path: evaluate into `rax` and store the whole
                 // word. (A `HeapStruct` never appears as a top-level local; kept in
@@ -807,7 +851,26 @@ pub(crate) fn lower_native_stmt(
             Ok(())
         }
         BytecodeInstruction::Return(None) => {
-            Err("native subset functions must return an i64 value".to_string())
+            // A bare `return` is legal in — and only in — a VOID function: there is
+            // no value to route, so reset the arena and emit the epilogue directly.
+            // `rax` is left undefined, which is exactly the void contract (the
+            // caller must not read it).
+            //
+            // In a VALUE-returning function a bare `return` would mean returning
+            // whatever happened to be in `rax`, so it is still refused and the
+            // function skips cleanly (`L0339`). Semantics rejects that shape first
+            // (`L0301`), making this a default-deny backstop rather than the live
+            // gate — kept so a frontend change cannot silently turn it into a
+            // miscompile.
+            if !matches!(ctx.return_ty, NativeType::Void) {
+                return Err(
+                    "a bare `return` in a value-returning function is not in the native subset"
+                        .to_string(),
+                );
+            }
+            emit_arena_reset(ctx, code);
+            emit_native_epilogue(code, ctx.frame_size, &ctx.saved_reg_slots);
+            Ok(())
         }
         BytecodeInstruction::Expr(expr) => {
             // A tail expression is the function result; a non-tail call result is

@@ -1,0 +1,88 @@
+# VOID-returning functions in the native subset — the shape every MMIO/kernel
+# driver routine wants (`fn poke p ptr<T> v T`), plus the tail shapes that
+# interact with the value-position routing.
+#
+# This fixture is deliberately INTERPRETER-DEFINED: every void helper's effect
+# stays inside its own frame, so all three interpreters run it and native must
+# agree. (A void helper that writes through a CALLER's `addr_of` pointer — the
+# real out-parameter idiom — is native-ONLY: the interpreters refuse a
+# cross-frame `addr_of` store with `L0459` because they cannot reach another
+# frame's locals. That documented divergence is pinned separately, against a real
+# `.exe` exit code, in `crates/lullaby_cli/tests/cli/suite16.rs`.)
+#
+# Each helper below returns NOTHING and runs purely for effect; `main` recomputes
+# the same work in value-returning form, so the result proves the void calls
+# executed, returned cleanly, and clobbered neither the caller's frame nor its
+# live values.
+#
+# main = 5 (poke_local) + 10 (spin 1..4 mirror) + 100 (classify) + 9 (from_opt)
+#      + 7 (early-return leaves it untouched) = 131.
+
+# A void writer through a SAME-FRAME `addr_of` pointer — fully modelled by the
+# interpreters, and the same `ptr_write` codegen the cross-frame driver uses.
+fn poke_local v i64 -> i64
+    let cell i64 = 0
+    unsafe
+        let p ptr<i64> = addr_of(cell)
+        ptr_write(p, v)
+    cell
+
+# A void function whose body is a LOOP.
+fn spin n i64
+    let acc i64 = 0
+    let i i64 = 1
+    while i <= n
+        acc = acc + i
+        i = i + 1
+
+# A void function whose body ENDS IN A NON-EXHAUSTIVE `if` (statement position —
+# a void body has no value to yield, so the value-position `block_yields_value`
+# gate must not apply to it; a missing `else` must therefore be fine).
+fn classify_effect n i64
+    let tag i64 = 0
+    if n > 10
+        tag = 100
+    elif n > 5
+        tag = 50
+
+# A void function whose body ENDS IN A `match` (statement position). Each arm body
+# is a void `ptr_write` call through a same-frame pointer.
+fn from_opt_effect o option<i64>
+    let got i64 = 0
+    unsafe
+        let p ptr<i64> = addr_of(got)
+        match o
+            some(v) -> ptr_write(p, v)
+            none -> ptr_write(p, 0)
+
+# A void function with a bare `return` (early exit, no value to route).
+fn early n i64
+    if n < 0
+        return
+    let used i64 = n * 2
+
+# A void function that calls another void function.
+fn outer n i64
+    spin(n)
+
+fn main -> i64
+    # Each void helper is called for effect; the value-returning mirror below it
+    # recomputes the same number, so a corrupted frame or a clobbered live local
+    # would show up in the total.
+    let a i64 = poke_local(5)
+
+    spin(4)
+    outer(4)
+    let b i64 = 1 + 2 + 3 + 4
+
+    classify_effect(20)
+    let c i64 = 100
+
+    from_opt_effect(some(9))
+    let d i64 = 9
+
+    early(-1)
+    early(3)
+    let e i64 = 7
+
+    a + b + c + d + e

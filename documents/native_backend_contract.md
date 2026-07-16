@@ -24,6 +24,7 @@ Implemented now:
 - **C-ABI FFI (exposing Lullaby to C).** An `export fn NAME params -> Ret` is a normal (bodied) Lullaby function additionally exposed under its plain C name as an externally visible, defined `.text` symbol so C (or another object) can call **into** Lullaby. An export must have a C-marshallable scalar signature from the delivered set `i64`/`f64`/`f32` (`L0424` otherwise); a float parameter arrives in its positional SSE register and a float return leaves in `xmm0`. An export-only program (no `main`) emits a library object with no entry stub. See "C-ABI FFI (exposing Lullaby to C)" below.
 - **Native source-line debug info (`--debug`).** `lullaby native --debug` (alias `-g`) emits a CodeView `.debug$S` section with a per-function line table mapping each compiled function's entry offset to its `.lby` declaration line, plus the source file name, so a debugger (via a linker-built PDB) can break at a function and show its source line. Opt-in: without `--debug` the object bytes are byte-for-byte unchanged. See "Debug info (`--debug`)" below.
 - **Value-position branch/arm tails (fixes a shipped MISCOMPILE).** A value bound to a local inside an `if`/`elif`/`else` branch or a `match` arm and yielded as that branch's/arm's **tail expression** is now routed to the function's return convention at any nesting depth. Previously the routing ran only for a function's own tail expression and for `return`, so a branch tail was evaluated into `rax` and discarded: an aggregate-returning function **never wrote its hidden result pointer**, and the caller read its own uninitialized scratch — a wrong tag AND payload (`option<i64>` gave `100` where the interpreters gave `103`, and `100` where they gave `0`), or a wild pointer dereference (`option<struct>` → `0xC0000005`). A float-returning `export fn` likewise never wrote `xmm0`. `lower_return_value` is now the single routing point used by every value position, and `block_yields_value` is a default-deny gate that skips (`L0339`) any tail that cannot provably yield on every path — counting an `asm` block as yielding (it leaves its value in `rax`), since `asm` is native-only and refusing it would make a freestanding program unbuildable anywhere rather than demote it. Byte-neutral for scalar returns (the COFF snapshots are unchanged). See "Value-Position Branch/Arm Tails" below.
+- **Void-returning functions (unblocks the natural driver spelling).** A function that declares no return type — `fn poke p ptr<i64> v i64`, the shape every MMIO/kernel driver routine wants — is now native-eligible when its parameters and body are otherwise in the subset. Previously the eligibility gate ran the `void` return through the shared signature type resolver, which answered — correctly for a *parameter*, wrongly for a *return* — "type `void` is not in the native stack subset", so **every** void function skipped with `L0339` and the demotion fixpoint cascaded that skip into every caller (`skipped bump: return type 'void' is not in the native subset` / `skipped main: call to non-i64-scalar or unknown function 'bump'`). The workaround was returning a dummy `i64`. A void return is not an unsupported return type — it is the **absence** of one: it resolves to `NativeType::Void` via a new **return-only** resolver (`resolve_return_native_type`, the sole producer of that variant), is deliberately **not** an aggregate (so it reserves no hidden result pointer and no return scratch, and the first visible parameter keeps `rcx`), and occupies zero words. The body runs for its effects and the epilogue returns without writing a result, so **`rax` is undefined on return and the caller must not read it** — including the **entry stub**, which is a caller of `main`: a void `main` is the one case where "no value" is externally observable, so its stub zeroes the exit-code register (`xor ecx, ecx` / `xor edi, edi`) instead of reading `eax`, and the process exits **0** like the interpreters (this was a real miscompile — a void `main` leaked `rax`, exiting 77 — fixed at all four stub emitters; `has_main: bool` is now the `EntryStub` enum). A void function has **no value position**, so its tail is never routed through `lower_return_value` and its tail `if`/`match` lowers as a **statement** — the `block_yields_value` default-deny gate (which a void body could never pass, having no value to yield) is never consulted for it, so a void body ending in a *non-exhaustive* `if` is fine. A bare `return` is accepted in a void function and still refused elsewhere. **Default-deny is unchanged:** `void` remains unresolvable as a parameter/local/field (the shared signature resolver still rejects it), and a void call in *value* position cannot reach the backend (semantics rejects `let x = void_fn()` with `L0303`). Byte-neutral for every previously-compiling program — void functions used to skip entirely, so no existing function's bytes could change (the COFF snapshots are unchanged). A void `export fn` is **not** delivered: semantics rejects it at check time with `L0424` before the backend sees it (`is_exportable_scalar` admits only `i64`/`f64`/`f32`), so it is refused cleanly rather than miscompiled — exposing `void NAME(...)` to C needs a frontend change. See "Void-Returning Functions" below.
 - **Stack-allocated enums + `match` (scalar payloads).** Enum values whose payloads are native scalars — the built-in generics `option<T>`/`result<T, E>` (for scalar `T`/`E`) and user enums — are laid out on the stack as a tag word plus a shared payload region, and `match` dispatches on the tag with identical variant ordering to the interpreters. See "Stack-Allocated Enums And `match`" below.
 - **Scalar-field aggregates across function boundaries.** Scalar-field structs, fixed arrays of scalars, and scalar-payload enums are now valid **parameters, return values, and call arguments** (not just locals), using a by-hidden-pointer ABI with copy-in value semantics. A function taking, returning, and mutating such an aggregate is compiled natively and agrees bit-for-bit with the interpreters. See "Scalar-Field Aggregates Across Function Boundaries" below.
 - **Growable `list<T>` (scalar or `string` element).** A heap-backed, capacity-doubling growable list with a scalar element type — or a **`string`** element — is compiled to native machine code: `list_new`, `push`, `get`, `set`, `len`, and `pop`, with value semantics (`push`/`set`/`pop` return a new list) and lists crossing function boundaries. A `string` element is a single immutable pointer word stored and copied exactly like a scalar (shared on the flat word-copy deep copy, never deep-recursed). This brings the native backend to parity with the WASM backend's growable-list support including `list<string>`. See "Growable `list<T>` (scalar or `string` element)" below.
@@ -454,6 +455,102 @@ The **`asm` arm is load-bearing, not cosmetic**: `asm` is native-only (the inter
 **Gate reachability (measured, stated honestly).** The refusal is nearly unreachable, and where it fires it is redundant rather than load-bearing. A `Let`/`Assign`/`While`/`For`/diverging-`Loop` tail in a value-returning function never reaches lowering — semantics rejects it with `L0301` ("no final return value"), as it does a non-exhaustive tail `if`; all four were probed directly against the CLI. The one shape that *does* reach the gate is a `throw`/`try` branch tail (it passes `lullaby check`), which the gate refuses — and which `lower_native_stmt` would refuse a few lines later anyway ("throw/try is not in the native subset"), so the compile-vs-skip decision is identical either way. The gate is kept deliberately as a safety net: the miscompile it guards against is exactly what shipped while this reasoning was left implicit in a comment, and a future instruction variant or a loosened frontend rule would otherwise reintroduce it silently.
 
 **Verified.** Native now matches the interpreters exactly for `option<T>`, `result<T, E>`, user enums (unit and payload variants), plain structs, `option<struct>`, `match`-arm tails, nested `if`s, and `elif` chains. Codegen proofs: `crates/lullaby_ir/src/native_object_tailvalue_tests.rs`. End-to-end repro pins: `crates/lullaby_cli/tests/cli/suite16.rs`. The class is swept by the `gen_branch_tail_program` differential fuzzer (`crates/lullaby_cli/tests/cli/fuzz.rs`, 4 aggregate kinds x 4 tail shapes; 96 real linked exes checked against the interpreters), which was confirmed to fail on the unfixed backend (program #0: `interpreter=103, native exit=100`) and pass on the fixed one.
+
+## Void-Returning Functions (DELIVERED)
+
+A function that declares no return type has a `void` return. The canonical shape is the **driver/out-parameter routine** every MMIO or kernel module is written in:
+
+```
+fn poke p ptr<i64> v i64
+    unsafe
+        ptr_write(p, v)
+```
+
+**The gap.** `native_signature_eligibility` classified the return type by asking `native_signature_type_is_aggregate`, which resolves the type through the shared *signature* resolver. That resolver rightly refuses `void` — for a **parameter**. Applied to a **return**, its answer ("type `void` is not in the native stack subset") was a category error: a void return is not an unsupported return type, it is the **absence** of one. Every void function therefore skipped with `L0339`, and because a caller is demoted when it calls a non-compiled function, the skip **cascaded through the fixpoint into every caller** — so a single void helper could demote an entire program. The observed skip pair was:
+
+```
+skipped bump: return type `void` is not in the native subset: type `void` is not in the native stack subset
+skipped main: call to non-i64-scalar or unknown function `bump`
+```
+
+The workaround was to give the routine a dummy `i64` return purely to keep it compilable.
+
+**The model.** `NativeType::Void` is the layout of "no value". It is produced by exactly one function — `resolve_return_native_type`, reachable only from a **return** slot — so `void` stays unresolvable as a parameter, local, field, element, or payload, and those still skip cleanly. Its two load-bearing properties:
+
+- **Not an aggregate.** `is_aggregate()` is false, so no hidden result pointer is reserved and no return scratch is sized. The first visible parameter keeps register 0 (`rcx`). Had `Void` been classified as an aggregate, the callee would read every parameter one register late while the caller passed it one register early — a silent argument-shift miscompile on every void call.
+- **Zero words.** A void return reserves no stack storage.
+
+**Codegen.** The body lowers as ordinary statements and the epilogue returns without writing a result. **`rax` is undefined on return from a void function; the caller must not read it.** The shared fallthrough exit (`xor rax, rax` + epilogue), which is a safety net for a value-returning function, is the *normal* return path for a void one — the zeroing is not a result, just a harmless write to a caller-saved register. A bare `return` (no value) emits the arena reset and epilogue directly; in a value-returning function it is still refused (semantics rejects that shape first with `L0301`, so the backend gate is a default-deny backstop, not the live guard).
+
+**Interaction with value-position routing.** This is the sharp edge. A void function has **no value position**, so:
+
+- its tail is never routed through `lower_return_value` (the single routing point for value positions);
+- its tail `if`/`match` lowers in **statement** position (`is_value: false`), so `block_yields_value` — the default-deny gate that requires every path to yield a value — is **never consulted** for it. That matters concretely: a void body ending in a *non-exhaustive* `if` (no `else`) is exactly the shape that gate refuses, and it must compile here. Routing a void tail through the value path would have refused perfectly lowerable functions.
+
+The guards are on the **function's** return type (`function.return_type.is_void()`), not only on the tail expression's type, because a void function may still end in a non-void expression statement whose value is discarded rather than returned.
+
+**Scope (default-deny).**
+
+| Shape | Native |
+| :--- | :--- |
+| `fn poke p ptr<i64> v i64` (out-parameter writer) | compiles |
+| void body ending in a non-exhaustive `if` / an `elif` chain | compiles (statement tail) |
+| void body ending in a `match` | compiles (statement tail) |
+| bare `return` in a void function | compiles |
+| void call in statement position, incl. in a loop | compiles (result discarded) |
+| void function calling another void function | compiles |
+| void call in **value** position (`let x = void_fn()`) | cannot reach the backend — semantics rejects it (`L0303`) |
+| `void` **parameter**/local/field | skips cleanly (`L0339`) — the signature resolver still refuses `void` |
+| void **`export fn`** | rejected at check time (`L0424`) — see below |
+
+**Void `export fn` is NOT delivered.** `lullaby_semantics`'s `is_exportable_scalar` admits only `i64`/`f64`/`f32`, so `export fn poke v i64` (no return type) is rejected with `L0424` before the backend ever sees it. That is a clean, loud refusal rather than a miscompile, but it means a void export is not C-callable as `void NAME(...)` yet; delivering it requires a frontend change to the export signature check, not a backend one.
+
+**Byte-neutral.** No COFF snapshot changed. Void functions previously skipped entirely, so no existing compiled function's bytes could change, and the added guards are byte-identical for non-void functions.
+
+**Verified.** Codegen proofs (eligibility, the no-hidden-pointer register classification, the statement-position tails, and the resolver's return-only boundary): `crates/lullaby_ir/src/native_object_void_tests.rs`. End-to-end real-`.exe` proofs via the linker-free direct-PE path: `crates/lullaby_cli/tests/cli/suite16.rs` — `native_void_driver_spelling_compiles_and_runs` (the driver spelling genuinely writes through the caller's out-parameter → `99`), `native_void_tail_shapes_compile_and_run` (non-exhaustive `if` + `match` + bare `return`, both taken and untaken → `1537`), and `native_void_call_in_a_loop_runs` (→ `10`).
+
+**Parity, honestly.** The out-parameter programs above are **native-only by design, not by omission**: they rely on a cross-frame `addr_of` store, which the interpreters refuse with `L0459` (they keep each frame's locals in that frame's own environment and cannot reach another's) — the documented acceptance divergence already pinned by `an_addr_of_pointer_that_escapes_its_frame_is_refused` in `suite15.rs`. No parity is claimed where the interpreters do not define the program; the exe's exit code is the verification. For a genuine four-way comparison, `tests/fixtures/valid/native_void_effects.lby` keeps every void helper's effect inside its own frame (covering a void body that loops, one ending in a non-exhaustive `if`, one ending in a `match`, a bare `return`, and a void→void call) and is asserted equal on **native == AST == IR == bytecode == 131** by `native_void_effects_fixture_matches_the_interpreters`, which also asserts all seven functions COMPILE rather than skip. It also runs under `lullaby native --freestanding` (direct PE, no linker) to the same `131`.
+
+**Fuzzed.** The scalar differential generator (`gen_program` in `crates/lullaby_cli/tests/cli/fuzz.rs`) now interleaves calls to generated **void helpers** — each ending in a non-exhaustive `if`, a `match`, a bare `return`, a `while` loop, or a void→void call. Their work is deliberately **unobservable**, so `main`'s value must be identical whether or not the call is there. `fuzz_native_matches_interpreter_when_linkable` compiles each program to a real `.exe` and checks its exit code against the interpreters, and **asserts** it actually executed a non-empty batch (`scalar native fuzz: ran 120/120 real exes (63 carried void helpers)`) rather than passing green having run nothing.
+
+What that net **actually catches**, measured by injecting the bugs rather than assumed:
+
+- a void call that **misaligns the stack**, scribbles on the caller's frame, or returns down a wrong epilogue path — `main`'s value changes;
+- a regression that makes the shape **stop compiling**, via the "an exe must be produced" assertion. This is the live one: injecting `NativeType::Void::is_aggregate() -> true` makes the fuzzer **fail**, because the void call statement then trips the "aggregate-returning call is only supported in a binding or return position" gate, its caller skips, and no exe appears.
+
+What it does **not** catch, despite the intuition:
+
+- a **clobbered callee-saved register** — a void call disables register promotion in the whole calling function (see the footgun below), so `rbx`/`rsi` are never live across one and there is nothing to clobber. The injected bug is invisible to this fuzzer, correctly.
+- an **argument-register shift** from a wrongly reserved hidden result pointer — unreachable; it is refused earlier as a clean skip, which is why the `is_aggregate` injection surfaces as a compile failure rather than a wrong value.
+
+### Void `main` must not leak `rax` (a MISCOMPILE this surface first introduced, now fixed)
+
+`main` is the one void function whose "no value" is **externally observable**: the entry stub is a **caller** of it, and the void contract says a caller must not read `rax`. Every stub read `eax` unconditionally as the process exit code, so a void `main` exited with whatever its body last computed:
+
+```
+fn f -> i64
+    77
+
+fn main -> void
+    let x i64 = f()
+    return
+```
+
+exited **77** natively (and `1234` → **210**, i.e. `1234 & 0xFF`) where all three interpreters exit **0**. The root enabler was `has_main = lowered.iter().any(|f| f.name == "main")` — keyed on the **name alone**, carrying no return-shape information, so no stub could have known better. `fn main -> void` is a supported, interpreter-defined shape (`tests/fixtures/valid/main.lby` uses it), so it is **fixed, not refused**.
+
+**Fixed at the stub, not the epilogue.** `rax` genuinely *is* undefined after a void function, so the stub is the thing that must stop reading it: for `EntryStub::MainVoid` it emits `xor ecx, ecx` (Win64) / `xor edi, edi` (SysV) instead of `mov ecx, eax` / `mov edi, eax`, and never touches `rax`. That covers **every** return path of `main` at once — fallthrough, an explicit `return`, and a `return` nested in a branch or loop — rather than requiring each epilogue to zero `rax` itself, and costs no instruction in ordinary void helpers. All four stub emitters are fixed: the two COFF writers, the ELF/Mach-O neutral model, and `pe_image.rs`'s direct-PE stub (the **default** path, and the one that produced the observed 77).
+
+The `has_main: bool` is replaced by the `EntryStub` enum (`None` / `MainValue` / `MainVoid`, classified from the module's `main` return type), so a stub emitter cannot read the exit code without first stating which `main` it has. AArch64 is unaffected: its `is_scalar` return gate never admits a void function at all, so a void `main` skips there rather than reaching the `_start` stub that passes `x0` to `exit`.
+
+**Why no existing test caught it:** the *fallthrough* path emits `xor rax, rax` before the epilogue, so the empty-bodied `fn main -> void` in `tests/fixtures/valid/main.lby` returned 0 by coincidence. The pins therefore use a body that makes a **nonzero** `rax` likely (a preceding `i64` call), with both a value that survives `& 0xFF` (77) and one that does not (1234 → 210): `native_void_main_exits_zero_like_the_interpreters` and `native_void_main_exits_zero_on_every_return_path` in `suite16.rs`, plus the byte-level `void_main_entry_stub_zeroes_the_exit_code` / `void_main_compiles_on_every_return_path` / `entry_stub_classifies_main_by_return_shape` in `native_object_void_tests.rs`. All were confirmed to fail on the unfixed stub.
+
+### Footgun: a void call disables register promotion in the whole calling function
+
+Adding a **single void call** to a function silently kills its register allocation. `plan_register_promotion` requires **every** instruction to pass `instr_reg_promotable`, and a void call statement is a `BytecodeInstruction::Expr` whose `Call` arm demands `expr.ty.name == "i64"` — a `void` call fails it, so the whole function keeps every local in its frame slot instead of promoting the two busiest into `rbx`/`rsi`.
+
+This is a **measurable perf cliff with no diagnostic**. Measured on an identical hot loop (`while i < 40: acc = acc + i * i`): without a void call the function emits two promotion moves (`mov rbx/rsi, rax`); adding one `noop(acc)` call drops it to **zero**. The result stays correct — this is purely a performance effect, not a correctness one — which is exactly what makes it easy to lose a day to.
+
+It is a consequence of promotion being an all-or-nothing per-function decision, not something inherent to void calls: a void call clobbers no callee-saved register, so a finer-grained analysis could keep promotion across one. Left as-is for now (correct, just conservative), and recorded here so the cliff is discoverable.
 
 ## Stack-Allocated Enums And `match` (DELIVERED)
 

@@ -64,6 +64,12 @@ struct Gen {
     rng: Rng,
     vars: Vec<String>,
     body: String,
+    /// Accumulated `fn hN ...` declarations for the VOID helpers `main` calls for
+    /// effect, emitted ahead of `main`. See [`Gen::void_helper`].
+    void_helpers: String,
+    /// How many void helpers have been emitted (names them, and lets a helper call
+    /// the previously-emitted one).
+    helper_count: usize,
 }
 
 impl Gen {
@@ -72,7 +78,113 @@ impl Gen {
             rng: Rng(seed | 1),
             vars: Vec::new(),
             body: String::new(),
+            void_helpers: String::new(),
+            helper_count: 0,
         }
+    }
+
+    /// Emit one VOID helper (`fn hN a i64 b i64` — no declared return type) and
+    /// return its name.
+    ///
+    /// The helper's work is deliberately **unobservable**: it computes into its own
+    /// locals and returns nothing, so `main`'s value must be **identical whether or
+    /// not the call is there**. The interpreters model the call as a pure no-op on
+    /// the caller, so any native deviation diverges.
+    ///
+    /// **What this actually catches (measured, not assumed):**
+    ///
+    /// * a void call that **misaligns the stack**, scribbles on the caller's frame,
+    ///   or returns down a wrong epilogue path — `main`'s value changes;
+    /// * a regression that makes the shape **stop compiling**, via
+    ///   `fuzz_native_exit`'s "an exe must be produced" assertion. This is the live
+    ///   one: injecting `NativeType::Void::is_aggregate() -> true` makes the fuzzer
+    ///   FAIL, because the void call statement then trips the "aggregate-returning
+    ///   call is only supported in a binding or return position" gate, its caller
+    ///   skips, and no exe is produced.
+    ///
+    /// **What it does NOT catch, despite the intuition:**
+    ///
+    /// * a **clobbered callee-saved register**. A void call disables register
+    ///   promotion in the *entire calling function*: `plan_register_promotion`
+    ///   requires ALL instructions to pass `instr_reg_promotable`, and a void call
+    ///   statement is an `Expr` whose `Call` arm demands `expr.ty.name == "i64"`.
+    ///   So `rbx`/`rsi` are never live across a void call — there is nothing to
+    ///   clobber. (Verified by injection: the bug is invisible to this fuzzer,
+    ///   correctly.) See the register-promotion footgun in
+    ///   `documents/native_backend_contract.md`.
+    /// * an **argument-register shift** from a wrongly reserved hidden result
+    ///   pointer. That never reaches codegen — it is refused earlier as a clean
+    ///   skip, which is why the `is_aggregate` injection above surfaces as a
+    ///   compile failure rather than a wrong value.
+    ///
+    /// The body shapes cover the void-specific lowering paths: a body ending in a
+    /// NON-EXHAUSTIVE `if` and one ending in a `match` (both STATEMENT tails — a
+    /// void function has no value position, so the `block_yields_value` gate must
+    /// never apply), a bare `return`, a `while` loop, and a void→void call. Only
+    /// `+`/`-`/`*` and literals appear, so no shape can divide by zero or otherwise
+    /// diverge between the tiers.
+    fn void_helper(&mut self) -> String {
+        let name = format!("h{}", self.helper_count);
+        self.helper_count += 1;
+        // A previously emitted helper this one may call (void -> void).
+        let callee = (self.helper_count > 1).then(|| format!("h{}", self.helper_count - 2));
+
+        let mut decl = format!("fn {name} a i64 b i64\n");
+        decl.push_str("    let t0 i64 = (a + b)\n");
+        decl.push_str(&format!(
+            "    let t1 i64 = (t0 * {})\n",
+            self.rng.range(1, 9)
+        ));
+
+        match self.rng.below(6) {
+            // Ends in a NON-EXHAUSTIVE `if` — a statement tail.
+            0 => {
+                decl.push_str("    if a < b\n        t1 = (t1 + 1)\n");
+                decl.push_str(&format!(
+                    "    elif a > {}\n        t1 = (t1 - 1)\n",
+                    self.rng.range(-9, 9)
+                ));
+            }
+            // Ends in a `match` — a statement tail. Each arm body is a void call.
+            1 => {
+                decl.push_str("    let o option<i64> = some(t0)\n");
+                decl.push_str("    match o\n");
+                decl.push_str(&format!("        some(v) -> {name}_sink(v)\n"));
+                decl.push_str(&format!("        none -> {name}_sink(0)\n"));
+                // The arm bodies need a void callee of their own.
+                self.void_helpers.push_str(&format!(
+                    "fn {name}_sink x i64\n    let s i64 = (x + 1)\n\n"
+                ));
+            }
+            // A bare `return` (early exit, no value to route) on a condition that
+            // varies with the arguments, so both paths occur across seeds.
+            2 => {
+                decl.push_str("    if a < b\n        return\n");
+                decl.push_str("    let t2 i64 = (t1 - a)\n");
+            }
+            // A `while` loop.
+            3 => {
+                decl.push_str("    let i i64 = 0\n");
+                decl.push_str(&format!("    while i < {}\n", self.rng.range(0, 8)));
+                decl.push_str("        t1 = (t1 + i)\n        i = i + 1\n");
+            }
+            // A void -> void call, when there is an earlier helper to call.
+            4 if callee.is_some() => {
+                let callee = callee.expect("guarded by the match arm");
+                decl.push_str(&format!("    {callee}(t0, t1)\n"));
+            }
+            // Straight-line only (also the fallback when there is no earlier
+            // helper to call).
+            _ => {
+                decl.push_str(&format!(
+                    "    let t2 i64 = (t1 - {})\n",
+                    self.rng.range(-20, 20)
+                ));
+            }
+        }
+        decl.push('\n');
+        self.void_helpers.push_str(&decl);
+        name
     }
 
     /// A leaf: a small literal or an in-scope variable.
@@ -150,7 +262,15 @@ impl Gen {
     fn program(&mut self) -> String {
         let stmt_count = self.rng.range(2, 7);
         for _ in 0..stmt_count {
-            match self.rng.below(8) {
+            match self.rng.below(9) {
+                // A call to a fresh VOID helper, for effect. It contributes nothing
+                // to the result, so `main`'s value must be unchanged by its
+                // presence — see `void_helper`.
+                7..=8 if !self.vars.is_empty() => {
+                    let (a, b) = (self.leaf(), self.leaf());
+                    let name = self.void_helper();
+                    self.push_line(1, &format!("{name}({a}, {b})"));
+                }
                 // A single-level `if` that reassigns an existing variable.
                 3 if !self.vars.is_empty() => {
                     let cond_l = self.leaf();
@@ -229,7 +349,8 @@ impl Gen {
         }
         let tail = self.expr(3);
         self.push_line(1, &tail);
-        format!("fn main -> i64\n{}", self.body)
+        // Void helpers (if any) are declared ahead of `main`.
+        format!("{}fn main -> i64\n{}", self.void_helpers, self.body)
     }
 }
 
@@ -881,9 +1002,21 @@ fn fuzz_native_matches_interpreter_when_linkable() {
     let dir = std::env::temp_dir().join("lullaby_fuzz_native");
     let _ = std::fs::create_dir_all(&dir);
 
+    // Counts what ACTUALLY executed, so the batch cannot silently do nothing and
+    // still pass green (asserted after the loop).
+    let mut ran = 0u64;
+    let mut with_void = 0u64;
+
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
         let source = gen_program(seed);
+        // Void helpers are generated into a fraction of the programs; track how
+        // many so the void surface's differential coverage is visible rather than
+        // assumed. Helpers are prepended, so the first one starts the source with
+        // no preceding newline — check both, or the count silently undercounts.
+        if source.starts_with("fn h") || source.contains("\nfn h") {
+            with_void += 1;
+        }
 
         // Interpreter ground truth (all three must already agree; assert it here
         // too so a native mismatch is never blamed on interpreter disagreement).
@@ -898,8 +1031,9 @@ fn fuzz_native_matches_interpreter_when_linkable() {
         };
 
         let Some(exit) = fuzz_native_exit(&source, &dir, &format!("fuzz_{i}")) else {
-            return;
+            break;
         };
+        ran += 1;
         // The entry stub forwards main's i64 to ExitProcess; on Windows the full
         // 32-bit value round-trips, so the exit code equals `expected as i32`.
         assert_eq!(
@@ -908,6 +1042,25 @@ fn fuzz_native_matches_interpreter_when_linkable() {
              interpreter={expected}, native exit={exit}"
         );
     }
+    // ASSERT, don't just report. The `native_exe_runnable()` gate above already
+    // established a Windows host, and every program this generator emits is
+    // direct-PE eligible (it has a `main` and needs no C runtime), so its exe is
+    // written in-house with no external linker — `fuzz_native_exit` cannot take its
+    // no-toolchain escape here, and all `PROGRAMS` must have run. Merely REPORTING
+    // the count still let `ran == 0` pass green, which would prove nothing about
+    // the emitter; this makes an empty batch a failure.
+    assert!(
+        ran > 0,
+        "the native differential fuzz executed NO programs on a Windows host — a \
+         green result here would prove nothing about the emitter"
+    );
+    // Visible under `--nocapture`. `with_void` counts programs carrying a void
+    // helper called for effect: such a call contributes nothing to `main`'s value,
+    // so any divergence it causes is a void-codegen bug. See `Gen::void_helper` for
+    // what that does and does not catch.
+    eprintln!(
+        "scalar native fuzz: ran {ran}/{PROGRAMS} real exes ({with_void} carried void helpers)"
+    );
 }
 
 #[test]
