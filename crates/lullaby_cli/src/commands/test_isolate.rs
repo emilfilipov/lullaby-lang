@@ -51,7 +51,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -71,10 +71,77 @@ pub(crate) const RUN_BATCH_COMMAND: &str = "__run-test-batch";
 const START: &str = "start";
 const PASS: &str = "pass";
 const FAIL: &str = "fail";
+/// The child finished the batch under its own power. This is what completes a
+/// batch — NOT stderr EOF. A test may leave a grandchild holding the inherited
+/// stderr pipe, in which case EOF never arrives; waiting for it would stall a
+/// wholly passing suite until the deadline. See `kill_process_tree`.
+const DONE: &str = "done";
 
 /// Separates the failure message from each traceback frame inside one `fail`
 /// payload. A control character, so it cannot occur in a rendered diagnostic.
 const FIELD_SEPARATOR: char = '\u{1f}';
+
+/// Kill the child AND every process it spawned.
+///
+/// Killing only the child is not enough: `sys_status`/`sys_output`/`proc_spawn`
+/// let a `test_*` function spawn arbitrary processes, and a grandchild both
+/// outlives a killed child and inherits the child's stderr pipe handle — so the
+/// pipe never reaches EOF and the runaway process keeps running. A runner whose
+/// `--timeout N` does not actually bound the run within ~N seconds fails the very
+/// guarantee it exists to provide.
+///
+/// Best-effort by design: this runs only on the timeout path, where we are
+/// forcibly stopping a runaway test. A suite that *passes* keeps whatever it
+/// spawned — `proc_spawn` is a documented builtin for background processes, and
+/// reaping a passing test's children would break legitimate use.
+#[cfg(windows)]
+fn kill_process_tree(child: &mut Child) {
+    // `/T` kills the whole tree rooted at the child; it must run BEFORE the child
+    // itself dies, or the parent/child links the tree walk needs are gone.
+    let _ = Command::new("taskkill")
+        .args(["/F", "/T", "/PID"])
+        .arg(child.id().to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// The POSIX counterpart: the child leads its own process group (see
+/// `process_group(0)` at spawn), so signalling the negated group id reaches every
+/// descendant that has not deliberately left the group.
+#[cfg(unix)]
+fn kill_process_tree(child: &mut Child) {
+    let _ = Command::new("kill")
+        .arg("--")
+        .arg(format!("-{}", child.id()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(windows, unix)))]
+fn kill_process_tree(_child: &mut Child) {}
+
+/// Windows `STATUS_STACK_OVERFLOW`, the one abnormal exit we can name exactly.
+#[cfg(windows)]
+const WINDOWS_STACK_OVERFLOW: i32 = 0xC000_00FDu32 as i32;
+
+/// Describe why a child died, without guessing. A stack overflow is the common
+/// cause but not the only one — an external `taskkill`/`SIGTERM` lands here too,
+/// and reporting that as "most likely a stack overflow" would be a fabrication.
+fn describe_abnormal_exit(status: Option<ExitStatus>) -> String {
+    #[cfg(windows)]
+    if let Some(status) = status
+        && status.code() == Some(WINDOWS_STACK_OVERFLOW)
+    {
+        return "the test process terminated abnormally: stack overflow                 (STATUS_STACK_OVERFLOW), i.e. unbounded recursion"
+            .to_string();
+    }
+    match status {
+        Some(status) => format!("the test process terminated abnormally ({status})"),
+        None => "the test process terminated abnormally (cause unknown)".to_string(),
+    }
+}
 
 /// How many tests passed and failed so far.
 #[derive(Default)]
@@ -195,6 +262,13 @@ fn run_batch(
     if let Some(filter) = filter {
         command.arg(filter);
     }
+    // POSIX: give the child its own process group so `kill_process_tree` can
+    // signal every descendant by group id.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     // Order our own prints against the child's inherited stdout.
     let _ = std::io::stdout().flush();
     // stdout is inherited so a test's own output reaches the terminal exactly as
@@ -221,6 +295,10 @@ fn run_batch(
 
     let prefix = format!("##{nonce} ");
     let mut in_flight: Option<usize> = None;
+    // The highest index this batch actually reported. This is what makes "the
+    // child finished" distinguishable from "the child died having reported
+    // nothing" -- see the `Disconnected` arm.
+    let mut last_reported: Option<usize> = None;
     let mut deadline = timeout.map(|limit| Instant::now() + limit);
 
     let resume = loop {
@@ -237,6 +315,12 @@ fn run_batch(
                     continue;
                 };
                 let (verb, payload) = rest.split_once(' ').unwrap_or((rest, ""));
+                if verb == DONE {
+                    // The child ran the batch to completion. Break on this rather
+                    // than on EOF: a grandchild holding the stderr pipe can defer
+                    // EOF indefinitely, and a passing suite must not wait for it.
+                    break names.len();
+                }
                 let (index_text, detail) = payload.split_once(' ').unwrap_or((payload, ""));
                 let index: usize = match index_text.parse() {
                     Ok(index) if index < names.len() => index,
@@ -250,6 +334,7 @@ fn run_batch(
                     PASS => {
                         report_pass(&names[index], tally);
                         in_flight = None;
+                        last_reported = Some(index);
                         deadline = timeout.map(|limit| Instant::now() + limit);
                     }
                     FAIL => {
@@ -261,6 +346,7 @@ fn run_batch(
                         let frames: Vec<String> = fields.map(unescape).collect();
                         report_fail(&names[index], &message, &frames, tally);
                         in_flight = None;
+                        last_reported = Some(index);
                         deadline = timeout.map(|limit| Instant::now() + limit);
                     }
                     _ => {}
@@ -268,8 +354,9 @@ fn run_batch(
             }
             Err(RecvTimeoutError::Timeout) => {
                 // The in-flight test outlived the deadline: it is not going to
-                // finish. Kill the child, bank the timeout as that test's failure,
-                // and resume the batch after it.
+                // finish. Kill the whole TREE -- not just the child -- bank the
+                // timeout as that test's failure, and resume the batch after it.
+                kill_process_tree(&mut child);
                 let _ = child.kill();
                 let _ = child.wait();
                 let limit = timeout.unwrap_or_default().as_secs();
@@ -287,9 +374,10 @@ fn run_batch(
                         );
                         index + 1
                     }
-                    // No test in flight: the child stalled before reporting one.
-                    // `run_isolated` turns a no-progress batch into a failure.
-                    None => start,
+                    // No test in flight: the child stalled between tests. Resume
+                    // after the last test it did report; if it reported none,
+                    // `run_isolated` turns the no-progress batch into a failure.
+                    None => last_reported.map_or(start, |index| index + 1),
                 };
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -302,27 +390,32 @@ fn run_batch(
                     // POSIX 127 or a signal), so report the *observable* — abnormal
                     // termination — and never pin a value.
                     Some(index) => {
-                        report_fail(
-                            &names[index],
-                            &format!(
-                                "the test process terminated abnormally{} — most likely a stack \
-                                 overflow from unbounded recursion",
-                                status
-                                    .map(|status| format!(" ({status})"))
-                                    .unwrap_or_default()
-                            ),
-                            &[],
-                            tally,
-                        );
+                        report_fail(&names[index], &describe_abnormal_exit(status), &[], tally);
                         index + 1
                     }
-                    None => names.len(),
+                    // No test in flight and no `done`: the child exited between
+                    // tests without finishing the batch. Resume after the last test
+                    // it reported -- NEVER claim the batch is complete here.
+                    // Treating this as "complete" would make a child that died
+                    // having reported nothing indistinguishable from one that ran
+                    // everything, silently yielding `0 passed, 0 failed` + exit 0:
+                    // a green run that executed no tests. `run_isolated`'s progress
+                    // guard turns the report-nothing case into a loud failure.
+                    None => last_reported.map_or(start, |index| index + 1),
                 };
             }
         }
     };
 
-    let _ = reader.join();
+    // Deliberately NOT joined. The reader blocks until stderr reaches EOF, and a
+    // grandchild that inherited the pipe handle defers EOF for as long as it
+    // lives -- joining here is what let a test's spawned process outlast the
+    // deadline and unbound the whole run (`--timeout 3` taking 14s). Tree-killing
+    // above normally EOFs the pipe promptly; detaching guarantees we proceed
+    // within the deadline even if it does not. The thread is `'static`, owns its
+    // pipe, and exits on EOF or when its send fails after `rx` drops -- so it is
+    // bounded by the grandchild's lifetime, never by ours.
+    drop(reader);
     let _ = child.wait();
     Ok(resume)
 }
@@ -382,5 +475,8 @@ pub(crate) fn run_batch_child(
             }
         }
     }
+    // Report completion explicitly: the parent must not have to infer it from
+    // stderr EOF, which a grandchild holding the inherited pipe can defer.
+    eprintln!("##{nonce} {DONE} 0");
     Ok(())
 }

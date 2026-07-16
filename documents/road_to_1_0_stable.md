@@ -145,6 +145,21 @@ These are toolchain-completeness items, not language decisions.
     contract. Pinned by `suite19.rs` over `tests/fixtures/test_runner/`
     (`stack_overflow.lby`, `infinite_loop.lby`); the hang pin passes an explicit
     short `--timeout`, so a non-terminating test cannot stall CI.
+  - **Tree-kill, not child-kill (review finding).** The first cut killed only the
+    child and joined the stderr reader. But `sys_status`/`sys_output`/`proc_spawn`
+    let a `test_*` function spawn real processes, and a grandchild outlives a
+    killed child *and* inherits its stderr pipe handle — so EOF never arrived and
+    the runner waited out the grandchild: `--timeout 3` measured at **14s**,
+    scaling linearly with the grandchild (`ping -n 60` -> 60s). The deadline
+    bounded nothing, which is the exact gap B3 exists to close, reachable from the
+    documented surface. Fixed by killing the process **tree** (`taskkill /T` on
+    Windows; a process-group signal on POSIX, the child being made group leader),
+    by *not* joining the reader (so the deadline holds even if a kill fails), and
+    by having the child signal completion explicitly instead of the parent
+    inferring it from EOF (which a grandchild can defer, stalling even a wholly
+    passing suite). Pinned by a wall-clock bound in `suite19.rs` — the `FAIL` line
+    alone printed on schedule while the run was unbounded, so only elapsed time
+    catches it.
   - **Design: batch-with-resume, not process-per-test.** A process per test would
     pay a spawn (~13ms) plus a full recompile per test — ~1.6s on a 100-test
     suite against ~20ms in-process, a tax on the all-passing path where nothing
@@ -177,7 +192,7 @@ These are toolchain-completeness items, not language decisions.
 | A5 | Safe-tier failure semantics | **DECIDED** | Abort + diagnostic, no unwinding | 2026-07-15 |
 | B1 | Closures native codegen | PLANNED | schedule post-arena | — |
 | B2 | Concrete stdlib contents | PLANNED | enumerate near finish | — |
-| B3 | Stable-grade toolchain | **PARTIAL** | test runner SHIPPED (+`--filter`, suite17); isolation now COMPLETE — subprocess + per-test `--timeout` (default 60s) contain stack-overflow AND non-terminating tests, pinned by suite19, +12ms/+22ms overhead on the all-passing path; `test --backend` (AST-only), DWARF + LSP/pkg remain; `test` declaration surface (`test_*` vs `test "name"` block) is an open owner call | 2026-07-16 |
+| B3 | Stable-grade toolchain | **PARTIAL** | test runner SHIPPED (+`--filter`, suite17); isolation now COMPLETE — subprocess + process-tree kill + per-test `--timeout` (default 60s) contain stack-overflow, non-terminating AND grandchild-spawning tests, pinned by suite19 (incl. a wall-clock bound), +12ms/+22ms overhead on the all-passing path; remaining uncontained: machine-wide resource exhaustion (reachable), a descendant that leaves the tree, `spawn`-thread blame misattribution; `test --backend` (AST-only), DWARF + LSP/pkg remain; `test` declaration surface (`test_*` vs `test "name"` block) is an open owner call | 2026-07-16 |
 
 ## Owner decisions — 2026-07-16
 

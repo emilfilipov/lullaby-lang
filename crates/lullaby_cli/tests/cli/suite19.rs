@@ -18,6 +18,16 @@
 //! per-test deadline, so both are contained and both are pinnable, which is what
 //! these tests do.
 //!
+//! A third shape is pinned alongside them: a test that **spawns a long-running
+//! grandchild**. `sys_status`/`sys_output`/`proc_spawn` are ordinary builtins and
+//! nothing gates builtins by entry point, so a test can spawn real processes — and
+//! a grandchild outlives a killed child *and* inherits its stderr pipe handle. The
+//! first cut of the runner killed only the child and waited on that pipe, so
+//! `--timeout 3` actually took 14s, scaling linearly with the grandchild: the
+//! deadline bounded nothing. That test asserts a **wall-clock bound**, because the
+//! `FAIL` line printed on schedule even while the run was unbounded — the report
+//! alone cannot catch it.
+//!
 //! The load-bearing assertion in each is the same: the killer test is reported as
 //! an ordinary failure, **every other test still runs**, and the summary is still
 //! correct with a non-zero exit.
@@ -104,6 +114,54 @@ fn test_runner_survives_a_non_terminating_test() {
     assert!(
         elapsed < Duration::from_secs(45),
         "the timeout must bound the run; took {elapsed:?}"
+    );
+}
+
+/// A test that SPAWNS A LONG-RUNNING GRANDCHILD must not outlive the deadline.
+///
+/// `sys_status`/`sys_output`/`proc_spawn` let a `test_*` function spawn real
+/// processes — nothing gates builtins by entry point. A grandchild outlives a
+/// killed child AND inherits its stderr pipe handle, so killing only the child
+/// left the runner waiting on an EOF the grandchild held: measured at 14s against
+/// a `--timeout 3`, tracking the grandchild's lifetime linearly (`ping -n 60` ->
+/// 60s). `--timeout N` meant nothing. The fix is to kill the process TREE.
+///
+/// The wall-clock bound is the assertion that matters — the `FAIL` line alone
+/// printed on schedule even while broken, so only elapsed time can catch this.
+/// It also pins the tree-kill end-to-end rather than just the deadline:
+/// `Command::output()` reads the child's pipes to EOF, so a surviving grandchild
+/// holds this test open past the bound even if the runner itself moved on.
+#[test]
+fn test_runner_timeout_bounds_a_test_that_spawned_a_grandchild() {
+    let fixture = workspace_root().join("tests/fixtures/test_runner/spawns_grandchild.lby");
+    let started = Instant::now();
+    let output = lullaby()
+        .arg("test")
+        .arg("--timeout")
+        .arg("3")
+        .arg(&fixture)
+        .output()
+        .expect("run lullaby test");
+    let elapsed = started.elapsed();
+    let text = stdout(&output);
+
+    assert!(
+        text.contains("FAIL test_a_spawns_a_long_grandchild"),
+        "stdout: {text}"
+    );
+    assert!(text.contains("timed out after 3s"), "stdout: {text}");
+    assert!(text.contains("PASS test_b_passes"), "stdout: {text}");
+    assert!(text.contains("PASS test_c_passes"), "stdout: {text}");
+    assert!(text.contains("2 passed, 1 failed"), "stdout: {text}");
+    assert!(!output.status.success(), "must exit non-zero on failure");
+
+    // The load-bearing assertion. The grandchild runs ~15s; the deadline is 3s.
+    // A run that waits for the grandchild lands at 14s+, so this bound separates
+    // "bounded by our deadline" from "bounded by whatever the test spawned" with
+    // room for a loaded machine (two spawns + two compiles) in between.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "--timeout must bound the run regardless of what a test spawned; took {elapsed:?}"
     );
 }
 
