@@ -495,17 +495,21 @@ struct Mixed
   `ptr_offset`/`ptr_read` walk it and the size law holds; native/WASM cleanly skip a
   function using any raw-pointer builtin (native raw-pointer codegen is later work).
 
-  > **Limitation — you cannot write through an `addr_of` pointer yet.** Because the
-  > interpreters back an `addr_of` address with a **by-value snapshot**, it does not
-  > alias the original place: `ptr_write(addr_of(x), 5)` would leave `x` unchanged,
-  > where real native addressing sets `x = 5`. Rather than silently give a wrong
-  > answer on the only tier that can run this today, a `ptr_write`/`volatile_store`
-  > through an `addr_of` pointer is **rejected at run time with `L0459`**. Reads
-  > (`ptr_read`/`volatile_load`) and `ptr_offset` walks work correctly, and stores
-  > through an `alloc`/`int_to_ptr` pointer are unaffected. Assign to the place
-  > directly (`x = 5`, `a[i] = v`, `s.f = v`) instead. This restriction is temporary:
-  > the native raw-pointer codegen increment makes `addr_of` place-backed, after which
-  > write-through aliases properly and `L0459` retires.
+  > **`addr_of` aliases the place it addresses.** The interpreters back an `addr_of`
+  > address with the *place itself* (a root binding plus a field/index path), not a
+  > copy, so a pointer genuinely aliases in both directions: `ptr_write(addr_of(x), 5)`
+  > sets `x` to `5`, a `ptr_read` after an independent `x = 99` observes `99`, and a
+  > write through `ptr_offset(addr_of(a[0]), i)` mutates `a[i]`. This matches real
+  > `lea`-based native addressing.
+  >
+  > **Lifetime — an `addr_of` pointer belongs to its frame.** It is valid only inside
+  > the function and block that own the place. Dereferencing one that has escaped into
+  > another frame (passed into a callee, returned, or stored), or whose block or
+  > function has ended, is **refused at run time with `L0459`** rather than reading
+  > stale storage or writing to the wrong place — each of those is undefined behaviour
+  > in C, so no defined program is affected. Pass or return the *value* instead of its
+  > address, or use an `alloc`-backed `ptr<T>`, which has no frame lifetime and is
+  > unaffected by any of this.
 
 ### Memory Safety Features
 

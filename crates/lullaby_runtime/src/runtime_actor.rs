@@ -310,7 +310,12 @@ impl<'a> Runtime<'a> {
             env.define(name.clone(), value);
         }
 
-        let control = self.eval_block(body, &mut env)?;
+        // An actor turn runs in its own frame over its own `Env` (see
+        // `raw_pointer.rs`); `?` below would skip the exit, so unpack explicitly.
+        let outer_frame = self.raw_ptrs.enter_frame();
+        let turn = self.eval_block(body, &mut env);
+        self.raw_ptrs.exit_frame(outer_frame);
+        let control = turn?;
         let reply = match control {
             Control::Value(value) | Control::Return(value) => value,
             Control::Break | Control::Continue => {

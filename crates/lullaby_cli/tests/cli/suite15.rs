@@ -412,16 +412,85 @@ fn ptr_offset_unsized_pointee_is_rejected() {
     );
 }
 
+/// `addr_of` is place-backed, so a pointer genuinely **aliases** the place: writes
+/// through it mutate the original, and reads through it observe independent writes to
+/// the original. This is the property stage 2 could not provide (its region was a
+/// by-value snapshot, so it refused stores with `L0459`), and retiring that refusal
+/// is exactly what this fixture pins — on all three interpreters, byte-identically.
 #[test]
-fn ptr_write_through_addr_of_is_refused_at_runtime() {
-    // A store through an `addr_of` pointer would only mutate the interpreters'
-    // by-value snapshot — `x` would stay 1 where real native addressing gives 5. It
-    // is refused with L0459 on every interpreter rather than silently returning the
-    // wrong answer. (Temporary: the native raw-pointer codegen increment makes
-    // `addr_of` place-backed and lifts this.) Reads/walks stay supported, and a
-    // store through an `alloc`/`int_to_ptr` heap-slot pointer is unaffected.
-    let path =
-        workspace_root().join("tests/fixtures/invalid/raw_ptr/ptr_write_through_addr_of.lby");
+fn addr_of_aliases_the_place_it_addresses() {
+    let path = workspace_root().join("tests/fixtures/valid/raw_ptr_aliasing.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                path.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        let errors = stderr(&output);
+        assert!(
+            output.status.success(),
+            "[{backend}] a write through an addr_of pointer must succeed and alias. \
+             stderr: {errors}"
+        );
+        // 5 (write-through) + 99 (read-after-independent-write) + 300 (offset write)
+        // + 60 (struct field) + 40 (whole-array decay) + 21 (nested s.arr[i]).
+        assert_eq!(
+            stdout(&output).trim(),
+            "525",
+            "[{backend}] addr_of must alias in both directions. stderr: {errors}"
+        );
+    }
+}
+
+/// The escaping case is **diagnosed, never guessed**. A place-backed address is only
+/// meaningful while its place is reachable; the interpreters keep each frame's locals
+/// in their own environment, so a pointer that leaves the frame that took the address
+/// cannot be resolved. Both shapes of escape — passed into a callee, and returned out
+/// of the defining function — are refused with `L0459` rather than silently reading or
+/// writing the wrong storage. Both are undefined behaviour in C, so no defined program
+/// is forbidden.
+#[test]
+fn an_addr_of_pointer_that_escapes_its_frame_is_refused() {
+    for fixture in [
+        "tests/fixtures/invalid/raw_ptr/addr_of_escapes_frame.lby",
+        "tests/fixtures/invalid/raw_ptr/addr_of_outlives_frame.lby",
+    ] {
+        let path = workspace_root().join(fixture);
+        for backend in ["ast", "ir", "bytecode"] {
+            let output = lullaby()
+                .args([
+                    "run",
+                    "--backend",
+                    backend,
+                    path.to_str().expect("fixture path"),
+                ])
+                .output()
+                .expect("run cli");
+            let errors = stderr(&output);
+            assert!(
+                !output.status.success(),
+                "[{backend}] {fixture}: an escaped addr_of pointer must not silently \
+                 resolve. stderr: {errors}"
+            );
+            assert!(
+                errors.contains("L0459"),
+                "[{backend}] {fixture}: expected the L0459 escaped/dangling refusal. \
+                 stderr: {errors}"
+            );
+        }
+    }
+}
+
+/// An `int_to_ptr` address that merely lands in the raw-pointer space (an MMIO
+/// register, a fixed physical address) is **not** an `addr_of` pointer, and the
+/// diagnostic must not blame one. It is unmapped: `L0406`, not `L0459`.
+#[test]
+fn an_mmio_address_is_diagnosed_as_unmapped_not_as_addr_of() {
+    let path = workspace_root().join("tests/fixtures/invalid/raw_ptr/mmio_volatile_store.lby");
     for backend in ["ast", "ir", "bytecode"] {
         let output = lullaby()
             .args([
@@ -435,12 +504,21 @@ fn ptr_write_through_addr_of_is_refused_at_runtime() {
         let errors = stderr(&output);
         assert!(
             !output.status.success(),
-            "[{backend}] a store through an addr_of pointer must not silently succeed. \
+            "[{backend}] an unmapped raw address must not be dereferenceable. \
              stderr: {errors}"
         );
         assert!(
-            errors.contains("L0459"),
-            "[{backend}] expected the L0459 unmodelled-store refusal. stderr: {errors}"
+            errors.contains("L0406"),
+            "[{backend}] expected L0406 for an unmapped int_to_ptr address. \
+             stderr: {errors}"
+        );
+        // The message may *mention* `addr_of` to explain what this address is not;
+        // what it must never do is assert that an `addr_of` pointer is involved, as
+        // the stage-2 L0459 refusal wrongly did for this exact program.
+        assert!(
+            !errors.contains("L0459") && !errors.contains("this `addr_of` pointer"),
+            "[{backend}] the diagnostic must not blame an `addr_of` pointer that was \
+             never taken. stderr: {errors}"
         );
     }
 }

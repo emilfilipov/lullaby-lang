@@ -1,0 +1,19 @@
+# An `addr_of` pointer passed INTO a callee cannot be dereferenced there: L0459.
+#
+# The interpreters keep each frame's locals in its own environment, so a callee
+# genuinely cannot reach `main`'s `x`. Rather than resolve it against the wrong
+# storage or read a stale copy, the dereference is refused. Escaping a local's
+# address like this is undefined behaviour in C too, so no defined program is
+# forbidden. Within one frame, `addr_of` aliases fully (tests/fixtures/valid/
+# raw_ptr_aliasing.lby).
+fn poke p ptr<i64> -> i64
+    unsafe
+        ptr_write(p, 5)
+    0
+
+fn main -> i64
+    let x i64 = 1
+    unsafe
+        let p ptr<i64> = addr_of(x)
+        poke(p)
+    x

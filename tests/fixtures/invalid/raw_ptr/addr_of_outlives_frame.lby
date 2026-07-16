@@ -1,0 +1,12 @@
+# An `addr_of` pointer RETURNED from the function that took the address is dangling:
+# the place died with the frame, so dereferencing it is refused with L0459 naming the
+# dead place. In C this is the classic return-address-of-a-local undefined behaviour.
+fn leak -> ptr<i64>
+    let local i64 = 7
+    unsafe
+        addr_of(local)
+
+fn main -> i64
+    unsafe
+        let p ptr<i64> = leak()
+        ptr_read(p)
