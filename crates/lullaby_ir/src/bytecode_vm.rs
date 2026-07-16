@@ -531,6 +531,28 @@ impl VmCompiler {
                 if name == "addr_of" {
                     return Err(());
                 }
+                // The static-buffer arena markers (freestanding tier §5) are special
+                // forms for the same structural reason: their region operand is a
+                // compile-time region *name*, not a value. `VmOp::Call` evaluates
+                // every argument to a `Value` and `dispatch_named_call` receives a
+                // `Vec<Value>`, so a region name cannot survive the flat op stream —
+                // implementing these there is impossible by construction, not merely
+                // unimplemented. The tree-walker intercepts both in `eval_expr`
+                // before argument evaluation; these functions run there.
+                //
+                // This refusal is deliberate and load-bearing. It was previously
+                // *accidental*: `arena_alloc`'s bare `Variable(region)` operand
+                // resolved to no slot, so `compile_expr` happened to `Err(())` on
+                // its own and the function fell back. A `region` with no `alloc` has
+                // no such operand, compiled cleanly, and reached `VmOp::Call` —
+                // where the missing arm raised `L0401 unknown function
+                // 'arena_region'` on bytecode while every other tier returned 0.
+                // Naming both markers here makes the fallback intentional and
+                // total, and covers a region that is declared but never allocated
+                // from. Regression: `freestanding_arena_scoping.lby`.
+                if name == "arena_region" || name == "arena_alloc" {
+                    return Err(());
+                }
                 for arg in args {
                     self.compile_expr(arg)?;
                 }

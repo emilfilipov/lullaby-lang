@@ -811,6 +811,25 @@ escape-analysis fuzzers stay green.
 **Full four-tier parity — and the refusal that was wrong.** The arena runs on the
 AST, IR, and bytecode interpreters as well as native, all agreeing on `109`.
 
+**How bytecode gets there: a deliberate tree-walker fallback**, the same shape §10.4
+documents for `addr_of`. Both arena markers (`arena_region`, `arena_alloc`) are
+special forms whose region operand is a compile-time region *name*, not a value.
+`VmOp::Call` evaluates every argument to a `Value` and `dispatch_named_call` receives
+a `Vec<Value>`, so a region name cannot survive the flat op stream — the VM could not
+implement these even in principle. `VmCompiler::compile_expr` therefore refuses both
+**by name**, and any function using an arena runs on the tree-walker.
+
+This refusal is written down because for one increment it was **accidental**, and the
+gap it left was real. `arena_alloc`'s bare region operand resolved to no VM slot, so
+`compile_expr` happened to fail on its own and the function fell back — arena
+programs worked, but by luck. A `region` declared and never allocated from has no
+such operand: it compiled cleanly, reached `VmOp::Call`, and hit a
+`dispatch_named_call` with no `arena_region` arm, raising `L0401 unknown function`
+on bytecode while `check`, AST, IR and native all returned `0`. Every fixture and
+every generated program had paired a region with an allocation, so nothing saw it.
+`freestanding_arena_scoping.lby`'s `region_without_alloc` and the fuzzer's
+`region_no_alloc` shape now cover it.
+
 This is a **correction to the first version of this increment**, and the reasoning
 matters. That version refused `arena_alloc` on all three interpreters with `L0460`,
 arguing their place-backed, typed-cell pointer model could not reinterpret a
@@ -838,9 +857,19 @@ was real, but the **env shelf** (`651d22c`) has since made a bare name resolve a
 frames, so passing an arena pointer into a callee — valid C, since a call does not end
 the caller's block — now **runs on every tier** and agrees (measured: `99` on all
 four). The paragraph is retired rather than reworded: there is no arena-specific
-divergence left to describe. A genuinely *dangling* pointer (its buffer's frame has
-returned) is still `L0459` on the interpreters and real undefined behaviour natively,
-exactly as for any `addr_of` pointer — see the lifetime note below.
+divergence left to describe.
+
+That retirement is a claim about a *closed* set of shapes, so the set is named. It
+rests on `freestanding_arena_scoping.lby` and the `fuzz_arena_scoping_matches_across_tiers`
+net agreeing on all four tiers for: a loop-body region's reset at dedent, a shadowed
+buffer, an arena pointer crossing the call ABI, and a region declared but never
+allocated from. That last shape is listed because the retirement was first written
+**while it was still broken** — every fixture and generated program then paired a
+region with an allocation, the `L0401` described above went unseen, and the claim was
+made on an untested shape. It is honest now; it was not then. A genuinely *dangling*
+pointer (its buffer's frame has returned) is still `L0459` on the interpreters and
+real undefined behaviour natively, exactly as for any `addr_of` pointer — see the
+lifetime note below.
 
 **One scoping model, and the three ways it was silently three.** The arena's scope and
 buffer binding are now defined once and shared:

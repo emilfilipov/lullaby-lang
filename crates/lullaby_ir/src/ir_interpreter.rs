@@ -436,6 +436,7 @@ impl<'a> IrRuntime<'a> {
 
     /// The cold half of [`Self::with_env_shelved`], kept out of line so the fast path
     /// stays small enough to inline into each call site.
+    #[inline(never)]
     fn shelve_and_run<R>(&mut self, env: &mut Env, body: impl FnOnce(&mut Self) -> R) -> R {
         let mut hollow = Env::hollow();
         std::mem::swap(env, &mut hollow);
@@ -1428,8 +1429,13 @@ impl<'a> IrRuntime<'a> {
                 // special forms handled before ordinary argument evaluation, because
                 // their region operand is a compile-time region name rather than a
                 // value — evaluating it would raise a misleading `L0403 unknown
-                // variable`. Serves both the IR tree-walker and the bytecode VM,
-                // which share this dispatch.
+                // variable`.
+                //
+                // This is the tree-walker's dispatch ONLY. The bytecode VM does not
+                // route through `eval_expr` — it shares `dispatch_named_call`, which
+                // takes already-evaluated `Vec<Value>` args and therefore cannot
+                // receive a region name at all. `VmCompiler::compile_expr` refuses
+                // both markers outright so any function using them falls back here.
                 if name == "arena_region" && args.len() == 2 {
                     return self.eval_arena_region(&args[0], &args[1], env);
                 }
@@ -1805,7 +1811,8 @@ impl<'a> IrRuntime<'a> {
             RuntimeError::new(
                 "L0445",
                 format!(
-                    "static-buffer arena `{region}` is backed by `{backing}`, which is not a                      binding in scope"
+                    "static-buffer arena `{region}` is backed by `{backing}`, \
+                     which is not a binding in scope"
                 ),
             )
         })?;
@@ -1846,7 +1853,8 @@ impl<'a> IrRuntime<'a> {
             return Err(RuntimeError::new(
                 "L0445",
                 format!(
-                    "`arena_alloc` names region `{region}`, which is not a static-buffer arena                      declared in scope"
+                    "`arena_alloc` names region `{region}`, which is not a \
+                     static-buffer arena declared in scope"
                 ),
             ));
         };
@@ -1857,7 +1865,8 @@ impl<'a> IrRuntime<'a> {
                 return Err(RuntimeError::new(
                     "L0445",
                     format!(
-                        "static-buffer arena `{region}`'s backing buffer is no longer a fixed                          array in scope"
+                        "static-buffer arena `{region}`'s backing buffer is no \
+                         longer a fixed array in scope"
                     ),
                 ));
             }

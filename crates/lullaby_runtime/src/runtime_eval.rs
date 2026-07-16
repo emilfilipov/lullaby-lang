@@ -948,7 +948,8 @@ impl<'a> Runtime<'a> {
             return Err(RuntimeError::new(
                 "L0445",
                 format!(
-                    "`arena_alloc` names region `{region}`, which is not a static-buffer arena                      declared in scope"
+                    "`arena_alloc` names region `{region}`, which is not a \
+                     static-buffer arena declared in scope"
                 ),
             ));
         };
@@ -959,7 +960,8 @@ impl<'a> Runtime<'a> {
                 return Err(RuntimeError::new(
                     "L0445",
                     format!(
-                        "static-buffer arena `{region}`'s backing buffer is no longer a                              fixed array in scope"
+                        "static-buffer arena `{region}`'s backing buffer is no \
+                         longer a fixed array in scope"
                     ),
                 ));
             }

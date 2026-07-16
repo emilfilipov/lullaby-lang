@@ -1,4 +1,4 @@
-# Static-buffer arena SCOPING — the three shapes where the tiers once disagreed
+# Static-buffer arena SCOPING — the four shapes where the tiers once disagreed
 # silently (freestanding_tier_design.md §5). All four tiers agree on every one.
 #
 # The model, and it is now the same in all three places: a `region <name> in
@@ -57,6 +57,19 @@ fn cross_frame -> i64
         let p ptr<i64> = arena_alloc(pool, 1)
         fill(p)
 
+# (4) A REGION WITH NO ALLOCATION. Declaring an arena and never allocating from it
+# is legal and must be a no-op. This shape is why bytecode's arena support has to be
+# an EXPLICIT fallback: `arena_alloc`'s region operand resolves to no VM slot, so a
+# region *with* an alloc used to fail `VmCompiler::compile_expr` by accident and
+# drop the whole function to the tree-walker. A region with no alloc has no such
+# operand — it compiled cleanly, reached `VmOp::Call`, and hit a `dispatch_named_call`
+# with no `arena_region` arm: `L0401 unknown function` on bytecode where check, ast,
+# ir and native all returned 0. Both markers are now refused by name.
+fn region_without_alloc -> i64
+    let buf array<i64> = [0, 0]
+    region pool in buf
+    buf[0]
+
 fn main -> i64
-    # 300 + 7 + 99 = 406
-    loop_region_resets() + shadowing_does_not_retarget() + cross_frame()
+    # 300 + 7 + 99 + 0 = 406
+    loop_region_resets() + shadowing_does_not_retarget() + cross_frame() + region_without_alloc()

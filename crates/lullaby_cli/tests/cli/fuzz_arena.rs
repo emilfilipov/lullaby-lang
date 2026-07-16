@@ -346,8 +346,31 @@ fn gen_arena_scoping_program(seed: u64) -> ArenaCase {
     } else {
         ""
     };
+
+    // A region that is declared and never allocated from. Legal, and a no-op — but
+    // structurally distinct, and it is the shape both earlier oracles were blind to:
+    // EVERY generated program paired a region with an `arena_alloc`, whose region
+    // operand resolves to no VM slot and so bailed the whole function out of the
+    // bytecode VM by accident. With no alloc there is no such operand, the function
+    // compiles cleanly, reaches `VmOp::Call`, and — before the explicit refusal in
+    // `VmCompiler::compile_expr` — hit a `dispatch_named_call` with no `arena_region`
+    // arm, raising `L0401` on bytecode alone while every other tier returned 0.
+    // Contributes 0 to the sum, so the oracle is unchanged by construction.
+    let no_alloc = rng.chance(2);
+    let (no_alloc_fn, no_alloc_call) = if no_alloc {
+        (
+            "fn region_no_alloc -> i64\n    \
+                 let spare array<i64> = [0, 0]\n    \
+                 region idle in spare\n    \
+                 spare[0]\n\n",
+            " + region_no_alloc()",
+        )
+    } else {
+        ("", "")
+    };
     let source = format!(
         "no-runtime\n\n\
+{no_alloc_fn}\
          fn scoped -> i64\n    \
              let buf array<i64> = [0, 0, 0, 0]\n    \
              let i i64 = 0\n    \
@@ -360,7 +383,7 @@ fn gen_arena_scoping_program(seed: u64) -> ArenaCase {
                  i += 1\n    \
              buf[0] * 1000 + buf[1] * 100 + buf[2] * 10 + buf[3]\n\n\
          fn main -> i64\n    \
-             scoped()\n"
+             scoped(){no_alloc_call}\n"
     );
 
     // Oracle. The region resets at dedent, so every iteration writes cell 0 and the
@@ -382,8 +405,8 @@ fn gen_arena_scoping_program(seed: u64) -> ArenaCase {
 ///
 /// # Teeth: measured, not assumed
 ///
-/// Three injections were built and run against this generator, then reverted. Each
-/// reproduces one of the three real divergences this class had, and each makes this
+/// Four injections were built and run against this generator, then reverted. Each
+/// reproduces one of the four real divergences this class had, and each makes this
 /// test fail:
 ///
 /// 1. **Native cursor zeroing moved back to the prologue** (from the declaration
@@ -396,6 +419,12 @@ fn gen_arena_scoping_program(seed: u64) -> ArenaCase {
 ///    generator stays green (its regions are all well-scoped) but
 ///    `arena_region_used_after_block_is_rejected` fails — which is why that negative
 ///    fixture exists alongside this net rather than instead of it.
+/// 4. **`arena_region` dropped from `VmCompiler::compile_expr`'s refusal** (leaving
+///    only `arena_alloc`, which is what the accidental bail-out amounted to): the
+///    `region_no_alloc` programs raise `L0401 unknown function 'arena_region'` on
+///    bytecode while the other three tiers return the correct sum. This injection is
+///    exactly the bug that shipped, and it is why the generator must emit a region
+///    with no allocation — with only alloc-paired regions it stays green.
 #[test]
 fn fuzz_arena_scoping_matches_across_tiers() {
     const PROGRAMS: u64 = 200;

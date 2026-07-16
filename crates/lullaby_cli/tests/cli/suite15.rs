@@ -1620,7 +1620,7 @@ fn arena_scoping_agrees_across_all_tiers() {
             stdout(&output).trim(),
             "406",
             "{backend}: loop_region_resets (300) + shadowing_does_not_retarget (7) + \
-             cross_frame (99)"
+             cross_frame (99) + region_without_alloc (0)"
         );
     }
 
@@ -1646,6 +1646,7 @@ fn arena_scoping_agrees_across_all_tiers() {
         "compiled loop_region_resets",
         "compiled shadowing_does_not_retarget",
         "compiled cross_frame",
+        "compiled region_without_alloc",
     ] {
         assert!(
             stdout(&emit).contains(symbol),
@@ -1665,8 +1666,9 @@ fn arena_scoping_agrees_across_all_tiers() {
     assert_eq!(
         exe.status.code().expect("native exit code"),
         406,
-        "native must agree with the interpreters on the region's block scope and on \
-         which buffer a shadowed arena writes"
+        "native must agree with the interpreters on the region's block scope, on \
+         which buffer a shadowed arena writes, and on a region declared but never \
+         allocated from"
     );
 }
 
