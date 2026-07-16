@@ -1353,6 +1353,12 @@ pub(crate) fn llvm_readobj_path() -> Option<PathBuf> {
 #[path = "cli/suite3.rs"]
 mod suite3;
 
+// Unique-per-process self-cleaning temp dirs; see `cli/scratch.rs`. Required for
+// any test that writes and then RUNS an `.exe`.
+#[path = "cli/scratch.rs"]
+mod scratch;
+pub(crate) use scratch::ScratchDir;
+
 #[path = "cli/fuzz.rs"]
 mod fuzz;
 

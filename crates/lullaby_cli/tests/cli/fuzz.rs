@@ -928,7 +928,13 @@ fn native_exe_runnable() -> bool {
 /// direct-PE image AND no linker). Panics on a native emit failure, so a
 /// regression that makes a previously-compiling program skip is a FAILURE, not a
 /// silent pass.
-fn fuzz_native_exit(source: &str, dir: &std::path::Path, tag: &str) -> Option<i32> {
+///
+/// Takes a [`ScratchDir`] rather than a `&Path` **on purpose**: the exe written
+/// here is executed here, so its path must not be shared with any other process.
+/// `ScratchDir` is the only way to name a directory for this function, and it
+/// cannot be pointed at a fixed path — so a new fuzzer gets process isolation by
+/// construction instead of by remembering to ask for it.
+fn fuzz_native_exit(source: &str, dir: &ScratchDir, tag: &str) -> Option<i32> {
     let src_path = dir.join(format!("{tag}.lby"));
     let exe_path = dir.join(format!("{tag}.exe"));
     std::fs::write(&src_path, source).expect("write fuzz source");
@@ -999,8 +1005,7 @@ fn fuzz_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 120;
     let base_seed = 0xD1B5_4A32_D192_ED03u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("scalar");
 
     // Counts what ACTUALLY executed, so the batch cannot silently do nothing and
     // still pass green (asserted after the loop).
@@ -1121,8 +1126,7 @@ fn fuzz_array_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 80;
     let base_seed = 0x7C6A_2F13_88BE_4D05u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_array");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("array");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1194,8 +1198,7 @@ fn fuzz_string_loop_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 100;
     let base_seed = 0x6EA3_55C1_9B02_7DF1u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_string_loop");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("string_loop");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1262,8 +1265,7 @@ fn fuzz_arena_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 100;
     let base_seed = 0x9D2B_C4E7_16A0_38F5u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_arena");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("arena");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1331,8 +1333,7 @@ fn fuzz_arena_struct_string_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 100;
     let base_seed = 0x2F81_66DA_9C40_7B15u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_arena_struct_string");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("arena_struct_string");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1402,8 +1403,7 @@ fn fuzz_list_struct_string_native_no_crash_when_linkable() {
 
     const PROGRAMS: u64 = 100;
     let base_seed = 0x7A3F_D18C_44B0_92E5u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_list_struct_string");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("list_struct_string");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1488,8 +1488,7 @@ fn fuzz_generic_scalar_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 120;
     let base_seed = 0xC3D2_E1F0_A9B8_7654u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_generic_scalar");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("generic_scalar");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1577,8 +1576,7 @@ fn fuzz_method_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 120;
     let base_seed = 0x6A09_E667_F3BC_C908u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_method");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("method");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1736,8 +1734,7 @@ fn fuzz_generic_heap_string_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 100;
     let base_seed = 0xB5C0_FBCF_EC4A_3E5Fu64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_generic_heap_string");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("generic_heap_string");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -1912,8 +1909,7 @@ fn fuzz_raw_pointer_reads_native_matches_interpreter() {
     }
     const PROGRAMS: u64 = 100;
     let base_seed = 0x2E64_A11B_7F03_C58Du64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_native_rawptr");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("rawptr");
 
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
@@ -2139,8 +2135,7 @@ fn fuzz_branch_tail_native_matches_interpreter_when_linkable() {
 
     const PROGRAMS: u64 = 96;
     let base_seed = 0x2D19_2ED0_3D1B_54A3u64;
-    let dir = std::env::temp_dir().join("lullaby_fuzz_branch_tail");
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = ScratchDir::new("branch_tail");
 
     let mut ran = 0u64;
     for i in 0..PROGRAMS {
