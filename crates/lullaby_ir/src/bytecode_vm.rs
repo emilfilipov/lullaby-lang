@@ -522,6 +522,15 @@ impl VmCompiler {
                 if self.locals.contains(name) {
                     return Err(());
                 }
+                // `addr_of(place)` is a special form: it needs the *place*
+                // expression (an array element keeps its array/index context), which
+                // the flat op stream cannot carry. Fall back to the tree-walker,
+                // which handles it and the shared raw-pointer space; `ptr_offset` /
+                // `ptr_cast` / `ptr_read` still lower to `Call` and dispatch through
+                // the same raw-aware builtin path on the shared interpreter state.
+                if name == "addr_of" {
+                    return Err(());
+                }
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
@@ -2852,6 +2861,25 @@ impl<'a> Lowerer<'a> {
             // fixed by the surrounding `let`/parameter annotation; the call node
             // itself carries the generic `ptr<i64>` handle spelling.
             "int_to_ptr" => TypeRef::new("ptr<i64>"),
+            // `addr_of(place) -> ptr<T>`: a whole-array place decays to a pointer
+            // to its element type; any other place points at its own type.
+            "addr_of" => {
+                let place = args.first().ok_or_else(|| {
+                    IrLoweringError::new("addr_of call missing place argument", Some(span))
+                })?;
+                let inner = place.ty.array_element().unwrap_or_else(|| place.ty.clone());
+                generic_type("ptr", std::slice::from_ref(&inner))
+            }
+            // `ptr_offset(p, n)` keeps the pointer type; `ptr_cast(p)` reinterprets
+            // it — its concrete pointee is fixed by the surrounding annotation, like
+            // `int_to_ptr`, so the call node carries the generic `ptr<i64>` spelling.
+            "ptr_offset" => {
+                let ptr = args.first().ok_or_else(|| {
+                    IrLoweringError::new("ptr_offset call missing pointer argument", Some(span))
+                })?;
+                ptr.ty.clone()
+            }
+            "ptr_cast" => TypeRef::new("ptr<i64>"),
             // `volatile_load(p)` reads the pointer's element type, like `load`.
             "volatile_load" => {
                 let ptr = args.first().ok_or_else(|| {

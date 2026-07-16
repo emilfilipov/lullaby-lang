@@ -196,6 +196,13 @@ impl<'a> Runtime<'a> {
                 self.eval_binary(left, *op, right)
             }
             ExprKind::Call { name, args } => {
+                // `addr_of(place)` is a special form: it needs the *place*
+                // expression (an array element keeps its array/index context, which
+                // a plain argument evaluation would discard), so it is handled
+                // before generic argument evaluation. See `raw_pointer.rs`.
+                if name == "addr_of" && args.len() == 1 {
+                    return self.eval_addr_of(&args[0], env);
+                }
                 let values = args
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
@@ -653,11 +660,23 @@ impl<'a> Runtime<'a> {
         let [ptr]: [Value; 1] = args
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("load", 1, args.len()))?;
-        let slot = ptr.as_ptr()?;
+        self.raw_or_heap_load(ptr)
+    }
+
+    /// Read a raw pointer's pointee (`ptr_read`/`volatile_load`), routing an
+    /// `addr_of`-derived byte address to the raw-pointer region model and any other
+    /// handle to the abstract heap-slot model.
+    pub(crate) fn raw_or_heap_load(&self, ptr: Value) -> Result<Value, RuntimeError> {
+        let addr = ptr.as_ptr()?;
+        if crate::RawPointerMemory::is_raw(addr) {
+            return self.raw_ptrs.load(addr).ok_or_else(|| {
+                RuntimeError::new("L0406", format!("invalid raw pointer `{addr}`"))
+            });
+        }
         self.heap
-            .get(slot)
+            .get(addr)
             .and_then(|value| value.clone())
-            .ok_or_else(|| RuntimeError::new("L0406", format!("invalid pointer `{slot}`")))
+            .ok_or_else(|| RuntimeError::new("L0406", format!("invalid pointer `{addr}`")))
     }
 
     pub(crate) fn builtin_store(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -665,6 +684,21 @@ impl<'a> Runtime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("store", 2, args.len()))?;
         let slot = ptr.as_ptr()?;
+        // A store through an `addr_of`-derived pointer cannot be modelled: the
+        // region is a by-value snapshot, so writing it would NOT update the original
+        // binding the way a real `lea`-based native `addr_of` does. Refuse rather
+        // than silently return a wrong answer (see `raw_pointer.rs`). Lifted by the
+        // native raw-pointer codegen increment, which makes `addr_of` place-backed.
+        if crate::RawPointerMemory::is_raw(slot) {
+            return Err(RuntimeError::new(
+                "L0459",
+                "storing through an `addr_of` pointer is not modelled on the interpreters \
+                 (the address refers to a by-value snapshot, so the write would not update \
+                 the original place); this requires native raw-pointer codegen. Reads and \
+                 `ptr_offset` walks through an `addr_of` pointer are supported — assign to \
+                 the place directly instead",
+            ));
+        }
         let Some(target) = self.heap.get_mut(slot) else {
             return Err(RuntimeError::new(
                 "L0406",
@@ -763,6 +797,69 @@ impl<'a> Runtime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("int_to_ptr", 1, args.len()))?;
         Ok(Value::Ptr(handle.as_i64()? as usize))
+    }
+
+    /// `addr_of(place) -> ptr<T>`: the address of an addressable place. On the
+    /// interpreters the place is snapshotted into the byte-addressed raw-pointer
+    /// space (`raw_pointer.rs`) so `ptr_offset` can walk it and the size law holds.
+    /// An array-element place keeps its array + index (so the whole array becomes a
+    /// walkable region); any other place snapshots its single value.
+    pub(crate) fn eval_addr_of(&mut self, arg: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+        if let ExprKind::Index { target, index } = &arg.kind {
+            let base = self.eval_expr(target, env)?;
+            let idx = self.eval_expr(index, env)?.as_i64()?;
+            let Value::Array(cells) = base else {
+                return Err(RuntimeError::new(
+                    "L0331",
+                    "addr_of expects an addressable array element",
+                ));
+            };
+            return self
+                .raw_ptrs
+                .addr_of_element(cells.into_vec(), idx)
+                .ok_or_else(|| {
+                    RuntimeError::new("L0331", "addr_of element has no defined memory layout")
+                });
+        }
+        let value = self.eval_expr(arg, env)?;
+        self.raw_ptrs
+            .addr_of_value(value)
+            .ok_or_else(|| RuntimeError::new("L0331", "addr_of place has no defined memory layout"))
+    }
+
+    /// `ptr_offset(p, n) -> ptr<T>`: element-scaled pointer arithmetic
+    /// (`p + n*size_of(T)`). On the interpreters the stride comes from the region
+    /// `p` addresses, so the size law
+    /// `ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p) == size_of(T)` holds. A
+    /// pointer not produced by `addr_of` (an `alloc`/`int_to_ptr` heap-slot handle)
+    /// has no walkable region and is rejected.
+    pub(crate) fn builtin_ptr_offset(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ptr, count]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("ptr_offset", 2, args.len()))?;
+        let addr = ptr.as_ptr()?;
+        let n = count.as_i64()?;
+        self.raw_ptrs
+            .offset(addr, n)
+            .map(Value::Ptr)
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    "L0406",
+                    "ptr_offset requires a pointer produced by addr_of (an addressable region)",
+                )
+            })
+    }
+
+    /// `ptr_cast(p) -> ptr<U>`: reinterpret a raw pointer's pointee type. No value
+    /// conversion and no address change — the byte address is preserved, so on the
+    /// interpreters this is the identity on the pointer handle (the new pointee type
+    /// is a static-only reinterpretation resolved by the type checker).
+    pub(crate) fn builtin_ptr_cast(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ptr]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("ptr_cast", 1, args.len()))?;
+        let addr = ptr.as_ptr()?;
+        Ok(Value::Ptr(addr))
     }
 
     pub(crate) fn builtin_read_file(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {

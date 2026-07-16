@@ -1,0 +1,14 @@
+# Storing through an `addr_of`-derived pointer is refused at run time with L0459.
+#
+# On the interpreters an `addr_of` address refers to a by-value SNAPSHOT of the
+# place, so this write could only mutate the snapshot — `x` would stay 1, whereas a
+# real `lea`-based native `addr_of` makes `x == 5`. Rather than silently return a
+# wrong answer on the only tier that can execute this today, the store is refused.
+# This is a temporary honest refusal: the native raw-pointer codegen increment makes
+# `addr_of` place-backed and lifts it. Reads and `ptr_offset` walks are supported.
+fn main -> i64
+    let x i64 = 1
+    unsafe
+        let p ptr<i64> = addr_of(x)
+        ptr_write(p, 5)
+    x

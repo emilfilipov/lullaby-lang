@@ -1,0 +1,6 @@
+# `addr_of` requires an addressable place; the address of a temporary (here an
+# arithmetic result) cannot be taken — L0458.
+fn main -> i64
+    unsafe
+        let p ptr<i64> = addr_of(1 + 2)
+        ptr_to_int(p)

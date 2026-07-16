@@ -37,6 +37,9 @@ pub(crate) struct IrRuntime<'a> {
     /// Enum variant name -> owning enum name. Variant names are globally unique.
     variants: HashMap<&'a str, &'a str>,
     heap: Vec<Option<Value>>,
+    /// Freestanding-tier byte-addressed raw-pointer space backing `addr_of` /
+    /// `ptr_offset` / `ptr_cast` (disjoint from `heap`; see runtime `raw_pointer.rs`).
+    raw_ptrs: RawPointerMemory,
     refcounts: HashMap<usize, usize>,
     /// Per-runtime table of open network sockets, mirroring the AST interpreter.
     /// A `Value::Socket(i)` indexes this vector; closing a socket clears its slot.
@@ -163,6 +166,7 @@ impl<'a> IrRuntime<'a> {
             structs,
             variants,
             heap: Vec::new(),
+            raw_ptrs: RawPointerMemory::default(),
             refcounts: HashMap::new(),
             sockets: Vec::new(),
             processes: Vec::new(),
@@ -567,7 +571,9 @@ impl<'a> IrRuntime<'a> {
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
-            "rc_get" | "ref_get" | "ptr_read" => self.builtin_ref_get(name, args),
+            "rc_get" | "ref_get" => self.builtin_ref_get(name, args),
+            // `ptr_read` routes through the raw-aware load (region or heap slot).
+            "ptr_read" => self.builtin_load(args),
             "rc_borrow" => self.builtin_rc_borrow(args),
             "ptr_write" => self.builtin_store(args),
             "size_of" => Self::builtin_size_of(args),
@@ -575,6 +581,8 @@ impl<'a> IrRuntime<'a> {
             "offset_of" => Self::builtin_offset_of(args),
             "ptr_to_int" => Self::builtin_ptr_to_int(args),
             "int_to_ptr" => Self::builtin_int_to_ptr(args),
+            "ptr_offset" => self.builtin_ptr_offset(args),
+            "ptr_cast" => Self::builtin_ptr_cast(args),
             // Volatile raw-memory access behaves exactly like `load`/`store` on
             // the interpreters' single-threaded abstract heap; the no-elision /
             // no-reordering guarantee is a native-codegen concern.
@@ -1301,6 +1309,11 @@ impl<'a> IrRuntime<'a> {
                 self.eval_binary(left, *op, right)
             }
             IrExprKind::Call { name, args } => {
+                // `addr_of(place)` is a special form needing the place expression;
+                // see the AST interpreter and runtime `raw_pointer.rs`.
+                if name == "addr_of" && args.len() == 1 {
+                    return self.eval_addr_of(&args[0], env);
+                }
                 let values = args
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
@@ -1561,11 +1574,16 @@ impl<'a> IrRuntime<'a> {
         let [ptr]: [Value; 1] = args
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("load", 1, args.len()))?;
-        let slot = ptr.as_ptr()?;
+        let addr = ptr.as_ptr()?;
+        if RawPointerMemory::is_raw(addr) {
+            return self.raw_ptrs.load(addr).ok_or_else(|| {
+                RuntimeError::new("L0406", format!("invalid raw pointer `{addr}`"))
+            });
+        }
         self.heap
-            .get(slot)
+            .get(addr)
             .and_then(|value| value.clone())
-            .ok_or_else(|| RuntimeError::new("L0406", format!("invalid pointer `{slot}`")))
+            .ok_or_else(|| RuntimeError::new("L0406", format!("invalid pointer `{addr}`")))
     }
 
     fn builtin_store(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1573,6 +1591,19 @@ impl<'a> IrRuntime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("store", 2, args.len()))?;
         let slot = ptr.as_ptr()?;
+        // A store through an `addr_of`-derived pointer is refused rather than
+        // silently mutating the by-value snapshot — see the AST interpreter's
+        // `builtin_store` and runtime `raw_pointer.rs`.
+        if RawPointerMemory::is_raw(slot) {
+            return Err(RuntimeError::new(
+                "L0459",
+                "storing through an `addr_of` pointer is not modelled on the interpreters \
+                 (the address refers to a by-value snapshot, so the write would not update \
+                 the original place); this requires native raw-pointer codegen. Reads and \
+                 `ptr_offset` walks through an `addr_of` pointer are supported — assign to \
+                 the place directly instead",
+            ));
+        }
         let Some(target) = self.heap.get_mut(slot) else {
             return Err(RuntimeError::new(
                 "L0406",
@@ -1587,6 +1618,60 @@ impl<'a> IrRuntime<'a> {
         }
         *target = Some(value);
         Ok(Value::Void)
+    }
+
+    /// `addr_of(place)` for the IR interpreter — mirrors the AST interpreter: an
+    /// array-element place snapshots the whole array into a walkable region; any
+    /// other place snapshots its single value. See runtime `raw_pointer.rs`.
+    fn eval_addr_of(&mut self, arg: &IrExpr, env: &Env) -> Result<Value, RuntimeError> {
+        if let IrExprKind::Index { target, index } = &arg.kind {
+            let base = self.eval_expr(target, env)?;
+            let idx = self.eval_expr(index, env)?.as_i64()?;
+            let Value::Array(cells) = base else {
+                return Err(RuntimeError::new(
+                    "L0331",
+                    "addr_of expects an addressable array element",
+                ));
+            };
+            return self
+                .raw_ptrs
+                .addr_of_element(cells.into_vec(), idx)
+                .ok_or_else(|| {
+                    RuntimeError::new("L0331", "addr_of element has no defined memory layout")
+                });
+        }
+        let value = self.eval_expr(arg, env)?;
+        self.raw_ptrs
+            .addr_of_value(value)
+            .ok_or_else(|| RuntimeError::new("L0331", "addr_of place has no defined memory layout"))
+    }
+
+    /// `ptr_offset(p, n)` — element-scaled by the region stride (see AST
+    /// interpreter and runtime `raw_pointer.rs`).
+    fn builtin_ptr_offset(&self, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ptr, count]: [Value; 2] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("ptr_offset", 2, args.len()))?;
+        let addr = ptr.as_ptr()?;
+        let n = count.as_i64()?;
+        self.raw_ptrs
+            .offset(addr, n)
+            .map(Value::Ptr)
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    "L0406",
+                    "ptr_offset requires a pointer produced by addr_of (an addressable region)",
+                )
+            })
+    }
+
+    /// `ptr_cast(p)` — reinterpret the pointee type; identity on the address.
+    fn builtin_ptr_cast(args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let [ptr]: [Value; 1] = args
+            .try_into()
+            .map_err(|args: Vec<Value>| Self::wrong_arity("ptr_cast", 1, args.len()))?;
+        let addr = ptr.as_ptr()?;
+        Ok(Value::Ptr(addr))
     }
 
     fn builtin_dealloc(&mut self, args: Vec<Value>) -> Result<Value, RuntimeError> {

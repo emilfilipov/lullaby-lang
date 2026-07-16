@@ -1176,6 +1176,12 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|| TypeRef::new("ptr<i64>"));
                 Some(result)
             }
+            // Freestanding raw-pointer addressing surface (stage 2). Each is
+            // `unsafe`-gated exactly like the delivered raw-pointer builtins and
+            // typed in `semantics_raw_ptr.rs`.
+            "addr_of" => self.check_addr_of(args, call_span, scope, function),
+            "ptr_offset" => self.check_ptr_offset(args, call_span, scope, function),
+            "ptr_cast" => self.check_ptr_cast(args, call_span, expected, scope, function),
             // `volatile_load(p) -> T` / `volatile_store(p, v)`: raw pointer
             // element read/write with volatile semantics (no elision or
             // reordering). Type-check exactly like `ptr_read`/`ptr_write`; the
