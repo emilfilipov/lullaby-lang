@@ -1,0 +1,48 @@
+# `addr_of` is PLACE-BACKED: the pointer aliases the original storage, so writes
+# through it mutate the place and reads through it observe independent mutations of
+# the place. This is what a real `lea`-based native `addr_of` does. (Stage 2 modelled
+# the place as a by-value snapshot and could do neither, so it refused stores with
+# L0459; stage 3 retires that refusal for every case shown here.)
+#
+# main = 5 (write-through) + 99 (read-after-independent-write) + 300 (offset write)
+#      + 60 (struct field) + 40 (whole-array decay) + 21 (nested s.arr[i]) = 525.
+struct Pair
+    lo i64
+    hi i64
+
+struct Holder
+    arr array<i64>
+    tag i64
+
+fn main -> i64
+    let x i64 = 1
+    let a array<i64> = [10, 20, 30, 40]
+    let d array<i64> = [40, 50]
+    let p Pair = Pair(7, 9)
+    let h Holder = Holder([1, 2, 3], 0)
+    let out i64 = 0
+    unsafe
+        # A write through the pointer mutates the local itself.
+        let px ptr<i64> = addr_of(x)
+        ptr_write(px, 5)
+        out = out + x
+        # A read through the pointer sees a later, independent write to the local
+        # (a by-value snapshot would still report 5 here).
+        x = 99
+        out = out + ptr_read(px)
+        # A write through an offset pointer hits the addressed element for real.
+        let base ptr<i64> = addr_of(a[0])
+        ptr_write(ptr_offset(base, 2), 300)
+        out = out + a[2]
+        # A struct-field address aliases the field.
+        let hp ptr<i64> = addr_of(p.hi)
+        ptr_write(hp, 60)
+        out = out + p.hi
+        # Whole-array decay: addr_of(d) is addr_of(d[0]).
+        let dp ptr<i64> = addr_of(d)
+        out = out + ptr_read(dp)
+        # A path through a struct field down to an array element.
+        let ip ptr<i64> = addr_of(h.arr[1])
+        ptr_write(ip, 21)
+        out = out + h.arr[1]
+    out

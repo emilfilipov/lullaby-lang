@@ -205,7 +205,7 @@ impl<'a> IrRuntime<'a> {
     /// moved-out placeholder observable by a surrounding `catch`. Excludes
     /// closure/func-valued variables, `extern`/`async` functions, trait methods,
     /// user functions, and `assert` (the one builtin that raises `L0420`).
-    fn is_move_safe_builtin(&self, name: &str, env: &Env) -> bool {
+    fn is_move_safe_builtin(&self, name: &str, env: &mut Env) -> bool {
         if matches!(
             env.get_ref(name),
             Some(Value::Closure(_)) | Some(Value::Func(_))
@@ -719,7 +719,14 @@ impl<'a> IrRuntime<'a> {
             function: function.name.as_str(),
             span: Some(function.span),
         });
+        // Open a raw-pointer frame around the call, exactly as the AST interpreter
+        // does: the callee's locals are a different `Env`, so a caller's
+        // place-backed `addr_of` pointer must refuse to resolve while we are inside
+        // rather than silently name the wrong storage. Regions this frame creates
+        // die on the way out. See `lullaby_runtime::raw_pointer`.
+        let outer_frame = self.raw_ptrs.enter_frame();
         let result = self.eval_block(&function.body, &mut env);
+        self.raw_ptrs.exit_frame(outer_frame);
 
         // Attach the traceback lazily. `with_traceback` records only the first
         // (innermost) stack, so eagerly cloning `call_stack` on every successful
@@ -909,7 +916,12 @@ impl<'a> IrRuntime<'a> {
         for (name, value) in def.params.iter().zip(args) {
             env.define(name.clone(), value);
         }
-        self.eval_expr(&def.body, &env)
+        // A closure body is its own frame — see the AST interpreter's
+        // `invoke_closure` and runtime `raw_pointer.rs`.
+        let outer_frame = self.raw_ptrs.enter_frame();
+        let result = self.eval_expr(&def.body, &mut env);
+        self.raw_ptrs.exit_frame(outer_frame);
+        result
     }
 
     fn eval_block(
@@ -1172,7 +1184,7 @@ impl<'a> IrRuntime<'a> {
     fn resolve_places(
         &mut self,
         path: &[IrPlace],
-        env: &Env,
+        env: &mut Env,
     ) -> Result<Vec<ResolvedPlace>, RuntimeError> {
         path.iter()
             .map(|place| match place {
@@ -1187,7 +1199,7 @@ impl<'a> IrRuntime<'a> {
     /// Resolve a bare name to a value: a local binding (name scan), else a known
     /// unit enum variant, else a first-class function value. Shared by the
     /// `Variable` and (on a slot miss) `Local` evaluation arms.
-    fn eval_variable_name(&self, name: &str, env: &Env) -> Result<Value, RuntimeError> {
+    fn eval_variable_name(&self, name: &str, env: &mut Env) -> Result<Value, RuntimeError> {
         match env.get(name) {
             Ok(value) => Ok(value),
             Err(error) => {
@@ -1206,7 +1218,7 @@ impl<'a> IrRuntime<'a> {
         }
     }
 
-    fn eval_expr(&mut self, expr: &IrExpr, env: &Env) -> Result<Value, RuntimeError> {
+    fn eval_expr(&mut self, expr: &IrExpr, env: &mut Env) -> Result<Value, RuntimeError> {
         let result = match &expr.kind {
             IrExprKind::Integer(value) => Ok(Value::I64(*value)),
             IrExprKind::Float(value) => Ok(Value::F64(*value)),
@@ -1337,7 +1349,14 @@ impl<'a> IrRuntime<'a> {
                     }
                     _ => name,
                 };
-                self.dispatch_named_call(target, values)
+                // A dereference of an `addr_of` pointer reads/writes the *original
+                // place*, so it needs this frame's `env` — which the by-name builtin
+                // dispatch does not carry. Handle the deref family here, where `env`
+                // is still in scope. See runtime `raw_pointer.rs`.
+                match self.eval_raw_deref(target, values, env) {
+                    Ok(result) => result,
+                    Err(values) => self.dispatch_named_call(target, values),
+                }
             }
             IrExprKind::Await { expr } => {
                 let value = self.eval_expr(expr, env)?;
@@ -1575,9 +1594,17 @@ impl<'a> IrRuntime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("load", 1, args.len()))?;
         let addr = ptr.as_ptr()?;
+        // The `env`-less path: a builtin reached as a first-class function value
+        // rather than through `eval_expr`'s deref hook. An `addr_of` address names a
+        // place only `env` can reach, so fail closed rather than approximate. See
+        // the AST interpreter's `raw_or_heap_load` and runtime `raw_pointer.rs`.
         if RawPointerMemory::is_raw(addr) {
-            return self.raw_ptrs.load(addr).ok_or_else(|| {
-                RuntimeError::new("L0406", format!("invalid raw pointer `{addr}`"))
+            return Err(match self.raw_ptrs.resolve(addr) {
+                RawResolve::Unmapped => unmapped_raw(addr),
+                RawResolve::Dangling { name } => dangling_place(&name),
+                RawResolve::Escaped { name } | RawResolve::Place { name, .. } => {
+                    escaped_pointer(&name)
+                }
             });
         }
         self.heap
@@ -1591,18 +1618,16 @@ impl<'a> IrRuntime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("store", 2, args.len()))?;
         let slot = ptr.as_ptr()?;
-        // A store through an `addr_of`-derived pointer is refused rather than
-        // silently mutating the by-value snapshot — see the AST interpreter's
-        // `builtin_store` and runtime `raw_pointer.rs`.
+        // The `env`-less counterpart of `builtin_load`'s raw branch: a place-backed
+        // store needs this frame's `env`, so fail closed here.
         if RawPointerMemory::is_raw(slot) {
-            return Err(RuntimeError::new(
-                "L0459",
-                "storing through an `addr_of` pointer is not modelled on the interpreters \
-                 (the address refers to a by-value snapshot, so the write would not update \
-                 the original place); this requires native raw-pointer codegen. Reads and \
-                 `ptr_offset` walks through an `addr_of` pointer are supported — assign to \
-                 the place directly instead",
-            ));
+            return Err(match self.raw_ptrs.resolve(slot) {
+                RawResolve::Unmapped => unmapped_raw(slot),
+                RawResolve::Dangling { name } => dangling_place(&name),
+                RawResolve::Escaped { name } | RawResolve::Place { name, .. } => {
+                    escaped_pointer(&name)
+                }
+            });
         }
         let Some(target) = self.heap.get_mut(slot) else {
             return Err(RuntimeError::new(
@@ -1620,30 +1645,159 @@ impl<'a> IrRuntime<'a> {
         Ok(Value::Void)
     }
 
-    /// `addr_of(place)` for the IR interpreter — mirrors the AST interpreter: an
-    /// array-element place snapshots the whole array into a walkable region; any
-    /// other place snapshots its single value. See runtime `raw_pointer.rs`.
-    fn eval_addr_of(&mut self, arg: &IrExpr, env: &Env) -> Result<Value, RuntimeError> {
-        if let IrExprKind::Index { target, index } = &arg.kind {
-            let base = self.eval_expr(target, env)?;
-            let idx = self.eval_expr(index, env)?.as_i64()?;
-            let Value::Array(cells) = base else {
-                return Err(RuntimeError::new(
-                    "L0331",
-                    "addr_of expects an addressable array element",
-                ));
-            };
-            return self
+    /// `addr_of(place)` for the IR interpreter — mirrors the AST interpreter
+    /// exactly: the place is decomposed into a root binding plus a `ResolvedPlace`
+    /// path and registered as a place-backed region, so reads and writes through the
+    /// pointer reach the original storage and genuinely alias. See runtime
+    /// `raw_pointer.rs`.
+    fn eval_addr_of(&mut self, arg: &IrExpr, env: &mut Env) -> Result<Value, RuntimeError> {
+        let (name, mut path) = self.resolve_addr_of_path(arg, env)?;
+        let root = env
+            .locate(&name)
+            .ok_or_else(|| RuntimeError::new("L0403", format!("unknown variable `{name}`")))?;
+        let base = env
+            .at(&root)
+            .expect("`locate` just resolved this binding in this env");
+        let target = get_place(base, &path)?;
+
+        // An array-element place (`addr_of(a[i])`) and a whole-array place
+        // (`addr_of(a)`, decaying to `addr_of(a[0])`) both become a multi-cell
+        // region over the array itself, so pointer arithmetic walks real elements.
+        let element_index = match path.last() {
+            Some(ResolvedPlace::Index(_)) if !matches!(target, Value::Array(_)) => {
+                let Some(ResolvedPlace::Index(index)) = path.pop() else {
+                    unreachable!("guarded by the match arm above");
+                };
+                Some(index)
+            }
+            _ if matches!(target, Value::Array(_)) => Some(0),
+            _ => None,
+        };
+
+        match element_index {
+            Some(index) => {
+                let array = get_place(base, &path)?;
+                let Value::Array(cells) = array else {
+                    return Err(RuntimeError::new(
+                        "L0331",
+                        "addr_of expects an addressable array element",
+                    ));
+                };
+                self.raw_ptrs
+                    .addr_of_element(root, &name, path, &cells, index)
+                    .ok_or_else(|| {
+                        RuntimeError::new("L0331", "addr_of element has no defined memory layout")
+                    })
+            }
+            None => self
                 .raw_ptrs
-                .addr_of_element(cells.into_vec(), idx)
+                .addr_of_place(root, &name, path, &target)
                 .ok_or_else(|| {
-                    RuntimeError::new("L0331", "addr_of element has no defined memory layout")
-                });
+                    RuntimeError::new("L0331", "addr_of place has no defined memory layout")
+                }),
         }
-        let value = self.eval_expr(arg, env)?;
-        self.raw_ptrs
-            .addr_of_value(value)
-            .ok_or_else(|| RuntimeError::new("L0331", "addr_of place has no defined memory layout"))
+    }
+
+    /// Decompose an `addr_of` argument into its root binding name and the
+    /// `ResolvedPlace` path beneath it. Mirrors the AST interpreter's helper; the
+    /// checker already rejects `addr_of` of a temporary with `L0458`, so the final
+    /// arm is a defence-in-depth backstop.
+    fn resolve_addr_of_path(
+        &mut self,
+        arg: &IrExpr,
+        env: &mut Env,
+    ) -> Result<(String, Vec<ResolvedPlace>), RuntimeError> {
+        match &arg.kind {
+            IrExprKind::Variable(name) | IrExprKind::Local { name, .. } => {
+                Ok((name.clone(), Vec::new()))
+            }
+            IrExprKind::Field { target, field } => {
+                let (name, mut path) = self.resolve_addr_of_path(target, env)?;
+                path.push(ResolvedPlace::Field(field.clone()));
+                Ok((name, path))
+            }
+            IrExprKind::Index { target, index } => {
+                let (name, mut path) = self.resolve_addr_of_path(target, env)?;
+                let index = self.eval_expr(index, env)?.as_i64()?;
+                path.push(ResolvedPlace::Index(index));
+                Ok((name, path))
+            }
+            _ => Err(RuntimeError::new(
+                "L0458",
+                "addr_of requires an addressable place (a local, field, or array \
+                 element), not a temporary",
+            )),
+        }
+    }
+
+    /// The `addr_of`-aware dereference family — the IR counterpart of the AST
+    /// interpreter's hook. A raw-space address names a *place* in this frame, so
+    /// these need `env`, which the by-name builtin dispatch does not carry. Returns
+    /// `Err(values)` for any call this does not own, so the caller dispatches
+    /// normally.
+    #[allow(clippy::result_large_err)]
+    fn eval_raw_deref(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        env: &mut Env,
+    ) -> Result<Result<Value, RuntimeError>, Vec<Value>> {
+        match name {
+            "ptr_read" | "volatile_load" | "load" if values.len() == 1 => {
+                let Ok(addr) = values[0].as_ptr() else {
+                    return Err(values);
+                };
+                if !RawPointerMemory::is_raw(addr) {
+                    return Err(values);
+                }
+                Ok(self.raw_place_load(addr, env))
+            }
+            "ptr_write" | "volatile_store" | "store" if values.len() == 2 => {
+                let Ok(addr) = values[0].as_ptr() else {
+                    return Err(values);
+                };
+                if !RawPointerMemory::is_raw(addr) {
+                    return Err(values);
+                }
+                let mut values = values;
+                let value = values.pop().expect("two arguments were just matched");
+                Ok(self.raw_place_store(addr, value, env))
+            }
+            _ => Err(values),
+        }
+    }
+
+    /// Read the place a raw byte address names, through this frame's `env`.
+    fn raw_place_load(&self, addr: usize, env: &Env) -> Result<Value, RuntimeError> {
+        match self.raw_ptrs.resolve(addr) {
+            RawResolve::Place { root, path, name } => {
+                let base = env.at(&root).ok_or_else(|| dangling_place(&name))?;
+                get_place(base, &path)
+            }
+            RawResolve::Escaped { name } => Err(escaped_pointer(&name)),
+            RawResolve::Dangling { name } => Err(dangling_place(&name)),
+            RawResolve::Unmapped => Err(unmapped_raw(addr)),
+        }
+    }
+
+    /// Write the place a raw byte address names, through this frame's `env`. This is
+    /// what makes `ptr_write(addr_of(x), 5)` set `x` to `5`.
+    fn raw_place_store(
+        &mut self,
+        addr: usize,
+        value: Value,
+        env: &mut Env,
+    ) -> Result<Value, RuntimeError> {
+        match self.raw_ptrs.resolve(addr) {
+            RawResolve::Place { root, path, name } => {
+                let base = env.at_mut(&root).ok_or_else(|| dangling_place(&name))?;
+                set_place(base, &path, value)?;
+                Ok(Value::Void)
+            }
+            RawResolve::Escaped { name } => Err(escaped_pointer(&name)),
+            RawResolve::Dangling { name } => Err(dangling_place(&name)),
+            RawResolve::Unmapped => Err(unmapped_raw(addr)),
+        }
     }
 
     /// `ptr_offset(p, n)` — element-scaled by the region stride (see AST

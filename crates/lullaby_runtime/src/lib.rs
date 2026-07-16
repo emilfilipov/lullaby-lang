@@ -31,7 +31,10 @@ mod runtime_net;
 mod runtime_os;
 
 pub use interpreter::{run_main, run_main_with_args, run_named_function};
-pub use raw_pointer::{RAW_POINTER_BASE, RawPointerMemory};
+pub use raw_pointer::{
+    RAW_POINTER_BASE, RawPointerMemory, RawResolve, RootSlot, dangling_place, escaped_pointer,
+    next_env_id, unmapped_raw,
+};
 pub use runtime_concurrency::*;
 pub use runtime_error::*;
 pub use runtime_int::*;
@@ -517,16 +520,22 @@ pub fn get_place(value: &Value, path: &[ResolvedPlace]) -> Result<Value, Runtime
 }
 
 /// Set the value at a resolved place path in place.
+/// An **empty path addresses the root itself** — `set_place(&mut x, &[], v)` sets
+/// `x` to `v`. Ordinary assignment never takes this path (a bare `x = v` goes
+/// through `Env::assign`), but a place-backed `ptr_write(addr_of(x), v)` does, and
+/// silently doing nothing here would be exactly the kind of lost write the
+/// place-backed raw-pointer model exists to prevent. Keeping the empty case total
+/// makes `get_place`/`set_place` agree: `get_place(v, &[])` already returns `v`.
 pub fn set_place(root: &mut Value, path: &[ResolvedPlace], new: Value) -> Result<(), RuntimeError> {
+    let Some((last, parents)) = path.split_last() else {
+        *root = new;
+        return Ok(());
+    };
     let mut current = root;
-    for (index, place) in path.iter().enumerate() {
-        let slot = place_get_mut(current, place)?;
-        if index + 1 == path.len() {
-            *slot = new;
-            return Ok(());
-        }
-        current = slot;
+    for place in parents {
+        current = place_get_mut(current, place)?;
     }
+    *place_get_mut(current, last)? = new;
     Ok(())
 }
 

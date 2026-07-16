@@ -1,0 +1,11 @@
+# An MMIO-style address conjured with `int_to_ptr` happens to land in the raw-pointer
+# address space (>= 1<<44), but it is NOT an `addr_of` pointer — no address was ever
+# taken. The interpreters model memory abstractly and have no real address space, so
+# this cannot be dereferenced: L0406 (unmapped), never L0459 (which is about an
+# `addr_of` pointer outliving its place). A native freestanding target can do this for
+# real; the interpreters say so plainly instead of blaming a pointer that never existed.
+fn main -> i64
+    unsafe
+        let reg ptr<i64> = int_to_ptr(17592186044416)
+        volatile_store(reg, 1)
+    0

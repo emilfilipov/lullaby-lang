@@ -495,17 +495,32 @@ struct Mixed
   `ptr_offset`/`ptr_read` walk it and the size law holds; native/WASM cleanly skip a
   function using any raw-pointer builtin (native raw-pointer codegen is later work).
 
-  > **Limitation — you cannot write through an `addr_of` pointer yet.** Because the
-  > interpreters back an `addr_of` address with a **by-value snapshot**, it does not
-  > alias the original place: `ptr_write(addr_of(x), 5)` would leave `x` unchanged,
-  > where real native addressing sets `x = 5`. Rather than silently give a wrong
-  > answer on the only tier that can run this today, a `ptr_write`/`volatile_store`
-  > through an `addr_of` pointer is **rejected at run time with `L0459`**. Reads
-  > (`ptr_read`/`volatile_load`) and `ptr_offset` walks work correctly, and stores
-  > through an `alloc`/`int_to_ptr` pointer are unaffected. Assign to the place
-  > directly (`x = 5`, `a[i] = v`, `s.f = v`) instead. This restriction is temporary:
-  > the native raw-pointer codegen increment makes `addr_of` place-backed, after which
-  > write-through aliases properly and `L0459` retires.
+  > **`addr_of` aliases the place it addresses.** The interpreters back an `addr_of`
+  > address with the *place itself* (a root binding plus a field/index path), not a
+  > copy, so a pointer genuinely aliases in both directions: `ptr_write(addr_of(x), 5)`
+  > sets `x` to `5`, a `ptr_read` after an independent `x = 99` observes `99`, and a
+  > write through `ptr_offset(addr_of(a[0]), i)` mutates `a[i]`. This matches real
+  > `lea`-based native addressing.
+  >
+  > **Limitation — on the interpreters, an `addr_of` pointer is usable only within the
+  > body of the function that took the address.** Pointer-taking code cannot be
+  > factored into a helper there. Dereferencing a pointer from another frame is
+  > **refused at run time with `L0459`** rather than reading or writing the wrong
+  > storage. Two different things are refused, and only one is your program's fault:
+  >
+  > - **Dangling** — using a pointer whose block has ended, or returning `addr_of` of a
+  >   local. A genuine error: undefined behaviour in C, refused everywhere.
+  > - **Passed into a callee** — e.g. `poke(addr_of(x))`. This is **correct code**: the
+  >   out-parameter idiom, well-defined in C (a call does not end the caller's block),
+  >   and the **native backend supports it** for a scalar or struct-field place
+  >   (`addr_of` of an array element is not lowered natively either). The interpreters
+  >   refuse it only because each frame's locals live in that frame's own environment
+  >   and a callee cannot reach its caller's. This is an accepted **acceptance
+  >   divergence** between the tiers — loud on the interpreters, never silent.
+  >
+  > On the interpreters, pass or return the *value* instead of its address, or use an
+  > `alloc`-backed `ptr<T>`, which has no frame lifetime and is unaffected by any of
+  > this.
 
 ### Memory Safety Features
 

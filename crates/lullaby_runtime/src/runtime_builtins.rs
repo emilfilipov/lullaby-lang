@@ -959,7 +959,15 @@ impl<'a> Runtime<'a> {
             function: function.name.as_str(),
             span: Some(function.span),
         });
+        // Open a raw-pointer frame around the call. This is what lets an `addr_of`
+        // pointer tell "my place is reachable right here" from "my place belongs to
+        // some other frame's `env`, which I cannot see" — the callee's locals are a
+        // different `Env` object, so a caller's place-backed pointer must refuse to
+        // resolve while we are inside. Regions created by this frame die on the way
+        // out. See `raw_pointer.rs`.
+        let outer_frame = self.raw_ptrs.enter_frame();
         let result = self.eval_block(&function.body, &mut env);
+        self.raw_ptrs.exit_frame(outer_frame);
 
         // Attach the traceback lazily. `with_traceback` records only the first
         // (innermost) stack — every later frame's attach is a no-op — so eagerly
@@ -1052,7 +1060,13 @@ impl<'a> Runtime<'a> {
         for (name, value) in param_names.iter().zip(args) {
             env.define(name.clone(), value);
         }
-        self.eval_expr(body, &env)
+        // A closure body is its own frame: its locals live in this `Env`, so an
+        // `addr_of` taken here must not stay resolvable once the closure returns.
+        // See `raw_pointer.rs`.
+        let outer_frame = self.raw_ptrs.enter_frame();
+        let result = self.eval_expr(body, &mut env);
+        self.raw_ptrs.exit_frame(outer_frame);
+        result
     }
 
     pub(crate) fn eval_block(
