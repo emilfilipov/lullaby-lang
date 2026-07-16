@@ -684,17 +684,20 @@ impl<'a> Runtime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("store", 2, args.len()))?;
         let slot = ptr.as_ptr()?;
-        // An `addr_of`-derived byte address writes into its raw-pointer region
-        // snapshot; any other handle writes to the abstract heap slot.
+        // A store through an `addr_of`-derived pointer cannot be modelled: the
+        // region is a by-value snapshot, so writing it would NOT update the original
+        // binding the way a real `lea`-based native `addr_of` does. Refuse rather
+        // than silently return a wrong answer (see `raw_pointer.rs`). Lifted by the
+        // native raw-pointer codegen increment, which makes `addr_of` place-backed.
         if crate::RawPointerMemory::is_raw(slot) {
-            return if self.raw_ptrs.store(slot, value) {
-                Ok(Value::Void)
-            } else {
-                Err(RuntimeError::new(
-                    "L0406",
-                    format!("invalid raw pointer `{slot}`"),
-                ))
-            };
+            return Err(RuntimeError::new(
+                "L0459",
+                "storing through an `addr_of` pointer is not modelled on the interpreters \
+                 (the address refers to a by-value snapshot, so the write would not update \
+                 the original place); this requires native raw-pointer codegen. Reads and \
+                 `ptr_offset` walks through an `addr_of` pointer are supported — assign to \
+                 the place directly instead",
+            ));
         }
         let Some(target) = self.heap.get_mut(slot) else {
             return Err(RuntimeError::new(

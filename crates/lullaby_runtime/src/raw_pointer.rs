@@ -18,13 +18,22 @@
 //! `ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p) == size_of(T)` hold on the
 //! interpreters exactly as it does in real native addressing.
 //!
-//! The region snapshots the place by value, so a write *through* an `addr_of`
-//! pointer mutates the snapshot, not the original binding — the interpreters model
-//! raw reads/walks (the freestanding fixtures), while true byte-exact aliasing is a
-//! native-codegen concern (as it already is for `volatile_*`). The native backend
-//! does not yet compile the raw-pointer surface at all (a function using it skips
-//! to the interpreters), so there is no native/interpreter divergence to reconcile
-//! for these builtins today.
+//! **Reads and walks through an `addr_of` pointer are correct; stores are refused.**
+//! The region snapshots the place *by value*, so it does not alias the original
+//! binding: a `ptr_write`/`volatile_store` through an `addr_of`-derived pointer
+//! could only mutate the snapshot, which a real `lea`-based native `addr_of` would
+//! not do (`ptr_write(addr_of(x), 5)` must make `x == 5`). Rather than silently
+//! return a wrong answer on the only tier that can execute this today, such a store
+//! is **rejected at run time with `L0459`** on all three interpreters. This is a
+//! deliberate, temporary honest refusal — *not* the intended permanent semantics.
+//! It is lifted by the native raw-pointer codegen increment, which also replaces
+//! this snapshot with a place-backed model (`ResolvedPlace{Field,Index}` + a root
+//! variable and path, the model assignment already uses) so stores alias properly.
+//!
+//! Note this is not the `volatile_*` situation: `volatile_load`/`volatile_store` on
+//! the interpreters are *semantically correct* (only the optimization barrier is
+//! unmodeled, and that is unobservable single-threaded). Here the value semantics
+//! themselves would be wrong, so the operation is refused instead of approximated.
 
 use crate::Value;
 
@@ -110,7 +119,14 @@ impl RawPointerMemory {
 
     /// Reserve a fresh region for `cells` with element `stride`, returning its byte
     /// base. Regions are laid out consecutively with a one-stride guard gap so two
-    /// regions never share an address.
+    /// adjacent regions never share an address.
+    ///
+    /// The gap is **not a bounds check**: it only separates neighbours by one
+    /// element, so a sufficiently out-of-range `addr_of(a[k])` (k at least two
+    /// elements past the end) can still land inside a later region and read it. That
+    /// mirrors C, where an out-of-range `&a[k]` is undefined behaviour — the region
+    /// model at least makes the outcome deterministic rather than arbitrary. Raw
+    /// pointer arithmetic is unchecked by definition inside `unsafe`.
     fn push_region(&mut self, cells: Vec<Value>, stride: usize) -> usize {
         let base = self.next_base;
         let span = stride.saturating_mul(cells.len()).max(stride).max(8);
@@ -179,22 +195,12 @@ impl RawPointerMemory {
                 .and_then(|index| region.cells.get(index).cloned())
         })
     }
-
-    /// Write the cell a raw byte address maps to (`ptr_write`/`volatile_store` for a
-    /// raw-space pointer), mutating the region snapshot. `false` when the address is
-    /// not inside any region.
-    pub fn store(&mut self, addr: usize, value: Value) -> bool {
-        for region in &mut self.regions {
-            if let Some(index) = region.cell_index(addr)
-                && let Some(slot) = region.cells.get_mut(index)
-            {
-                *slot = value;
-                return true;
-            }
-        }
-        false
-    }
 }
+
+// NOTE: there is deliberately no `store` here. A write through an `addr_of`
+// pointer cannot be modelled correctly against a by-value snapshot (see the module
+// header), so `ptr_write`/`volatile_store` on a raw-space address is refused with
+// `L0459` at the interpreter call sites rather than silently mutating the snapshot.
 
 #[cfg(test)]
 mod tests {
@@ -242,12 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn store_then_load_round_trips_within_a_region() {
+    fn addr_of_scalar_reads_back_the_value() {
         let mut mem = RawPointerMemory::default();
         let Value::Ptr(base) = mem.addr_of_value(Value::I64(41)).expect("addr_of scalar") else {
             panic!("addr_of should yield a pointer");
         };
-        assert!(mem.store(base, Value::I64(99)));
-        assert_eq!(mem.load(base), Some(Value::I64(99)));
+        // Reads through an `addr_of` pointer are correct. There is deliberately no
+        // `store` counterpart: a write cannot alias the snapshot, so the
+        // interpreters refuse it with `L0459` (see the module header).
+        assert_eq!(mem.load(base), Some(Value::I64(41)));
     }
 }

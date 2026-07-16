@@ -1591,15 +1591,18 @@ impl<'a> IrRuntime<'a> {
             .try_into()
             .map_err(|args: Vec<Value>| Self::wrong_arity("store", 2, args.len()))?;
         let slot = ptr.as_ptr()?;
+        // A store through an `addr_of`-derived pointer is refused rather than
+        // silently mutating the by-value snapshot — see the AST interpreter's
+        // `builtin_store` and runtime `raw_pointer.rs`.
         if RawPointerMemory::is_raw(slot) {
-            return if self.raw_ptrs.store(slot, value) {
-                Ok(Value::Void)
-            } else {
-                Err(RuntimeError::new(
-                    "L0406",
-                    format!("invalid raw pointer `{slot}`"),
-                ))
-            };
+            return Err(RuntimeError::new(
+                "L0459",
+                "storing through an `addr_of` pointer is not modelled on the interpreters \
+                 (the address refers to a by-value snapshot, so the write would not update \
+                 the original place); this requires native raw-pointer codegen. Reads and \
+                 `ptr_offset` walks through an `addr_of` pointer are supported — assign to \
+                 the place directly instead",
+            ));
         }
         let Some(target) = self.heap.get_mut(slot) else {
             return Err(RuntimeError::new(

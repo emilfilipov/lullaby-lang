@@ -411,3 +411,88 @@ fn ptr_offset_unsized_pointee_is_rejected() {
         "L0431",
     );
 }
+
+#[test]
+fn ptr_write_through_addr_of_is_refused_at_runtime() {
+    // A store through an `addr_of` pointer would only mutate the interpreters'
+    // by-value snapshot — `x` would stay 1 where real native addressing gives 5. It
+    // is refused with L0459 on every interpreter rather than silently returning the
+    // wrong answer. (Temporary: the native raw-pointer codegen increment makes
+    // `addr_of` place-backed and lifts this.) Reads/walks stay supported, and a
+    // store through an `alloc`/`int_to_ptr` heap-slot pointer is unaffected.
+    let path =
+        workspace_root().join("tests/fixtures/invalid/raw_ptr/ptr_write_through_addr_of.lby");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                path.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        let errors = stderr(&output);
+        assert!(
+            !output.status.success(),
+            "[{backend}] a store through an addr_of pointer must not silently succeed. \
+             stderr: {errors}"
+        );
+        assert!(
+            errors.contains("L0459"),
+            "[{backend}] expected the L0459 unmodelled-store refusal. stderr: {errors}"
+        );
+    }
+}
+
+/// The whole raw-pointer surface is interpreter-only today: no raw-pointer builtin
+/// has native codegen, so a function using `addr_of`/`ptr_offset`/`ptr_cast` is
+/// native-ineligible and the native command *cleanly skips* it via the existing
+/// `L0339` gate — a clean diagnostic naming the skipped function, never a
+/// produced-but-wrong executable. Pinned here rather than left to prose.
+#[test]
+fn addr_of_cleanly_skips_native() {
+    let fixture = workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_addr_of.lby");
+    let output = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        !output.status.success(),
+        "expected the L0339 no-eligible-function gate: {output:?}"
+    );
+    let errors = stderr(&output);
+    assert!(
+        errors.contains("L0339"),
+        "expected the no-eligible-function skip diagnostic: {errors}"
+    );
+    assert!(
+        errors.contains("skipped main"),
+        "expected `main` to be skipped natively: {errors}"
+    );
+}
+
+/// The WASM backend likewise cleanly skips the raw-pointer addressing surface with
+/// the existing `L0338` gate (the freestanding tier targets bare-metal native, not
+/// WASM), never miscompiling it.
+#[test]
+fn addr_of_cleanly_skips_wasm() {
+    let fixture = workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_addr_of.lby");
+    let output = lullaby()
+        .args(["wasm", fixture.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(
+        !output.status.success(),
+        "expected the L0338 no-eligible-function gate: {output:?}"
+    );
+    assert!(
+        stderr(&output).contains("L0338"),
+        "expected the WASM no-eligible-function skip diagnostic: {}",
+        stderr(&output)
+    );
+}
