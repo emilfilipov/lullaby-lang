@@ -1549,7 +1549,7 @@ pub(crate) fn arena_eligible_functions(
         }
         // (5) No `alloc` heap box — a manually-managed cell this analysis cannot see,
         // so a rewind could reclaim a live box (see `native_object_heapbox.rs`).
-        if alloc_defeats_arena(&function.instructions) {
+        if alloc_defeats_arena(&function.instructions, &module.closures) {
             continue;
         }
         arena.insert(name.clone());

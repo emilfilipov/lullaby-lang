@@ -108,6 +108,26 @@
 //! loop-edge rewind and the return-edge rewind are impossible. This costs only the
 //! arena optimization for such a function; correctness and codegen are otherwise
 //! unchanged.
+//!
+//! **The control experiment for this hazard is gate-removed-on-this-branch, NOT the
+//! base commit.** Before `alloc` had native codegen the whole leaf simply skipped
+//! (`L0339`), so the miscompile is one this module *introduces* and then defuses —
+//! measured at native `92` vs the interpreters' `2116` with `alloc_defeats_arena`
+//! disabled. Reproducing it at the base commit is not possible and is the wrong
+//! experiment.
+//!
+//! # The `ptr_cast` laundering route (why the identity gate covers it)
+//!
+//! `refuse_legacy_box_pointer` in `native_object_rawptr.rs` keys on the *spelling*
+//! `ptr_T`, and `ptr_cast` is free to CHANGE that spelling: `check_ptr_cast` derives
+//! its result type from the caller's annotation, not from the operand, so
+//! `let q ptr<i64> = ptr_cast(p)` turns a box into a `ptr<i64>` and `ptr_offset(q, 1)`
+//! would then stride 8 bytes past the one-cell payload into the NEXT block's `[size]`
+//! header — the word the allocator's free-list scan reads — so a write through it
+//! corrupts allocator metadata. `ptr_cast` is therefore gated on a `ptr_T` operand
+//! too. See `refuse_legacy_box_pointer`'s docs for why that gate is complete (it is
+//! the only builtin whose result type ignores its operand) and how it closes the
+//! cross-function laundering route through the demotion fixpoint.
 
 use super::*;
 
@@ -234,18 +254,33 @@ fn lower_alloc(
 /// exactly like [`body_takes_address`]'s register-promotion gate: it cannot be
 /// defeated by an aliasing pattern a finer analysis failed to see through, and it
 /// only ever DENIES an optimization — it never changes emitted semantics.
-pub(crate) fn alloc_defeats_arena(instrs: &[BytecodeInstruction]) -> bool {
-    instrs.iter().any(instr_allocates_box)
+///
+/// `closures` is the module's closure table, so a `Closure { id }` literal is
+/// resolved and its BODY scanned too. A closure body is a separate expression tree
+/// reachable only by id, so without this an `alloc` inside one would be invisible to
+/// the gate. (Today the Stage-1 closure rules make that shape hard to reach, but this
+/// gate guards a demonstrated miscompile, so it does not rely on a *different*
+/// subsystem's restrictions staying as they are.)
+///
+/// Scanning only the function's own body (plus its closures) is sound because arena
+/// eligibility independently requires the function to be a **leaf w.r.t. user code**
+/// (condition (3) of [`arena_eligible_functions`]): it calls no user or `extern`
+/// function, so an `alloc` cannot reach it from a callee.
+pub(crate) fn alloc_defeats_arena(
+    instrs: &[BytecodeInstruction],
+    closures: &[BytecodeClosureDef],
+) -> bool {
+    instrs.iter().any(|i| instr_allocates_box(i, closures))
 }
 
-fn instr_allocates_box(instr: &BytecodeInstruction) -> bool {
+fn instr_allocates_box(instr: &BytecodeInstruction, cls: &[BytecodeClosureDef]) -> bool {
     match instr {
         BytecodeInstruction::Let { value, .. } | BytecodeInstruction::Assign { value, .. } => {
-            expr_allocates_box(value)
+            expr_allocates_box(value, cls)
         }
         BytecodeInstruction::Return(Some(expr))
         | BytecodeInstruction::Expr(expr)
-        | BytecodeInstruction::Throw { value: expr, .. } => expr_allocates_box(expr),
+        | BytecodeInstruction::Throw { value: expr, .. } => expr_allocates_box(expr, cls),
         BytecodeInstruction::Return(None)
         | BytecodeInstruction::Break(_)
         | BytecodeInstruction::Continue(_)
@@ -257,12 +292,12 @@ fn instr_allocates_box(instr: &BytecodeInstruction) -> bool {
         } => {
             branches
                 .iter()
-                .any(|b| expr_allocates_box(&b.condition) || alloc_defeats_arena(&b.body))
-                || alloc_defeats_arena(else_body)
+                .any(|b| expr_allocates_box(&b.condition, cls) || alloc_defeats_arena(&b.body, cls))
+                || alloc_defeats_arena(else_body, cls)
         }
         BytecodeInstruction::While {
             condition, body, ..
-        } => expr_allocates_box(condition) || alloc_defeats_arena(body),
+        } => expr_allocates_box(condition, cls) || alloc_defeats_arena(body, cls),
         BytecodeInstruction::For {
             start,
             end,
@@ -270,43 +305,59 @@ fn instr_allocates_box(instr: &BytecodeInstruction) -> bool {
             body,
             ..
         } => {
-            expr_allocates_box(start)
-                || expr_allocates_box(end)
-                || step.as_ref().is_some_and(expr_allocates_box)
-                || alloc_defeats_arena(body)
+            expr_allocates_box(start, cls)
+                || expr_allocates_box(end, cls)
+                || step.as_ref().is_some_and(|s| expr_allocates_box(s, cls))
+                || alloc_defeats_arena(body, cls)
         }
-        BytecodeInstruction::Loop { body, .. } => alloc_defeats_arena(body),
+        BytecodeInstruction::Loop { body, .. } => alloc_defeats_arena(body, cls),
         BytecodeInstruction::Match {
             scrutinee, arms, ..
-        } => expr_allocates_box(scrutinee) || arms.iter().any(|a| alloc_defeats_arena(&a.body)),
+        } => {
+            expr_allocates_box(scrutinee, cls)
+                || arms.iter().any(|a| alloc_defeats_arena(&a.body, cls))
+        }
         BytecodeInstruction::Try {
             body, catch_body, ..
-        } => alloc_defeats_arena(body) || alloc_defeats_arena(catch_body),
+        } => alloc_defeats_arena(body, cls) || alloc_defeats_arena(catch_body, cls),
     }
 }
 
-fn expr_allocates_box(expr: &BytecodeExpr) -> bool {
+fn expr_allocates_box(expr: &BytecodeExpr, cls: &[BytecodeClosureDef]) -> bool {
+    expr_allocates_box_at(expr, cls, 0)
+}
+
+/// `depth` bounds closure-into-closure resolution. Ids are assigned in parse order
+/// and a body can only contain literals nested *within* it, so a cycle cannot occur
+/// in a well-formed module; the bound makes a malformed one terminate (returning
+/// `true` — conservative: it only denies the arena) instead of recursing forever.
+fn expr_allocates_box_at(expr: &BytecodeExpr, cls: &[BytecodeClosureDef], depth: u32) -> bool {
+    const MAX_CLOSURE_DEPTH: u32 = 16;
+    if depth > MAX_CLOSURE_DEPTH {
+        return true;
+    }
+    let go = |e: &BytecodeExpr| expr_allocates_box_at(e, cls, depth);
     match &expr.kind {
-        BytecodeExprKind::Call { name, args } => {
-            name == ALLOC_BUILTIN || args.iter().any(expr_allocates_box)
-        }
+        BytecodeExprKind::Call { name, args } => name == ALLOC_BUILTIN || args.iter().any(go),
         BytecodeExprKind::Unary { expr: inner, .. } | BytecodeExprKind::Await { expr: inner } => {
-            expr_allocates_box(inner)
+            go(inner)
         }
-        BytecodeExprKind::Binary { left, right, .. } => {
-            expr_allocates_box(left) || expr_allocates_box(right)
-        }
-        BytecodeExprKind::Array(values) => values.iter().any(expr_allocates_box),
-        BytecodeExprKind::Index { target, index } => {
-            expr_allocates_box(target) || expr_allocates_box(index)
-        }
-        BytecodeExprKind::Field { target, .. } => expr_allocates_box(target),
+        BytecodeExprKind::Binary { left, right, .. } => go(left) || go(right),
+        BytecodeExprKind::Array(values) => values.iter().any(go),
+        BytecodeExprKind::Index { target, index } => go(target) || go(index),
+        BytecodeExprKind::Field { target, .. } => go(target),
+        // A closure literal carries only its parse-order `id`; the body lives in the
+        // module's closure table. Resolve and scan it, so an `alloc` inside a closure
+        // is not invisible to the gate.
+        BytecodeExprKind::Closure { id } => cls
+            .iter()
+            .find(|c| c.id == *id)
+            .is_some_and(|c| expr_allocates_box_at(&c.body, cls, depth + 1)),
         BytecodeExprKind::Integer(_)
         | BytecodeExprKind::Float(_)
         | BytecodeExprKind::Bool(_)
         | BytecodeExprKind::Char(_)
         | BytecodeExprKind::String(_)
-        | BytecodeExprKind::Variable(_)
-        | BytecodeExprKind::Closure { .. } => false,
+        | BytecodeExprKind::Variable(_) => false,
     }
 }

@@ -404,6 +404,86 @@ fn native_ptr_offset_over_an_alloc_box_skips_gracefully() {
     );
 }
 
+/// `ptr_cast` LAUNDERS an `alloc` box past the spelling-keyed gate:
+/// `check_ptr_cast` derives its result type from the caller's ANNOTATION (defaulting
+/// to `ptr<i64>`), never from the operand, so `let q ptr<i64> = ptr_cast(p)` rewrites
+/// `ptr_i64` into the very spelling the gate keys on — after which `ptr_offset(q, 1)`
+/// strides 8 bytes past the one-cell payload into the NEXT block's `[size]` header,
+/// the word `__lullaby_alloc`'s free-list scan reads to decide reuse. A write there
+/// corrupts allocator metadata.
+///
+/// Measured before the fix, against interpreters that raise `L0406` / answer `0`:
+/// the strided read compiled and exited **0**; `ptr_to_int` gave a real address
+/// (**1073758240**) where the interpreters give the slot index **0**; and the strided
+/// write compiled and executed. All three must now skip.
+#[test]
+fn native_ptr_cast_cannot_launder_an_alloc_box() {
+    for (tag, tail) in [
+        ("read", "ptr_read(ptr_offset(q, 1))"),
+        ("identity", "ptr_to_int(q)"),
+        (
+            "write",
+            "ptr_write(ptr_offset(q, 1), 999999)\n        ptr_read(p)",
+        ),
+    ] {
+        assert_native_skips_because(
+            &format!(
+                "fn main -> i64\n    unsafe\n        let p ptr_i64 = alloc(7)\n        \
+                 let q ptr<i64> = ptr_cast(p)\n        {tail}\n"
+            ),
+            &format!("lullaby_alloc_cast_launder_{tag}"),
+            "`ptr_cast` over the `ptr_i64` produced by `alloc`",
+        );
+    }
+}
+
+/// The CROSS-FUNCTION laundering route: a helper takes the box and returns it cast to
+/// `ptr<i64>`, so `main` never mentions `ptr_i64`. The gate closes this for free — the
+/// helper's own `ptr_cast` site carries the `ptr_T` operand, so it refuses there, the
+/// helper skips, and the demotion fixpoint skips `main`. (Before the fix this compiled
+/// and exited 0 where the interpreters raise `L0406`.)
+#[test]
+fn native_ptr_cast_cannot_launder_an_alloc_box_across_a_function() {
+    assert_native_skips_because(
+        concat!(
+            "fn launder p ptr_i64 -> ptr<i64>\n",
+            "    unsafe\n",
+            "        ptr_cast(p)\n",
+            "\n",
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let p ptr_i64 = alloc(7)\n",
+            "        let q ptr<i64> = launder(p)\n",
+            "        ptr_read(ptr_offset(q, 1))\n",
+        ),
+        "lullaby_alloc_cast_launder_fn",
+        "`ptr_cast` over the `ptr_i64` produced by `alloc`",
+    );
+}
+
+/// The negative control for the `ptr_cast` gate, end-to-end: a genuine `ptr<T>` cast
+/// chain — `addr_of` -> `ptr_cast` to `ptr<u8>` -> `ptr_cast` back -> `ptr_offset` ->
+/// `ptr_to_int` — must still COMPILE and agree on all four tiers. The gate keys on the
+/// legacy `ptr_T` spelling only, so the documented `let bp ptr<byte> = ptr_cast(base)`
+/// idiom is untouched.
+#[test]
+fn native_ptr_cast_over_a_typed_pointer_still_works() {
+    assert_all_four_tiers_agree(
+        concat!(
+            "fn main -> i64\n",
+            "    let buf array<i64> = [1, 2, 3]\n",
+            "    unsafe\n",
+            "        let p ptr<i64> = addr_of(buf[0])\n",
+            "        let bp ptr<u8> = ptr_cast(p)\n",
+            "        let q ptr<i64> = ptr_cast(bp)\n",
+            "        let r ptr<i64> = ptr_offset(q, 1)\n",
+            "        ptr_read(r) + ptr_to_int(r) - ptr_to_int(q)\n",
+        ),
+        "lullaby_ptr_cast_typed_control",
+        10,
+    );
+}
+
 /// A box whose cell is not an 8-byte scalar has no width-exact native
 /// representation on the raw-pointer read path, so it skips cleanly rather than
 /// guessing a layout.

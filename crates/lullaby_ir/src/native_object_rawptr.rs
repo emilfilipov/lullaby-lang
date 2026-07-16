@@ -183,15 +183,15 @@ pub(crate) fn is_addressable_word_type(name: &str) -> bool {
 }
 
 /// Whether `name` is the **legacy `ptr_T` spelling** that only `alloc` produces, as
-/// opposed to the typed `ptr<T>` spelling. The two are distinct types to the
-/// checker (`let p ptr<i64> = alloc(8)` is `L0303`) and are NOT interchangeable at
-/// a function boundary (`L0313`), so a `ptr_T` value is always an `alloc`-derived
-/// heap box that never left the frame that created it.
+/// opposed to the typed `ptr<T>` spelling. The two are distinct types to the checker
+/// (`let p ptr<i64> = alloc(8)` is `L0303`) and are not interchangeable at a function
+/// boundary (`L0313`), so a `ptr_T`-typed expression is always an `alloc`-derived
+/// heap box.
 ///
-/// This is the provenance signal behind [`refuse_legacy_box_pointer`]: the
-/// interpreters model an `alloc` box as a heap-slot INDEX, not an address, so the
-/// builtins that expose a pointer's numeric identity or stride over it disagree
-/// with a real machine address and must not be lowered for such a pointer.
+/// **This is a spelling test, not a provenance analysis** — and that distinction is
+/// load-bearing, because one builtin can change the spelling. See
+/// [`refuse_legacy_box_pointer`] for why gating `ptr_cast` is what makes the spelling
+/// test sound as a whole-program property.
 fn is_legacy_box_pointer(name: &str) -> bool {
     name.starts_with("ptr_")
 }
@@ -208,10 +208,34 @@ fn is_legacy_box_pointer(name: &str) -> bool {
 ///   answers.
 /// * `ptr_offset(p, 1)` over a box is REFUSED by the interpreters at run time
 ///   (`L0406`: "ptr_offset requires a pointer produced by addr_of"). Natively it
-///   would stride 8 bytes off the end of a one-cell block into the allocator's own
-///   RC header — garbage, not a meaningful definition of the program.
+///   would stride 8 bytes past a one-cell payload straight into the NEXT block's
+///   `[size]` header — the word `__lullaby_alloc`'s free-list first-fit scan reads to
+///   decide reuse — so a write through it corrupts allocator metadata. Not garbage:
+///   *active* garbage.
 ///
-/// A `ptr<T>` operand (from `addr_of`/`int_to_ptr`) is unaffected: it keeps its full
+/// # Why `ptr_cast` is gated too (the laundering route)
+///
+/// `check_ptr_cast` (`semantics_raw_ptr.rs`) derives its result type from the
+/// **caller's expected annotation**, defaulting to `ptr<i64>`, and *never* from the
+/// operand. So `let q ptr<i64> = ptr_cast(p)` rewrites a `ptr_i64` box into a
+/// `ptr<i64>` — laundering away the very spelling this gate keys on, after which
+/// `ptr_offset(q, 1)` sails through. Gating `ptr_cast`'s operand closes it.
+///
+/// That gate is **complete, not whack-a-mole**, because `ptr_cast` is the only
+/// builtin whose result type ignores its operand:
+///
+/// * `check_ptr_offset` returns `Some(ptr_ty)` — it *preserves* the operand's type.
+/// * `check_addr_of` derives `ptr<T>` from the addressed **place**.
+/// * `int_to_ptr` takes an `i64`; the only way to get a box's address into one is
+///   `ptr_to_int`, refused above.
+///
+/// It closes the **cross-function** route for free: a laundering helper
+/// (`fn launder p ptr_i64 -> ptr<i64>` whose body is `ptr_cast(p)`) has the `ptr_T`
+/// operand *at its own `ptr_cast` site*, so it refuses there, skips, and the
+/// demotion fixpoint then skips every caller. Verified: that shape used to compile
+/// and exit 0 where the interpreters raise `L0406`.
+///
+/// A `ptr<T>` operand from `addr_of`/`int_to_ptr` is unaffected: it keeps its full
 /// existing lowering, including the buffer-walking `addr_of(buf[0])` + `ptr_offset`
 /// kernel idiom.
 fn refuse_legacy_box_pointer(pointer: &BytecodeExpr, builtin: &str) -> Result<(), String> {
@@ -305,10 +329,16 @@ fn lower_checked(
             };
             // `ptr_to_int` of an `alloc` box exposes the pointer's numeric identity,
             // which the interpreters define as a heap-slot index rather than an
-            // address — refuse (see `refuse_legacy_box_pointer`). `ptr_cast` only
-            // reinterprets the pointee type and `int_to_ptr` takes an integer, so
-            // neither exposes an `alloc` box's identity and both stay unrestricted.
-            if name == "ptr_to_int" {
+            // address. `ptr_cast` of one LAUNDERS its model: `check_ptr_cast` derives
+            // the result type from the CALLER'S ANNOTATION (defaulting to `ptr<i64>`),
+            // never from the operand, so `ptr_cast(box)` rewrites `ptr_i64` into
+            // `ptr<i64>` — the exact spelling this gate keys on — and every downstream
+            // check would then treat a one-cell box as a walkable typed pointer. Both
+            // are refused here (see `refuse_legacy_box_pointer`).
+            //
+            // `int_to_ptr` needs no gate: it takes an `i64`, and the only way to get a
+            // box's address into one is `ptr_to_int`, refused just above.
+            if matches!(name, "ptr_to_int" | "ptr_cast") {
                 refuse_legacy_box_pointer(operand, name)?;
             }
             lower_native_expr(ctx, operand, code)

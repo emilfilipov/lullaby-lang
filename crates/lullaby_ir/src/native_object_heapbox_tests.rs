@@ -287,7 +287,7 @@ fn an_alloc_using_function_is_excluded_from_arena_routing() {
     // The body-scan gate sees the `alloc`s (one in a `Let`, one in an `Assign`
     // nested inside a `for`).
     assert!(
-        alloc_defeats_arena(&h.instructions),
+        alloc_defeats_arena(&h.instructions, &module.closures),
         "the gate must see an `alloc` in a `Let` and in a loop-nested `Assign`"
     );
 
@@ -306,6 +306,148 @@ fn an_alloc_using_function_is_excluded_from_arena_routing() {
     assert!(
         !arena.contains("h"),
         "an `alloc`-using function must NOT be arena-routed (use-after-free): {arena:?}"
+    );
+}
+
+// -- The `ptr_cast` laundering route -----------------------------------------
+
+/// `ptr_cast` LAUNDERS an `alloc` box past a spelling-keyed gate: `check_ptr_cast`
+/// derives its result type from the caller's ANNOTATION (defaulting to `ptr<i64>`),
+/// never from the operand, so `let q ptr<i64> = ptr_cast(p)` rewrites `ptr_i64` into
+/// the very spelling `refuse_legacy_box_pointer` keys on.
+///
+/// Left open, `ptr_offset(q, 1)` then strides 8 bytes past the one-cell payload into
+/// the NEXT block's `[size]` header — the word `__lullaby_alloc`'s free-list scan
+/// reads — so a write through it corrupts allocator metadata. All three shapes must
+/// skip. (Measured before the fix: the `ptr_offset` read compiled and exited 0 where
+/// the interpreters raise `L0406`; `ptr_to_int` gave a real address where the
+/// interpreters give the slot index `0`; the write compiled and executed.)
+#[test]
+fn ptr_cast_cannot_launder_an_alloc_box() {
+    for (tag, tail) in [
+        ("read through a strided cast", "ptr_read(ptr_offset(q, 1))"),
+        ("identity through a cast", "ptr_to_int(q)"),
+        (
+            "write through a strided cast",
+            "ptr_write(ptr_offset(q, 1), 999999)\n        ptr_read(p)",
+        ),
+    ] {
+        let source = format!(
+            "fn main -> i64\n    unsafe\n        let p ptr_i64 = alloc(7)\n        \
+             let q ptr<i64> = ptr_cast(p)\n        {tail}\n"
+        );
+        assert_main_skips_because(&source, "`ptr_cast` over the `ptr_i64` produced by `alloc`");
+        let _ = tag;
+    }
+}
+
+/// The CROSS-FUNCTION laundering route: a helper takes a box and returns it cast to
+/// `ptr<i64>`, so the caller never mentions `ptr_i64` at all. The gate closes this
+/// for free — the helper's own `ptr_cast` site has the `ptr_T` operand, so it refuses
+/// there, the helper skips, and the demotion fixpoint skips every caller. (Before the
+/// fix this compiled and exited 0 where the interpreters raise `L0406`.)
+#[test]
+fn ptr_cast_cannot_launder_an_alloc_box_across_a_function() {
+    let source = concat!(
+        "fn launder p ptr_i64 -> ptr<i64>\n",
+        "    unsafe\n",
+        "        ptr_cast(p)\n",
+        "\n",
+        "fn main -> i64\n",
+        "    unsafe\n",
+        "        let p ptr_i64 = alloc(7)\n",
+        "        let q ptr<i64> = launder(p)\n",
+        "        ptr_read(ptr_offset(q, 1))\n",
+    );
+    match emit_native_program(&module_for(source)) {
+        Err(error) => assert_eq!(error.code, "L0339", "a skip must carry L0339"),
+        Ok(program) => {
+            assert!(
+                !program.compiled.contains(&"launder".to_string()),
+                "the laundering helper must NOT compile: {:?}",
+                program.compiled
+            );
+            assert!(
+                !program.compiled.contains(&"main".to_string()),
+                "main must demote once its laundering callee skips: {:?}",
+                program.compiled
+            );
+        }
+    }
+}
+
+/// The negative control for the `ptr_cast` gate: a genuine `ptr<T>` cast chain —
+/// `addr_of` -> `ptr_cast` to `ptr<u8>` -> `ptr_cast` back -> `ptr_offset` ->
+/// `ptr_to_int` — must still compile. The gate keys on the legacy `ptr_T` spelling
+/// only, so the documented `let bp ptr<byte> = ptr_cast(base)` idiom is untouched.
+/// (Verified end-to-end at 10 on all four tiers.)
+#[test]
+fn ptr_cast_over_a_typed_pointer_still_compiles() {
+    let program = emit_native_program(&module_for(concat!(
+        "fn main -> i64\n",
+        "    let buf array<i64> = [1, 2, 3]\n",
+        "    unsafe\n",
+        "        let p ptr<i64> = addr_of(buf[0])\n",
+        "        let bp ptr<u8> = ptr_cast(p)\n",
+        "        let q ptr<i64> = ptr_cast(bp)\n",
+        "        let r ptr<i64> = ptr_offset(q, 1)\n",
+        "        ptr_read(r) + ptr_to_int(r) - ptr_to_int(q)\n",
+    )))
+    .expect("emit");
+    assert!(
+        program.compiled.contains(&"main".to_string()),
+        "a genuine `ptr<T>` cast chain must still compile: skipped={:?}",
+        program.skipped
+    );
+}
+
+/// An `alloc` inside a CLOSURE body must be visible to the arena gate. A closure
+/// literal carries only its parse-order `id` — the body lives in the module's closure
+/// table — so a scan that stops at `Closure { .. }` would miss it entirely.
+///
+/// The shape is reachable (`fn x i64 -> ptr_read(alloc(x * 2))` type-checks and runs),
+/// and `h` here is otherwise arena-eligible: scalar return, touches the heap via the
+/// `string`, and is a leaf w.r.t. USER code (a closure call is not a module function,
+/// so `body_calls_user` does not see it). This is defense-in-depth — the box is read
+/// before the rewind today, so no miscompile is observable — but the gate guards a
+/// demonstrated miscompile and must not depend on that coincidence, nor on the
+/// Stage-1 closure rules staying as they are.
+#[test]
+fn an_alloc_inside_a_closure_body_defeats_arena() {
+    let module = module_for(concat!(
+        "fn h a i64 -> i64\n",
+        "    unsafe\n",
+        "        let f fn(i64) -> i64 = fn x i64 -> ptr_read(alloc(x * 2))\n",
+        "        let s string = to_string(a)\n",
+        "        f(a) + len(s)\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let total i64 = 0\n",
+        "    for i from 0 to 5\n",
+        "        total = total + h(i)\n",
+        "    total\n",
+    ));
+    let h = module
+        .functions
+        .iter()
+        .find(|f| f.name == "h")
+        .expect("h exists");
+    assert!(
+        !module.closures.is_empty(),
+        "the fixture must actually produce a closure body to scan"
+    );
+    // The scan must resolve the closure id and find the `alloc` in its body...
+    assert!(
+        alloc_defeats_arena(&h.instructions, &module.closures),
+        "an `alloc` inside a closure body must defeat the arena"
+    );
+    // ...and it must be the CLOSURE body that supplies it: with an empty closure
+    // table the same instructions are `alloc`-free, proving the scan is not merely
+    // seeing an `alloc` elsewhere in `h`.
+    assert!(
+        !alloc_defeats_arena(&h.instructions, &[]),
+        "the fixture's only `alloc` must be inside the closure body, or this test \
+         proves nothing about closure resolution"
     );
 }
 
@@ -334,7 +476,7 @@ fn an_alloc_free_function_keeps_its_arena() {
         .find(|f| f.name == "h")
         .expect("h exists");
     assert!(
-        !alloc_defeats_arena(&h.instructions),
+        !alloc_defeats_arena(&h.instructions, &module.closures),
         "a function with no `alloc` must not trip the gate"
     );
     let program = emit_native_program(&module).expect("emit");
