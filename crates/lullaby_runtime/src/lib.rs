@@ -48,9 +48,11 @@ pub use runtime_os::*;
 // interpreter types, the private process-pipe selector, the parser AST types,
 // and the standard-library/diagnostics types they name. `AssignOp` is also used
 // by `apply_compound` below.
+// The actor data model lives in the `actor` module, next to the scheduler that
+// owns it; `Runtime` only holds the tables.
+pub(crate) use actor::{ActorInstance, ActorMessage, ReplySlot, SupervisionAction};
 pub(crate) use interpreter::{
-    ActorInstance, ActorMessage, CallFrame, Control, Env, ParallelCallable, Runtime, index_into,
-    statement_span,
+    CallFrame, Control, Env, ParallelCallable, Runtime, index_into, statement_span,
 };
 pub(crate) use lullaby_diagnostics::{Span, TraceFrame};
 pub(crate) use lullaby_parser::{

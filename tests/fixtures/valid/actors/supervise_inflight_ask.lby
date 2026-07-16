@@ -1,0 +1,41 @@
+# Stage-4 supervision: an `ask` that is genuinely **in flight** — already queued
+# on the child's mailbox — when supervision stops the child.
+#
+# Both requests are enqueued before either turn runs. Awaiting the first runs its
+# turn, which fails; the supervisor stops the tank, and stopping purges the
+# mailbox — including the *second*, still-queued request. Its reply can never be
+# produced, so its slot is marked unavailable and `await`ing it reports `L0359`
+# deterministically. The pending asker is failed, never left hanging.
+actor Tank
+    state
+        level i64
+        cap i64
+
+    init capacity i64
+        level = 0
+        cap = capacity
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > cap
+            return err("overflow")
+        level += amount
+        ok(level)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank(10) supervise stop
+
+    # Queue both requests up front; neither has run yet.
+    let doomed Future<result<i64, string>> = ask t.deposit(99)
+    let inflight Future<result<i64, string>> = ask t.deposit(1)
+
+    # Running the first fails the tank and stops it, purging `inflight`.
+    println(describe(await doomed))
+
+    # `inflight` was queued behind the failure and can never run: L0359, not a hang.
+    println(describe(await inflight))
+    0

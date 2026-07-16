@@ -467,3 +467,326 @@ fn ref_in_enum_payload_reply_is_not_sendable() {
         "L0353",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stage 4: supervision / failure handling.
+//
+// Actor failure is **result-based, not panic-based**. Decision A5 aborts on a
+// contract violation and does not unwind, so a supervisor has nothing to catch;
+// the supervised failure channel is instead a handler declared `-> result<R, E>`
+// replying `err(e)`. A genuine panic still aborts the program and is never
+// supervised — `supervised_panic_aborts_the_program` pins that boundary, and it
+// must not be "fixed" into a supervised failure.
+//
+// Supervision is opt-in via `spawn NAME(args) supervise restart|stop|escalate`,
+// because `err` is also the ordinary recoverable-error channel.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn supervise_restart_gives_the_child_fresh_state() {
+    // Two good deposits accumulate (4, then 7) — a supervised child that succeeds
+    // is completely unaffected by having a policy. The third overflows: the
+    // handler replies `err`, the asker still receives that `err`, and the
+    // supervisor then restarts the tank. The restart is observable in the fourth
+    // deposit: it lands on fresh state (5), not on the pre-failure level (12).
+    let output = run_ast("tests/fixtures/valid/actors/supervise_restart.lby");
+    assert!(
+        output.status.success(),
+        "supervise restart should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "ok 4\nok 7\nerr overflow\nok 5\n0\n");
+}
+
+#[test]
+fn supervise_stop_terminates_the_child_and_drops_later_tells() {
+    // The failing deposit replies `err` to its asker, then the policy stops the
+    // tank for good. A later `tell` to a stopped actor is dropped (a
+    // fire-and-forget send has no channel to report on), so the program still
+    // drains to a clean exit.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_stop.lby");
+    assert!(
+        output.status.success(),
+        "supervise stop should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "ok 4\nerr overflow\nafter stop\n0\n");
+}
+
+#[test]
+fn ask_to_a_stopped_actor_fails_deterministically() {
+    // An `ask` to an actor supervision has stopped can never be answered. The
+    // reply type is the user's own `result<i64, string>` and the runtime cannot
+    // fabricate an inhabitant of an arbitrary `E`, so this is a clean L0359 —
+    // never a fabricated `err`, and above all never a hang.
+    assert_run_fails(
+        "tests/fixtures/valid/actors/supervise_ask_stopped.lby",
+        "L0359",
+    );
+}
+
+#[test]
+fn an_ask_in_flight_when_the_child_stops_is_failed_not_hung() {
+    // Both requests are queued before either runs. Awaiting the first fails the
+    // tank and stops it, which purges the mailbox — including the second,
+    // still-queued request. Its slot is marked unavailable, so awaiting it
+    // reports L0359 rather than waiting forever for a turn that will never run.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_inflight_ask.lby");
+    assert!(
+        !output.status.success(),
+        "an in-flight ask across a stop should fail"
+    );
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("L0359"),
+        "the purged in-flight asker should report L0359. stderr: {stderr}"
+    );
+    // The failure itself still reached its own asker as an ordinary `err` value.
+    assert_eq!(stdout(&output), "err overflow\n");
+}
+
+#[test]
+fn an_ask_in_flight_across_a_restart_is_served_by_the_fresh_actor() {
+    // A restart preserves the mailbox, so a request queued behind the failing one
+    // is not lost: it runs on the restarted actor. `init` reset the level to 0, so
+    // the in-flight deposit of 2 replies `ok 2` (not `ok 8`). The failing message
+    // is *not* replayed — it was consumed by the turn that returned `err` — which
+    // is why a restart cannot loop on a poison message.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_inflight_restart.lby");
+    assert!(
+        output.status.success(),
+        "an in-flight ask across a restart should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "ok 6\nerr overflow\nok 2\n0\n");
+}
+
+#[test]
+fn supervise_escalate_walks_up_a_nested_supervision_tree() {
+    // main --restart--> Manager --escalate--> Worker. The Worker's failure is not
+    // handled locally: the Worker stops and the failure passes to the Manager,
+    // which applies its own `restart`. The Manager's handler still completes
+    // normally first (returning -1) — a supervisory action lands at the turn
+    // boundary, never underneath a running turn — and the restart is then
+    // observable: the fresh Worker has a full budget, so spending 4 leaves 6.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_escalate_nested.lby");
+    assert!(
+        output.status.success(),
+        "nested escalate should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "6\n-1\n6\n0\n");
+}
+
+#[test]
+fn escalation_that_reaches_the_root_stops_the_program() {
+    // An actor spawned from `main` is a root actor with no supervisor, so an
+    // escalation from it has nowhere to go. The failure is not silently
+    // discarded: the program stops with a deterministic L0362.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_escalate_root.lby");
+    assert!(
+        !output.status.success(),
+        "escalation to the root should stop the program"
+    );
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("L0362"),
+        "escalation to the root should report L0362. stderr: {stderr}"
+    );
+    // The successful open ran; "unreachable" after the escalation never printed.
+    assert_eq!(stdout(&output), "ok 1\n");
+}
+
+#[test]
+fn supervised_panic_aborts_the_program() {
+    // THE A5 BOUNDARY PIN. Do not "improve" this into a supervised failure.
+    //
+    // The actor is supervised with `restart` and has a fallible handler, so
+    // supervision is fully armed — and its `dig(5)` failure is duly handled as a
+    // result-based failure. But its `bug` handler indexes out of bounds: a
+    // contract violation, i.e. a *bug*. Per decision A5 that aborts the program
+    // deterministically and does not unwind, so a supervisor has nothing to catch.
+    // It is NOT restarted, NOT stopped, and "unreachable" never prints.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_panic_aborts.lby");
+    assert!(
+        !output.status.success(),
+        "a panicking handler must abort the program, not be supervised"
+    );
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("L0413"),
+        "a bounds violation in a handler must abort with the bounds diagnostic, \
+         not be turned into a supervised failure. stderr: {stderr}"
+    );
+    // The `err` path was supervised; the panic path aborted before "unreachable".
+    assert_eq!(stdout(&output), "err no such hole\n");
+}
+
+#[test]
+fn a_failing_init_is_caught_instead_of_restarting_forever() {
+    // A restart cannot loop on a poison message, but an `init` that itself drives
+    // a child to fail re-fails on every restart. Rather than spin forever, the
+    // scheduler reports a deterministic L0363 on the second attempt.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_restart_loop.lby");
+    assert!(!output.status.success(), "a failing init should be caught");
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("L0363"),
+        "a failing init should report L0363 rather than looping. stderr: {stderr}"
+    );
+    // Exactly two attempts ran — the original and one restart — then it stopped.
+    assert_eq!(
+        stdout(&output),
+        "init saw always fails\ninit saw always fails\n"
+    );
+}
+
+#[test]
+fn supervision_composes_with_message_ownership() {
+    // Stage-3 semantics are unchanged by supervision: a moved payload stays moved
+    // and is discarded with the restarted actor's state, `shared<T>` is not
+    // consumed by a send (so `tag` is still readable at the end, and `init`
+    // re-supplies it from the retained spawn argument on restart), and copy-set
+    // values stay usable across sends.
+    let output = run_ast("tests/fixtures/valid/actors/supervise_ownership.lby");
+    assert!(
+        output.status.success(),
+        "ownership composition should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        "ok 1\nvault holds 1\nerr vault full\nvault holds 0\ntag still readable: vault\n0\n"
+    );
+}
+
+#[test]
+fn move_into_a_supervised_message_is_still_use_after_send() {
+    // A failed handler does not hand its payload back and a restart discards it,
+    // so a value moved into a message stays moved whatever supervision does. -> L0357
+    assert_check_rejects(
+        "tests/fixtures/invalid/actors/supervise_move_use_after_send.lby",
+        "L0357",
+    );
+}
+
+#[test]
+fn supervise_on_an_actor_that_cannot_fail_is_rejected() {
+    // `Counter` declares no fallible handler and the program uses no `escalate`,
+    // so the policy could never apply. This is the diagnostic that corrects the
+    // most likely misconception: supervision does not catch panics. -> L0358
+    assert_check_rejects(
+        "tests/fixtures/invalid/actors/supervise_no_fallible_handler.lby",
+        "L0358",
+    );
+}
+
+#[test]
+fn no_runtime_rejects_supervision() {
+    // The freestanding tier has no scheduler, so it has no supervision either.
+    // The `supervise` clause rides on the existing `spawn` node, so it inherits
+    // the same L0441 gate with no new tier plumbing. -> L0441
+    assert_check_rejects(
+        "tests/fixtures/invalid/no_runtime/actor_supervise.lby",
+        "L0441",
+    );
+}
+
+#[test]
+fn supervise_ir_and_bytecode_reject_cleanly() {
+    // Supervision runs on the AST interpreter only. Because the `supervise` clause
+    // is a field on the existing `spawn` node rather than a new construct, the
+    // IR/bytecode backends reject it through the stage-1 `L0355` gate unchanged.
+    let path = workspace_root().join("tests/fixtures/valid/actors/supervise_restart.lby");
+    for backend in ["ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                path.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        let stderr = stderr(&output);
+        assert!(
+            !output.status.success(),
+            "{backend} should reject a supervised actor program. stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("L0355"),
+            "{backend} should reject with L0355. stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn supervise_clause_formats_idempotently() {
+    // The formatter must render the `supervise POLICY` clause back out, so a
+    // formatted program still supervises. Dropping it would silently unsupervise
+    // an actor — a formatter changing program behavior — so pin both that the
+    // clause survives and that re-formatting is a fixed point.
+    let path = workspace_root().join("tests/fixtures/valid/actors/supervise_escalate_nested.lby");
+    let first = lullaby()
+        .args(["fmt", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run fmt");
+    assert!(first.status.success(), "fmt failed: {}", stderr(&first));
+    let formatted = stdout(&first);
+    assert!(
+        formatted.contains("supervise restart"),
+        "fmt must preserve `supervise restart`; dropping it would unsupervise the \
+         actor. output: {formatted}"
+    );
+    assert!(
+        formatted.contains("supervise escalate"),
+        "fmt must preserve `supervise escalate`. output: {formatted}"
+    );
+
+    let temp = std::env::temp_dir().join("lullaby_actor_supervise_fmt_idempotent.lby");
+    std::fs::write(&temp, &formatted).expect("write temp");
+    let second = lullaby()
+        .args(["fmt", temp.to_str().expect("temp path")])
+        .output()
+        .expect("run fmt again");
+    assert!(
+        second.status.success(),
+        "second fmt failed: {}",
+        stderr(&second)
+    );
+    assert_eq!(stdout(&second), formatted, "fmt must be idempotent");
+}
+
+#[test]
+fn supervise_output_is_byte_identical_across_repeated_runs() {
+    // Determinism is the property stages 2-4 are held to: supervision adds
+    // restart/stop/escalate decisions to the schedule, and every one of them must
+    // be reproducible. The scheduler is single-threaded and run-to-completion, and
+    // supervisory actions land at deterministic turn boundaries, so the same
+    // program produces byte-identical output on every run.
+    for fixture in [
+        "tests/fixtures/valid/actors/supervise_restart.lby",
+        "tests/fixtures/valid/actors/supervise_stop.lby",
+        "tests/fixtures/valid/actors/supervise_inflight_ask.lby",
+        "tests/fixtures/valid/actors/supervise_inflight_restart.lby",
+        "tests/fixtures/valid/actors/supervise_escalate_nested.lby",
+        "tests/fixtures/valid/actors/supervise_escalate_root.lby",
+        "tests/fixtures/valid/actors/supervise_restart_loop.lby",
+        "tests/fixtures/valid/actors/supervise_ownership.lby",
+    ] {
+        let first = run_ast(fixture);
+        for _ in 0..4 {
+            let again = run_ast(fixture);
+            assert_eq!(
+                stdout(&first),
+                stdout(&again),
+                "{fixture} stdout must be identical on every run"
+            );
+            assert_eq!(
+                first.status.code(),
+                again.status.code(),
+                "{fixture} exit code must be identical on every run"
+            );
+        }
+    }
+}

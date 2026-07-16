@@ -1,0 +1,42 @@
+# Stage-4 supervision: an escalation that runs out of supervisors.
+#
+# `main` is not an actor, so an actor spawned from it is a *root* actor with no
+# supervisor. Escalating a root actor's failure has nowhere to go: there is no
+# supervisor left to apply a policy. Rather than silently discard the failure —
+# the one outcome that would make supervision untrustworthy — the program stops
+# with the deterministic runtime error `L0362`.
+#
+# The fix for a program that hits this is to give the actor a policy that handles
+# the failure locally (`restart`/`stop`), or to spawn it under a supervisor actor
+# that can absorb the escalation.
+actor Gate
+    state
+        opened i64
+
+    init
+        opened = 0
+
+    on open key i64 -> result<i64, string>
+        if key != 42
+            return err("bad key")
+        opened += 1
+        ok(opened)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    # A root actor: spawned from `main`, so it has no supervisor to escalate to.
+    let g Actor<Gate> = spawn Gate() supervise escalate
+
+    # The correct key: no failure, nothing escalates.
+    println(describe(await ask g.open(42)))
+
+    # A bad key fails the handler. `escalate` stops the gate and looks for a
+    # supervisor to hand the failure to — and finds none. -> L0362
+    println(describe(await ask g.open(7)))
+
+    println("unreachable")
+    0

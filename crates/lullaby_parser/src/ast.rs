@@ -47,6 +47,59 @@ pub struct Program {
     pub is_no_runtime: bool,
 }
 
+/// What a supervisor does when a supervised child's fallible handler returns
+/// `err` — the `POLICY` in a `spawn NAME(args) supervise POLICY` clause.
+///
+/// **Actor failure is result-based, not panic-based.** Lullaby's decided failure
+/// semantics (A5) abort the program on a contract/memory-safety violation and do
+/// **not** unwind, so a supervisor cannot catch a panicking child — there is
+/// nothing to catch. A genuine panic inside a handler (an out-of-bounds index, a
+/// divide-by-zero) is a *bug* and still aborts the whole program; it is never
+/// supervised. The supervised failure channel is instead the one A5 already
+/// designates for recoverable failure: a handler declared `-> result<R, E>` that
+/// returns `err(e)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SupervisionPolicy {
+    /// `supervise restart` — discard the child's state, re-run its `init` with
+    /// the original `spawn` arguments, and keep the same `Actor<T>` handle
+    /// valid. Messages already queued for the child are preserved.
+    Restart,
+    /// `supervise stop` — terminate the child. Its queued messages are dropped,
+    /// and any queued/subsequent `ask` to it resolves to a deterministic
+    /// `L0359` runtime error rather than hanging.
+    Stop,
+    /// `supervise escalate` — stop the child and fail its supervisor in turn,
+    /// applying *that* actor's own policy. Escalation that reaches an
+    /// unsupervised parent or the root (`main`) terminates the program with a
+    /// deterministic `L0362`.
+    Escalate,
+}
+
+impl SupervisionPolicy {
+    /// The source spelling of this policy, as written after `supervise`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+            Self::Escalate => "escalate",
+        }
+    }
+
+    /// Parse a policy from the identifier following `supervise`, or `None` when
+    /// the word is not one of the three policies. (Deliberately not
+    /// `std::str::FromStr`: these are contextual words recognized only after
+    /// `supervise`, not a general-purpose parse of arbitrary strings.)
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "restart" => Some(Self::Restart),
+            "stop" => Some(Self::Stop),
+            "escalate" => Some(Self::Escalate),
+            _ => None,
+        }
+    }
+}
+
 /// An actor declaration: `actor NAME` followed by a `state` block of private
 /// fields, an optional `init <params>` constructor, and one or more
 /// `on <handler> <params> [-> T]` message handlers. An actor bundles isolated
@@ -808,14 +861,27 @@ pub enum ExprKind {
     /// signal, and the IR lowerer desugars it into `let`/`match`/`return` so no
     /// IR node (and thus no native/WASM backend change) is needed.
     Try(Box<Expr>),
-    /// `spawn NAME(args)`: construct an actor of type `NAME`, run its `init`
-    /// with `args`, schedule it, and yield a typed handle `Actor<NAME>`. The
-    /// handle is the only way to reach the actor; it carries no reference into
-    /// the actor's private heap. Only the AST interpreter runs actors; the
-    /// IR/bytecode/native/WASM backends reject or cleanly skip an actor program.
+    /// `spawn NAME(args) [supervise POLICY]`: construct an actor of type `NAME`,
+    /// run its `init` with `args`, schedule it, and yield a typed handle
+    /// `Actor<NAME>`. The handle is the only way to reach the actor; it carries
+    /// no reference into the actor's private heap. Only the AST interpreter runs
+    /// actors; the IR/bytecode/native/WASM backends reject or cleanly skip an
+    /// actor program.
+    ///
+    /// The optional `supervise POLICY` clause makes the spawning context this
+    /// actor's **supervisor** and declares what happens when one of its fallible
+    /// (`-> result<R, E>`) handlers returns `err` — see [`SupervisionPolicy`].
+    /// `None` (no clause) means the child is **unsupervised**: an `err` reply is
+    /// then just an ordinary value the asker matches on, exactly as for any
+    /// other `result`-returning code.
     Spawn {
         actor: String,
         args: Vec<Expr>,
+        /// The restart policy from a `supervise` clause, or `None` when the
+        /// child is unsupervised. Serde-defaulted to `None` so existing
+        /// single-file artifacts and AST snapshots stay valid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supervise: Option<SupervisionPolicy>,
     },
     /// A message send to the actor addressed by `target` (an `Actor<T>` handle).
     /// This one node carries both message-send forms, distinguished by `is_ask`:

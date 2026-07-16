@@ -1,0 +1,54 @@
+# Stage-4 supervision — THE A5 BOUNDARY PIN. Do not "fix" this fixture by making
+# it supervised; that would be a regression, not an improvement.
+#
+# This actor is supervised with `restart` AND has a fallible handler, so
+# supervision is fully armed. It then hits a genuine **panic**: an out-of-bounds
+# index. That is a *bug*, not a supervised failure, and Lullaby's decided failure
+# semantics (A5) say a contract violation aborts the program deterministically and
+# does **not** unwind. So:
+#
+#   - The program ABORTS with the bounds diagnostic (L0413).
+#   - `boom` is NOT restarted, NOT stopped, and the supervisor never sees it.
+#   - "unreachable" is never printed.
+#
+# A supervisor cannot catch a panicking child because there is nothing to catch —
+# no unwinding exists to intercept, by design (it is what keeps the abort path
+# allocation-free and freestanding-safe). The supervised failure channel is
+# `-> result<R, E>` replying `err`, which `dig(0)` below exercises normally. You
+# do not restart an actor that hit a bug; you fix the bug.
+actor Digger
+    state
+        holes list<i64>
+
+    init
+        let fresh list<i64> = list_new()
+        holes = push(fresh, 7)
+
+    # A fallible handler: this is the supervised failure channel, and it works.
+    on dig index i64 -> result<i64, string>
+        if index >= len(holes)
+            return err("no such hole")
+        ok(get(holes, index))
+
+    # NOT a failure channel: this handler has a bug. Indexing past the end is a
+    # contract violation, so it aborts the program rather than failing the actor.
+    on bug index i64 -> i64
+        get(holes, index)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let d Actor<Digger> = spawn Digger() supervise restart
+
+    # The recoverable path: `err` is a supervised failure, handled by the policy.
+    println(describe(await ask d.dig(5)))
+
+    # The bug path: an out-of-bounds index aborts the whole program (L0413).
+    # Supervision does not and must not intercept it.
+    println(to_string(await ask d.bug(99)))
+
+    println("unreachable")
+    0

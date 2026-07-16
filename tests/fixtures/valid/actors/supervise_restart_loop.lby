@@ -1,0 +1,38 @@
+# Stage-4 supervision: the one restart loop that *is* possible, caught cleanly.
+#
+# A restart can never loop on a poison message — the failing message is consumed
+# by the turn that returned `err`, so a restart never replays it. But an `init`
+# that drives a child to fail *during construction* re-fails every time it is
+# re-run, so restarting can never produce a working actor. That is a broken actor,
+# not a supervisable failure.
+#
+# `Broken`'s `init` spawns an escalating `Kid` and asks it to do something that
+# always fails. The escalation stops the Kid and restarts `Broken`, whose `init`
+# fails again identically. Rather than spin forever, the scheduler reports the
+# deterministic runtime error `L0363` on the second attempt.
+actor Kid
+    on go -> result<i64, string>
+        err("always fails")
+
+actor Broken
+    state
+        kid Actor<Kid>
+        started i64
+
+    init
+        started = 1
+        kid = spawn Kid() supervise escalate
+        # The Kid fails -> escalates -> Kid stops and `Broken` restarts, re-running
+        # this same `init`, which fails the same way again.
+        let outcome result<i64, string> = await ask kid.go()
+        match outcome
+            ok(v) -> println("ok " + to_string(v))
+            err(m) -> println("init saw " + m)
+
+    on ping -> i64
+        started
+
+fn main -> i64
+    let b Actor<Broken> = spawn Broken() supervise restart
+    println(to_string(await ask b.ping()))
+    0

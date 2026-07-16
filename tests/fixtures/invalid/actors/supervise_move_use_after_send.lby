@@ -1,0 +1,31 @@
+# Stage-3 ownership composed with stage-4 supervision: a value moved into a
+# message stays moved, whatever supervision later does to the recipient.
+#
+# `words` is an owned aggregate, so `ask v.deposit(words)` MOVES it. The handler
+# is fallible and the vault is supervised with `restart`, so this send may well
+# fail and restart the actor — but that changes nothing for the sender: a failed
+# handler does not hand the payload back, and a restart discards it along with the
+# rest of the actor's state. The moved binding is dead either way. -> L0357
+actor Vault
+    state
+        held i64
+
+    init
+        held = 0
+
+    on deposit words list<string> -> result<i64, string>
+        if len(words) > 3
+            return err("vault full")
+        held += len(words)
+        ok(held)
+
+fn main -> i64
+    let v Actor<Vault> = spawn Vault() supervise restart
+
+    let empty list<string> = list_new()
+    let words list<string> = push(empty, "a")
+    let outcome result<i64, string> = await ask v.deposit(words)
+
+    # `words` was moved into the message above. Supervision does not resurrect it.
+    println(to_string(len(words)))
+    0

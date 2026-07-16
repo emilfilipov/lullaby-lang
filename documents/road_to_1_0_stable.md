@@ -196,14 +196,21 @@ These are all **loud refusals, never miscompiles** — but each was a deferral, 
   — all rejected). Stages 2+ (static-buffer arenas, inline asm operands, MMIO/port-IO,
   interrupt/naked, direct-ELF/flat-binary) remain — the long pole to kernel capability.
   **Stage 2 (raw-pointer surface `addr_of`/`ptr_offset`/`ptr_cast`) IN FLIGHT.**
-- **Actors — stages 1–3 SHIPPED** (AST interpreter tier; IR/bytecode/native/WASM keep
+- **Actors — stages 1–4 SHIPPED** (AST interpreter tier; IR/bytecode/native/WASM keep
   clean deferral). Stage 2 = `ask`/`await`/`Future<R>` request-response with a
   deterministic run-to-completion scheduler (deadlock → L0356). Stage 3 = message
   ownership: move-by-default + use-after-send (L0357), type-driven copy set, `shared<T>`,
   and a fully transitive sendability predicate (L0353 now recurses into struct
-  fields/enum payloads). Stage 4 (supervision/failure) is PARKED pending a design pass:
-  under A5 (abort, no unwinding) a supervisor can't catch a panicking child — likely
-  needs result-based actor failure. Directional; raise with owner before building.
+  fields/enum payloads). **Stage 4 = supervision** (`spawn X() supervise
+  restart|stop|escalate`), per owner decision **C1**: failure is result-based and **A5
+  stands** — `err(e)` is supervised, a genuine panic aborts. The boundary is structural
+  (a `RuntimeError` propagates out of the turn before the policy is consulted) and pinned
+  by a test verified load-bearing. Supervision is opt-in and `ask`-to-stopped is `L0359`
+  rather than a fabricated `err` — both deviations from the design doc forced by C1 and
+  confirmed in review. Restart storms are structurally impossible (the failing message is
+  consumed, never replayed), so no backoff exists. Zero backend edits: the clause is a
+  field on the existing `Spawn` node, so every tier deferral is inherited.
+  **Stages 5–6 remain**: `join_all`/`select` + back-pressure, then native/WASM actor codegen.
 - **A1 generics — COMPLETE across native + WASM.** Native monomorphization (scalar +
   one-level-heap-`string`) + **inherent-method dispatch** (generic AND non-generic,
   reviewed PASS, zero miscompiles). **WASM at A1 parity** (monomorphization shipped;

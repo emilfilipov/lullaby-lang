@@ -1,0 +1,38 @@
+# Stage-4 supervision: `ask`ing an actor that supervision has stopped.
+#
+# The reply type is the user's own `result<i64, string>`, and the runtime cannot
+# conjure an inhabitant of an arbitrary `E` to fake an `err` with — so a reply
+# that can never be produced is reported as the deterministic runtime error
+# `L0359` rather than being faked, and above all rather than hanging. `await` in
+# this scheduler always terminates: it resolves, deadlocks (`L0356`), or reports
+# an unavailable reply (`L0359`).
+actor Tank
+    state
+        level i64
+        cap i64
+
+    init capacity i64
+        level = 0
+        cap = capacity
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > cap
+            return err("overflow")
+        level += amount
+        ok(level)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank(10) supervise stop
+
+    # This failure stops the tank; the asker still receives the `err`.
+    println(describe(await ask t.deposit(99)))
+
+    # The tank is stopped, so this request can never run a turn. `await` reports
+    # L0359 deterministically instead of waiting for a reply that will never come.
+    println(describe(await ask t.deposit(1)))
+    0

@@ -957,10 +957,20 @@ fn render_expr(expr: &Expr) -> String {
             let end = end.as_deref().map(render_expr).unwrap_or_default();
             format!("{}[{start}:{end}]", render_postfix_target(target))
         }
-        // `spawn NAME(args)` — construct and schedule an actor.
-        ExprKind::Spawn { actor, args } => {
+        // `spawn NAME(args) [supervise POLICY]` — construct and schedule an
+        // actor, optionally under a supervision policy. The clause is rendered
+        // back verbatim so the form round-trips to the same `Spawn` node.
+        ExprKind::Spawn {
+            actor,
+            args,
+            supervise,
+        } => {
             let args = args.iter().map(render_expr).collect::<Vec<_>>().join(", ");
-            format!("spawn {actor}({args})")
+            let clause = match supervise {
+                Some(policy) => format!(" supervise {}", policy.as_str()),
+                None => String::new(),
+            };
+            format!("spawn {actor}({args}){clause}")
         }
         // `tell`/`ask TARGET.HANDLER(args)` — a message send. Rendered back in
         // method-call syntax so it re-parses to the same `Tell` node; the verb is

@@ -1,0 +1,44 @@
+# Stage-4 supervision: `supervise stop`. The same fallible `Tank`, but the
+# supervisor's policy terminates the child on failure instead of restarting it.
+#
+# The failing `deposit` still replies `err` to its asker (the reply is published
+# before the policy runs), and the tank then stops for good. A later `tell` to a
+# stopped actor is dropped — a fire-and-forget send has no channel to report on —
+# so the program still exits cleanly.
+actor Tank
+    state
+        level i64
+        cap i64
+
+    init capacity i64
+        level = 0
+        cap = capacity
+
+    on drain
+        level = 0
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > cap
+            return err("overflow")
+        level += amount
+        ok(level)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank(10) supervise stop
+
+    println(describe(await ask t.deposit(4)))
+
+    # Over capacity: the handler replies `err`, the asker sees it, and the
+    # supervisor stops the tank.
+    println(describe(await ask t.deposit(99)))
+
+    # The tank is stopped: this `tell` is dropped rather than queued, so no
+    # `drain` turn ever runs and the program drains to a clean exit.
+    tell t.drain()
+    println("after stop")
+    0

@@ -1,8 +1,11 @@
 # Lullaby Concurrency Model Design — Actors + Intra-Actor Async
 
-**Status:** Design proposal, 2026-07-14. **Stage 1 delivered, 2026-07-15**
-(actor core + `spawn` + fire-and-forget `tell`, on the AST interpreter — see
-"Stage 1 delivery" below). This document proposes the concrete, buildable shape
+**Status:** Design proposal, 2026-07-14. **Stages 1–4 delivered** on the AST
+interpreter (actor core + `spawn`/`tell`; `ask`/`await`/`Future`; message
+ownership; supervision — see the "Stage N delivery" sections below).
+**Stage 4 supersedes the panic-based supervision sketch in §2.6/§2.7:** actor
+failure is result-based, because decision A5 aborts without unwinding and so
+leaves a supervisor nothing to catch. This document proposes the concrete, buildable shape
 of Lullaby's **safe-tier concurrency model**: real parallelism via **actors on a
 thread pool**, with **structured `async`/`await` for concurrency *within* a
 single actor**.
@@ -177,14 +180,183 @@ AST interpreter, realizing §2.3 (move vs copy vs immutable-share) and §3.3
   Extended: `L0353` is now fully transitive through struct fields and enum
   payloads.
 - **Deferred to later stages (unchanged):** a send-site `copy e` escape hatch and
-  true zero-copy allocation handoff on move (stage 4+/8); supervision/failure
-  (stage 4); `join_all`/`select`, back-pressure/`try_tell` (stage 5); native/WASM
+  true zero-copy allocation handoff on move (stage 5+/8); supervision/failure
+  (stage 4 — **now delivered**, see below); `join_all`/`select`, back-pressure/`try_tell` (stage 5); native/WASM
   actor codegen (stage 6); eager `shared<T>` reclamation (stage 8). A future,
   fully path-insensitive loop re-check for cross-iteration use-after-send is a
   possible stage-4 hardening.
 
+## Stage 4 delivery (2026-07-16)
+
+Stage 4 of §5.2 — **supervision / failure handling** — is implemented and
+test-locked on the AST interpreter. It **supersedes the panic-based "let it
+crash" sketch in §2.6/§2.7 below**, which was written before decision A5 was
+settled and does not survive contact with it. Read this section, not §2.7, for
+what supervision is.
+
+### Actor failure is result-based, not panic-based
+
+Supervision as originally sketched (§2.7: a handler that hits a bounds violation
+"crashes the actor", its supervisor is notified) requires **catching a panicking
+child**. Lullaby cannot do that, and will not learn to:
+[execution_tiers_and_1_0_scope.md](execution_tiers_and_1_0_scope.md)'s decision
+**A5** says a contract/memory-safety violation **aborts and does not unwind** —
+that is what keeps the abort path allocation-free under the GC-free arena model
+and viable in freestanding code. With no unwinding there is nothing to catch, and
+carving out an actor-shaped exception would forfeit exactly those properties.
+
+**A5 stands unchanged; there is no scoped exception.** Instead, supervision uses
+the channel A5 already designates for recoverable failure. A5's own reasoning is
+that "recoverable errors flow through `result`/`?`/throw-catch, so panics are for
+bugs" — stage 4 is that principle applied to actors:
+
+- A **fallible handler** is declared `-> result<R, E>` (the stage-2 reply typing,
+  unchanged). Replying `err(e)` is an actor **failure**: normal, expected,
+  recoverable.
+- A **supervisor** observes that `err` and applies a **restart policy**. That is
+  the entire failure channel.
+- A **genuine panic** — an out-of-bounds index, a divide-by-zero — is a **bug**.
+  It aborts the whole program exactly as it would anywhere else and is never
+  supervised. You do not restart an actor that hit a bug; you fix the bug.
+  (Pinned by `supervised_panic_aborts_the_program` in `suite14.rs`.)
+
+Erlang's "let it crash" is not being copied, deliberately. It depends on a
+substrate Lullaby does not have: isolated OS-level processes and cheap
+restartable ones. Lullaby has a deterministic single-threaded scheduler and
+non-unwinding aborts. Copying the *surface* without the *substrate* would be
+dishonest — it would promise fault isolation the runtime cannot deliver.
+
+### Delivered surface
+
+- **`spawn NAME(args) supervise restart|stop|escalate`** — the spawn-site clause
+  of §2.6, kept verbatim. `supervise`, `restart`, `stop` and `escalate` are
+  **contextual** identifiers recognized only in this position (like stage-1's
+  `state`/`init`/`on`), so no keyword is reserved and code using those words as
+  names is unaffected. The clause is a field on the existing `Spawn` node, so it
+  is not a new construct for any backend to learn.
+- **Supervision is opt-in — a deviation from decision 8, on purpose.** Decision 8
+  ("default `stop`") was written for *panic*-based crashes, where a crash is
+  unambiguous. Under result-based failure it does not survive: `err` is *also* the
+  ordinary recoverable-error channel. §2.7's own example has `withdraw` replying
+  `err("insufficient funds")` — a correct answer to a normal request, which must
+  not terminate the actor. So a child with **no `supervise` clause is
+  unsupervised**, and its `err` is simply a value the asker matches on. Only an
+  explicit clause marks a child's `err` as a supervised failure. The spirit of
+  decision 8 is preserved and strengthened: resilience is an explicit, considered
+  choice, and the default is the least surprising behavior.
+- **The supervisor is the spawning actor**, per §2.6's supervision tree rooted at
+  `main`. It is implicit in `spawn`, so there is no way to supervise a non-child
+  and no diagnostic is needed for one.
+
+### What a restart does — exactly
+
+- **State:** discarded and zero-initialized, then `init` re-runs with the
+  arguments the original `spawn` supplied (retained for this purpose). A restarted
+  actor is indistinguishable from a freshly spawned one.
+- **Handle:** unchanged. The `Actor<T>` keeps its identity, so every holder stays
+  valid and addresses the restarted actor — the point of restarting rather than
+  respawning.
+- **Mailbox:** preserved (as §2.6 specifies). Messages already queued are
+  delivered, in order, to the restarted actor.
+- **The failing message:** not replayed. It was *consumed* by the turn that
+  replied `err`, and its asker has already received that `err`.
+- **In-flight `ask`s:** the failing request's asker receives the child's own
+  `err(e)` — the reply is published into its slot **before** the policy is
+  applied, so a failure is never lost and no asker strands. A request still queued
+  behind it is served by the restarted actor.
+- **Supervision links:** carried over; a restarted actor is still supervised.
+
+**No restart loop is possible from a poison message** — it is consumed rather than
+retried — so the backoff/restart-limit policy §2.7 called for is not needed, and
+none is implemented. The one loop that *can* occur is an `init` that itself fails
+(it spawns an escalating child and drives it to fail during construction); that is
+a broken actor rather than a supervisable failure, and it is caught deterministically
+as **`L0363`** on the second attempt instead of spinning.
+
+### What `stop` and `escalate` do
+
+- **`stop`** terminates the child: it runs no further turns. Its mailbox is
+  purged — a queued `tell` is dropped, and a queued `ask` has its reply slot
+  marked unavailable. A later `tell` to a stopped actor is dropped (a
+  fire-and-forget send has no channel to report on).
+- **`escalate`** stops the child and hands the failure to its supervisor, which
+  applies *its own* policy. This terminates: a supervisor is always spawned before
+  its children, so each step strictly decreases the actor id and the links form a
+  forest. An escalation that reaches a root actor (spawned from `main`, so it has
+  no supervisor) or an unsupervised parent has nowhere left to go; rather than
+  silently discard the failure, the program stops with **`L0362`**.
+
+### `ask` to a stopped actor: a clean error, not a fabricated `err`
+
+§2.7 proposed that an `ask` to a stopped actor "resolves the `Future` to a failure
+(`result::err` with a 'recipient unavailable' `E`)". **That is not implementable
+and is not what ships.** The reply type is the *program's own* `result<R, E>`; the
+runtime cannot conjure an inhabitant of an arbitrary user `E`, and inventing one
+would be a fabricated value flowing into user code. The liveness requirement §2.7
+was protecting is met honestly instead: the reply slot is marked **unavailable**
+and `await` reports the deterministic runtime error **`L0359`**.
+
+`await` in this scheduler therefore always terminates — it resolves, deadlocks
+(`L0356`), or reports an unavailable reply (`L0359`). Never a hang.
+
+### Determinism
+
+Unchanged and non-negotiable: the scheduler is single-threaded and
+run-to-completion, so the turn sequence is identical on every run, and every
+supervisory decision is a deterministic function of it. Two properties do the work:
+
+- **A supervisory action lands at a turn boundary.** If its target is mid-turn —
+  the usual case for an escalation, whose supervisor is typically blocked in
+  `await ask child...` — the action is deferred until that turn completes. This is
+  load-bearing, not tidiness: a turn holds the actor's `state` in its environment
+  and writes it back on completion, so restarting a busy actor would let the outer
+  turn clobber the fresh state with the stale copy it had taken, silently
+  resurrecting the failed child's handle.
+- **An actor's action is a function of its own single policy**, so repeated
+  failures within one turn agree and there is no ordering ambiguity to resolve.
+
+Verified by running every stage-4 fixture repeatedly and asserting byte-identical
+stdout and exit codes (`supervise_output_is_byte_identical_across_repeated_runs`).
+
+### Composition with stage-3 ownership
+
+Unchanged by supervision. A moved payload stays moved: a failed handler does not
+hand it back, and a restart discards it with the rest of the actor's state, so
+`L0357` holds across supervision (`supervise_move_use_after_send.lby`). Copy-set
+values (scalars, `Actor<T>`/`shared<T>` handles) stay usable across sends, and a
+`shared<T>` is not consumed by a send — a restart's re-run `init` re-supplies it
+from the retained spawn arguments. `L0353` sendability is untouched.
+
+### Tiers
+
+No new tier plumbing, by construction: the `supervise` clause is a field on the
+existing `Spawn` node rather than a new construct, so every existing gate covers
+it unchanged. Supervision runs on the **AST interpreter only**; IR/bytecode reject
+a supervised actor program with **`L0355`**, native/WASM cleanly skip it
+(**`L0339`**/**`L0338`**, program-declares-actors), and a `no-runtime` module
+rejects it with **`L0441`**.
+
+### New diagnostics
+
+**`L0358`** (semantic — a `supervise` clause on an actor that can never fail;
+the diagnostic that corrects the "supervision catches panics" misconception at the
+spawn site), **`L0359`** (runtime — reply unavailable, target stopped by
+supervision), **`L0362`** (runtime — escalation reached the root), **`L0363`**
+(runtime — restart loop from a failing `init`).
+
+### Deferred to later stages (unchanged)
+
+`join_all`/`select`, back-pressure/`try_tell` (stage 5); native/WASM actor codegen
+(stage 6); eager `shared<T>` reclamation and zero-copy move handoff (stage 8). Also
+deliberately **not** built: restart backoff/limits (unnecessary — no poison-message
+loop exists), a system/priority mailbox lane (§6.4 — supervision is synchronous at
+the turn boundary here, so it cannot be starved by user messages), and explicit
+`stop` as a user-callable surface (§2.6's graceful-stop verb; only supervision
+stops actors today).
+
 The rest of this document is the original design proposal (the full model); the
-above is the slice that is live today.
+above is the slice that is live today. **Where §2.6/§2.7 describe panic-based
+supervision, they are superseded by "Stage 4 delivery" above.**
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 The decided direction and its rationale are fixed in
@@ -598,12 +770,30 @@ safety is the moat; an unbounded queue quietly violates it.
   open questions), or (c) its supervisor stops it. On stop, the actor's arena is
   bulk-freed (the arena model makes teardown a single reset), and any outstanding
   `ask` futures to it are failed with a "recipient stopped" error.
-- **Failure (crash):** a handler that hits an unrecoverable fault (a bounds-check
+- **Failure (crash):** ~~a handler that hits an unrecoverable fault (a bounds-check
   panic, an explicit unrecoverable error, an `assert`) **crashes the actor**, not
   the process. Its arena is reclaimed; its supervisor is notified. This is the
-  "let it crash" model (§2.7).
+  "let it crash" model (§2.7).~~ **SUPERSEDED — see "Stage 4 delivery" above.** A
+  bounds-check panic is a *bug*: per decision A5 it aborts the **whole program**
+  without unwinding and is never supervised. An actor **failure** is a fallible
+  handler (`-> result<R, E>`) replying `err(e)`, which is what a supervisor
+  observes.
 
 ### 2.7 Error and supervision behavior
+
+> **SUPERSEDED by "Stage 4 delivery" (above) — do not implement from this
+> section.** Everything below that depends on **catching a panicking child** is
+> void: decision A5 aborts without unwinding, so there is nothing to catch.
+> Actor failure is **result-based** — a handler declared `-> result<R, E>`
+> replying `err(e)` — and a genuine panic aborts the program instead of being
+> supervised. Specifically void here: "let-it-crash"/crash-the-actor framing; the
+> `restart`/`stop`/`escalate` *policies* survive but are triggered by `err`, not
+> by a crash; supervision is **opt-in**, not "default `stop`" (because `err` is
+> also the ordinary recoverable channel — see the `withdraw` example immediately
+> below, which must not stop its actor); restart limits/backoff are unnecessary
+> (a consumed failing message cannot poison-loop); and an `ask` to a stopped actor
+> reports `L0359` rather than resolving to a fabricated "recipient unavailable"
+> `err` (the runtime cannot invent an inhabitant of an arbitrary user `E`).
 
 Consistent with [lullaby_error_handling.md](lullaby_error_handling.md): expected,
 recoverable failures are modeled **in types** with `result<T,E>`/`option<T>` and
@@ -867,9 +1057,11 @@ Standard.
 3. **Move & share semantics.** Move-by-default for owned aggregates with use-
    after-send analysis (L0351), `copy` opt-out, and `shared<T>`/`share` immutable
    sharing (global immutable region). Ties into the arena escape pass.
-4. **Supervision & failure.** Supervision tree, `supervise stop|restart|escalate`,
-   restart limits/backoff, crash-isolates-the-actor (arena reclaim on crash),
-   failure surfaced to `ask`ers as a `result::err`.
+4. **Supervision & failure.** *(Delivered — see "Stage 4 delivery"; scope revised.)*
+   Supervision tree, `supervise stop|restart|escalate`, failure surfaced to
+   `ask`ers as a `result::err`. **Revised:** failure is result-based, so there is
+   no "crash-isolates-the-actor" (a panic aborts the program per A5) and no restart
+   limits/backoff (a consumed failing message cannot poison-loop).
 5. **Structured intra-actor concurrency.** `join_all`, `select`, blocking-I/O
    pool integration; back-pressure `try_tell`.
 6. **Native parity.** Lower actors/`tell`/`ask`/`await`/`spawn` to runtime-library
@@ -936,7 +1128,7 @@ convenience only, per the canonical doc).
 | 5 | Reconcile existing thread-spawning `async` | **Keep surface, swap to cooperative executor** |
 | 6 | Owned-aggregate message default | **Move by default**, explicit `copy` to keep |
 | 7 | Mailbox bounding | **Bounded + back-pressure**, `try_tell` to shed |
-| 8 | Default supervision strategy | **`stop` by default**, opt-in `restart` w/ limit |
+| 8 | Default supervision strategy | ~~**`stop` by default**, opt-in `restart` w/ limit~~ → **REVISED at stage 4: supervision is opt-in (no clause = unsupervised); no restart limit needed.** `err` is also the ordinary recoverable channel, so only an explicit `supervise` clause may treat it as a failure; and a consumed failing message cannot poison-loop. See "Stage 4 delivery". |
 | 9 | `shared<T>` reclamation | **Global immutable region until exit** (1.0) |
 
 Each fork is designed so the *surface* stays stable if the owner later reverses

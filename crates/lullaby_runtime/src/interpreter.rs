@@ -17,30 +17,6 @@ use lullaby_parser::{ActorDecl, BinaryOp, Expr, ExprKind, Function, Place, Progr
 
 use crate::*;
 
-/// One scheduled actor: its declared type name and its private `state`, held as
-/// an ordered `(field, value)` list exactly like a struct's fields. The state is
-/// touched only by the actor's own handlers, one message at a time, so it is a
-/// single-writer resource with no locking.
-#[derive(Debug, Clone)]
-pub(crate) struct ActorInstance {
-    pub(crate) actor_name: String,
-    pub(crate) state: Vec<(String, Value)>,
-}
-
-/// One pending message on the global mailbox: which actor it targets, which
-/// handler to run, and the (already-evaluated, moved-across-the-boundary)
-/// argument values. Drained FIFO before `main` returns.
-#[derive(Debug, Clone)]
-pub(crate) struct ActorMessage {
-    pub(crate) actor_id: usize,
-    pub(crate) handler: String,
-    pub(crate) args: Vec<Value>,
-    /// For an `ask` request, the index of the `actor_reply_slots` entry the
-    /// handler's reply value is written into once the turn completes; `None` for a
-    /// fire-and-forget `tell`.
-    pub(crate) reply_slot: Option<usize>,
-}
-
 pub fn run_main(program: &Program) -> Result<Value, RuntimeError> {
     run_main_with_args(program, Vec::new())
 }
@@ -329,8 +305,10 @@ pub(crate) struct Runtime<'a> {
     /// to the right handler body.
     pub(crate) actors: HashMap<&'a str, &'a ActorDecl>,
     /// Live actor instances. A `Value::ActorRef(i)` indexes this vector; the slot
-    /// holds the actor's private `state`. Instances live until the program ends
-    /// (stage 1 has no explicit `stop`).
+    /// holds the actor's private `state` plus its supervision links. The vector
+    /// only grows: a stopped actor keeps its slot (flagged `stopped`) so its
+    /// handle stays a valid index and messages to it fail cleanly rather than
+    /// dangling.
     pub(crate) actor_instances: Vec<ActorInstance>,
     /// The global message mailbox: a FIFO queue of pending deliveries. `tell`/
     /// `ask` enqueue; the scheduler dequeues the first *deliverable* message (one
@@ -338,11 +316,14 @@ pub(crate) struct Runtime<'a> {
     /// completion. Single-threaded and deterministic: the same program always
     /// produces the same output.
     pub(crate) actor_mailbox: VecDeque<ActorMessage>,
-    /// One-shot reply slots for `ask` request-reply futures. A `Value::ActorFuture(i)`
-    /// indexes this vector; the slot is `None` until the target handler's turn
-    /// completes and writes its reply value, then `await` `take`s it. Slots live
-    /// until the program ends (a one-shot future is awaited once).
-    pub(crate) actor_reply_slots: Vec<Option<Value>>,
+    /// One-shot reply slots for `ask` request-reply futures. A
+    /// `Value::ActorFuture(i)` indexes this vector; the slot is
+    /// [`ReplySlot::Pending`] until the target handler's turn completes and
+    /// writes its reply value, then `await` takes it. A slot whose target actor
+    /// stopped before running the request becomes [`ReplySlot::Unavailable`], so
+    /// the awaiting side gets a deterministic `L0359` instead of hanging. Slots
+    /// live until the program ends (a one-shot future is awaited once).
+    pub(crate) actor_reply_slots: Vec<ReplySlot>,
     /// The set of actor ids whose turn is currently on the (Rust) call stack — an
     /// actor is "busy" from the moment it begins a message turn until that turn
     /// (including any `await`s inside it) completes. The scheduler never starts a
@@ -352,6 +333,25 @@ pub(crate) struct Runtime<'a> {
     /// be satisfied by re-entering a busy actor is a deterministic deadlock
     /// (`L0356`).
     pub(crate) busy_actors: std::collections::HashSet<usize>,
+    /// The actor whose turn is currently executing, or `None` when control is in
+    /// `main` (or a free function called from it) rather than inside a handler.
+    /// A `spawn` reads this to record the new actor's **supervisor**: the actor
+    /// that spawned it, per the supervision tree rooted at `main`. Saved and
+    /// restored around every turn, so it always names the innermost running
+    /// handler.
+    pub(crate) current_actor: Option<usize>,
+    /// Supervisory actions deferred because their target was mid-turn when the
+    /// failure was decided — the usual case for an escalation, whose supervisor is
+    /// typically blocked in `await ask child...`. Applied at that actor's turn
+    /// boundary, upholding run-to-completion: a turn always finishes, and the
+    /// action then lands on state no live turn is holding. Keyed by actor id; an
+    /// actor's action is a function of its own single policy, so a repeated
+    /// failure within one turn records the same action.
+    pub(crate) pending_supervision: HashMap<usize, SupervisionAction>,
+    /// Actors whose `init` is currently re-running for a `supervise restart`. A
+    /// restart cannot loop on a poison message, but an `init` that itself fails
+    /// would restart forever; this guard turns that into a deterministic `L0363`.
+    pub(crate) restarting: std::collections::HashSet<usize>,
     /// A free-list of reusable per-call environments. Function invocation is on the
     /// hot path and each call needs a fresh `Env`; rather than allocate one (its
     /// scope `Vec` plus a first-scope `Vec` that grows as parameters bind) on every
@@ -494,6 +494,9 @@ impl<'a> Runtime<'a> {
             actor_mailbox: VecDeque::new(),
             actor_reply_slots: Vec::new(),
             busy_actors: std::collections::HashSet::new(),
+            current_actor: None,
+            pending_supervision: HashMap::new(),
+            restarting: std::collections::HashSet::new(),
             env_pool: Vec::new(),
         })
     }

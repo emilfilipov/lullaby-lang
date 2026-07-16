@@ -385,15 +385,20 @@ impl<'a> Runtime<'a> {
                 };
                 Self::builtin_substring(vec![target, start, end])
             }
-            // `spawn NAME(args)`: construct the actor, run its `init` with the
-            // evaluated arguments, register it on the scheduler, and yield the
-            // handle. Delegated to the actor scheduler module.
-            ExprKind::Spawn { actor, args } => {
+            // `spawn NAME(args) [supervise POLICY]`: construct the actor, run its
+            // `init` with the evaluated arguments, register it on the scheduler
+            // under the given supervision policy, and yield the handle. Delegated
+            // to the actor scheduler module.
+            ExprKind::Spawn {
+                actor,
+                args,
+                supervise,
+            } => {
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval_expr(arg, env)?);
                 }
-                self.spawn_actor(actor, values)
+                self.spawn_actor(actor, values, *supervise)
             }
             // `tell`/`ask TARGET.HANDLER(args)`: evaluate the target handle and
             // the arguments, then dispatch. `tell` enqueues a fire-and-forget

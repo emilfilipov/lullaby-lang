@@ -1,0 +1,68 @@
+# Stage-4 supervision composed with stage-3 message ownership.
+#
+# What this pins:
+#   - **Move survives supervision.** `first` is a `list<string>` — an owned
+#     aggregate — so it is MOVED into the message. The sender may not touch it
+#     afterwards (`L0357`, see invalid/actors/move_use_after_tell.lby); nothing
+#     about a failing or restarting recipient revives it. A moved payload stays
+#     moved.
+#   - **A restart discards the moved payloads.** The `Vault` accumulates the lists
+#     it was given; on failure its state — including everything moved into it — is
+#     dropped and `init` re-runs. The moved values do not reappear anywhere: not
+#     in the sender, not in the restarted actor.
+#   - **Copy still copies.** `Actor<T>` handles and scalars are in the copy set, so
+#     `v` stays usable across every send, exactly as at stage 3.
+#   - **`shared<T>` still shares.** A `shared<T>` is not consumed by a send, so the
+#     same label is readable by the actor before and after its restart.
+actor Vault
+    state
+        held i64
+        label shared<string>
+
+    init tag shared<string>
+        held = 0
+        label = tag
+
+    # Fallible: too many deposits is a failure, reported as `err`.
+    on deposit words list<string> -> result<i64, string>
+        if held + len(words) > 3
+            return err("vault full")
+        held += len(words)
+        ok(held)
+
+    on describe -> string
+        shared_get(label) + " holds " + to_string(held)
+
+fn main -> i64
+    let tag shared<string> = share("vault")
+    # `tag` is a `shared<T>`: not consumed by the send, so it stays usable below.
+    let v Actor<Vault> = spawn Vault(tag) supervise restart
+
+    let first list<string> = list_new()
+    let first2 list<string> = push(first, "a")
+    # `first2` is an owned aggregate: this send MOVES it. Reading `first2` after
+    # this line would be L0357 — and stays L0357 regardless of what supervision
+    # does to the recipient.
+    println(to_string_result(await ask v.deposit(first2)))
+    println(await ask v.describe())
+
+    let second list<string> = list_new()
+    let second2 list<string> = push(second, "b")
+    let second3 list<string> = push(second2, "c")
+    let second4 list<string> = push(second3, "d")
+    # 1 + 4 > 3: the vault fails, replies `err`, and is restarted. Everything
+    # moved into it — including `first2`'s list — goes away with its state.
+    println(to_string_result(await ask v.deposit(second4)))
+
+    # Fresh state after the restart: `held` is 0 again, and the `shared` label was
+    # re-supplied by the re-run `init` from the retained spawn argument.
+    println(await ask v.describe())
+
+    # `tag` was shared, not moved, so it is still readable here.
+    println("tag still readable: " + shared_get(tag))
+    0
+
+fn to_string_result r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m

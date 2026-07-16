@@ -725,8 +725,10 @@ fn collect_expr_references(expr: &Expr, out: &mut Vec<(String, Span)>) {
         ExprKind::Field { target, .. } => collect_expr_references(target, out),
         ExprKind::Await { expr } => collect_expr_references(expr, out),
         ExprKind::Try(inner) => collect_expr_references(inner, out),
-        // `spawn NAME(args)` names an actor declaration (a top-level name).
-        ExprKind::Spawn { actor, args } => {
+        // `spawn NAME(args)` names an actor declaration (a top-level name). A
+        // trailing `supervise POLICY` clause names no declaration — the policy is
+        // a fixed contextual word, not a reference — so it is skipped here.
+        ExprKind::Spawn { actor, args, .. } => {
             out.push((actor.clone(), expr.span));
             for arg in args {
                 collect_expr_references(arg, out);
