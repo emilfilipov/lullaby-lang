@@ -1,0 +1,8 @@
+# `ptr_offset` scales by size_of<T>, so an unsized pointee `T` (here `string`, a
+# growable heap type with no defined layout) is rejected — L0431.
+fn walk p ptr<string> -> i64
+    unsafe
+        let q ptr<string> = ptr_offset(p, 1)
+        ptr_to_int(q)
+fn main -> i64
+    0

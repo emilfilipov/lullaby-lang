@@ -285,6 +285,9 @@ pub(crate) struct Runtime<'a> {
     /// so this resolves both unit and payload construction.
     pub(crate) variants: HashMap<&'a str, &'a str>,
     pub(crate) heap: Vec<Option<Value>>,
+    /// Freestanding-tier byte-addressed raw-pointer space backing `addr_of` /
+    /// `ptr_offset` / `ptr_cast` (disjoint from `heap`; see `raw_pointer.rs`).
+    pub(crate) raw_ptrs: crate::RawPointerMemory,
     /// Ownership counts for reference-counted (`rc<T>`) heap slots, keyed by
     /// slot index. Slots not present here are raw pointers / plain allocations.
     pub(crate) refcounts: HashMap<usize, usize>,
@@ -475,6 +478,7 @@ impl<'a> Runtime<'a> {
             structs,
             variants,
             heap: Vec::new(),
+            raw_ptrs: crate::RawPointerMemory::default(),
             refcounts: HashMap::new(),
             sockets: Vec::new(),
             processes: Vec::new(),
@@ -922,7 +926,10 @@ impl<'a> Runtime<'a> {
             "rc_new" => self.builtin_rc_new(args),
             "rc_clone" => self.builtin_rc_clone(args),
             "rc_release" => self.builtin_rc_release(args),
-            "rc_get" | "ref_get" | "ptr_read" => self.builtin_ref_get(name, args),
+            "rc_get" | "ref_get" => self.builtin_ref_get(name, args),
+            // `ptr_read` routes through the raw-aware load so an `addr_of`-derived
+            // byte address reads its region and a heap-slot handle reads the heap.
+            "ptr_read" => self.builtin_load(args),
             "rc_borrow" => self.builtin_rc_borrow(args),
             "share" => self.builtin_share(args),
             "shared_get" => self.builtin_shared_get(args),
@@ -932,6 +939,10 @@ impl<'a> Runtime<'a> {
             "offset_of" => Self::builtin_offset_of(args),
             "ptr_to_int" => Self::builtin_ptr_to_int(args),
             "int_to_ptr" => Self::builtin_int_to_ptr(args),
+            // `ptr_offset` scales by the region stride; `ptr_cast` reinterprets the
+            // pointee type and is the identity on the pointer address.
+            "ptr_offset" => self.builtin_ptr_offset(args),
+            "ptr_cast" => Self::builtin_ptr_cast(args),
             // Volatile raw-memory access behaves exactly like `load`/`store` on
             // the interpreters' single-threaded abstract heap; the no-elision /
             // no-reordering guarantee is a native-codegen concern.

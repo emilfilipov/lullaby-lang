@@ -2,7 +2,9 @@
 
 **Status:** Design proposal, 2026-07-14. **Stage 1 (the tier gate + enforcement)
 is delivered** (2026-07-15) — see §10.2 stage 1 and the "Stage 1 delivery" note
-at the end of §10.2. This document proposes the concrete, buildable shape of
+at the end of §10.2. **The raw-pointer addressing surface `addr_of` / `ptr_offset` /
+`ptr_cast` is delivered** (2026-07-16, §10.2 increment 4) — see §2.2 and the
+"Raw-pointer addressing delivery" note (§10.4). This document proposes the concrete, buildable shape of
 Lullaby's **freestanding / `no-runtime` tier** — the capability set that makes 1.0
 a systems language you can write a kernel, boot code, embedded firmware, and FFI
 shims in.
@@ -242,7 +244,7 @@ fn poke_and_peek base ptr<u32> -> u32
 - **`addr_of(x) -> ptr<T>`** — address-of an addressable lvalue (local, global, struct field, array element). The value must be *addressable*; taking the address of a temporary is `L0442`.
 - **`ptr_cast<U>(p ptr<T>) -> ptr<U>`** — reinterpret the element type (no value conversion). `ptr_to_int`/`int_to_ptr` (delivered) round-trip a pointer to/from an integer address.
 - **`ptr_null<T>() -> ptr<T>`** and **`is_null(p)`** (the latter delivered) — the null pointer and its test. There is no implicit null: a `ptr<T>` is never checked for you (that is the point of `unsafe`), but `is_null` is available where you want it.
-- Interpreter behavior: on the AST/IR/bytecode interpreters a `ptr<T>` is a heap-slot handle (delivered semantics), so `ptr_offset`/`addr_of`/`ptr_cast` operate over that abstract model consistently; the raw byte-exact behavior is a native-codegen concern, exactly as `volatile_load`/`volatile_store` already are.
+- Interpreter behavior: on the AST/IR/bytecode interpreters a `ptr<T>` from `alloc`/`int_to_ptr` is a heap-slot handle (delivered semantics). **As delivered (§10.4),** `addr_of` introduces a second *byte-addressed* address space so `ptr_offset`/`ptr_read` walk snapshotted regions and the size law `ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p) == size_of(T)` holds; `ptr_cast` is the identity on the address (a static-only pointee reinterpretation). Raw byte-exact aliasing through a pointer remains a native-codegen concern, exactly as `volatile_load`/`volatile_store` already are.
 
 ---
 
@@ -884,9 +886,13 @@ increment.**
    `L0448`; wire the bounds-check-failure edge (and arena overflow, `assert`,
    `unreachable`) to call it. Negative fixtures: out-of-range index calls `on_panic`
    with the right `PanicInfo`; missing/duplicate handler is `L0448`. Cross-backend.
-4. **Raw-pointer surface completion.** `addr_of`/`ptr_offset`/`ptr_offset_bytes`/
-   `ptr_cast`/`ptr_null` (extending delivered `ptr_read`/`ptr_write`/`ptr_to_int`),
-   `unsafe` gating (`L0442`), interpreter abstract-heap semantics. Native lowering.
+4. **Raw-pointer surface completion.** ✅ **DELIVERED (2026-07-16)** for the core
+   addressing trio `addr_of`/`ptr_offset`/`ptr_cast` (extending delivered
+   `ptr_read`/`ptr_write`/`ptr_to_int`), `unsafe` gating (reusing `L0330`),
+   interpreter byte-addressed semantics with the size law. See §10.4. The extra
+   convenience spellings `ptr_offset_bytes`/`ptr_null`/`is_null` and native lowering
+   are a later increment (native raw-pointer codegen does not yet exist for *any* of
+   the raw-pointer builtins — a function using them cleanly skips to the interpreters).
 5. **`repr`/`packed`/`align`.** Layout-engine extension + `L0447`; `size_of`/
    `align_of`/`offset_of` reflect packed/over-aligned layouts. Layout fixtures across
    backends (interpreters compute layout too).
@@ -951,6 +957,76 @@ bounds check (§8), the completed raw-pointer surface `addr_of`/`ptr_offset`/`pt
 MMIO/port-IO/privileged intrinsics (§4), `interrupt`/`naked` functions (§6), and
 `entry`/`section`/direct-ELF/flat-binary output (§9). Stage 1 deliberately does **not**
 reject the raw/`unsafe`/`ptr` primitives that already exist — they are the kernel core.
+
+### 10.4 Raw-pointer addressing delivery (2026-07-16)
+
+The core addressing trio `addr_of` / `ptr_offset` / `ptr_cast` (§2.2) is implemented
+and test-locked, extending the delivered `ptr_read`/`ptr_write`/`ptr_to_int`/
+`int_to_ptr`/`volatile_*` surface. What shipped:
+
+- **Surface (the delivered subset of §2.2).**
+  - `addr_of(place) -> ptr<T>` — the address of an addressable place: a local
+    (`Variable`), an array element (`Index`), or a struct field (`Field`). A
+    whole-array place decays to `ptr<T>` (a pointer to its element type), matching C
+    array decay, so `addr_of(a)` and `addr_of(a[0])` agree. The place's type `T` must
+    have a defined C-natural layout.
+  - `ptr_offset(p: ptr<T>, n: isize) -> ptr<T>` — element-scaled arithmetic:
+    `result = base + n * size_of(T)`. `n` is a signed `isize`/`i64` element count
+    (negative walks backward). **`size_of(T)` scaling rule:** the scale factor is the
+    C-natural `size_of` of the pointee `T` (`i8`/`u8`/`bool`/`byte` = 1, `i16`/`u16`
+    = 2, `i32`/`u32`/`f32`/`char` = 4, `i64`/`u64`/`f64`/any pointer = 8, a struct/
+    fixed `array<T>` its computed layout size). **Supported `T`:** any type with a
+    defined layout — scalars, pointer/reference handles, structs, and fixed
+    `array<T>`; an *unsized* pointee (a `string`/`list`/`map`/growable value) is
+    rejected with `L0431`.
+  - `ptr_cast(p: ptr<T>) -> ptr<U>` — reinterpret the pointee type with no value
+    conversion and no address change. The target `U` comes from the caller's expected
+    annotation when it is a raw pointer (mirroring `int_to_ptr`), defaulting to
+    `ptr<i64>` when there is none. **Spelling choice:** the design sketch in §2.2
+    shows a turbofish `ptr_cast<byte>(p)`; the delivered raw-pointer builtins take no
+    turbofish, so — as the minimal consistent form — the target element type is
+    supplied by the `let bp ptr<byte> = ptr_cast(base)` context, exactly as
+    `int_to_ptr` already resolves its pointee.
+- **`unsafe` gating (both tiers).** All three are raw-pointer operations: using one
+  outside an `unsafe` block is the existing unsafe-required diagnostic `L0330`,
+  identical to `ptr_read`/`int_to_ptr`. They are available in the safe tier *and* the
+  `no-runtime` tier under `unsafe`.
+- **`no-runtime` behavior.** They are part of the kernel core, **not** rejected by
+  the tier gate (`L0441`): each yields an allowed `ptr<T>` value and is not a
+  host-allocator builtin, so a `no-runtime` module freely uses them (verified by
+  `tests/fixtures/valid/no_runtime/freestanding_addr_of.lby`).
+- **Interpreter model (byte-addressed regions).** The delivered `ptr<T>` model is an
+  abstract *heap-slot handle* with no adjacency, which cannot express arithmetic. The
+  interpreters (`crates/lullaby_runtime/src/raw_pointer.rs`, shared by all three)
+  therefore add a second **byte-addressed** address space above `RAW_POINTER_BASE`
+  (`1 << 44`, disjoint from small heap-slot handles): `addr_of` snapshots the
+  addressed place into a contiguous region of typed cells with element `stride =
+  size_of(element)`, and returns the region's byte base; `ptr_offset` advances the
+  byte address by `n * stride`; a read/write (routed there by `ptr_read`/`ptr_write`/
+  `volatile_*` when the address is in raw space) maps `addr` back to cell
+  `(addr - base) / stride`. This makes the **size law**
+  `ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p) == size_of(T)` hold on the
+  interpreters exactly as in real addressing. The region snapshots by value, so a
+  write *through* an `addr_of` pointer mutates the snapshot (raw reads/walks are the
+  freestanding use); true byte-exact aliasing is a native concern, as it already is
+  for `volatile_*`.
+- **Tier coverage.** ast / ir / bytecode: **yes** (identical results; the bytecode VM
+  falls back to the tree-walker for `addr_of`, which needs the place expression the
+  flat op stream cannot carry, and shares the same raw-pointer space). **native /
+  WASM: clean skip** — a function using any raw-pointer builtin is ineligible and
+  skips (`L0339`/`L0338`), never miscompiled; this matches the *entire* existing
+  raw-pointer surface (`ptr_read`/`int_to_ptr`/`volatile_*` are interpreter-only
+  today). Native raw-pointer codegen — for the whole surface, not just these three —
+  is a later increment.
+- **New diagnostics.** `L0458` (`addr_of` of a non-addressable place / temporary).
+  `ptr_offset` on an unsized pointee reuses `L0431`; a non-pointer argument reuses
+  `L0331`; the `unsafe` gate reuses `L0330`.
+- **Tests.** `crates/lullaby_cli/tests/cli/suite15.rs` (the `addr_of`/`ptr_offset`/
+  `ptr_cast` run + negative tests), the `raw_pointer.rs` unit tests (region walk,
+  size law, narrow-scalar stride, non-region offset), and the fixtures under
+  `tests/fixtures/valid/no_runtime/freestanding_addr_of.lby`,
+  `tests/fixtures/valid/raw_ptr_addressing.lby`, and
+  `tests/fixtures/invalid/raw_ptr/`.
 
 ---
 

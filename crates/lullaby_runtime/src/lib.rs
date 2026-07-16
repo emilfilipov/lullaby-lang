@@ -21,6 +21,7 @@
 use std::fmt;
 
 mod interpreter;
+mod raw_pointer;
 mod runtime_concurrency;
 mod runtime_error;
 mod runtime_int;
@@ -30,6 +31,7 @@ mod runtime_net;
 mod runtime_os;
 
 pub use interpreter::{run_main, run_main_with_args, run_named_function};
+pub use raw_pointer::{RAW_POINTER_BASE, RawPointerMemory};
 pub use runtime_concurrency::*;
 pub use runtime_error::*;
 pub use runtime_int::*;

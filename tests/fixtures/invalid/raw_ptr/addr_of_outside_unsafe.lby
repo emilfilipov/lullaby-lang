@@ -1,0 +1,6 @@
+# `addr_of` is a raw-pointer operation: using it outside an `unsafe` block is the
+# existing unsafe-required diagnostic L0330.
+fn main -> i64
+    let a array<i64> = [1, 2, 3]
+    let p ptr<i64> = addr_of(a[0])
+    ptr_to_int(p)

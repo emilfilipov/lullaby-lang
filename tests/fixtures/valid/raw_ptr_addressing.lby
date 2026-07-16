@@ -1,0 +1,24 @@
+# The stage-2 raw-pointer addressing surface in the SAFE tier (no `no-runtime`
+# directive): `addr_of` / `ptr_offset` / `ptr_cast` are available under `unsafe` in
+# both tiers. Exercises a non-8-byte element stride (`i32`, size 4) and a negative
+# offset, so the size law and back-stepping are covered.
+#
+# main = 11 (struct field pt.x) + 4 (i32 size law) + 3 (a[2] stepped back to a[0])
+#      = 18.
+struct Point
+    x i64
+    y i64
+
+fn main -> i64
+    let a array<i32> = [to_i32(3), to_i32(4), to_i32(5), to_i32(6)]
+    let pt Point = Point(11, 22)
+    let out i64 = 0
+    unsafe
+        let px ptr<i64> = addr_of(pt.x)
+        out = out + ptr_read(px)
+        let p ptr<i32> = addr_of(a[0])
+        out = out + (ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p))
+        let p2 ptr<i32> = addr_of(a[2])
+        let back ptr<i32> = ptr_offset(p2, -2)
+        out = out + to_i64(ptr_read(back))
+    out

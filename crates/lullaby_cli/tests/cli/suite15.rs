@@ -315,3 +315,99 @@ fn ordinary_program_without_directive_is_unaffected() {
     );
     assert_eq!(stdout(&output).trim(), "1", "one push -> len 1");
 }
+
+// --- Freestanding tier, stage 2: the raw-pointer addressing surface
+// (`addr_of` / `ptr_offset` / `ptr_cast`). Interpreter-only, exactly like the
+// delivered `ptr_read`/`int_to_ptr`/`volatile_*` builtins (a function using them
+// is native/WASM-ineligible and cleanly skips). See
+// `documents/freestanding_tier_design.md` §2.2. ---
+
+#[test]
+fn no_runtime_addr_of_surface_is_allowed_and_runs() {
+    // A `no-runtime` module using `addr_of`/`ptr_offset`/`ptr_cast` over a local
+    // array + struct is NOT rejected by the gate (they yield an allowed `ptr<T>`)
+    // and runs identically on every interpreter. main = 100 (array sum) + 8 (size
+    // law) + 10 (cast round-trip) + 9 (struct field) = 127.
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(
+            "tests/fixtures/valid/no_runtime/freestanding_addr_of.lby",
+            backend,
+        );
+        assert!(
+            output.status.success(),
+            "[{backend}] no-runtime addr_of program should run: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "127",
+            "[{backend}] addr_of/ptr_offset/ptr_cast program should compute 127"
+        );
+    }
+}
+
+#[test]
+fn raw_ptr_addressing_runs_on_all_interpreters() {
+    // The safe-tier fixture: the addressing surface is available under `unsafe` in
+    // both tiers. Covers a non-8-byte stride (`i32`) so the size law and a negative
+    // offset are exercised. main = 11 + 4 + 3 = 18 on ast/ir/bytecode.
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend("tests/fixtures/valid/raw_ptr_addressing.lby", backend);
+        assert!(
+            output.status.success(),
+            "[{backend}] raw-pointer addressing should run: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "18",
+            "[{backend}] i32-stride walk + negative offset should compute 18"
+        );
+    }
+}
+
+/// Assert a fixture is rejected by `lullaby check` with a specific diagnostic code.
+fn assert_check_rejected_with(fixture: &str, code: &str) {
+    let path = workspace_root().join(fixture);
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let stderr = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "{fixture} should be rejected but exited 0. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(code),
+        "{fixture} should report {code}. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn addr_of_outside_unsafe_is_rejected() {
+    // Every raw-pointer operation requires `unsafe`; `addr_of` outside one is the
+    // existing unsafe-required diagnostic L0330.
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/raw_ptr/addr_of_outside_unsafe.lby",
+        "L0330",
+    );
+}
+
+#[test]
+fn addr_of_temporary_is_rejected() {
+    // `addr_of` requires an addressable place; the address of a temporary is L0458.
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/raw_ptr/addr_of_temporary.lby",
+        "L0458",
+    );
+}
+
+#[test]
+fn ptr_offset_unsized_pointee_is_rejected() {
+    // `ptr_offset` scales by size_of<T>, so an unsized pointee `T` is L0431.
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/raw_ptr/ptr_offset_unsized.lby",
+        "L0431",
+    );
+}

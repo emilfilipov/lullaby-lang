@@ -471,6 +471,29 @@ struct Mixed
   `load`/`store` over the single-threaded abstract heap, which is a correct
   implementation; the volatility guarantee (suppressing compiler elision and
   reordering) is a code-generation concern realized on the native backend.
+- **Raw-pointer addressing (freestanding-tier stage 2, inside `unsafe`).** The
+  addressing trio for pointer arithmetic and address-of that boot/kernel code needs
+  pervasively (see [freestanding_tier_design.md](freestanding_tier_design.md) §2.2,
+  §10.4):
+  - `addr_of(place) -> ptr<T>`: the address of an addressable place — a local, an
+    array element (`a[i]`), or a struct field (`s.f`) — of type `T` (which must have
+    a defined layout). A whole-array place decays to `ptr<element>`, so `addr_of(a)`
+    and `addr_of(a[0])` agree. Taking the address of a temporary (a literal, an
+    arithmetic/call result) is `L0458`.
+  - `ptr_offset(p ptr<T>, n isize) -> ptr<T>`: element-scaled arithmetic,
+    `base + n * size_of(T)`, with `n` a signed element count. `size_of(T)` is the
+    C-natural size above; an *unsized* pointee (`string`/`list`/`map`/growable) is
+    `L0431`. The size law holds:
+    `ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p) == size_of(T)`.
+  - `ptr_cast(p ptr<T>) -> ptr<U>`: reinterpret the pointee type — no value
+    conversion, no address change. `U` comes from the surrounding annotation
+    (`let bp ptr<byte> = ptr_cast(base)`), defaulting to `ptr<i64>`, exactly as
+    `int_to_ptr` resolves its pointee.
+  All three are `unsafe`-gated (`L0330` outside `unsafe`) and available in both tiers
+  and in a `no-runtime` module (they are kernel core, not gate-rejected). On the
+  interpreters `addr_of` snapshots the place into a byte-addressed region so
+  `ptr_offset`/`ptr_read` walk it and the size law holds; native/WASM cleanly skip a
+  function using any raw-pointer builtin (native raw-pointer codegen is later work).
 
 ### Memory Safety Features
 
