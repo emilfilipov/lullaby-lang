@@ -137,11 +137,24 @@ These are toolchain-completeness items, not language decisions.
   — type-alias-hidden string, nested `option<list>`, cross-module imported heap helper
   — all rejected). Stages 2+ (static-buffer arenas, inline asm operands, MMIO/port-IO,
   interrupt/naked, direct-ELF/flat-binary) remain — the long pole to kernel capability.
-- **Actors — stage 1 shipped; stage 2 (`ask`/`await`/`Future` request-response) IN
-  FLIGHT** on the AST interpreter tier (IR/bytecode/native/WASM keep clean deferral).
-- **B1 closures native — stage 1 (scalar-capture direct-call) IN FLIGHT.** Interpreters
-  run all closures; native currently skips cleanly (L0339). Deeper captures / HOF /
-  escape defer to later stages.
+  **Stage 2 (raw-pointer surface `addr_of`/`ptr_offset`/`ptr_cast`) IN FLIGHT.**
+- **Actors — stages 1–3 SHIPPED** (AST interpreter tier; IR/bytecode/native/WASM keep
+  clean deferral). Stage 2 = `ask`/`await`/`Future<R>` request-response with a
+  deterministic run-to-completion scheduler (deadlock → L0356). Stage 3 = message
+  ownership: move-by-default + use-after-send (L0357), type-driven copy set, `shared<T>`,
+  and a fully transitive sendability predicate (L0353 now recurses into struct
+  fields/enum payloads). Stage 4 (supervision/failure) is PARKED pending a design pass:
+  under A5 (abort, no unwinding) a supervisor can't catch a panicking child — likely
+  needs result-based actor failure. Directional; raise with owner before building.
+- **A1 generics — COMPLETE across native + WASM.** Native monomorphization (scalar +
+  one-level-heap-`string`) + **inherent-method dispatch** (generic AND non-generic,
+  reviewed PASS, zero miscompiles). **WASM at A1 parity** (monomorphization shipped;
+  method dispatch IN FLIGHT). Deeper-than-one-level heap generics defer cleanly on both.
+- **B1 closures native — stage 1 SHIPPED** (scalar-capture direct-call, loop-reclaim
+  proven bounded; reviewed PASS). Deeper captures / HOF / escape defer (L0339).
+- **File-size discipline:** native_object.rs re-split under the 1500 cap after the
+  closures growth (new native_object_closure_ctx.rs); semantics actor-ownership carved
+  into semantics_actor_ownership.rs to keep lib.rs from growing.
 - **Follow-up (trivial, queued):** freestanding formatter emits a double blank line
   after the directive + repositions header comments (idempotent, cosmetic); cross-module
   L0441 span attributed to the importing file. Fold into a later freestanding stage.
