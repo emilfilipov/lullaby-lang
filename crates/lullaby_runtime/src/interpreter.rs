@@ -360,6 +360,19 @@ pub(crate) struct Runtime<'a> {
     /// only returned on the success path; error/`?`-unwind paths simply drop theirs
     /// (correctness is unaffected — a smaller pool just means a few more allocs).
     pub(crate) env_pool: Vec<Env>,
+    /// The **env shelf**: the ancestor frames' environments, innermost last.
+    ///
+    /// At a call boundary the caller's `Env` is swapped out of its `&mut Env` slot
+    /// and pushed here for the dynamic extent of the call, so a callee can reach its
+    /// caller's locals — the out-parameter idiom, `poke(addr_of(x))`. The *current*
+    /// frame is deliberately **not** here: it stays a plain `&mut Env`, which is what
+    /// keeps every variable access exactly as cheap as it was (see
+    /// `crate::raw_pointer`'s module docs for why this beats `Rc<RefCell<Env>>` and a
+    /// frame-id-indexed `Vec<Env>`).
+    ///
+    /// Only populated once the program has taken an address
+    /// ([`RawPointerMemory::shelf_needed`]), so ordinary code never touches it.
+    pub(crate) env_shelf: Vec<Env>,
 }
 
 impl<'a> Runtime<'a> {
@@ -498,6 +511,7 @@ impl<'a> Runtime<'a> {
             pending_supervision: HashMap::new(),
             restarting: std::collections::HashSet::new(),
             env_pool: Vec::new(),
+            env_shelf: Vec::new(),
         })
     }
 
@@ -658,7 +672,9 @@ impl<'a> Runtime<'a> {
             .collect();
         // `callee` is a plain builtin/constructor here (closures/func values/
         // extern/async/user functions were excluded), so dispatch it directly.
-        Ok(Some(self.call_function(callee, values)?))
+        Ok(Some(self.with_env_shelved(env, |me| {
+            me.call_function(callee, values)
+        })?))
     }
 
     /// `x = x <binop> e` / `x = e <binop> x` arm of
@@ -715,6 +731,74 @@ impl<'a> Runtime<'a> {
             (other, moved)
         };
         Ok(Some(self.eval_binary(l, op, r)?))
+    }
+
+    /// Run `body` with `env` — the *calling* frame's environment — moved onto the env
+    /// shelf, so anything `body` invokes can reach it by [`RootSlot::env`]. This is
+    /// what makes `poke(addr_of(x))` write the caller's real `x`. Mirrors the
+    /// IR/bytecode interpreter's `with_env_shelved` exactly, for backend parity.
+    ///
+    /// The swap leaves an [`Env::hollow`] placeholder in the caller's slot. Nothing
+    /// reads it: the caller is suspended for exactly the extent of `body`, and the
+    /// real environment is swapped back before it resumes.
+    ///
+    /// Wrapping `body` in a closure rather than exposing raw push/pop is deliberate —
+    /// it makes the restore unconditional, so a `?` anywhere inside cannot leave the
+    /// caller holding a hollow environment or the shelf unbalanced.
+    ///
+    /// # Why the gate is sound
+    ///
+    /// Shelving is skipped entirely unless a raw region is live. That is not a
+    /// heuristic: with no region, `RawPointerMemory::resolve` cannot return a place at
+    /// all, so nothing can consult the shelf and its contents are unobservable. The
+    /// decision is captured in a local rather than re-tested on the way out, so a
+    /// callee that takes the program's *first* address mid-`body` cannot desynchronize
+    /// the push from the pop.
+    ///
+    /// The invariant it maintains: **every live region's `Env` is either the current
+    /// frame's `&mut Env` or on the shelf.** A region created in frame `F` keeps
+    /// `shelf_needed` true for as long as `F` lives, so every call `F` makes from that
+    /// point on shelves `F`'s environment — and `F`'s region cannot outlive `F`,
+    /// because `RawPointerMemory::exit_frame` drops it.
+    pub(crate) fn with_env_shelved<R>(
+        &mut self,
+        env: &mut Env,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        if !self.raw_ptrs.shelf_needed() {
+            return body(self);
+        }
+        let mut hollow = Env::hollow();
+        std::mem::swap(env, &mut hollow);
+        self.env_shelf.push(hollow);
+        let result = body(self);
+        let mut restored = self
+            .env_shelf
+            .pop()
+            .expect("env shelf push/pop are paired by `with_env_shelved`");
+        std::mem::swap(env, &mut restored);
+        result
+    }
+
+    /// Find a shelved ancestor frame's environment by its [`RootSlot::env`] id.
+    /// Ancestors only — the current frame is never on the shelf.
+    pub(crate) fn shelf_env(&self, id: u64) -> Option<&Env> {
+        self.env_shelf.iter().find(|env| env.id() == id)
+    }
+
+    /// Mutable counterpart of [`Self::shelf_env`] — the write half of a cross-frame
+    /// `ptr_write`.
+    pub(crate) fn shelf_env_mut(&mut self, id: u64) -> Option<&mut Env> {
+        self.env_shelf.iter_mut().find(|env| env.id() == id)
+    }
+
+    /// Locate the environment owning `root`, checking the current frame first (the
+    /// overwhelmingly common in-frame case) and then the shelf.
+    pub(crate) fn owning_env<'e>(&'e self, root: &RootSlot, env: &'e Env) -> Option<&'e Env> {
+        if env.id() == root.env {
+            return Some(env);
+        }
+        self.shelf_env(root.env)
     }
 
     /// Dispatch a call to an already-resolved top-level function name: reject an
@@ -1262,6 +1346,31 @@ impl Default for Env {
 }
 
 impl Env {
+    /// This environment's process-unique id. The env shelf looks a frame up by the
+    /// [`RootSlot::env`] an `addr_of` recorded, which is what lets a callee reach its
+    /// caller's locals. Ids are unique among *live* environments: a pooled `Env` is
+    /// only reused after its frame returned, so at any instant no two live frames
+    /// share one. Mirrors the IR/bytecode `Env`.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// A placeholder environment that owns nothing: no allocation, no scopes, and no
+    /// id bump (which would take the process-global atomic on every call).
+    ///
+    /// Left behind in a caller's `&mut Env` slot while its real environment sits on
+    /// the env shelf for the duration of a call. It is never read: the swap back
+    /// happens before the caller resumes. Its id is `0`, which
+    /// [`crate::raw_pointer::next_env_id`] never hands out, so even a stray
+    /// [`RootSlot`] cannot resolve against it.
+    pub(crate) fn hollow() -> Self {
+        Self {
+            id: 0,
+            scopes: Vec::new(),
+            next_scope_id: 0,
+        }
+    }
+
     fn fresh_scope(&mut self) -> Scope {
         let id = self.next_scope_id;
         self.next_scope_id += 1;

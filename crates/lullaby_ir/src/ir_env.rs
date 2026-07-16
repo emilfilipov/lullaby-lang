@@ -54,6 +54,31 @@ impl Default for Env {
 }
 
 impl Env {
+    /// This environment's process-unique id. The env shelf looks a frame up by the
+    /// [`RootSlot::env`] an `addr_of` recorded, which is what lets a callee reach its
+    /// caller's locals. Ids are unique among *live* environments: a pooled `Env` is
+    /// only reused after its frame returned, so at any instant no two live frames
+    /// share one.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// A placeholder environment that owns nothing: no allocation, no scopes, and no
+    /// id bump (which would take the process-global atomic on every call).
+    ///
+    /// Left behind in a caller's `&mut Env` slot while its real environment sits on
+    /// the env shelf for the duration of a call. It is never read: the swap back
+    /// happens before the caller resumes. Its id is `0`, which
+    /// [`lullaby_runtime::next_env_id`] never hands out, so even a stray [`RootSlot`]
+    /// cannot resolve against it.
+    pub(crate) fn hollow() -> Self {
+        Self {
+            id: 0,
+            scopes: Vec::new(),
+            next_scope_id: 0,
+        }
+    }
+
     fn fresh_scope(&mut self) -> Scope {
         let id = self.next_scope_id;
         self.next_scope_id += 1;
