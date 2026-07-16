@@ -784,14 +784,11 @@ impl<'a> NativeCtx<'a> {
 
         // Return classification: an aggregate return is written through a hidden
         // pointer passed in the first integer-argument register (Win64 `rcx`),
-        // shifting the visible parameters to the following registers.
-        let return_ty = resolve_signature_native_type(
-            &function.return_type,
-            structs,
-            enums,
-            array_lengths,
-            RETURN_ARRAY_KEY,
-        )?;
+        // shifting the visible parameters to the following registers. A `void`
+        // return resolves to `NativeType::Void` (no value): not an aggregate, so no
+        // hidden pointer and no return scratch — the parameters keep register 0.
+        let return_ty =
+            resolve_return_native_type(&function.return_type, structs, enums, array_lengths)?;
         let return_is_aggregate = return_ty.is_aggregate();
         let sret_slot = if return_is_aggregate {
             next_slot += 8;

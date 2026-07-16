@@ -22,6 +22,14 @@
 //! tests pin the exact reported reproductions with their exact expected values.
 //! The instruction-selection proofs live in
 //! `crates/lullaby_ir/src/native_object_tailvalue_tests.rs`.
+//!
+//! This suite also covers VOID-RETURNING functions, which live here because their
+//! correctness question is the mirror image of the above: a void function has NO
+//! value position, so the routing this suite pins must NOT be applied to it. Its
+//! tail `if`/`match` is a statement, and the `block_yields_value` default-deny
+//! gate — which a void body could never pass, having no value to yield — must
+//! never be consulted for it. The codegen-level proofs live in
+//! `crates/lullaby_ir/src/native_object_void_tests.rs`.
 
 use crate::*;
 use std::process::Command;
@@ -169,4 +177,208 @@ fn native_asm_branch_tail_compiles_and_runs() {
             );
         }
     }
+}
+
+// -- VOID-returning functions -------------------------------------------------
+//
+// A function declaring no return type was NOT native-eligible: the eligibility
+// gate ran its `void` return through the shared signature resolver, which
+// answered — right for a parameter, wrong for a return — "type `void` is not in
+// the native stack subset". Every void function skipped with `L0339`, and the
+// demotion fixpoint cascaded that skip into every caller, so the natural driver
+// spelling `fn poke p ptr<T> v T` could not be compiled at all and had to be
+// worked around with a dummy `i64` return.
+
+/// The natural DRIVER spelling: `fn poke p ptr<i64> v i64` writing through a
+/// caller-supplied out-parameter. This is the shape every MMIO/kernel routine
+/// wants, and the reason void eligibility matters.
+///
+/// This is a NATIVE-ONLY program by design, not by omission: the interpreters
+/// refuse a cross-frame `addr_of` store with `L0459` (they keep each frame's
+/// locals in that frame's own environment and cannot reach another frame's), so
+/// there is no interpreter result to compare against — the documented acceptance
+/// divergence also pinned by `an_addr_of_pointer_that_escapes_its_frame_is_refused`
+/// in `suite15.rs`. The exe's exit code IS the verification: `addr_of` is a real
+/// machine address natively, so `poke` genuinely mutates `main`'s local.
+#[test]
+fn native_void_driver_spelling_compiles_and_runs() {
+    let source = concat!(
+        "fn poke p ptr<i64> v i64\n",
+        "    unsafe\n",
+        "        ptr_write(p, v)\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let cell i64 = 0\n",
+        "    unsafe\n",
+        "        poke(addr_of(cell), 99)\n",
+        "    return cell\n",
+    );
+    if let Some(exit) = native_exit_for(source, "lullaby_void_driver_poke") {
+        assert_eq!(
+            exit, 99,
+            "`fn poke p ptr<i64> v i64` must compile natively and genuinely write \
+             through the caller's out-parameter"
+        );
+    }
+}
+
+/// The void TAIL shapes, each called for effect through an out-parameter, all in
+/// one program: a body ending in a non-exhaustive `if`, a body ending in a
+/// `match`, and a bare `return` on both its taken and untaken paths.
+///
+/// The non-exhaustive `if` is the load-bearing case: `block_yields_value` refuses
+/// exactly that shape in a VALUE position, so if a void tail were ever routed
+/// through the value path this function would skip (`L0339`) and `native_exit_for`
+/// would fail its "must COMPILE, not skip" assertion.
+#[test]
+fn native_void_tail_shapes_compile_and_run() {
+    let source = concat!(
+        // Ends in a NON-EXHAUSTIVE `if` — statement position.
+        "fn poke_if p ptr<i64> n i64\n",
+        "    unsafe\n",
+        "        if n > 10\n",
+        "            ptr_write(p, 1)\n",
+        "        elif n > 5\n",
+        "            ptr_write(p, 2)\n",
+        "\n",
+        // Ends in a `match` — statement position.
+        "fn poke_match p ptr<i64> o option<i64>\n",
+        "    unsafe\n",
+        "        match o\n",
+        "            some(v) -> ptr_write(p, v)\n",
+        "            none -> ptr_write(p, 0)\n",
+        "\n",
+        // Bare `return` — no value to route.
+        "fn poke_ret p ptr<i64> n i64\n",
+        "    if n < 0\n",
+        "        return\n",
+        "    unsafe\n",
+        "        ptr_write(p, n)\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let a i64 = 0\n",
+        "    let b i64 = 0\n",
+        "    let c i64 = 0\n",
+        "    let d i64 = 7\n",
+        "    unsafe\n",
+        "        poke_if(addr_of(a), 20)\n",
+        "        poke_match(addr_of(b), some(5))\n",
+        "        poke_ret(addr_of(c), 3)\n",
+        "        poke_ret(addr_of(d), -1)\n",
+        "    return a * 1000 + b * 100 + c * 10 + d\n",
+    );
+    // a=1 (n>10 branch), b=5 (some payload), c=3 (written), d=7 (untouched: the
+    // bare `return` took the early path) -> 1537.
+    if let Some(exit) = native_exit_for(source, "lullaby_void_tail_shapes") {
+        assert_eq!(
+            exit, 1537,
+            "a void body ending in a non-exhaustive `if`/`match`, and a bare \
+             `return`, must each compile and take effect"
+        );
+    }
+}
+
+/// A void function called in a LOOP: the call is a statement whose (undefined)
+/// `rax` is discarded on every iteration, and the accumulating out-parameter
+/// write must land each time.
+#[test]
+fn native_void_call_in_a_loop_runs() {
+    let source = concat!(
+        "fn add_to p ptr<i64> v i64\n",
+        "    unsafe\n",
+        "        ptr_write(p, ptr_read(p) + v)\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let acc i64 = 0\n",
+        "    let i i64 = 1\n",
+        "    while i <= 4\n",
+        "        unsafe\n",
+        "            add_to(addr_of(acc), i)\n",
+        "        i = i + 1\n",
+        "    return acc\n",
+    );
+    // 1+2+3+4 = 10.
+    if let Some(exit) = native_exit_for(source, "lullaby_void_loop_call") {
+        assert_eq!(
+            exit, 10,
+            "a void function called in a loop must apply its effect every iteration"
+        );
+    }
+}
+
+/// Cross-tier PARITY for void functions, over the interpreter-defined subset.
+///
+/// `native_void_effects.lby` keeps every void helper's effect inside its own
+/// frame precisely so all three interpreters model it, giving a real four-way
+/// comparison (the out-parameter programs above cannot have one — the
+/// interpreters refuse a cross-frame `addr_of` store by design). It covers a void
+/// body that loops, one ending in a non-exhaustive `if`, one ending in a `match`,
+/// a bare `return`, and a void function calling another void function.
+#[test]
+fn native_void_effects_fixture_matches_the_interpreters() {
+    let path = workspace_root().join("tests/fixtures/valid/native_void_effects.lby");
+    let fixture = path.to_str().expect("fixture path");
+
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args(["run", "--backend", backend, fixture])
+            .output()
+            .expect("run cli");
+        assert!(
+            output.status.success(),
+            "[{backend}] the void-effects fixture must run. stderr: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "131",
+            "[{backend}] void helpers must run for effect and leave the caller intact"
+        );
+    }
+
+    if !cfg!(windows) {
+        eprintln!("not a Windows host; skipping the native leg");
+        return;
+    }
+    let exe = std::env::temp_dir().join("lullaby_void_effects_fixture.exe");
+    let _ = std::fs::remove_file(&exe);
+    // `--verbose` is what prints the per-function `compiled`/`skipped` notes.
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            exe.to_str().expect("exe path"),
+            fixture,
+        ])
+        .output()
+        .expect("run native");
+    assert!(
+        emit.status.success(),
+        "native emit failed for the void-effects fixture:\n{}",
+        stderr(&emit)
+    );
+    // Every helper is void; if void eligibility regressed, all of them would skip
+    // and take `main` with them through the demotion fixpoint.
+    let notes = stdout(&emit);
+    for name in [
+        "poke_local",
+        "spin",
+        "classify_effect",
+        "from_opt_effect",
+        "early",
+        "outer",
+        "main",
+    ] {
+        assert!(
+            notes.contains(&format!("compiled {name}")),
+            "`{name}` must compile natively (void functions must not skip):\n{notes}"
+        );
+    }
+    let run = Command::new(&exe).output().expect("run exe");
+    assert_eq!(
+        run.status.code().expect("exit code"),
+        131,
+        "native must agree with all three interpreters (131) on the void-effects fixture"
+    );
 }

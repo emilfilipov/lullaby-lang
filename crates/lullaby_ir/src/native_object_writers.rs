@@ -1384,3 +1384,10 @@ mod native_object_rawptr_tests;
 #[cfg(test)]
 #[path = "native_object_tailvalue_tests.rs"]
 mod native_object_tailvalue_tests;
+
+// Void-returning functions (eligibility, the no-hidden-pointer classification, and
+// the statement-position tail that keeps them clear of the value-position routing)
+// likewise have their own codegen tests for the size-cap reason.
+#[cfg(test)]
+#[path = "native_object_void_tests.rs"]
+mod native_object_void_tests;

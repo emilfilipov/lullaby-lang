@@ -86,6 +86,9 @@ pub(crate) fn native_signature_type_is_aggregate(
     // here so the function skips gracefully.
     let native = resolve_native_type(ty, structs, enums)?;
     match native {
+        // Unreachable (`resolve_native_type` never yields `Void`, and a void RETURN
+        // is classified by the caller); a `Void` here could only be a void PARAMETER.
+        NativeType::Void => Err("`void` is not a valid parameter type".to_string()),
         NativeType::I64
         | NativeType::F64
         | NativeType::F32
@@ -118,9 +121,12 @@ pub(crate) fn native_signature_eligibility(
     structs: &[IrStructDef],
     enums: &[IrEnumDef],
 ) -> Result<(), String> {
-    // Does the return type consume a hidden first integer-register argument?
-    let returns_aggregate =
-        native_signature_type_is_aggregate(&function.return_type, structs, enums).map_err(
+    // Does the return type consume a hidden first integer-register argument? A VOID
+    // return is not an unsupported return type — it is the ABSENCE of one, taking no
+    // hidden pointer — so it answers `false` without the type resolver, which would
+    // (rightly, for a parameter) reject `void` as outside the native stack subset.
+    let returns_aggregate = !function.return_type.is_void()
+        && native_signature_type_is_aggregate(&function.return_type, structs, enums).map_err(
             |reason| {
                 format!(
                     "return type `{}` is not in the native subset: {reason}",
@@ -640,13 +646,9 @@ pub(crate) fn compute_native_signature(
             &param.name,
         )?);
     }
-    let ret = resolve_signature_native_type(
-        &function.return_type,
-        structs,
-        enums,
-        array_lengths,
-        RETURN_ARRAY_KEY,
-    )?;
+    // The return-only resolver so a `void` return yields `NativeType::Void` instead
+    // of being rejected; the params above keep the resolver that still refuses it.
+    let ret = resolve_return_native_type(&function.return_type, structs, enums, array_lengths)?;
     Ok(NativeSignature { params, ret })
 }
 

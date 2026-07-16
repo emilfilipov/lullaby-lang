@@ -24,6 +24,20 @@ use lullaby_semantics::substitute_type;
 /// The stack layout of a native local value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NativeType {
+    /// **No value at all** — the return layout of a function that declares no
+    /// return type (`fn poke p ptr<i64> v i64`). This is the ABSENCE of a return
+    /// value, not an unsupported one: the body runs for its effects and the
+    /// epilogue returns without writing a result, so `rax` is UNDEFINED on return
+    /// and the caller must not read it.
+    ///
+    /// `Void` is admitted in **return position only** — via
+    /// [`resolve_return_native_type`], never [`resolve_signature_native_type`] or
+    /// [`resolve_native_type`] — so a `void` parameter, local, field, element, or
+    /// enum payload still fails to resolve and its function skips cleanly
+    /// (`L0339`). It is deliberately NOT an aggregate ([`NativeType::is_aggregate`]
+    /// returns false), so it reserves no hidden result pointer and no return
+    /// scratch, and it occupies zero words.
+    Void,
     /// A single 8-byte integer word.
     I64,
     /// A single 8-byte word holding an IEEE-754 `f64` (double). Lives in an XMM
@@ -138,6 +152,11 @@ impl NativeType {
     /// The number of 8-byte words this value occupies on the stack.
     pub(crate) fn words(&self) -> usize {
         match self {
+            // No value: no storage. `Void` only ever appears as a RETURN layout
+            // (never a local/param/field), so this arm is a sizing identity rather
+            // than a live stack reservation — a void return reserves no return
+            // scratch (it is not an aggregate) and no hidden result pointer.
+            NativeType::Void => 0,
             // A string, list, map, or heap struct is a single pointer word, like a
             // scalar.
             NativeType::I64
@@ -359,6 +378,12 @@ fn subst_map(type_params: &[String], args: &[TypeRef]) -> HashMap<String, TypeRe
 pub(crate) fn is_scalar_only_layout(ty: &NativeType) -> bool {
     match ty {
         NativeType::I64 | NativeType::F64 | NativeType::F32 => true,
+        // `Void` is a RETURN-only layout and can never be a field/element/payload,
+        // so this arm is unreachable through the generic-monomorphization gate that
+        // calls it. `false` is the default-deny answer regardless: "no value" is not
+        // a scalar, so a hypothetical void-carrying layout defers rather than
+        // compiling to a zero-word field.
+        NativeType::Void => false,
         NativeType::String
         | NativeType::List { .. }
         | NativeType::Map { .. }
@@ -701,11 +726,40 @@ pub(crate) const RETURN_ARRAY_KEY: &str = "\0return";
 /// [`NativeType::FatArray`] instead of a fixed [`NativeType::Array`].
 pub(crate) const FAT_ARRAY_LEN: usize = usize::MAX;
 
+/// Resolve a function's **return** type into its `NativeType`.
+///
+/// The one and only place [`NativeType::Void`] is produced. A function that
+/// declares no return type (`fn poke p ptr<i64> v i64`) has a `void` return type,
+/// which is the ABSENCE of a return value rather than an unsupported one — so it
+/// resolves to `Void` and the function stays native-eligible, instead of being
+/// rejected by [`resolve_signature_native_type`] as a type "not in the native
+/// stack subset" (which is the right answer for a `void` PARAMETER, and is why
+/// this is a separate return-only entry point rather than a `void` arm added to
+/// the shared signature resolver).
+///
+/// Every other return type delegates unchanged to [`resolve_signature_native_type`]
+/// under the [`RETURN_ARRAY_KEY`] array-length key.
+pub(crate) fn resolve_return_native_type(
+    ty: &TypeRef,
+    structs: &[IrStructDef],
+    enums: &[IrEnumDef],
+    array_lengths: &ArrayLengths,
+) -> Result<NativeType, String> {
+    if ty.is_void() {
+        return Ok(NativeType::Void);
+    }
+    resolve_signature_native_type(ty, structs, enums, array_lengths, RETURN_ARRAY_KEY)
+}
+
 /// Resolve a **signature** type (a parameter or return type) into its
 /// `NativeType`. Identical to [`resolve_native_type`] except a fixed-array type
 /// (`array<T>`), whose length is absent from the type, takes its length from
 /// `array_lengths[key]` (populated by [`infer_array_lengths`]). A bare array with
 /// no inferred length is rejected so the function skips gracefully.
+///
+/// `void` is NOT resolvable here — a `void` parameter/local/field is genuinely
+/// outside the native subset. A void RETURN goes through
+/// [`resolve_return_native_type`] instead.
 pub(crate) fn resolve_signature_native_type(
     ty: &TypeRef,
     structs: &[IrStructDef],
