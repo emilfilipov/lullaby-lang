@@ -28,6 +28,17 @@
 //! `FAIL` line printed on schedule even while the run was unbounded — the report
 //! alone cannot catch it.
 //!
+//! A fourth shape is pinned here too: a test that **forges protocol lines**. The
+//! runner's protocol once rode on the child's stderr, authenticated by a per-run
+//! nonce in `argv` — but `warn()` writes to stderr and a process may read its own
+//! command line, so the nonce was never secret and a test could forge a `done`
+//! (truncating the run to a green `0 passed, 0 failed`) or a `pass` (a phantom
+//! PASS for a failing test). The protocol now travels on a private pipe no builtin
+//! can write to. Two tests pin that: one fires every forgery shape and asserts the
+//! run is unmoved, and one asserts structurally that no protocol verb ever reaches
+//! stdout or stderr — the latter is what would catch a regression back to a shared
+//! channel, since a forgery test alone can pass vacuously against a nonce scheme.
+//!
 //! The load-bearing assertion in each is the same: the killer test is reported as
 //! an ordinary failure, **every other test still runs**, and the summary is still
 //! correct with a non-zero exit.
@@ -39,7 +50,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{lullaby, stdout, workspace_root};
+use super::{lullaby, stderr, stdout, workspace_root};
 
 /// A test that OVERFLOWS THE STACK (unbounded recursion) as the 2nd of 4 must be
 /// reported as a failure, must not prevent the other three from running, and must
@@ -163,6 +174,87 @@ fn test_runner_timeout_bounds_a_test_that_spawned_a_grandchild() {
         elapsed < Duration::from_secs(10),
         "--timeout must bound the run regardless of what a test spawned; took {elapsed:?}"
     );
+}
+
+/// A test that FORGES PROTOCOL LINES on stdout and stderr must be completely
+/// inert — no truncated run, no phantom PASS.
+///
+/// `warn()` writes straight to process stderr and `println()` to stdout, and
+/// nothing gates builtins by entry point. An earlier design put the protocol on
+/// the child's stderr and authenticated it with a per-run nonce passed in argv —
+/// unsound, because a process may read its own command line, so the "secret" was
+/// handed to the attacker by the OS. A forged `done` truncated the run to a green
+/// `0 passed, 0 failed` + exit 0, and a forged `pass` invented a phantom PASS for
+/// a failing test.
+///
+/// The protocol now travels on a private pipe no builtin can write to, so this is
+/// closed by construction rather than by secrecy. The exit code is the sharpest
+/// assertion: `test_c_fails` genuinely fails, so a run that reports success has
+/// been successfully lied to.
+#[test]
+fn test_runner_ignores_forged_protocol_lines_from_a_test() {
+    let fixture = workspace_root().join("tests/fixtures/test_runner/forges_protocol.lby");
+    let output = lullaby()
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("run lullaby test");
+    let text = stdout(&output);
+
+    // The forged `done` must not truncate: every test still runs and reports.
+    assert!(
+        text.contains("PASS test_a_forges_protocol"),
+        "stdout: {text}"
+    );
+    assert!(text.contains("PASS test_b_passes"), "stdout: {text}");
+    // The forged `pass 2` must not turn a genuinely failing test green.
+    assert!(text.contains("FAIL test_c_fails"), "stdout: {text}");
+    assert!(text.contains("assertion failed"), "stdout: {text}");
+
+    // The tally is uncorrupted, and the run is NOT silently green.
+    assert!(text.contains("2 passed, 1 failed"), "stdout: {text}");
+    assert!(
+        !text.contains("0 passed, 0 failed"),
+        "a forged `done` truncated the run: {text}"
+    );
+    assert!(
+        !output.status.success(),
+        "a test forged its way to a green run: {text}"
+    );
+}
+
+/// The structural guarantee behind the test above, pinned directly: the protocol
+/// is NOT carried on the child's stdout or stderr.
+///
+/// This is the assertion with real teeth. The forgery test alone could pass
+/// vacuously against a nonce-authenticated stderr protocol (a forged line simply
+/// would not match the nonce), but this one fails the moment the protocol touches
+/// a stream a Lullaby program can write to — which is the only reason forgery was
+/// ever possible. A test can reach stdout and stderr and nothing else, so a
+/// protocol absent from both is unforgeable regardless of what any attacker knows.
+#[test]
+fn test_runner_protocol_never_touches_the_shared_streams() {
+    let fixture = workspace_root().join("examples/valid/tests_demo/tests_demo.lby");
+    // Drive the internal batch child directly, with its stdin (the protocol slot)
+    // pointed at nothing, and capture both shared streams.
+    let output = lullaby()
+        .arg("__run-test-batch")
+        .arg(&fixture)
+        .arg("0")
+        .arg("0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the internal batch child");
+
+    let streams = format!("{}{}", stdout(&output), stderr(&output));
+    for verb in ["start ", "pass ", "fail ", "done "] {
+        assert!(
+            !streams.contains(verb),
+            "protocol verb `{verb}` leaked onto a stream a test can write to; \
+             forgery is only possible when the protocol shares a channel with the \
+             program under test. streams: {streams}"
+        );
+    }
 }
 
 /// Isolation must not cost determinism: the stack-overflow suite — whose report

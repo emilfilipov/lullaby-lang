@@ -78,7 +78,6 @@ fn run() -> Result<(), String> {
                 invocation.path,
                 batch.start,
                 batch.verbose,
-                &batch.nonce,
                 invocation.filter,
             )
         }

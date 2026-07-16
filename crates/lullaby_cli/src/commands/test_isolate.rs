@@ -33,14 +33,40 @@
 //! tests still run sequentially in one process. Only a suite that actually kills
 //! the runner pays per incident, which is the right place to pay.
 //!
-//! # The protocol
+//! # The transport: a private pipe, not stdout/stderr
 //!
-//! The child reports progress on **stderr**, one line per event, so the test's
-//! own stdout stays untouched and is inherited straight through to the terminal.
-//! A Lullaby program can itself write to stderr, so every protocol line carries a
-//! per-run **nonce** the child is given at spawn: a test cannot forge a line whose
-//! nonce it was never told, and any stderr line that is not a protocol line is
-//! forwarded to the parent's stderr as the test's own output.
+//! The child reports results over a **dedicated pipe no test can reach**, and this
+//! is a correctness property rather than a nicety.
+//!
+//! An earlier design put the protocol on the child's stderr and authenticated it
+//! with a per-run nonce. That was **unsound**. `warn()` writes straight to process
+//! stderr, and the nonce travelled in `argv` — which any process may read of
+//! itself (`/proc/self/cmdline`, or `Get-CimInstance Win32_Process` through the
+//! `sys_output` builtin). Secrecy the OS hands to the attacker is not secrecy, so
+//! a test could forge a result line: a fake `pass` invented a phantom PASS for a
+//! failing test, and a fake `done` truncated the run into a green
+//! `0 passed, 0 failed`.
+//!
+//! The fix is structural, not cryptographic. The parent creates a pipe and passes
+//! its **write end as the child's stdin slot**; the child reclaims that descriptor
+//! and writes the protocol there. The child's stdout and stderr are plain
+//! `inherit`, so a test's `print`/`println`/`warn` go straight to the terminal,
+//! untouched and never parsed by us. A Lullaby program can reach **only** stdout
+//! and stderr: no builtin writes to an arbitrary fd or handle, and no builtin
+//! writes to stdin at all. The protocol is therefore unforgeable *by
+//! construction* — there is no secret to leak and no channel to write on, so
+//! knowing everything about the protocol buys an attacker nothing.
+//!
+//! Reclaiming the stdin slot costs nothing real: `lullaby test` already gave the
+//! child a null stdin, so `read_line` in a test had nothing to read either way.
+//!
+//! # Completion and ordering
+//!
+//! Completion is reported by an explicit `done`, not inferred from EOF: a test may
+//! leave a grandchild holding the inherited pipe, and EOF would then be deferred
+//! for as long as that process lives, stalling even a wholly passing suite. `done`
+//! is still validated against what was actually reported — no verb may declare the
+//! batch finished on its own say-so.
 //!
 //! Results are printed as they stream in, never collected and dumped at the end:
 //! a batch only ever resumes *past* the test that killed it, so results arrive in
@@ -49,11 +75,12 @@
 //! line and the parent flushes its own stdout before each spawn, so a test's
 //! output always lands before the `PASS`/`FAIL` line reporting it.
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use lullaby_runtime::run_named_function;
 
@@ -64,29 +91,56 @@ use crate::diagnostics::format_reports;
 use super::test::discover_tests;
 
 /// The hidden internal subcommand the parent re-invokes itself with. Positional:
-/// `<path> <start-index> <verbose:0|1> <nonce> [filter]`.
+/// `<path> <start-index> <verbose:0|1> [filter]`.
 pub(crate) const RUN_BATCH_COMMAND: &str = "__run-test-batch";
 
-/// Protocol verbs, emitted by the child as `##<nonce> <verb> <index> [payload]`.
+/// Protocol verbs, emitted by the child as `<verb> <index> [payload]` on the
+/// private channel. There is no nonce and none is needed — see the module docs:
+/// the channel is unreachable from a Lullaby program, so this is not a secret
+/// being kept, it is a pipe an attacker has no handle to.
 const START: &str = "start";
 const PASS: &str = "pass";
 const FAIL: &str = "fail";
-/// The child finished the batch under its own power. This is what completes a
-/// batch — NOT stderr EOF. A test may leave a grandchild holding the inherited
-/// stderr pipe, in which case EOF never arrives; waiting for it would stall a
-/// wholly passing suite until the deadline. See `kill_process_tree`.
+/// The child finished the batch under its own power. This completes a batch —
+/// NOT pipe EOF, which a grandchild holding the inherited handle can defer
+/// indefinitely. Still validated against `last_reported`.
 const DONE: &str = "done";
 
 /// Separates the failure message from each traceback frame inside one `fail`
 /// payload. A control character, so it cannot occur in a rendered diagnostic.
 const FIELD_SEPARATOR: char = '\u{1f}';
 
+/// The child's end of the private protocol channel: the descriptor the parent put
+/// in the stdin slot, reclaimed as an owned `File`. The child never reads its
+/// stdin, and `lullaby test` gave it a null stdin before this, so taking the slot
+/// costs nothing.
+#[cfg(windows)]
+fn protocol_channel() -> Option<File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    let handle = std::io::stdin().as_raw_handle();
+    if handle.is_null() {
+        return None;
+    }
+    Some(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(unix)]
+fn protocol_channel() -> Option<File> {
+    use std::os::fd::FromRawFd;
+    Some(unsafe { File::from_raw_fd(0) })
+}
+
+#[cfg(not(any(windows, unix)))]
+fn protocol_channel() -> Option<File> {
+    None
+}
+
 /// Kill the child AND every process it spawned.
 ///
 /// Killing only the child is not enough: `sys_status`/`sys_output`/`proc_spawn`
 /// let a `test_*` function spawn arbitrary processes, and a grandchild both
-/// outlives a killed child and inherits the child's stderr pipe handle — so the
-/// pipe never reaches EOF and the runaway process keeps running. A runner whose
+/// outlives a killed child and inherits the child's pipe handles — so the pipe
+/// never reaches EOF and the runaway process keeps running. A runner whose
 /// `--timeout N` does not actually bound the run within ~N seconds fails the very
 /// guarantee it exists to provide.
 ///
@@ -134,7 +188,8 @@ fn describe_abnormal_exit(status: Option<ExitStatus>) -> String {
     if let Some(status) = status
         && status.code() == Some(WINDOWS_STACK_OVERFLOW)
     {
-        return "the test process terminated abnormally: stack overflow                 (STATUS_STACK_OVERFLOW), i.e. unbounded recursion"
+        return "the test process terminated abnormally: stack overflow \
+                (STATUS_STACK_OVERFLOW), i.e. unbounded recursion"
             .to_string();
     }
     match status {
@@ -148,16 +203,6 @@ fn describe_abnormal_exit(status: Option<ExitStatus>) -> String {
 pub(crate) struct Tally {
     pub(crate) passed: usize,
     pub(crate) failed: usize,
-}
-
-/// A per-run token the test being run cannot know, so it cannot forge a protocol
-/// line on the stderr it shares with the child.
-fn make_nonce() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos())
-        .unwrap_or(0);
-    format!("{:x}-{:x}", std::process::id(), nanos)
 }
 
 /// Escape a message so it survives as one protocol line.
@@ -210,13 +255,12 @@ pub(crate) fn run_isolated(
 ) -> Result<Tally, String> {
     let exe = std::env::current_exe()
         .map_err(|error| format!("could not locate the lullaby executable: {error}"))?;
-    let nonce = make_nonce();
     let mut tally = Tally::default();
     let mut next = 0usize;
 
     while next < names.len() {
         let resume = run_batch(
-            &exe, path, next, filter, verbose, &nonce, timeout, names, &mut tally,
+            &exe, path, next, filter, verbose, timeout, names, &mut tally,
         )?;
         // A batch must always make progress, or this would spin forever on a child
         // that dies before reporting anything. If it made none, attribute the
@@ -247,18 +291,23 @@ fn run_batch(
     start: usize,
     filter: Option<&str>,
     verbose: bool,
-    nonce: &str,
     timeout: Option<Duration>,
     names: &[String],
     tally: &mut Tally,
 ) -> Result<usize, String> {
+    // The private protocol channel. Its write end becomes the child's stdin slot;
+    // a Lullaby program can reach neither (no builtin writes to stdin, and none
+    // writes to a raw descriptor), so nothing a test emits can be mistaken for a
+    // protocol line.
+    let (protocol, protocol_write) = std::io::pipe()
+        .map_err(|error| format!("could not create the test protocol pipe: {error}"))?;
+
     let mut command = Command::new(exe);
     command
         .arg(RUN_BATCH_COMMAND)
         .arg(path)
         .arg(start.to_string())
-        .arg(if verbose { "1" } else { "0" })
-        .arg(nonce);
+        .arg(if verbose { "1" } else { "0" });
     if let Some(filter) = filter {
         command.arg(filter);
     }
@@ -271,35 +320,42 @@ fn run_batch(
     }
     // Order our own prints against the child's inherited stdout.
     let _ = std::io::stdout().flush();
-    // stdout is inherited so a test's own output reaches the terminal exactly as
-    // it did in-process; stderr is piped because it carries the protocol.
+    // stdout/stderr are inherited, so a test's own output reaches the terminal
+    // exactly as it did in-process and is never parsed by us.
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(Stdio::from(protocol_write))
         .stdout(Stdio::inherit())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| format!("could not start the isolated test process: {error}"))?;
+    // The parent must not keep the pipe's write end alive, or it would never see
+    // EOF and could not detect a crash.
+    drop(command);
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "isolated test process has no stderr pipe".to_string())?;
     let (tx, rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+        for line in BufReader::new(protocol).lines().map_while(Result::ok) {
             if tx.send(line).is_err() {
                 break;
             }
         }
     });
 
-    let prefix = format!("##{nonce} ");
     let mut in_flight: Option<usize> = None;
-    // The highest index this batch actually reported. This is what makes "the
-    // child finished" distinguishable from "the child died having reported
-    // nothing" -- see the `Disconnected` arm.
+    // The highest index this batch actually reported. This makes "the child
+    // finished" distinguishable from "the child died having reported nothing",
+    // and is what `done` is validated against.
     let mut last_reported: Option<usize> = None;
     let mut deadline = timeout.map(|limit| Instant::now() + limit);
+
+    // Where to resume when the child stops without finishing: after the last test
+    // we actually saw reported. NEVER `names.len()` on a guess — that would make a
+    // child which died having reported nothing indistinguishable from one that ran
+    // everything, silently yielding `0 passed, 0 failed` + exit 0: a green run that
+    // executed no tests. `run_isolated`'s progress guard turns the report-nothing
+    // case into a loud failure.
+    let resume_after_reported =
+        |last_reported: Option<usize>| last_reported.map_or(start, |index| index + 1);
 
     let resume = loop {
         let event = match deadline {
@@ -309,17 +365,16 @@ fn run_batch(
 
         match event {
             Ok(line) => {
-                let Some(rest) = line.strip_prefix(&prefix) else {
-                    // Not ours: the test's own stderr output. Pass it through.
-                    eprintln!("{line}");
-                    continue;
-                };
-                let (verb, payload) = rest.split_once(' ').unwrap_or((rest, ""));
+                let (verb, payload) = line.split_once(' ').unwrap_or((line.as_str(), ""));
                 if verb == DONE {
-                    // The child ran the batch to completion. Break on this rather
-                    // than on EOF: a grandchild holding the stderr pipe can defer
-                    // EOF indefinitely, and a passing suite must not wait for it.
-                    break names.len();
+                    // Validated, not taken on faith: the child may only claim the
+                    // batch is complete if it actually reported every test in it.
+                    // `done` must never be the one verb that can end a run
+                    // unconditionally.
+                    break match last_reported {
+                        Some(index) if index + 1 == names.len() => names.len(),
+                        other => resume_after_reported(other),
+                    };
                 }
                 let (index_text, detail) = payload.split_once(' ').unwrap_or((payload, ""));
                 let index: usize = match index_text.parse() {
@@ -353,6 +408,26 @@ fn run_batch(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
+                // Before declaring a timeout, check whether the child has already
+                // died: a crash's EOF can lag the fault (Windows tears a stack
+                // overflow down in ~4s), and a deadline shorter than that would
+                // otherwise report a test that DID terminate as one that did not.
+                // This narrows that window but cannot close it — see the caveat in
+                // `language_surface.md`.
+                if let Some(status) = child.try_wait().ok().flatten() {
+                    break match in_flight {
+                        Some(index) => {
+                            report_fail(
+                                &names[index],
+                                &describe_abnormal_exit(Some(status)),
+                                &[],
+                                tally,
+                            );
+                            index + 1
+                        }
+                        None => resume_after_reported(last_reported),
+                    };
+                }
                 // The in-flight test outlived the deadline: it is not going to
                 // finish. Kill the whole TREE -- not just the child -- bank the
                 // timeout as that test's failure, and resume the batch after it.
@@ -374,14 +449,12 @@ fn run_batch(
                         );
                         index + 1
                     }
-                    // No test in flight: the child stalled between tests. Resume
-                    // after the last test it did report; if it reported none,
-                    // `run_isolated` turns the no-progress batch into a failure.
-                    None => last_reported.map_or(start, |index| index + 1),
+                    // No test in flight: the child stalled between tests.
+                    None => resume_after_reported(last_reported),
                 };
             }
             Err(RecvTimeoutError::Disconnected) => {
-                // stderr closed: the child is done, one way or another.
+                // The pipe closed without a `done`: the child is gone.
                 let status = child.wait().ok();
                 break match in_flight {
                     // A test was running and the process died under it: a stack
@@ -393,28 +466,20 @@ fn run_batch(
                         report_fail(&names[index], &describe_abnormal_exit(status), &[], tally);
                         index + 1
                     }
-                    // No test in flight and no `done`: the child exited between
-                    // tests without finishing the batch. Resume after the last test
-                    // it reported -- NEVER claim the batch is complete here.
-                    // Treating this as "complete" would make a child that died
-                    // having reported nothing indistinguishable from one that ran
-                    // everything, silently yielding `0 passed, 0 failed` + exit 0:
-                    // a green run that executed no tests. `run_isolated`'s progress
-                    // guard turns the report-nothing case into a loud failure.
-                    None => last_reported.map_or(start, |index| index + 1),
+                    None => resume_after_reported(last_reported),
                 };
             }
         }
     };
 
-    // Deliberately NOT joined. The reader blocks until stderr reaches EOF, and a
-    // grandchild that inherited the pipe handle defers EOF for as long as it
-    // lives -- joining here is what let a test's spawned process outlast the
-    // deadline and unbound the whole run (`--timeout 3` taking 14s). Tree-killing
-    // above normally EOFs the pipe promptly; detaching guarantees we proceed
-    // within the deadline even if it does not. The thread is `'static`, owns its
-    // pipe, and exits on EOF or when its send fails after `rx` drops -- so it is
-    // bounded by the grandchild's lifetime, never by ours.
+    // Deliberately NOT joined. The reader blocks until the pipe reaches EOF, and a
+    // grandchild that inherited the handle defers EOF for as long as it lives —
+    // joining here is what let a test's spawned process outlast the deadline and
+    // unbound the whole run (`--timeout 3` taking 14s). Tree-killing above normally
+    // EOFs the pipe promptly; detaching guarantees we proceed within the deadline
+    // even if it does not. The thread is `'static`, owns its pipe, and exits on EOF
+    // or when its send fails after `rx` drops — so it is bounded by the
+    // grandchild's lifetime, never by ours.
     drop(reader);
     let _ = child.wait();
     Ok(resume)
@@ -425,16 +490,19 @@ fn run_batch(
 // ---------------------------------------------------------------------------
 
 /// The `__run-test-batch` entry point: run `names[start..]` in THIS process,
-/// reporting each test's progress and result on stderr. Discovery is re-derived
-/// here rather than passed in, because it is deterministic — the parent and the
-/// child agree on the list and therefore on every index.
+/// reporting each test's progress and result on the private protocol channel.
+/// Discovery is re-derived here rather than passed in, because it is
+/// deterministic — the parent and the child agree on the list and therefore on
+/// every index.
 pub(crate) fn run_batch_child(
     path: PathBuf,
     start: usize,
     verbose: bool,
-    nonce: &str,
     filter: Option<String>,
 ) -> Result<(), String> {
+    let Some(mut protocol) = protocol_channel() else {
+        return Err("the isolated test process has no protocol channel".to_string());
+    };
     let compiled = match compile(&path, SourceMode::Library) {
         Ok(compiled) => compiled,
         Err(failure) => {
@@ -450,13 +518,15 @@ pub(crate) fn run_batch_child(
         discover_tests(&compiled.checked.program, filter.as_deref(), false);
 
     for (index, name) in names.iter().enumerate().skip(start) {
-        eprintln!("##{nonce} {START} {index}");
+        let _ = writeln!(protocol, "{START} {index}");
         let result = run_named_function(&compiled.checked.program, name);
         // Flush the test's own output before reporting its result, so the parent
         // prints `PASS`/`FAIL` strictly after it.
         let _ = std::io::stdout().flush();
         match result {
-            Ok(_) => eprintln!("##{nonce} {PASS} {index}"),
+            Ok(_) => {
+                let _ = writeln!(protocol, "{PASS} {index}");
+            }
             Err(error) => {
                 let mut payload = escape(&error.message);
                 if verbose {
@@ -471,12 +541,12 @@ pub(crate) fn run_batch_child(
                         payload.push_str(&escape(&text));
                     }
                 }
-                eprintln!("##{nonce} {FAIL} {index} {payload}");
+                let _ = writeln!(protocol, "{FAIL} {index} {payload}");
             }
         }
     }
-    // Report completion explicitly: the parent must not have to infer it from
-    // stderr EOF, which a grandchild holding the inherited pipe can defer.
-    eprintln!("##{nonce} {DONE} 0");
+    // Report completion explicitly: the parent must not have to infer it from pipe
+    // EOF, which a grandchild holding the inherited handle can defer.
+    let _ = writeln!(protocol, "{DONE} 0");
     Ok(())
 }

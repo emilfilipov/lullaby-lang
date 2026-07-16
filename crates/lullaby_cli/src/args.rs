@@ -59,8 +59,8 @@ pub(crate) struct Invocation {
     /// `test`.
     pub(crate) timeout_secs: u64,
     /// Internal (`__run-test-batch` only): the index in the discovered test list
-    /// to resume the batch at, whether to render tracebacks, and the protocol
-    /// nonce. Unused by every user-facing command.
+    /// to resume the batch at, and whether to render tracebacks. Unused by every
+    /// user-facing command.
     pub(crate) batch: Option<BatchArgs>,
 }
 
@@ -70,7 +70,6 @@ pub(crate) struct Invocation {
 pub(crate) struct BatchArgs {
     pub(crate) start: usize,
     pub(crate) verbose: bool,
-    pub(crate) nonce: String,
 }
 
 /// The default per-test deadline for `lullaby test`, in seconds. Generous enough
@@ -134,7 +133,9 @@ pub(crate) enum CommandName {
     Run,
     Test,
     /// Internal: run a contiguous batch of the discovered tests in this process,
-    /// reporting each result on stderr. `lullaby test` re-invokes itself with
+    /// reporting each result on a private pipe the parent supplies in the stdin
+    /// slot (NOT on stdout/stderr, which stay the test's own — see
+    /// [`crate::commands::test_isolate`]). `lullaby test` re-invokes itself with
     /// this to isolate the suite. Not public; deliberately absent from `--help`.
     RunTestBatch,
     Wasm,
@@ -216,12 +217,15 @@ pub(crate) fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, 
             }
         }
         // Internal, not user-facing:
-        // `__run-test-batch <path> <start> <verbose:0|1> <nonce> [filter]`.
+        // `__run-test-batch <path> <start> <verbose:0|1> [filter]`. There is no
+        // nonce: the protocol travels on a private pipe a test cannot reach, so
+        // there is no secret to pass (and argv could never have kept one — a
+        // process may read its own command line).
         value if value == RUN_BATCH_COMMAND => match &args[1..] {
-            [path, start, verbose, nonce, rest @ ..] if rest.len() <= 1 => {
+            [path, start, verbose, rest @ ..] if rest.len() <= 1 => {
                 let Ok(start) = start.parse::<usize>() else {
                     return Err(format!(
-                        "usage: lullaby {RUN_BATCH_COMMAND} <path> <start> <verbose> <nonce> [filter]"
+                        "usage: lullaby {RUN_BATCH_COMMAND} <path> <start> <verbose> [filter]"
                     ));
                 };
                 Ok(Some(Invocation {
@@ -230,13 +234,12 @@ pub(crate) fn parse_invocation(args: Vec<String>) -> Result<Option<Invocation>, 
                     batch: Some(BatchArgs {
                         start,
                         verbose: verbose == "1",
-                        nonce: nonce.clone(),
                     }),
                     ..Invocation::bare(CommandName::RunTestBatch)
                 }))
             }
             _ => Err(format!(
-                "usage: lullaby {RUN_BATCH_COMMAND} <path> <start> <verbose> <nonce> [filter]"
+                "usage: lullaby {RUN_BATCH_COMMAND} <path> <start> <verbose> [filter]"
             )),
         },
         "build" | "check" | "compile" | "inspect" | "run" | "test" | "wasm" | "native" => {
