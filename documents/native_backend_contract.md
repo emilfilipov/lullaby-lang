@@ -2008,11 +2008,26 @@ The overflow edge is the one place the tiers *look* different and are not: nativ
 same relationship the delivered array-bounds failure already has (`L0413` /`ud2`),
 and what decision **A5** requires.
 
-The only genuinely unmodellable case is a pointer **escaping the frame that owns its
-buffer**, which the interpreters refuse with `L0459` — the pre-existing `addr_of`
-divergence documented above, inherited rather than added. Natively that is real
-undefined behaviour, precisely as the equivalent C is (an arena pointer is valid
-exactly as long as its buffer's binding); it is `unsafe`-gated for that reason.
+Passing an arena pointer **into a callee** also agrees on all four tiers (measured
+`99`): it is valid C — a call does not end the caller's block — and the env shelf
+resolves it on the interpreters. A genuinely *dangling* pointer (its buffer's frame has
+returned) is `L0459` on the interpreters and real undefined behaviour natively, exactly
+as for any `addr_of` pointer; the arena inherits that and adds nothing.
+
+### Scoping: the cursor is zeroed at the DECLARATION, not the prologue
+
+A `region <name> in <buffer>` is scoped to its **enclosing block**, and the cursor
+must reset on block re-entry. Zeroing it once in the prologue is not enough, and the
+gap was a real, undiagnosed divergence: a region declared inside a loop body is
+re-entered every iteration, and the interpreters re-create the arena each time (its env
+binding dies at dedent), so its cursor restarts at zero — while prologue-only native
+kept bumping across iterations and handed out different cells (**123 natively vs 300 on
+every interpreter**). `emit_arena_cursor_init` now runs at the `region` marker, which is
+*inside* the loop body, so the reset happens exactly when the region is re-entered.
+
+The buffer is likewise bound to a **frame slot**, so an inner `let buf` shadowing the
+arena's buffer cannot retarget it — the interpreters match by pinning the buffer's
+`RootSlot` at the declaration.
 
 ### Verification
 

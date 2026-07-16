@@ -11,9 +11,12 @@
 # every Lullaby scalar is a normalized 8-byte cell natively, which is the same
 # reason `addr_of` is 8-byte-only. See §5's delivery record.
 #
-# RUNS NATIVELY. The interpreters refuse `arena_alloc` with L0460 (their
-# place-backed, typed-cell pointer model cannot reinterpret a buffer's storage as
-# new typed cells) — a documented acceptance divergence, not a defect.
+# RUNS ON ALL FOUR TIERS, all agreeing on 109. There is nothing here only native
+# can do: an arena cell is an ordinary `array<i64>` element, so `arena_alloc(r, n)`
+# is exactly `addr_of(buf[cursor])` plus an integer cursor — which the interpreters
+# already model. (An earlier version refused it on the interpreters with L0460,
+# claiming their pointer model could not reinterpret a buffer's storage. Nothing
+# was being reinterpreted; L0460 is now the arena OVERFLOW diagnostic.)
 no-runtime
 
 # Bump two cells out of a caller-owned buffer, write through the returned

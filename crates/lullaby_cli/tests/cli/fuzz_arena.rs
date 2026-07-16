@@ -310,3 +310,135 @@ fn fuzz_arena_interpreters_agree() {
          edge (fit={success_cases}, overflow={overflow_cases})"
     );
 }
+
+/// Generate one arena **scoping** program: a `region` inside a loop body, and/or a
+/// buffer shadowed by an inner `let`.
+///
+/// # Why this generator exists
+///
+/// [`gen_arena_program`] emits only a function-level region over an unshadowed
+/// buffer, and it was **blind to an entire class of silent wrong answers** — both
+/// its oracles were live and caught none of them:
+///
+/// * a region in a loop body: the interpreters re-created the arena each iteration
+///   (its env binding dies at dedent) while native zeroed the cursor only in the
+///   prologue, so native kept bumping across iterations — 123 vs 300, undiagnosed;
+/// * a shadowed buffer: the interpreters re-resolved the buffer **by name** on every
+///   allocation, so an inner `let buf` silently retargeted a live arena to the
+///   shadowing buffer — 0 vs 7, undiagnosed.
+///
+/// Both are now one model (block-scoped regions; the buffer pinned to a slot at the
+/// declaration), and this generator is the standing net for it.
+fn gen_arena_scoping_program(seed: u64) -> ArenaCase {
+    let mut rng = Rng(seed ^ 0x37B1_04C2_9E6D_51AAu64);
+    let iters = rng.range(1, 3);
+    let value = rng.range(1, 9);
+    let shadow = rng.chance(2);
+
+    // A region inside a loop body is re-entered every iteration, so its cursor
+    // restarts at zero and every iteration writes cell 0. `buf` is read back
+    // positionally so a cursor that failed to reset — spreading the writes across
+    // buf[0], buf[1], buf[2] — produces a different number rather than the same one.
+    let shadow_line = if shadow {
+        // The shadowing buffer is live across the allocation. A name-resolved arena
+        // writes THIS buffer; a slot-pinned one still writes the outer `buf`.
+        "        let buf array<i64> = [0, 0, 0, 0]\n"
+    } else {
+        ""
+    };
+    let source = format!(
+        "no-runtime\n\n\
+         fn scoped -> i64\n    \
+             let buf array<i64> = [0, 0, 0, 0]\n    \
+             let i i64 = 0\n    \
+             while i < {iters}\n        \
+                 region pool in buf\n\
+{shadow_line}        \
+                 unsafe\n            \
+                     let p ptr<i64> = arena_alloc(pool, 1)\n            \
+                     ptr_write(p, {value} + i)\n        \
+                 i += 1\n    \
+             buf[0] * 1000 + buf[1] * 100 + buf[2] * 10 + buf[3]\n\n\
+         fn main -> i64\n    \
+             scoped()\n"
+    );
+
+    // Oracle. The region resets at dedent, so every iteration writes cell 0 and the
+    // last write wins: buf = [value + iters - 1, 0, 0, 0].
+    //
+    // When the inner `let buf` shadows, the arena is still pinned to the OUTER
+    // buffer's slot, so the outer buffer sees exactly the same writes — shadowing
+    // must make no difference at all. That equality IS the assertion.
+    let expected = (value + iters - 1) * 1000;
+    ArenaCase {
+        source,
+        expected: Some(expected),
+        value_if_overflow_succeeded: expected,
+    }
+}
+
+/// The scoping net: a loop-body region must reset at dedent, and a shadowing `let`
+/// must not retarget a live arena — on **all four tiers**.
+///
+/// # Teeth: measured, not assumed
+///
+/// Three injections were built and run against this generator, then reverted. Each
+/// reproduces one of the three real divergences this class had, and each makes this
+/// test fail:
+///
+/// 1. **Native cursor zeroing moved back to the prologue** (from the declaration
+///    site): the loop-body region stops resetting and native returns the
+///    writes-spread value instead of the reset value.
+/// 2. **The interpreters re-resolve the buffer by name** instead of using the pinned
+///    `RootSlot`: the shadowed programs write the inner buffer and `scoped` returns
+///    0.
+/// 3. **The checker's `arena_regions` moved back to a flat per-function map**: this
+///    generator stays green (its regions are all well-scoped) but
+///    `arena_region_used_after_block_is_rejected` fails — which is why that negative
+///    fixture exists alongside this net rather than instead of it.
+#[test]
+fn fuzz_arena_scoping_matches_across_tiers() {
+    const PROGRAMS: u64 = 200;
+    let base_seed = 0x0C0F_11AA_5EED_7731u64;
+    let dir = ScratchDir::new("arena_scope");
+    let mut ran = 0u64;
+
+    for i in 0..PROGRAMS {
+        let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
+        let case = gen_arena_scoping_program(seed);
+        let expected = case
+            .expected
+            .expect("scoping generator emits no overflow cases");
+
+        // The interpreters always run (no toolchain needed), so this half is the net
+        // even where native skips.
+        let (ast, ir, bc) = run_interpreters(&case.source);
+        assert!(
+            ast == ir && ir == bc,
+            "arena scoping divergence between interpreters on #{i} (seed {seed:#x}):\n{}\n\
+             ast={ast:?} ir={ir:?} bytecode={bc:?}",
+            case.source
+        );
+        assert_eq!(
+            ast,
+            Outcome::Value(expected),
+            "arena scoping value mismatch on the interpreters, #{i} (seed {seed:#x}): a \
+             loop-body region must reset at dedent, and a shadowing `let` must not \
+             retarget a live arena\n{}",
+            case.source
+        );
+
+        let Some(exit) = fuzz_native_exit(&case.source, &dir, &format!("scope_{i}")) else {
+            continue;
+        };
+        ran += 1;
+        assert_eq!(
+            i64::from(exit),
+            expected,
+            "arena scoping value mismatch on NATIVE, #{i} (seed {seed:#x}): native must \
+             agree with the interpreters on the region's block scope\n{}",
+            case.source
+        );
+    }
+    assert!(ran > 0, "arena scoping fuzz ran no native programs");
+}

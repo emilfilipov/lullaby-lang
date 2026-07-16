@@ -593,22 +593,21 @@ impl RawPointerMemory {
 // Freestanding static-buffer arenas (`documents/freestanding_tier_design.md` §5).
 // ---------------------------------------------------------------------------
 
-/// The env key holding a static-buffer arena's **bump cursor** (a cell index).
+/// The env key holding a live static-buffer arena's [`Value::Arena`] state — the
+/// `RootSlot` of its backing buffer plus its bump cursor
+/// (`documents/freestanding_tier_design.md` §5).
 ///
-/// The space is deliberate and load-bearing: the lexer can never produce an
-/// identifier containing one, so these keys are collision-proof against any user
-/// binding **by construction** rather than by picking a name nobody is likely to
-/// write. Storing arena state as ordinary env bindings — rather than on the
-/// interpreter — gives it exactly the frame and block lifetime a `region`
-/// declaration has, for free.
-pub fn arena_cursor_key(region: &str) -> String {
-    format!("arena cursor {region}")
-}
-
-/// The env key holding the *name* of a static-buffer arena's backing buffer.
-/// See [`arena_cursor_key`] for why the space makes this collision-proof.
-pub fn arena_buffer_key(region: &str) -> String {
-    format!("arena buffer {region}")
+/// **The space is deliberate and load-bearing.** The lexer's identifier rule is
+/// ASCII alphanumeric plus `_`, so it can never produce a name containing a space:
+/// these keys are collision-proof against any user binding *by construction* rather
+/// than by picking a name nobody is likely to write.
+///
+/// Storing arena state as an ordinary env binding — rather than on the interpreter —
+/// gives it exactly the frame and **block** lifetime a `region` declaration has, for
+/// free: the arena dies with its block and is re-created (cursor re-zeroed) on
+/// re-entry, which is what "reset at dedent" means and what native now matches.
+pub fn arena_key(region: &str) -> String {
+    format!("arena {region}")
 }
 
 #[cfg(test)]

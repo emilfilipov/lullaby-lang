@@ -915,20 +915,22 @@ impl<'a> Runtime<'a> {
     /// own element type. So there is nothing to *reinterpret*: allocating a cell is
     /// exactly taking the address of an element the buffer already has. This
     /// reduces to `addr_of(buf[cursor])` plus an integer cursor, and the
-    /// interpreters define both halves already. The pointer it returns is the same
-    /// place-backed pointer `addr_of(buf[i])` returns, and genuinely aliases the
-    /// buffer.
+    /// interpreters define both halves. The pointer returned is the same
+    /// place-backed pointer `addr_of(buf[i])` returns, and genuinely aliases.
     ///
-    /// That is why the arena is **not** refused here. An earlier version of this
-    /// increment refused it on all three interpreters, arguing their typed-cell
-    /// model could not reinterpret a buffer's storage. Once the design settled on
-    /// cell-granular bumping over `array<i64>`, that argument was simply false —
-    /// there was no reinterpretation left to be unable to do. Refusing would have
-    /// been work not done dressed as a limitation.
+    /// # The buffer is pinned to a slot, not a name
+    ///
+    /// The arena's `RootSlot` was resolved **once, at the `region` declaration**.
+    /// This never re-resolves the buffer by name, which is what a previous version
+    /// did — and that was wrong in two ways it could not see: an inner `let buf`
+    /// shadowing the arena's buffer silently retargeted every later allocation, and
+    /// (after the env shelf made a bare name resolve across frames) a name could
+    /// reach a *caller's* buffer entirely. Native binds the buffer to a frame slot
+    /// at compile time; pinning the slot here is what makes the two agree.
     ///
     /// The genuinely unmodellable case — a pointer escaping the frame that owns the
-    /// buffer — is not special to arenas and is already diagnosed by `L0459` from
-    /// the shared `addr_of` machinery, which this reuses wholesale.
+    /// buffer — is not special to arenas and is handled by the shared `addr_of`
+    /// machinery this reuses.
     fn eval_arena_alloc(
         &mut self,
         region: &Expr,
@@ -941,59 +943,53 @@ impl<'a> Runtime<'a> {
                 "`arena_alloc` requires a static-buffer region name as its first operand",
             ));
         };
-        let buffer = env
-            .get_ref(&arena_buffer_key(region))
-            .ok_or_else(|| {
-                RuntimeError::new(
-                    "L0445",
-                    format!("`arena_alloc` names region `{region}`, which is not declared"),
-                )
-            })?
-            .as_string()?;
-        let cursor = env.get(&arena_cursor_key(region))?.as_i64()?;
+        let key = arena_key(region);
+        let Some(Value::Arena(state)) = env.get_ref(&key).cloned() else {
+            return Err(RuntimeError::new(
+                "L0445",
+                format!(
+                    "`arena_alloc` names region `{region}`, which is not a static-buffer arena                      declared in scope"
+                ),
+            ));
+        };
         let requested = self.eval_expr(count, env)?.as_i64()?;
-
-        // The buffer's extent. Reading it through the env keeps this honest for a
-        // buffer whose length is only known at run time.
-        let capacity = match env.get_ref(&buffer) {
-            Some(Value::Array(cells)) => cells.len() as i64,
+        let cells = match env.at(&state.buffer) {
+            Some(Value::Array(cells)) => cells.clone(),
             _ => {
                 return Err(RuntimeError::new(
                     "L0445",
                     format!(
-                        "static-buffer arena `{region}` is backed by `{buffer}`, which is not a \
-                         fixed array in scope"
+                        "static-buffer arena `{region}`'s backing buffer is no longer a                              fixed array in scope"
                     ),
                 ));
             }
         };
+        let capacity = cells.len() as i64;
 
         // Overflow is a defined edge, not a wrap. A negative or absurd `count` must
         // not be able to bring the cursor back into range and hand out a pointer
         // outside the buffer, so the sum is checked rather than wrapped — the
         // interpreter counterpart of the native `jc` + unsigned `ja`.
+        let cursor = state.cursor;
         let end = cursor.checked_add(requested).filter(|end| *end >= cursor);
         let Some(end) = end.filter(|end| *end <= capacity) else {
             return Err(arena_overflow_error(region, requested, capacity - cursor));
         };
-        env.assign(&arena_cursor_key(region), Value::I64(end))?;
+        env.assign(
+            &key,
+            Value::Arena(Box::new(ArenaState {
+                cursor: end,
+                ..(*state).clone()
+            })),
+        )?;
 
         // `&buffer[cursor]` — the same place-backed pointer `addr_of(buf[cursor])`
-        // yields, so it aliases the buffer exactly as the native `lea` does.
-        let place = Expr {
-            kind: ExprKind::Index {
-                target: Box::new(Expr {
-                    kind: ExprKind::Variable(buffer),
-                    span: count.span,
-                }),
-                index: Box::new(Expr {
-                    kind: ExprKind::Integer(cursor),
-                    span: count.span,
-                }),
-            },
-            span: count.span,
-        };
-        self.eval_addr_of(&place, env)
+        // yields, built from the PINNED slot rather than a name lookup.
+        self.raw_ptrs
+            .addr_of_element(state.buffer, &state.name, Vec::new(), &cells, cursor)
+            .ok_or_else(|| {
+                RuntimeError::new("L0331", "arena_alloc element has no defined memory layout")
+            })
     }
 
     /// [`ResolvedPlace`] path beneath it (`s.f`, `a[i]`, `s.a[i].f`, …). Index

@@ -1583,3 +1583,104 @@ fn arena_two_regions_over_one_buffer_are_rejected() {
         "L0445",
     );
 }
+
+/// **The one scoping model, agreed by all four tiers.** Three shapes that each once
+/// produced a *silent wrong answer* now produce `406` everywhere.
+///
+/// The region scope/binding model existed in three incompatible forms — a flat
+/// per-function map in the checker, a block-scoped env with late name resolution on
+/// the interpreters, and a function-scoped frame word zeroed only in the prologue
+/// natively. It is now one model: a `region <name> in <buffer>` is scoped to its
+/// **enclosing block**, and its buffer is pinned at the **declaration**.
+///
+/// * `loop_region_resets` (300) — a region in a loop body resets at dedent. Native
+///   zeroed the cursor only in the prologue, so it never re-zeroed and kept bumping
+///   across iterations: **123 natively vs 300 on every interpreter**, undiagnosed,
+///   and contradicting this feature's own documented "reset at dedent".
+/// * `shadowing_does_not_retarget` (7) — an inner `let buf` cannot retarget a live
+///   arena, because the arena is pinned to the outer buffer's slot. The interpreters
+///   re-resolved the buffer **by name** on every allocation and wrote the shadowing
+///   buffer: **0 vs 7**, undiagnosed. Slot-pinning also immunizes this against the
+///   env shelf, which now resolves a bare name across frames — a name-keyed arena
+///   could otherwise have reached a *caller's* buffer.
+/// * `cross_frame` (99) — an arena pointer passed into a callee. Valid C (a call
+///   does not end the caller's block), and the shelf resolves it on the
+///   interpreters too, so this is ordinary parity rather than a divergence.
+#[test]
+fn arena_scoping_agrees_across_all_tiers() {
+    let fixture = "tests/fixtures/valid/no_runtime/freestanding_arena_scoping.lby";
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(fixture, backend);
+        assert!(
+            output.status.success(),
+            "{backend} must run the arena scoping fixture: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "406",
+            "{backend}: loop_region_resets (300) + shadowing_does_not_retarget (7) + \
+             cross_frame (99)"
+        );
+    }
+
+    let path = workspace_root().join(fixture);
+    let out = std::env::temp_dir().join("lullaby_arena_scoping.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--freestanding",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            path.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        emit.status.success(),
+        "the arena scoping fixture must compile: {}",
+        stderr(&emit)
+    );
+    for symbol in [
+        "compiled loop_region_resets",
+        "compiled shadowing_does_not_retarget",
+        "compiled cross_frame",
+    ] {
+        assert!(
+            stdout(&emit).contains(symbol),
+            "the scoping shapes must be natively lowered, not skipped — expected \
+             `{symbol}`: {}",
+            stdout(&emit)
+        );
+    }
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32 unavailable; skipping scoping run (compile check ran)");
+        return;
+    }
+    let exe = std::process::Command::new(&out)
+        .output()
+        .expect("run native exe");
+    assert_eq!(
+        exe.status.code().expect("native exit code"),
+        406,
+        "native must agree with the interpreters on the region's block scope and on \
+         which buffer a shadowed arena writes"
+    );
+}
+
+/// A `region` is scoped to its **enclosing block**, so allocating from it after that
+/// block ends must be rejected — **by the checker**, at the right layer.
+///
+/// The checker once tracked regions in a flat per-function map with no block
+/// scoping, so it *accepted* this program: all three interpreters then rejected it
+/// at run time (the arena's env binding died at dedent) and native happily returned
+/// 7. `check` must not accept what the tiers reject.
+#[test]
+fn arena_region_used_after_block_is_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_region_used_after_block.lby",
+        "L0445",
+    );
+}

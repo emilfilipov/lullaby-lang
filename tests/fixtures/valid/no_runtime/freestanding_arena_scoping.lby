@@ -1,0 +1,62 @@
+# Static-buffer arena SCOPING — the three shapes where the tiers once disagreed
+# silently (freestanding_tier_design.md §5). All four tiers agree on every one.
+#
+# The model, and it is now the same in all three places: a `region <name> in
+# <buffer>` is scoped to its ENCLOSING BLOCK, and its backing buffer is pinned at
+# the DECLARATION. The checker block-scopes region names; the interpreters bind the
+# arena to one env binding with block lifetime, holding the buffer's RootSlot; the
+# native backend re-zeroes the cursor at the declaration site and binds the buffer
+# to a frame slot.
+no-runtime
+
+# (1) RESET AT DEDENT. A region declared inside a loop body is re-entered every
+# iteration, so its cursor restarts at zero and every iteration writes buf[0].
+# Native once never re-zeroed (prologue-only), spreading the writes across
+# buf[0..2] and returning 123 where the interpreters returned 300.
+fn loop_region_resets -> i64
+    let buf array<i64> = [0, 0, 0, 0]
+    let i i64 = 0
+    while i < 3
+        region pool in buf
+        unsafe
+            let p ptr<i64> = arena_alloc(pool, 1)
+            ptr_write(p, i + 1)
+        i += 1
+    # Reset at dedent => every write lands on buf[0] => 3, 0, 0
+    buf[0] * 100 + buf[1] * 10 + buf[2]
+
+# (2) SHADOWING CANNOT RETARGET A LIVE ARENA. The inner `let buf` shadows the
+# arena's buffer name, but the arena was pinned to the OUTER buffer's slot at its
+# declaration, so the write still lands there. The interpreters once re-resolved
+# the buffer BY NAME on every allocation and wrote the shadowing buffer instead,
+# returning 0 where native returned 7.
+fn shadowing_does_not_retarget -> i64
+    let buf array<i64> = [0, 0, 0, 0]
+    region pool in buf
+    let i i64 = 0
+    while i < 1
+        let buf array<i64> = [0, 0, 0, 0]
+        unsafe
+            let p ptr<i64> = arena_alloc(pool, 1)
+            ptr_write(p, 7)
+        i += 1
+    buf[0]
+
+# (3) AN ARENA POINTER CROSSES THE CALL ABI. Passing it into a callee is valid C
+# (a call does not end the caller's block), and the env shelf resolves it on the
+# interpreters too — so this is ordinary four-tier parity, not a divergence.
+fn fill p ptr<i64> -> i64
+    unsafe
+        ptr_write(p, 99)
+        ptr_read(p)
+
+fn cross_frame -> i64
+    let buf array<i64> = [0, 0, 0, 0]
+    region pool in buf
+    unsafe
+        let p ptr<i64> = arena_alloc(pool, 1)
+        fill(p)
+
+fn main -> i64
+    # 300 + 7 + 99 = 406
+    loop_region_resets() + shadowing_does_not_retarget() + cross_frame()

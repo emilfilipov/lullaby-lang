@@ -3,10 +3,26 @@
 //! `arena_alloc(region, count)` bump builtin. A sibling of
 //! `native_object_rawptr.rs`; sees the parent's items via `use super::*`.
 //!
-//! This is the tier that matters for §5: a kernel targets bare metal, and the
-//! interpreters refuse the arena outright (`L0460`) because their place-backed,
-//! typed-cell pointer model cannot reinterpret a buffer's storage as new typed
-//! cells. Native is where the arena is real.
+//! Native is the tier §5 ultimately targets — a kernel runs on bare metal — but it
+//! is **not** the only tier that defines the arena. The AST, IR, and bytecode
+//! interpreters run it too, and agree with this backend on every program: an arena
+//! cell is an ordinary `array<i64>` element, so `arena_alloc(r, n)` is exactly
+//! `addr_of(buf[cursor])` plus an integer cursor, which every tier already models.
+//! `L0460` is the arena **overflow** diagnostic, not a refusal.
+//!
+//! Because the tiers share one model, they must share one **scoping** model too, and
+//! that is the subtle part. A `region <name> in <buffer>` is scoped to its
+//! **enclosing block**, and its buffer is pinned at the **declaration**:
+//!
+//! * the checker block-scopes region names (`Scope::arena_regions`);
+//! * the interpreters hold the arena in a single env binding with block lifetime,
+//!   carrying the buffer's `RootSlot`;
+//! * this backend re-zeroes the cursor **at the declaration site** (not the
+//!   prologue) and binds the buffer to a frame slot.
+//!
+//! Each of those three was independently wrong at first, and each produced a silent
+//! wrong answer rather than a diagnostic — see `emit_arena_cursor_init` for the
+//! prologue-zeroing case (native 123 vs 300 on every interpreter).
 //!
 //! # What an arena is, natively
 //!
@@ -16,7 +32,7 @@
 //!   its own frame slots. The arena adds no storage of its own.
 //! * **the cursor** — one dedicated frame word per region (reserved by
 //!   `NativeCtx::plan`, sized in `native_object_frame.rs`), holding a **cell
-//!   count**, zeroed by the prologue.
+//!   count**, zeroed at its `region` declaration so it resets on block re-entry.
 //! * **the bump** — `arena_alloc(a, n)` reads the cursor, range-checks `cursor + n`
 //!   against the buffer's length, stores the new cursor, and returns
 //!   `&buffer[old_cursor]`.
@@ -110,9 +126,9 @@ pub(crate) fn lower_arena_call(
     code: &mut Vec<u8>,
 ) -> Option<Result<(), String>> {
     match name {
-        // The declaration marker: `plan` already recorded the region and reserved
-        // its cursor word, and the prologue zeroes it. Nothing to emit.
-        ARENA_REGION_MARKER => Some(Ok(())),
+        // The declaration marker: `plan` already reserved this region's cursor word;
+        // the declaration ZEROES it. See `emit_arena_cursor_init`.
+        ARENA_REGION_MARKER => Some(emit_arena_cursor_init(ctx, args, code)),
         ARENA_ALLOC_BUILTIN => Some(lower_arena_alloc(ctx, args, expr_ty, code)),
         _ => None,
     }
@@ -300,31 +316,45 @@ pub(crate) fn emit_arena_overflow_trap(code: &mut Vec<u8>) {
     code.extend_from_slice(&[0x0F, 0x0B]); // ud2
 }
 
-/// Zero every declared static-buffer arena's bump cursor, at function entry.
+/// Zero a static-buffer arena's bump cursor — **at its `region` declaration**, which
+/// is what makes "reset at dedent" true.
 ///
-/// A frame slot is uninitialized memory — it holds whatever the previous call left
-/// there. An un-zeroed cursor would make the first `arena_alloc` bump from a
-/// garbage cell index, which either hands back a pointer outside the buffer (if the
-/// garbage is small enough to pass the range check) or traps on an allocation that
-/// should have succeeded. Both are wrong; zeroing is the fix, and it is what makes
-/// "a fresh arena starts empty" true.
+/// # Why the declaration site and not the prologue
 ///
-/// Emits nothing when the function declares no arena, so every existing function's
-/// code is byte-identical.
-pub(crate) fn emit_arena_cursor_init(ctx: &mut NativeCtx, code: &mut Vec<u8>) {
-    // Deterministic order: the emitted bytes must not depend on `HashMap`
-    // iteration order, or the COFF snapshots and the build itself stop being
-    // reproducible.
-    let mut slots: Vec<i32> = ctx
-        .arena_buffers
-        .values()
-        .map(|binding| binding.cursor_slot)
-        .collect();
-    slots.sort_unstable();
-    for slot in slots {
-        // mov qword ptr [rbp + disp32], 0
-        code.extend_from_slice(&[0x48, 0xC7, 0x85]);
-        code.extend_from_slice(&(-slot).to_le_bytes());
-        code.extend_from_slice(&0i32.to_le_bytes());
-    }
+/// A frame slot holds whatever the previous call left there, so the cursor must be
+/// zeroed *somewhere*. Doing it once in the prologue is not enough, and the gap was a
+/// real divergence: a `region` declared inside a loop body is re-entered every
+/// iteration, and the interpreters re-create the arena each time (its env binding
+/// dies at dedent), so its cursor restarts at zero. A prologue-only zeroing never
+/// re-zeroes, so native kept bumping across iterations and handed out different
+/// cells — measured 123 natively against 300 on all three interpreters, with no
+/// diagnostic. Native contradicted this feature's own documented semantics.
+///
+/// Emitting the zeroing at the declaration fixes that by construction: the
+/// declaration is *inside* the loop body, so the cursor is re-zeroed exactly when the
+/// region is re-entered, and exactly once when it is not. A region declared but never
+/// reached zeroes nothing and allocates nothing, which is also correct.
+fn emit_arena_cursor_init(
+    ctx: &mut NativeCtx,
+    args: &[BytecodeExpr],
+    code: &mut Vec<u8>,
+) -> Result<(), String> {
+    let [region, _buffer] = args else {
+        return Err(format!(
+            "`{ARENA_REGION_MARKER}` takes the region and buffer names"
+        ));
+    };
+    let BytecodeExprKind::String(region) = &region.kind else {
+        return Err(format!(
+            "`{ARENA_REGION_MARKER}` takes the region name as a string literal"
+        ));
+    };
+    let binding = ctx.arena_buffers.get(region).cloned().ok_or_else(|| {
+        format!("`{ARENA_REGION_MARKER}` names region `{region}`, which was not planned")
+    })?;
+    // mov qword ptr [rbp + disp32], 0
+    code.extend_from_slice(&[0x48, 0xC7, 0x85]);
+    code.extend_from_slice(&(-binding.cursor_slot).to_le_bytes());
+    code.extend_from_slice(&0i32.to_le_bytes());
+    Ok(())
 }

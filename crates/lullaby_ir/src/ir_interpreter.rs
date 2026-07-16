@@ -436,7 +436,6 @@ impl<'a> IrRuntime<'a> {
 
     /// The cold half of [`Self::with_env_shelved`], kept out of line so the fast path
     /// stays small enough to inline into each call site.
-    #[inline(never)]
     fn shelve_and_run<R>(&mut self, env: &mut Env, body: impl FnOnce(&mut Self) -> R) -> R {
         let mut hollow = Env::hollow();
         std::mem::swap(env, &mut hollow);
@@ -1780,27 +1779,43 @@ impl<'a> IrRuntime<'a> {
     /// pointer reach the original storage and genuinely alias. See runtime
     /// `raw_pointer.rs`.
     /// The `arena_region(name, buffer)` marker: open a static-buffer arena
-    /// (freestanding tier §5). Its whole state is two env bindings — a cell cursor
-    /// starting at zero and the backing buffer's name — so the arena inherits
-    /// exactly the frame and block lifetime the `region` declaration has. Declaring
-    /// an arena allocates nothing and reads nothing.
+    /// (freestanding tier §5).
+    ///
+    /// The backing buffer is resolved to its `RootSlot` **here, once, at the
+    /// declaration** — see the AST interpreter's counterpart for why pinning the
+    /// slot rather than the name is what makes this agree with native and survive
+    /// both shadowing and the env shelf. The whole arena is one env binding, so it
+    /// inherits the declaration's block lifetime: it dies at dedent and is
+    /// re-created, cursor re-zeroed, on re-entry.
     fn eval_arena_region(
         &mut self,
         region: &IrExpr,
         buffer: &IrExpr,
         env: &mut Env,
     ) -> Result<Value, RuntimeError> {
-        let (IrExprKind::String(region), IrExprKind::String(buffer)) = (&region.kind, &buffer.kind)
+        let (IrExprKind::String(region), IrExprKind::String(backing)) =
+            (&region.kind, &buffer.kind)
         else {
             return Err(RuntimeError::new(
                 "L0445",
                 "`arena_region` takes the region and buffer names as string literals",
             ));
         };
-        env.define(arena_cursor_key(region), Value::I64(0));
+        let slot = env.locate(backing).ok_or_else(|| {
+            RuntimeError::new(
+                "L0445",
+                format!(
+                    "static-buffer arena `{region}` is backed by `{backing}`, which is not a                      binding in scope"
+                ),
+            )
+        })?;
         env.define(
-            arena_buffer_key(region),
-            Value::String(buffer.clone().into()),
+            arena_key(region),
+            Value::Arena(Box::new(ArenaState {
+                buffer: slot,
+                name: backing.clone().into(),
+                cursor: 0,
+            })),
         );
         Ok(Value::Void)
     }
@@ -1809,13 +1824,11 @@ impl<'a> IrRuntime<'a> {
     /// static-buffer arena and return a pointer to the first (freestanding tier §5).
     ///
     /// The IR/bytecode counterpart of the AST interpreter's `eval_arena_alloc`; see
-    /// that function for why this is ordinary place-backed addressing rather than a
-    /// new pointer model. In short: the arena bumps in whole 8-byte cells of an
-    /// `array<i64>`, so allocating is exactly `addr_of(buf[cursor])` over an element
-    /// the buffer already has — nothing is reinterpreted, and the pointer genuinely
-    /// aliases the buffer. The one genuinely unmodellable case, a pointer escaping
-    /// its buffer's frame, is not arena-specific and is already diagnosed by `L0459`
-    /// from the shared `addr_of` machinery this reuses.
+    /// that function for the full reasoning. In short: the arena bumps in whole
+    /// 8-byte cells of an `array<i64>`, so allocating is exactly
+    /// `addr_of(buf[cursor])` over an element the buffer already has — nothing is
+    /// reinterpreted, and the pointer genuinely aliases. The buffer is resolved from
+    /// the `RootSlot` pinned at the declaration, never re-derived from a name.
     fn eval_arena_alloc(
         &mut self,
         region: &IrExpr,
@@ -1828,57 +1841,49 @@ impl<'a> IrRuntime<'a> {
                 "`arena_alloc` requires a static-buffer region name as its first operand",
             ));
         };
-        let buffer = env
-            .get_ref(&arena_buffer_key(region))
-            .ok_or_else(|| {
-                RuntimeError::new(
-                    "L0445",
-                    format!("`arena_alloc` names region `{region}`, which is not declared"),
-                )
-            })?
-            .as_string()?;
-        let cursor = env.get(&arena_cursor_key(region))?.as_i64()?;
+        let key = arena_key(region);
+        let Some(Value::Arena(state)) = env.get_ref(&key).cloned() else {
+            return Err(RuntimeError::new(
+                "L0445",
+                format!(
+                    "`arena_alloc` names region `{region}`, which is not a static-buffer arena                      declared in scope"
+                ),
+            ));
+        };
         let requested = self.eval_expr(count, env)?.as_i64()?;
-
-        let capacity = match env.get_ref(&buffer) {
-            Some(Value::Array(cells)) => cells.len() as i64,
+        let cells = match env.at(&state.buffer) {
+            Some(Value::Array(cells)) => cells.clone(),
             _ => {
                 return Err(RuntimeError::new(
                     "L0445",
                     format!(
-                        "static-buffer arena `{region}` is backed by `{buffer}`, which is not a \
-                         fixed array in scope"
+                        "static-buffer arena `{region}`'s backing buffer is no longer a fixed                          array in scope"
                     ),
                 ));
             }
         };
+        let capacity = cells.len() as i64;
 
-        // Overflow is a defined edge, not a wrap: a negative or absurd `count` must
-        // not bring the cursor back into range and hand out a pointer outside the
-        // buffer. The interpreter counterpart of the native `jc` + unsigned `ja`.
+        // Overflow is a defined edge, not a wrap: the interpreter counterpart of the
+        // native `jc` + unsigned `ja`.
+        let cursor = state.cursor;
         let end = cursor.checked_add(requested).filter(|end| *end >= cursor);
         let Some(end) = end.filter(|end| *end <= capacity) else {
             return Err(arena_overflow_error(region, requested, capacity - cursor));
         };
-        env.assign(&arena_cursor_key(region), Value::I64(end))?;
+        env.assign(
+            &key,
+            Value::Arena(Box::new(ArenaState {
+                cursor: end,
+                ..(*state).clone()
+            })),
+        )?;
 
-        let place = IrExpr {
-            kind: IrExprKind::Index {
-                target: Box::new(IrExpr {
-                    kind: IrExprKind::Variable(buffer),
-                    ty: TypeRef::new("array<i64>"),
-                    span: count.span,
-                }),
-                index: Box::new(IrExpr {
-                    kind: IrExprKind::Integer(cursor),
-                    ty: TypeRef::new("i64"),
-                    span: count.span,
-                }),
-            },
-            ty: TypeRef::new("i64"),
-            span: count.span,
-        };
-        self.eval_addr_of(&place, env)
+        self.raw_ptrs
+            .addr_of_element(state.buffer, &state.name, Vec::new(), &cells, cursor)
+            .ok_or_else(|| {
+                RuntimeError::new("L0331", "arena_alloc element has no defined memory layout")
+            })
     }
 
     fn eval_addr_of(&mut self, arg: &IrExpr, env: &mut Env) -> Result<Value, RuntimeError> {

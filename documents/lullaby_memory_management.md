@@ -216,11 +216,17 @@ fn two_cells -> i64
 - **Two arenas over one buffer are rejected** (`L0445`). Each bumps from its own
   cursor starting at zero, so they would hand out the *same* cells and silently
   clobber each other. Separate bounded pools need separate buffers.
+- **Scoped to its enclosing block, buffer pinned at the declaration.** A `region`
+  resets at dedent (so one declared in a loop body restarts each iteration), it
+  cannot be allocated from after its block ends (`L0445`), and an inner `let` that
+  shadows its buffer cannot retarget it — the arena is bound to the buffer it was
+  declared over, not to a name.
 - **Lifetime.** The arena's memory *is* the buffer, so a pointer into it is valid
-  exactly as long as the buffer's binding — its enclosing frame. Using one after
-  that frame returns is real undefined behaviour, precisely as the equivalent C is,
-  which is why the surface is `unsafe`-gated. Do not return an arena pointer from
-  the function that owns the buffer.
+  exactly as long as the buffer's binding — its enclosing frame. Passing one into a
+  callee is fine (a call does not end the caller's block, and all four tiers agree).
+  Using one *after* that frame returns is real undefined behaviour, precisely as the
+  equivalent C is, which is why the surface is `unsafe`-gated. Do not return an
+  arena pointer from the function that owns the buffer.
 - **Available in both tiers**, like `unsafe` and the raw-pointer builtins — it is
   load-bearing for `no-runtime`, but a safe-tier function may use one too.
 

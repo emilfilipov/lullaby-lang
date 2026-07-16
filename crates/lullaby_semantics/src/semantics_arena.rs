@@ -78,7 +78,7 @@ impl Checker<'_> {
         &mut self,
         decl: &RegionDecl,
         backing: &str,
-        scope: &Scope,
+        scope: &mut Scope,
         function: &Function,
     ) {
         let Some(buffer_ty) = scope.locals.get(backing).cloned() else {
@@ -116,7 +116,7 @@ impl Checker<'_> {
         // is a silent wrong answer, and it is exactly the shape §5's per-CPU-pool
         // motivation invites an author to reach for. Separate pools need separate
         // buffers; reject rather than corrupt.
-        if let Some((existing, _)) = self
+        if let Some((existing, _)) = scope
             .arena_regions
             .iter()
             .find(|(_, buffer)| buffer.as_str() == backing)
@@ -144,7 +144,8 @@ impl Checker<'_> {
             ));
             return;
         }
-        self.arena_regions
+        scope
+            .arena_regions
             .insert(decl.name.clone(), backing.to_string());
     }
 
@@ -171,7 +172,7 @@ impl Checker<'_> {
     ) -> Option<TypeRef> {
         self.expect_arg_count(ARENA_ALLOC_BUILTIN, args, 2, function)?;
         let region = match &args[0].kind {
-            ExprKind::Variable(name) if self.arena_regions.contains_key(name) => name.clone(),
+            ExprKind::Variable(name) if scope.arena_regions.contains_key(name) => name.clone(),
             _ => {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0445",

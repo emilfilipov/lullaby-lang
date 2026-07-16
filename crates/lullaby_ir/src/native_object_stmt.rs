@@ -215,15 +215,6 @@ pub(crate) fn lower_native_function(
         emit_arena_prologue(&mut ctx, &mut code);
     }
 
-    // Freestanding static-buffer arenas (§5): zero each declared arena's bump
-    // cursor. A frame slot holds whatever the last call left there, so an
-    // un-zeroed cursor would start the very first `arena_alloc` at a garbage cell
-    // index — either handing out a pointer past the buffer or (if the garbage
-    // exceeds the length) trapping on a bump that should have succeeded. Emitted
-    // before the body and after parameter seating, and a no-op for every function
-    // that declares no arena, which keeps existing codegen byte-identical.
-    emit_arena_cursor_init(&mut ctx, &mut code);
-
     let mut loops: Vec<NativeLoop> = Vec::new();
 
     // A function whose last statement is a value-producing tail expression (e.g.

@@ -831,11 +831,38 @@ interpreters (reusing the shared `addr_of` machinery wholesale — the returned
 pointer is the same place-backed pointer, and genuinely aliases the buffer), and
 `L0460` is retargeted to **arena overflow**, the failure that genuinely exists.
 
-**What still cannot be modelled — and it is not arena-specific.** A pointer that
-escapes the frame owning its buffer is refused by the interpreters with **`L0459`**,
-exactly as any other `addr_of` pointer is, because a callee cannot reach its
-caller's `Env`. That is the pre-existing, honestly-earned divergence described in
-§10.4; the arena inherits it rather than adding one.
+**Nothing about the arena is native-only — including across frames.** An earlier
+version of this record said a pointer escaping its buffer's frame was refused by the
+interpreters with `L0459`, inherited from `addr_of` rather than added. The inheritance
+was real, but the **env shelf** (`651d22c`) has since made a bare name resolve across
+frames, so passing an arena pointer into a callee — valid C, since a call does not end
+the caller's block — now **runs on every tier** and agrees (measured: `99` on all
+four). The paragraph is retired rather than reworded: there is no arena-specific
+divergence left to describe. A genuinely *dangling* pointer (its buffer's frame has
+returned) is still `L0459` on the interpreters and real undefined behaviour natively,
+exactly as for any `addr_of` pointer — see the lifetime note below.
+
+**One scoping model, and the three ways it was silently three.** The arena's scope and
+buffer binding are now defined once and shared:
+
+- a `region <name> in <buffer>` is **scoped to its enclosing block**, and
+- its backing buffer is **pinned at the declaration**, to a slot — never re-resolved
+  by name later.
+
+Each tier had drifted to its own model, and every drift was a *silent wrong answer*
+with no diagnostic:
+
+| Shape | Was | Root cause |
+| :-- | :-- | :-- |
+| `region` in a loop body | interpreters `300`, **native `123`** | Native zeroed the cursor only in the **prologue**, so it never re-zeroed on block re-entry — contradicting this document's own "reset at dedent". It now zeroes **at the declaration site**, which is inside the loop body. |
+| `region` in an inner block, used after | `check` **accepted**; interpreters `L0445`, native `7` | The checker tracked regions in a flat **per-function** map. `arena_regions` now lives on `Scope`, which is cloned per block — so `check` no longer accepts what the tiers reject. |
+| buffer shadowed by an inner `let` | interpreters `0`, **native `7`** | The interpreters re-resolved the buffer **by name** on every allocation, so a shadowing `let buf` silently retargeted a live arena. They now hold the buffer's `RootSlot`, pinned at the declaration. |
+
+All three are `406` on all four tiers (`freestanding_arena_scoping.lby`). The
+slot-pinning also **immunizes the arena against the env shelf**: with a name-keyed
+buffer, the shelf's cross-frame resolution could have reached a *caller's* buffer
+entirely. (A callee naming a buffer it does not own is rejected by the checker —
+`L0445` — so the shelf has no route in.)
 
 **Lifetime: an arena pointer does not outlive its buffer.** The arena's memory *is*
 the buffer, so a pointer into it is valid exactly as long as the buffer's binding —
@@ -852,9 +879,12 @@ and **runs, exiting 109** — `two_cells` (42: distinct allocations do not alias
 `loop_sum` (60: the arena composes with a loop) + `block` (7: a multi-cell request
 walked with `ptr_offset`) — and the AST, IR, and bytecode interpreters all produce
 `109` too. `freestanding_arena_overflow.lby` traps natively (`0xC000001D`) and aborts
-with `L0460` on the three interpreters. Five negative fixtures under
-`tests/fixtures/invalid/no_runtime/` pin `L0445` (×4, including two regions over one
-buffer) and `L0330`. Tests in `crates/lullaby_cli/tests/cli/suite15.rs`; the differential
+with `L0460` on the three interpreters. `freestanding_arena_scoping.lby` pins the one
+scoping model at **406 on all four tiers** — a loop-body region resetting at dedent, a
+shadowing `let` failing to retarget a live arena, and an arena pointer crossing the
+call ABI. Six negative fixtures under `tests/fixtures/invalid/no_runtime/` pin `L0445`
+(×5: backing not in scope, wrong type, unknown region, two regions over one buffer,
+and a region used after its block) and `L0330`. Tests in `crates/lullaby_cli/tests/cli/suite15.rs`; the differential
 fuzzer is `crates/lullaby_cli/tests/cli/fuzz_arena.rs`.
 
 That fuzzer carries **both** oracles: a cross-engine
@@ -870,8 +900,9 @@ injected bug passed. The generator now calls a stack-dirtying function first, wh
 is what makes the zeroing observable.
 
 **Still undelivered in this section:** the `region <name> from <ptr>, <len>`
-raw-pointer binding, nested/per-CPU pool composition beyond ordinary block scoping,
-explicit mid-scope reset, and the escape-copy interaction (vacuous today, since the
+raw-pointer binding, per-CPU pools sharing one buffer (two regions over one buffer is
+`L0445` — separate pools need separate buffers; nesting *distinct* buffers works via
+ordinary block scoping), explicit mid-scope reset, and the escape-copy interaction (vacuous today, since the
 escaping values that would be copied are `L0441`-rejected in this tier).
 
 ---
