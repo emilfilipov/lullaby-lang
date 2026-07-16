@@ -125,6 +125,39 @@ pub fn port_io_interpreter_error(name: &str) -> RuntimeError {
     )
 }
 
+/// The refusal every interpreter raises for a freestanding **static-buffer arena**
+/// allocation (`documents/freestanding_tier_design.md` §5).
+///
+/// A static-buffer arena hands out a `ptr<T>` into raw bytes carved from a
+/// caller-owned buffer. That is precisely the one thing the interpreters' pointer
+/// model cannot express: it addresses **typed cells via a stride** and is
+/// *place-backed* (each pointer names an existing binding and a path to it), so it
+/// has no way to reinterpret a buffer's storage as freshly-typed cells, and no way
+/// to carry the resulting pointer across the frames an arena is naturally passed
+/// through (the same wall `L0459` describes). Bump arithmetic alone could be
+/// faked — but a faked pointer that reads and writes the *wrong storage* is a
+/// silent wrong answer, which is exactly what this model exists to prevent.
+///
+/// So the arena is **native-only** and the interpreters refuse it, deliberately
+/// mirroring `port_io_interpreter_error`/`L0444`: a documented acceptance
+/// divergence, not a defect. Native is the tier a kernel targets, and `check`
+/// still fully validates the arena (`L0445`, the `unsafe` gate `L0330`) — only
+/// *execution* is native-only.
+pub fn arena_interpreter_error(name: &str) -> RuntimeError {
+    RuntimeError::new(
+        "L0460",
+        format!(
+            "cannot execute the static-buffer arena builtin `{name}` on an interpreter: an arena \
+             carves raw storage out of a caller-owned buffer and hands back a `ptr<T>` into it, \
+             but the interpreters address typed cells through a place-backed pointer model that \
+             cannot reinterpret a buffer's storage as new typed cells — a fabricated pointer \
+             would silently read and write the wrong storage. Compile with `lullaby native \
+             --freestanding` to run the real bump allocator; the resulting image is meant for a \
+             kernel/bootloader, not a hosted interpreter run"
+        ),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
     Runtime,

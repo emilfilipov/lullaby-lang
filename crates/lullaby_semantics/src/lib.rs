@@ -9,6 +9,7 @@ use lullaby_parser::{
 
 mod semantics_actor_ownership;
 mod semantics_aliases;
+mod semantics_arena;
 mod semantics_consts;
 mod semantics_generics;
 mod semantics_no_runtime;
@@ -301,6 +302,12 @@ struct Checker<'a> {
     loop_depth: usize,
     unsafe_depth: usize,
     region_names: HashSet<String>,
+    /// Static-buffer arena regions declared in the function being checked:
+    /// region name -> backing buffer name (`region NAME in BUFFER`, freestanding
+    /// tier §5). Populated by `check_region_arena` and read by `check_arena_alloc`
+    /// to resolve `arena_alloc`'s compile-time region operand. Cleared per function
+    /// alongside `region_names`.
+    arena_regions: HashMap<String, String>,
     /// Declared struct types: name -> ordered fields. For a generic struct the
     /// field types may mention the struct's type parameters (see
     /// `struct_type_params`); a use site substitutes them to concrete types.
@@ -453,6 +460,7 @@ impl<'a> Checker<'a> {
             loop_depth: 0,
             unsafe_depth: 0,
             region_names: HashSet::new(),
+            arena_regions: HashMap::new(),
             structs: HashMap::new(),
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
@@ -2077,6 +2085,7 @@ impl<'a> Checker<'a> {
 
     fn validate_function(&mut self, function: &Function) {
         self.region_names.clear();
+        self.arena_regions.clear();
         // Any generic struct named in a parameter or return type must be given
         // the right number of type arguments. The function's own type
         // parameters are in scope so a bare type variable is not mistaken for a
@@ -2542,7 +2551,14 @@ impl<'a> Checker<'a> {
                 Some(function.return_type.clone())
             }
             Stmt::Region(decl) => {
-                self.check_region(decl, function);
+                // Two forms share this statement: the delivered metadata region
+                // (`region N: size=...`) and the freestanding static-buffer arena
+                // (`region N in buf`, §5), which needs the scope to resolve its
+                // backing buffer.
+                match &decl.backing {
+                    Some(backing) => self.check_region_arena(decl, backing, scope, function),
+                    None => self.check_region(decl, function),
+                }
                 None
             }
             Stmt::Throw { value, .. } => {

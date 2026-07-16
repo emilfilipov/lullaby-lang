@@ -1,0 +1,16 @@
+# L0445: `arena_alloc`'s first operand must name a static-buffer arena declared
+# with `region <name> in <buffer>` in scope. A region name is a compile-time
+# entity, not a value, so an undeclared one cannot be resolved to a buffer.
+no-runtime
+
+fn bad -> i64
+    let buf array<i64> = [0, 0]
+    region scratch in buf
+    unsafe
+        # `other` was never declared as a region.
+        let p ptr<i64> = arena_alloc(other, 1)
+        ptr_write(p, 1)
+        ptr_read(p)
+
+fn main -> i64
+    bad()

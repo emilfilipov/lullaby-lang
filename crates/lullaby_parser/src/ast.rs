@@ -742,7 +742,20 @@ pub(crate) fn expr_to_place(expr: &Expr) -> Option<(String, Vec<Place>)> {
     }
 }
 
-/// A memory-region declaration: `region NAME: size=N[, align=N][, kind=static|dynamic][, mutable=true|false]`.
+/// A memory-region declaration, in one of two forms.
+///
+/// 1. The delivered **metadata** form
+///    `region NAME: size=N[, align=N][, kind=static|dynamic][, mutable=true|false]`.
+///    This carries region metadata through memory analysis (it lowers to a
+///    `region_create` marker) and has no allocation behaviour of its own.
+///
+/// 2. The freestanding **static-buffer arena** form `region NAME in BUFFER`
+///    (`documents/freestanding_tier_design.md` §5): `NAME` becomes a bump arena
+///    carved from `BUFFER`, a fixed `array<i64>` the caller owns. It is usable in
+///    a `no-runtime` module because it never touches the host allocator — the
+///    memory is the caller's buffer, and the bump cursor is a frame slot.
+///    [`RegionDecl::backing`] is `Some(buffer)` in this form, and `size` is `0`
+///    (the extent comes from the buffer's inferred length, not the source).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionDecl {
     pub name: String,
@@ -750,6 +763,11 @@ pub struct RegionDecl {
     pub align: Option<i64>,
     pub kind: String,
     pub mutable: bool,
+    /// `Some(buffer_name)` for the static-buffer arena form `region NAME in BUFFER`;
+    /// `None` for the delivered metadata form. Serde-defaulted so previously
+    /// serialized programs stay loadable.
+    #[serde(default)]
+    pub backing: Option<String>,
     pub span: Span,
 }
 

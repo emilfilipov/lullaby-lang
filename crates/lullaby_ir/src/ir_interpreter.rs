@@ -687,6 +687,12 @@ impl<'a> IrRuntime<'a> {
             "port_in8" | "port_in16" | "port_in32" | "port_out8" | "port_out16" | "port_out32" => {
                 Err(port_io_interpreter_error(name))
             }
+            // Static-buffer arenas are native-only: the interpreters' place-backed,
+            // typed-cell pointer model cannot reinterpret a caller's buffer as new
+            // typed cells. Refuse with `L0460` rather than hand back a pointer that
+            // would read and write the wrong storage. This arm serves BOTH the IR
+            // tree-walker and the bytecode VM (whose `VmOp::Call` routes here).
+            "arena_alloc" => Err(arena_interpreter_error(name)),
             "env" => Self::builtin_env(args),
             "os_random" => Self::builtin_os_random(args),
             "args" => self.builtin_args(args),
@@ -745,6 +751,11 @@ impl<'a> IrRuntime<'a> {
             // A region-creation marker has no runtime effect in the current
             // analysis-only region model.
             "region_create" => Ok(Value::Void),
+            // The static-buffer arena declaration marker (§5). Declaring an arena
+            // allocates nothing and reads nothing — it only names a buffer — so it
+            // is a genuine no-op here rather than a refusal. `arena_alloc`, the
+            // operation this model cannot express, is what refuses (`L0460`).
+            "arena_region" => Ok(Value::Void),
             _ => {
                 let function = *self.functions.get(name).ok_or_else(|| {
                     RuntimeError::new("L0401", format!("unknown function `{name}`"))
@@ -1424,6 +1435,14 @@ impl<'a> IrRuntime<'a> {
                 // see the AST interpreter and runtime `raw_pointer.rs`.
                 if name == "addr_of" && args.len() == 1 {
                     return self.eval_addr_of(&args[0], env);
+                }
+                // `arena_alloc(region, count)`: refuse BEFORE evaluating arguments.
+                // `region` is a compile-time region name rather than a value, so
+                // evaluating it would raise a misleading `L0403 unknown variable`
+                // instead of the honest "static-buffer arenas are native-only"
+                // (`L0460`). Serves both the IR tree-walker and the bytecode VM.
+                if name == "arena_alloc" {
+                    return Err(arena_interpreter_error(name));
                 }
                 let values = args
                     .iter()

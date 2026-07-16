@@ -1308,8 +1308,31 @@ impl<'a> Parser<'a> {
     fn parse_region(&mut self) -> Option<Stmt> {
         let span = self.previous().span;
         let name = self.expect_identifier("expected region name")?;
+
+        // The freestanding static-buffer arena form: `region NAME in BUFFER`
+        // (`documents/freestanding_tier_design.md` §5). The arena's memory is the
+        // caller's fixed buffer, so there is no `size=` to state — the extent is
+        // the buffer's. Checked against the buffer in `semantics_arena.rs`.
+        if self.eat_keyword(Keyword::In).is_some() {
+            let backing = self.expect_identifier("expected backing buffer name after `in`")?;
+            self.expect_newline("expected newline after region declaration");
+            return Some(Stmt::Region(RegionDecl {
+                name,
+                size: 0,
+                align: None,
+                kind: String::from("static"),
+                mutable: true,
+                backing: Some(backing),
+                span,
+            }));
+        }
+
         if !self.eat_symbol(":") {
-            self.error("L0210", "expected `:` after region name", self.peek().span);
+            self.error(
+                "L0210",
+                "expected `:` or `in <buffer>` after region name",
+                self.peek().span,
+            );
             return None;
         }
 
@@ -1351,6 +1374,7 @@ impl<'a> Parser<'a> {
             align,
             kind,
             mutable,
+            backing: None,
             span,
         }))
     }

@@ -1316,8 +1316,43 @@ impl<'a> Lowerer<'a> {
                 bytes: bytes.iter().map(|byte| *byte as u8).collect(),
                 span: *span,
             }),
-            // A region declaration lowers to a `region_create` marker call so
-            // its metadata flows through memory analysis as a RegionCreate op.
+            // A *static-buffer arena* (`region N in buf`, freestanding tier §5) is
+            // not a metadata region: it has no `size=`/`kind=` to publish, and its
+            // storage is the caller's buffer. It lowers to its own `arena_region`
+            // marker call — the same technique as `region_create` — carrying the
+            // region and buffer **names**, which is what the native backend needs to
+            // resolve `arena_alloc` against the buffer's frame slot and length.
+            //
+            // Both operands are string literals rather than a `Variable` reference to
+            // the buffer, deliberately: a `Variable` operand would make an
+            // interpreter *evaluate* it and copy the whole array for a declaration
+            // that reads nothing. The marker itself is a void no-op at run time; the
+            // refusal lives on `arena_alloc`, the operation that actually has no
+            // faithful interpreter model.
+            Stmt::Region(decl) if decl.backing.is_some() => {
+                let backing = decl.backing.clone().unwrap_or_default();
+                Ok(IrStmt::Expr(IrExpr {
+                    kind: IrExprKind::Call {
+                        name: "arena_region".to_string(),
+                        args: vec![
+                            IrExpr {
+                                kind: IrExprKind::String(decl.name.clone()),
+                                ty: TypeRef::new("string"),
+                                span: decl.span,
+                            },
+                            IrExpr {
+                                kind: IrExprKind::String(backing),
+                                ty: TypeRef::new("string"),
+                                span: decl.span,
+                            },
+                        ],
+                    },
+                    ty: TypeRef::new("void"),
+                    span: decl.span,
+                }))
+            }
+            // A metadata region declaration lowers to a `region_create` marker call
+            // so its metadata flows through memory analysis as a RegionCreate op.
             Stmt::Region(decl) => {
                 let mut args = vec![
                     IrExpr {
@@ -2544,6 +2579,35 @@ impl<'a> Lowerer<'a> {
         // expected container type flows into the container argument and the
         // resolved element/key/value types flow into the value arguments.
         match name {
+            // `arena_alloc(region, count)` is a special form: `region` names a
+            // `region <name> in <buffer>` declaration, which is a **compile-time
+            // entity, not a value** (exactly as a `region` name is everywhere else
+            // in the language — there is no `arena` type and nothing to evaluate).
+            // Lowering it as an ordinary expression would look it up as a local and
+            // fail with "unknown variable". It stays a bare `Variable` node so the
+            // native backend can read the name and resolve it against the frame's
+            // arena bindings. The checker (`L0445`) has already proved the name
+            // resolves to a declared region.
+            "arena_alloc" if args.len() == 2 => {
+                let ExprKind::Variable(region) = &args[0].kind else {
+                    return Err(IrLoweringError::new(
+                        "`arena_alloc` requires a static-buffer region name as its first \
+                         operand"
+                            .to_string(),
+                        Some(args[0].span),
+                    ));
+                };
+                let count =
+                    self.lower_expr_expected(&args[1], Some(&TypeRef::new("i64")), scope)?;
+                return Ok(vec![
+                    IrExpr {
+                        kind: IrExprKind::Variable(region.clone()),
+                        ty: TypeRef::new("void"),
+                        span: args[0].span,
+                    },
+                    count,
+                ]);
+            }
             "push" if args.len() == 2 => {
                 let list = self.lower_expr_expected(&args[0], expected, scope)?;
                 let element = list_element_type(&list.ty);
@@ -2668,8 +2732,10 @@ impl<'a> Lowerer<'a> {
             "store" | "dealloc" | "write_file" | "append_file" | "write_bytes" | "make_dir"
             | "remove_file" | "remove_dir" | "print" | "println" | "warn" | "wasm_log"
             | "console_log" | "dom_set_text" | "flush" | "sleep_millis" | "assert"
-            | "rc_release" | "ptr_write" | "volatile_store" | "region_create" | "tcp_close"
-            | "tcp_shutdown" | "port_out8" | "port_out16" | "port_out32" => TypeRef::new("void"),
+            | "rc_release" | "ptr_write" | "volatile_store" | "region_create" | "arena_region"
+            | "tcp_close" | "tcp_shutdown" | "port_out8" | "port_out16" | "port_out32" => {
+                TypeRef::new("void")
+            }
             // Port reads yield the unsigned width named by the builtin. (Executing
             // one is refused with `L0444` in `dispatch_named_call`; the type is
             // still needed to lower the call node.)
@@ -2683,6 +2749,13 @@ impl<'a> Lowerer<'a> {
             // fixed by the surrounding `let`/parameter annotation; the call node
             // itself carries the generic `ptr<i64>` handle spelling.
             "int_to_ptr" => TypeRef::new("ptr<i64>"),
+            // `arena_alloc(region, count)` bumps cells out of a static-buffer arena
+            // and yields a raw pointer to the first. Like `int_to_ptr`, the concrete
+            // pointee is fixed by the surrounding annotation; the call node carries
+            // the generic `ptr<i64>` handle spelling. (Executing one is refused with
+            // `L0460` in `dispatch_named_call`; the type is still needed to lower
+            // the call node.)
+            "arena_alloc" => TypeRef::new("ptr<i64>"),
             // `addr_of(place) -> ptr<T>`: a whole-array place decays to a pointer
             // to its element type; any other place points at its own type.
             "addr_of" => {

@@ -315,6 +315,12 @@ pub(crate) struct NativeCtx<'a> {
     /// loops at different depths use distinct words. `0` when `is_arena` is false or
     /// the function has no loops. See `arena_loop_mark_slot`.
     arena_loop_mark_base: i32,
+    /// Freestanding **static-buffer arenas** (§5): region name -> its backing
+    /// buffer local and the frame word holding its bump cursor. Populated in `plan`
+    /// from the `arena_region` markers in the body; read when lowering
+    /// `arena_alloc`. Empty for every function that declares no
+    /// `region <name> in <buffer>`, which keeps all existing codegen byte-identical.
+    arena_buffers: HashMap<String, ArenaBinding>,
     /// Aggregate type names (`struct`/`enum`) that transitively carry a heap
     /// field/payload (a `string` field, an `option<string>`/user enum with a heap
     /// payload, etc.). Used by the arena loop-lowering (`arena_loop_reset_mark`) so
@@ -504,6 +510,30 @@ impl<'a> NativeCtx<'a> {
             0
         };
 
+        // Freestanding static-buffer arenas (§5): reserve one frame word per
+        // declared `region <name> in <buffer>` to hold that arena's bump cursor (a
+        // cell count into the backing buffer). The cursor has no source-level
+        // binding, so it cannot be an ordinary local, and two arenas over two
+        // buffers can be live at once, so the word cannot be shared. The prologue
+        // zeroes each one. Functions with no arena reserve nothing and stay
+        // byte-identical.
+        //
+        // Note this is orthogonal to `is_arena` above: that is the arena-FIRST
+        // escape analysis over the *host* heap bump pointer, which a static-buffer
+        // arena never touches. See `native_object_arena.rs` for why the two cannot
+        // interact.
+        let mut arena_buffers: HashMap<String, ArenaBinding> = HashMap::new();
+        for region in collect_arena_regions(&function.instructions) {
+            next_slot += 8;
+            arena_buffers.insert(
+                region.name,
+                ArenaBinding {
+                    buffer: region.buffer,
+                    cursor_slot: next_slot,
+                },
+            );
+        }
+
         // Arena-first memory (stage 2): reserve one bump-pointer "sub-region mark"
         // word per level of loop nesting, so each loop that gets a per-iteration
         // sub-region can save/restore its own mark. A loop at nesting depth `d`
@@ -559,6 +589,7 @@ impl<'a> NativeCtx<'a> {
             is_arena,
             arena_mark_slot,
             arena_loop_mark_base,
+            arena_buffers,
             // Non-generic heap-carrying aggregate NAMES plus the heap-`T`
             // user-generic INSTANTIATION spellings used in this function
             // (`Box<string>`, `Opt<string>`), so the lowering-time loop confinement
@@ -746,6 +777,10 @@ pub(crate) use heapbox::*;
 #[path = "native_object_portio.rs"]
 mod portio;
 pub(crate) use portio::*;
+
+#[path = "native_object_arena.rs"]
+mod arena;
+pub(crate) use arena::*;
 
 #[path = "native_object_closure.rs"]
 mod closure;

@@ -806,6 +806,11 @@ fn render_if(
 }
 
 fn render_region(decl: &RegionDecl) -> String {
+    // The static-buffer arena form (`documents/freestanding_tier_design.md` §5)
+    // carries no `size=`/`kind=` metadata — its extent is the backing buffer's.
+    if let Some(backing) = &decl.backing {
+        return format!("region {} in {}", decl.name, backing);
+    }
     let mut out = format!("region {}: size={}", decl.name, decl.size);
     if let Some(align) = decl.align {
         out.push_str(&format!(", align={align}"));

@@ -203,6 +203,17 @@ impl<'a> Runtime<'a> {
                 if name == "addr_of" && args.len() == 1 {
                     return self.eval_addr_of(&args[0], env);
                 }
+                // `arena_alloc(region, count)` is likewise a special form, and is
+                // refused here — BEFORE argument evaluation — for two reasons.
+                // First, `region` names a compile-time `region <name> in <buffer>`
+                // declaration, not a value, so evaluating it would raise a
+                // misleading `L0403 unknown variable` that reads like a bug in the
+                // user's program. Second, and the real point: a static-buffer arena
+                // is native-only (see `arena_interpreter_error`), so the honest
+                // answer is the refusal itself, not an accident of evaluation order.
+                if name == "arena_alloc" {
+                    return Err(arena_interpreter_error(name));
+                }
                 let values = args
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))

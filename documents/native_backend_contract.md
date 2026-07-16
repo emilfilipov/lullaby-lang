@@ -1914,6 +1914,109 @@ names, so a function using one fails their `callable` lookup and skips cleanly
 a program then falls back to an interpreter, which raises the same `L0444`. The
 chain is honest end to end: no target ever invents a port value.
 
+## Static-Buffer Arenas (Freestanding Tier) (DELIVERED, native-only, runs)
+
+`region <name> in <buffer>` + `arena_alloc(region, count) -> ptr<T>` give a
+`no-runtime` module its first **bounded, allocator-free storage**. Until this
+landed, a freestanding driver could reach hardware (MMIO, port I/O) but had nowhere
+to put what it read: `alloc`/`list`/`map`/`string`/`rc` are all `L0441`-rejected in
+that tier by design. Full design + as-built record:
+[freestanding_tier_design.md](freestanding_tier_design.md) §5 and §5.2. Code:
+`crates/lullaby_ir/src/native_object_arena.rs`.
+
+### What an arena is, natively: a frame word and a bump
+
+No runtime is involved at any point — three things and nothing else:
+
+- **the buffer** — an ordinary `array<i64>` local the author declared, in its own
+  frame slots. The arena adds no storage of its own.
+- **the cursor** — **one dedicated frame word per region**, holding a *cell count*.
+  Reserved by `NativeCtx::plan` from `collect_arena_regions`
+  (`native_object_frame.rs` — arena state is frame sizing, which is why it lives
+  there), and **zeroed by the prologue** (`emit_arena_cursor_init`): a frame slot
+  holds whatever the previous call left there, so an un-zeroed cursor would bump
+  from garbage.
+- **the bump** — `arena_alloc` emits: load the cursor, `add` the count, `jc` on
+  unsigned wrap, `cmp`/`ja` against the buffer's cell length, commit the new cursor,
+  then `lea rax, [rax + rcx*8]` off `&buffer[0]`.
+
+The carry check is load-bearing, not decoration: `count` is a signed `i64` the
+author supplies, so a huge or negative value could wrap `old + count` back into
+range and hand out a pointer *before* the buffer. Both checks are unsigned, so a
+negative count reads as an enormous one and is caught by one or the other. A
+zero-cell request is well-defined — it commits nothing and returns the current
+position.
+
+### Cells, not bytes
+
+The bump unit is the **8-byte cell** and the buffer is `array<i64>`, not the
+`array<byte>` §5's prose sketches. **Every Lullaby scalar is a normalized 8-byte
+cell** natively (an `i32` local occupies a full sign-extended word) — the same fact
+that makes `addr_of` 8-byte-only (see "Default-deny scope" above). An `array<byte>`
+is an array of 8-byte cells, not packed bytes, so a byte-granular arena over one
+would hand back pointers whose stores corrupt the cell invariant every other native
+path relies on. Bumping in cells makes every arena pointer exactly as well-formed as
+an `addr_of(buf[i])` — the delivered, tested buffer-walk idiom this reuses.
+
+### Overflow: `ud2`, and the §8 seam
+
+A bump that would leave the buffer **traps with `ud2`** (`emit_arena_overflow_trap`)
+— the same instruction and reasoning as the native bounds check for an out-of-range
+`buf[i]`. It is immediate, deterministic, and **can never hand back a pointer past
+the buffer's end**; a null or truncated pointer would be a silent wrong answer
+corrupting memory at some later, unrelated point. Verified observable:
+`0xC000001D` (`STATUS_ILLEGAL_INSTRUCTION`).
+
+This is the **single seam** §8 (the pluggable panic handler) replaces: it will call
+the program's own `panic fn` with `kind = arena_overflow` instead of trapping. The
+range check, the cursor, and the bump are already final. Per decision **A5** the
+handler still terminates and does not unwind, so the edge's shape (a divergent tail,
+no return path) does not change.
+
+### Arena / escape-analysis interaction: none, by construction
+
+The arena-FIRST escape analysis (`native_object_eligibility.rs`) is where a
+per-iteration sub-region rewind freeing a still-live cell is a demonstrated
+miscompile class, so this was checked rather than assumed. There is **no**
+interaction:
+
+- it governs the **host heap bump pointer** (`__lullaby_heap_next`), backing
+  `list`/`string`/`map`/`rc`/`alloc`. A static-buffer arena never reads or writes
+  it — its memory is the author's local, its cursor a private frame word;
+- its rewinds restore `__lullaby_heap_next` and cannot touch an arena cursor they do
+  not know about;
+- the two are gated on disjoint programs anyway: `arena_eligible_functions` needs a
+  *heap-touching* function, and every heap-touching construct is `L0441`-rejected
+  where arenas live.
+
+So **no conservative exclusion was needed and none was made**. A function with no
+arena has an empty `arena_buffers` and emits byte-identical code, which is why the
+escape-analysis fuzzers stay green.
+
+### Acceptance divergence: native runs it, the interpreters refuse it
+
+All three interpreters refuse `arena_alloc` with **`L0460`** rather than approximate
+it. Their pointer model addresses **typed cells through a place-backed pointer**
+(each names an existing binding plus a path to it — see `L0459`), so it cannot
+reinterpret a buffer's storage as freshly-typed cells, nor carry the pointer across
+the frames an arena is naturally passed through. The bump arithmetic could be faked,
+but a faked pointer reads and writes the *wrong storage* — a silent wrong answer.
+**No parity is claimed**, exactly as with port I/O (`L0444`). `check` still fully
+validates the arena (`L0445`, `L0330`), so only *execution* is native-only.
+
+### Verification
+
+`tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby` compiles under
+`lullaby native --freestanding` to a real direct-PE exe (no linker) and **runs,
+exiting 109**: `two_cells` (42 — distinct allocations do not alias), `loop_sum` (60
+— the arena composes with a loop), `block` (7 — a multi-cell request walked with
+`ptr_offset`). `freestanding_arena_overflow.lby` traps as above. Tests in
+`crates/lullaby_cli/tests/cli/suite15.rs`; fuzzer in
+`crates/lullaby_cli/tests/cli/fuzz_arena.rs` (a *value* oracle, since there is no
+second engine to differ with; teeth measured by two reverted bug injections).
+
+---
+
 ## Deferred Native Work
 
 Deferred beyond the current increment: within the raw-pointer surface — **`addr_of` of an array element and of a whole array are now DELIVERED** (the native frame lays aggregates out at ASCENDING, C-compatible addresses, so a pointer into an array walks forward correctly — buffer walking works; see "Aggregate word order"). Still deferred: `addr_of` of a narrower-than-8-byte scalar (normalized 8-byte cells — this also covers an `array<i32>` element, whose 8-byte cell and 4-byte `ptr_offset` stride would desynchronize), `addr_of` into a fat-pointer (runtime-length) array parameter (the descriptor shares the caller's storage read-only), a `bool`/`char`/`f64`/`f32` pointee, a struct/array pointee for `ptr_offset`, and `addr_of` of a closure-captured variable — each a precise `L0339` skip today; a `void`-returning function of any kind (a pre-existing, raw-pointer-independent gap that blocks the natural `fn poke p ptr<T> v T` kernel spelling); more than four **effective** register arguments (stack arguments; the count now includes a hidden aggregate-return pointer), a top-level `f64`/`f32` **scalar** parameter/return across a function boundary (needs XMM argument routing), aggregates (structs/arrays) containing heap values as boundary values, trapping native array bounds checks, `to_string(f64)`/`to_string(f32)` and the remaining string builtins (`replace`/`words`/`chars`/`string_from_chars`), string comparison, strings as struct/array fields/elements, string-keyed or float-keyed maps, a mutable-aggregate map KEY, collection elements/values or enum payloads nested past **one** mutable-aggregate level (`list<list<list<…>>>`) or of `map`/`array` type, field access directly on an unbound `get`/`map_get` result, heap allocation exposed beyond the delivered string/list/map/struct helpers, a heap `free`/reclamation path, cross-platform ELF/Mach-O object emission, CRT-driven `mainCRTStartup` entry, and true bare-metal (no-OS-import) freestanding. (First-class `string` **values** — locals/parameters/returns/arguments, literal values, `+` concatenation, `len`, `to_string` for integers/`bool`/`char`/`byte`, and the index-based `substring`/`find`/`contains`/`starts_with`/`ends_with` operations; scalar-field aggregates as parameters, returns, and call arguments; `f64`/`f32`/`bool`/`char`/`byte` scalar lowering within i64-signature functions; `match` over enums with a scalar, `string`, **or one-level mutable-aggregate** payload; growable `list<T>` with a scalar, `string`, **or one-level mutable-aggregate** (`list<struct>`, `list<list<scalar>>`) element; and growable `map<K, V>` with a scalar key and a scalar, `string`, **or one-level mutable-aggregate** (`map<K, struct>`) value are **delivered** — see the sections above.) This work must not bypass the AST runtime, typed IR validation, bytecode VM, or existing release verification.

@@ -13,8 +13,17 @@ Surface" section of [native_backend_contract.md](native_backend_contract.md).
 the delivered `int_to_ptr`/`ptr_offset`/`volatile_store` + void functions with no
 intrinsics of its own, and `port_in8/16/32` / `port_out8/16/32` lower to real x86
 `in`/`out` (native-only; the interpreters refuse them with `L0444` rather than
-fabricate a device value). The **privileged** set of §4 (`read_cr`/`write_cr`,
-`read_msr`/`write_msr`, `halt`/`cli`/`sti`) remains undelivered. This document proposes the concrete, buildable shape of
+fabricate a device value). **Static-buffer arenas are delivered** (2026-07-16, §5)
+— `region <name> in <buffer>` + `arena_alloc(region, count)` give a `no-runtime`
+module its first bounded, allocator-free storage (until now a driver could reach
+hardware but had nowhere to put what it read, since `alloc`/`list`/`map` are all
+`L0441`-rejected here by design). Overflow is a defined, deterministic edge
+(`ud2`); native runs it and the interpreters refuse it (`L0460`). See the as-built
+record in §5.2 — it deviates from §5's text in three places where that text is
+wrong about the delivered compiler. The **privileged** set of §4 (`read_cr`/`write_cr`,
+`read_msr`/`write_msr`, `halt`/`cli`/`sti`) remains undelivered, as does the
+pluggable panic handler (§8), which is the natural next increment: it replaces the
+arena's overflow trap with a call to the program's own `panic fn`. This document proposes the concrete, buildable shape of
 Lullaby's **freestanding / `no-runtime` tier** — the capability set that makes 1.0
 a systems language you can write a kernel, boot code, embedded firmware, and FFI
 shims in.
@@ -568,6 +577,17 @@ precedent in the delivered builtins.
 
 ## 5. Static-buffer-backed arenas
 
+> **DELIVERED (2026-07-16).** `region <name> in <buffer>` + `arena_alloc(region, count)`
+> ship and **run natively**, giving a `no-runtime` module its first bounded,
+> allocator-free storage. Overflow is a defined, deterministic edge (`ud2`, the same
+> edge as the native bounds check) — the seam §8's pluggable panic handler replaces.
+> The interpreters **refuse** the arena (`L0460`) rather than approximate it: their
+> place-backed, typed-cell pointer model cannot reinterpret a buffer's storage as new
+> typed cells. **Three premises in the text below are wrong about the delivered
+> compiler** (there is no `region` *block*; implicit arena allocation is vacuous in
+> this tier; the buffer is `array<i64>` bumping in 8-byte cells, not `array<byte>`) —
+> see the as-built record in §5.2 for what shipped and why.
+
 The canonical region model (`execution_tiers_and_1_0_scope.md`) says the freestanding
 tier uses "the same `region` surface, but arenas are backed by a caller-provided
 static buffer (no host allocator)". This is the feature that lets *most of a kernel
@@ -639,6 +659,167 @@ fn handle_request req ptr<Request> -> i64
   from the region descriptor instead of the host allocator; overflow branches to the
   panic-handler symbol (§8) rather than the grow path. A malformed binding (buffer not
   `static`/sized, or a non-byte buffer) is proposed **`L0445`**.
+
+
+### 5.2 Static-buffer arena delivery (2026-07-16) — the as-built record
+
+Delivered on this section's Option A recommendation — `region <name> in <buffer>`,
+memory from a caller-provided buffer, bump allocation, a defined overflow edge, no
+host allocator. **Three of this section's stated premises turned out to be wrong
+about the delivered compiler**, and each forced a documented deviation rather than
+an unbuildable literal reading. What follows is what actually shipped.
+
+**Deviation 1 — there is no `region` *block* to reuse.** This section says Option A
+"reuses the *exact* delivered `region` block grammar, adds one `in <buffer>`
+clause". It does not exist. The delivered `region` is a flat **metadata
+declaration** — `region NAME: size=N, align=N, kind=static|dynamic,
+mutable=true|false` — which is validated (`L0340`/`L0341`), lowered to a
+`region_create` marker for memory analysis, and has **no block, no scoping, and no
+allocation behaviour whatsoever**. So the arena form is a **statement in that same
+delivered statement position**, scoped to its enclosing block:
+
+```lby
+no-runtime
+
+fn two_cells -> i64
+    let buf array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]   # the caller's buffer
+    region scratch in buf                            # a bump arena over it
+    unsafe
+        let a ptr<i64> = arena_alloc(scratch, 1)
+        let b ptr<i64> = arena_alloc(scratch, 1)
+        ptr_write(a, 30)
+        ptr_write(b, 12)
+        ptr_read(a) + ptr_read(b)                    # 42 — distinct cells
+```
+
+"Reset at dedent" is exactly what an enclosing-block scope gives for a region
+declared at the top of a block, so nothing is lost.
+
+**Deviation 2 — implicit arena allocation is *vacuous* in `no-runtime`.** This
+section's sketch has the region block's body allocate implicitly (`let parsed Parsed
+= parse(req)` bumping into the buffer). Nothing would. Every type whose allocation
+the escape analysis arena-izes — `list`/`string`/`map`/`rc` — is `L0441`-rejected in
+this tier (§1.1); what remains is by-value scalars, structs, and fixed arrays, none
+of which heap-allocate. An implicit bump would have literally nothing to bump. So
+allocation is **explicit**, via `arena_alloc(region, count) -> ptr<T>` — which is
+also what a kernel actually writes.
+
+**Deviation 3 — the buffer is `array<i64>` and the bump unit is the 8-byte CELL,
+not the byte.** This section spells the buffer `static ... array<byte>` with
+byte-granular bumping. The delivered native value model forbids it: **every Lullaby
+scalar is a normalized 8-byte cell** (an `i32` local occupies a full sign-extended
+word), which is precisely why native `addr_of` lowers for 8-byte scalars only. An
+`array<byte>` is therefore an array of 8-byte cells rather than packed bytes, so a
+byte-granular arena over one would hand back pointers whose stores corrupt the cell
+invariant every other native path depends on. Bumping in cells makes every pointer
+the arena returns exactly as well-formed as an `addr_of(buf[i])` — the delivered,
+tested kernel idiom this reuses wholesale. A packed-byte arena needs a
+representation no tier has, and is not a 1.0 item.
+
+**The surface, as built.**
+
+- **`region <name> in <buffer>`** — opens a bump arena over `<buffer>`, a fixed
+  `array<i64>` binding in scope with an inferable length. Scoped to the enclosing
+  block. The `region <name> from <ptr>, <len>` raw-pointer variant this section also
+  proposed is **not** delivered (no fixture needed it; it is a clean later add).
+- **`arena_alloc(region, count) -> ptr<T>`** — bump `count` 8-byte cells, returning
+  a pointer to the first. `region` is a **compile-time region name, not a value**
+  (there is no `arena` type, matching how `region` names work everywhere else). `T`
+  comes from the caller's annotation, defaulting to `ptr<i64>` — the delivered
+  `int_to_ptr`/`ptr_cast` context rule, since the raw-pointer builtins take no
+  turbofish. `unsafe`-gated with **`L0330`**, like every other raw-pointer producer.
+- **Available in `no-runtime`, which is the whole point.** `semantics_no_runtime.rs`
+  needed **no change**: `L0441` rejects heap/runtime *types* and host-allocator
+  *builtins*, and an arena names only `array<i64>`/`ptr<T>`, allocates nothing from
+  the host, and adds no hidden control flow. Pinned by
+  `arena_is_available_in_a_no_runtime_module`.
+- **`L0445`** — a malformed arena: the backing name is not in scope, is not a fixed
+  `array<i64>`, the region name collides, or `arena_alloc`'s first operand does not
+  name a declared region. This section proposed `L0445` for exactly this, and the
+  registry confirmed it free. **`L0446`–`L0449` were deliberately avoided** even
+  though unassigned: this document proposes them for other, undelivered sections
+  (`naked fn` §6, `repr`/`align` §7, `panic fn` §8, `section` §9).
+
+**Overflow: `ud2`, and the §8 seam.** A bump that would leave the buffer **traps
+with `ud2`** — the same instruction and reasoning as the delivered native bounds
+check for an out-of-range `buf[i]`. It is immediate, deterministic, and can never
+hand back a pointer past the buffer's end; a null or truncated pointer would be a
+silent wrong answer corrupting memory at some later, unrelated point. Pinned by
+`arena_overflow_hits_the_panic_edge_natively`, which asserts what is actually
+observable — the process dies on the trap (`0xC000001D`,
+`STATUS_ILLEGAL_INSTRUCTION`, verified) rather than exiting, and specifically does
+**not** produce the value the program would have returned had the overflowing
+allocation wrongly succeeded. It cannot hang.
+
+**§8 (the pluggable panic handler) is the next increment, and this is its seam.**
+When it lands, `emit_arena_overflow_trap` calls the program's `panic fn` with
+`kind = arena_overflow` instead of trapping. That one function changes; the range
+check, the cursor, and the bump are already in their final form. Per decision **A5**
+the handler still terminates and does **not** unwind, so the shape of the edge (a
+divergent tail with no return path) is unchanged by that work.
+
+**Native implementation.** An arena is three things and no runtime: the author's
+`array<i64>` local (the arena adds no storage), **one dedicated frame word per
+region** holding the bump cursor as a cell count (reserved by `NativeCtx::plan`,
+collected by `collect_arena_regions` in `native_object_frame.rs` — the module split
+out for exactly this), and the bump itself. `arena_alloc` emits: load the cursor,
+`add` the count, `jc` on unsigned wrap, `cmp`/`ja` against the buffer's length,
+commit, then `lea` the element address. The carry check is not decoration — `count`
+is a signed `i64` the author supplies, so a huge or negative value could wrap back
+into range and hand out a pointer *before* the buffer; both checks are unsigned, so
+a negative count reads as an enormous one and is caught. A zero-cell request is
+well-defined: it commits nothing and returns the current position. The prologue
+**zeroes each cursor** (`emit_arena_cursor_init`) — a frame slot holds whatever the
+last call left there. Code lives in `crates/lullaby_ir/src/native_object_arena.rs`.
+
+**Composition with the arena-FIRST escape analysis: disjoint by construction.** That
+analysis (`native_object_eligibility.rs`) is where a per-iteration sub-region rewind
+freeing a still-live cell is a demonstrated miscompile class, so the interaction was
+checked rather than assumed. There is none, structurally: it governs the **host heap
+bump pointer** (`__lullaby_heap_next`), which a static-buffer arena never reads or
+writes — the arena's memory is the author's local and its cursor is a private frame
+word no rewind knows about. The two are gated on disjoint programs anyway
+(`arena_eligible_functions` requires a heap-touching function; every heap-touching
+construct is `L0441`-rejected where arenas live). **No conservative exclusion was
+needed**, and none was made. Functions without an arena emit byte-identical code
+(`arena_buffers` is empty for them), so the escape-analysis fuzzers stay green.
+
+**The honest acceptance divergence: native runs it, the interpreters refuse.** All
+three interpreters refuse `arena_alloc` with **`L0460`** rather than approximate it.
+Their pointer model addresses **typed cells through a place-backed pointer** — each
+names an existing binding plus a path to it (see §10.4 and `L0459`) — so it cannot
+reinterpret a buffer's storage as freshly-typed cells, and cannot carry the pointer
+across the frames an arena is naturally passed through. The bump arithmetic alone
+could be faked, but a faked pointer reads and writes the *wrong storage*: a silent
+wrong answer, which is the exact failure this model exists to prevent. So **no
+parity is claimed** — framed precisely like port I/O's `L0444` and the cross-frame
+`addr_of` divergence. `check` still fully validates the arena, so only *execution*
+is native-only.
+
+**Verification.** `tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby`
+compiles under `lullaby native --freestanding` to a real direct-PE exe (no linker)
+and **runs, exiting 109** — `two_cells` (42: distinct allocations do not alias) +
+`loop_sum` (60: the arena composes with a loop) + `block` (7: a multi-cell request
+walked with `ptr_offset`). `freestanding_arena_overflow.lby` traps as described.
+Four negative fixtures under `tests/fixtures/invalid/no_runtime/` pin `L0445` (×3)
+and `L0330`. Tests in `crates/lullaby_cli/tests/cli/suite15.rs`; the differential
+fuzzer is `crates/lullaby_cli/tests/cli/fuzz_arena.rs`.
+
+Because the interpreters refuse the arena, that fuzzer's oracle is the
+**generator's own arithmetic** rather than a cross-engine differential, and it
+straddles the buffer's capacity so an exactly-full allocation must succeed while one
+cell past it must trap. Its teeth are **measured, not assumed**: removing the cursor
+zeroing and weakening the range check from `ja` to `jae` each make it fail, and it
+passes against the real implementation. Notably, the generator's first version had
+**no teeth for the cursor zeroing** — a process's initial stack pages are already
+zero, so an arena called straight from `main` read a zero cursor by luck and the
+injected bug passed. The generator now calls a stack-dirtying function first, which
+is what makes the zeroing observable.
+
+**Still undelivered in this section:** the `region <name> from <ptr>, <len>`
+raw-pointer binding, nested/per-CPU pool composition beyond ordinary block scoping,
+explicit mid-scope reset, and the escape-copy interaction (vacuous today, since the
+escaping values that would be copied are `L0441`-rejected in this tier).
 
 ---
 
@@ -1012,9 +1193,12 @@ increment.**
    handler in stage 3 and static-buffer arenas in stage 2; stage 1 enforces the
    allowed/rejected boundary directly over the AST + checked expression types, which is
    sufficient and complete for the gate.)
-2. **Static-buffer arenas.** `region … in <buffer>` + fixed-buffer
-   `__lullaby_arena_alloc`/reset + overflow→panic; folds into the delivered region
-   work. Bounded-heap reclaim fixture + overflow-calls-handler fixture.
+2. **Static-buffer arenas.** ✅ **DELIVERED (2026-07-16)** — `region <name> in
+   <buffer>` + `arena_alloc(region, count)`, a per-region frame bump cursor, and a
+   defined overflow edge (`ud2`; §8 makes it call the user handler). Native-only:
+   the interpreters refuse it with `L0460` rather than fabricate a pointer into a
+   buffer their typed-cell model cannot reinterpret. See §5.2 for the as-built
+   record, including three deviations forced by wrong premises in §5's text.
 3. **User panic handler + parameterized bounds check.** `panic fn`/`PanicInfo`/
    `L0448`; wire the bounds-check-failure edge (and arena overflow, `assert`,
    `unreachable`) to call it. Negative fixtures: out-of-range index calls `on_panic`

@@ -1,0 +1,14 @@
+# L0330: `arena_alloc` yields an unchecked raw `ptr<T>` into caller memory, so it
+# is an `unsafe` operation exactly like every other raw-pointer producer.
+no-runtime
+
+fn bad -> i64
+    let buf array<i64> = [0, 0]
+    region scratch in buf
+    let p ptr<i64> = arena_alloc(scratch, 1)
+    unsafe
+        ptr_write(p, 1)
+        ptr_read(p)
+
+fn main -> i64
+    bad()

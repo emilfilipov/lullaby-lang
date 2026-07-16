@@ -1,0 +1,62 @@
+# Static-buffer arenas in the freestanding tier (freestanding_tier_design.md §5).
+#
+# A `no-runtime` module has nowhere bounded to put data: `alloc`, `list`, `map`,
+# `string` and `rc` are all L0441-rejected, by design — each needs the host
+# allocator a kernel does not have. A static-buffer arena is the answer: the
+# memory is a fixed `array<i64>` THE CALLER ALREADY OWNS, and allocation is a
+# bump cursor within it. No allocator is involved at any point, which is exactly
+# why the L0441 gate does not (and must not) reject this file.
+#
+# The arena bumps in 8-byte CELLS, not bytes, and the buffer is `array<i64>`:
+# every Lullaby scalar is a normalized 8-byte cell natively, which is the same
+# reason `addr_of` is 8-byte-only. See §5's delivery record.
+#
+# RUNS NATIVELY. The interpreters refuse `arena_alloc` with L0460 (their
+# place-backed, typed-cell pointer model cannot reinterpret a buffer's storage as
+# new typed cells) — a documented acceptance divergence, not a defect.
+no-runtime
+
+# Bump two cells out of a caller-owned buffer, write through the returned
+# pointers, and read them back. This is the whole point of the feature: bounded,
+# allocator-free storage a driver can actually use.
+fn two_cells -> i64
+    let buf array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]
+    region scratch in buf
+    unsafe
+        let a ptr<i64> = arena_alloc(scratch, 1)
+        let b ptr<i64> = arena_alloc(scratch, 1)
+        ptr_write(a, 30)
+        ptr_write(b, 12)
+        # Distinct allocations must not alias: 30 + 12 == 42.
+        ptr_read(a) + ptr_read(b)
+
+# The arena composes with a loop: bump one cell per iteration and walk the
+# result back through the returned pointer.
+fn loop_sum -> i64
+    let buf array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]
+    region pool in buf
+    let total i64 = 0
+    let i i64 = 0
+    while i < 4
+        unsafe
+            let cell ptr<i64> = arena_alloc(pool, 1)
+            ptr_write(cell, i * 10)
+            total += ptr_read(cell)
+        i += 1
+    # 0 + 10 + 20 + 30 == 60
+    total
+
+# A multi-cell request, walked with ptr_offset — the delivered kernel idiom.
+fn block -> i64
+    let buf array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]
+    region pool in buf
+    unsafe
+        let p ptr<i64> = arena_alloc(pool, 3)
+        ptr_write(p, 1)
+        ptr_write(ptr_offset(p, 1), 2)
+        ptr_write(ptr_offset(p, 2), 4)
+        ptr_read(p) + ptr_read(ptr_offset(p, 1)) + ptr_read(ptr_offset(p, 2))
+
+fn main -> i64
+    # 42 + 60 + 7 == 109
+    two_cells() + loop_sum() + block()

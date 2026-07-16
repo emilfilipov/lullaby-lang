@@ -176,6 +176,47 @@ Address Range        Region Name          Size (bytes)    Align
 
 ## Memory Allocation Mechanisms
 
+### Static-Buffer Arenas (Freestanding Tier) — DELIVERED (2026-07-16)
+
+In the freestanding / `no-runtime` tier there **is no host allocator**, so every
+mechanism below that grows a heap is unavailable (`L0441`). The one allocation form
+that tier has is a **static-buffer arena**: memory the *caller already owns*, handed
+out by a bump cursor.
+
+```lby
+no-runtime
+
+fn two_cells -> i64
+    let buf array<i64> = [0, 0, 0, 0, 0, 0, 0, 0]   # the caller's buffer
+    region scratch in buf                            # a bump arena over it
+    unsafe
+        let a ptr<i64> = arena_alloc(scratch, 1)     # bump 1 cell
+        let b ptr<i64> = arena_alloc(scratch, 1)
+        ptr_write(a, 30)
+        ptr_write(b, 12)
+        ptr_read(a) + ptr_read(b)                    # 42 — distinct cells
+```
+
+- The arena's extent is the buffer's; it **never grows and never calls an
+  allocator**, which is exactly why the `no-runtime` gate permits it.
+- The bump unit is the **8-byte cell** (hence `array<i64>`), because every Lullaby
+  scalar is stored as a normalized 8-byte cell — the same reason `addr_of` is
+  8-byte-only.
+- **Overflow is a defined, deterministic edge**: a bump past the buffer traps
+  (`ud2`), the same edge as an out-of-range index. It can never hand back a pointer
+  past the buffer's end. The pluggable panic handler
+  ([freestanding_tier_design.md](freestanding_tier_design.md) §8, undelivered) will
+  replace that trap with a call to the program's own `panic fn`.
+- **Native-only.** The interpreters refuse `arena_alloc` with **`L0460`**: their
+  place-backed, typed-cell pointer model cannot reinterpret a buffer's storage as
+  new typed cells, and a fabricated pointer would read and write the wrong storage.
+  A documented acceptance divergence, not a defect — native is the tier a kernel
+  targets.
+
+Canonical design and as-built record:
+[freestanding_tier_design.md](freestanding_tier_design.md) §5 / §5.2; native
+contract: [native_backend_contract.md](native_backend_contract.md).
+
 ### Region-Based Allocation (Primary)
 
 Regions provide explicit, deterministic memory management:
