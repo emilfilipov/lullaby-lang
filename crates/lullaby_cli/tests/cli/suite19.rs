@@ -28,16 +28,27 @@
 //! `FAIL` line printed on schedule even while the run was unbounded — the report
 //! alone cannot catch it.
 //!
-//! A fourth shape is pinned here too: a test that **forges protocol lines**. The
-//! runner's protocol once rode on the child's stderr, authenticated by a per-run
-//! nonce in `argv` — but `warn()` writes to stderr and a process may read its own
-//! command line, so the nonce was never secret and a test could forge a `done`
-//! (truncating the run to a green `0 passed, 0 failed`) or a `pass` (a phantom
-//! PASS for a failing test). The protocol now travels on a private pipe no builtin
-//! can write to. Two tests pin that: one fires every forgery shape and asserts the
-//! run is unmoved, and one asserts structurally that no protocol verb ever reaches
-//! stdout or stderr — the latter is what would catch a regression back to a shared
-//! channel, since a forgery test alone can pass vacuously against a nonce scheme.
+//! A fourth shape is pinned here too, and it took three attempts to get right: a
+//! test that **forges protocol lines**. Every escape came through the OS rather
+//! than the language, which is why each was invisible to a green
+//! `cargo test --all`:
+//!
+//! * the protocol rode on the child's **stderr** behind a nonce in `argv` — but
+//!   `warn()` writes to stderr, and a process may read its own command line, so the
+//!   nonce was never secret; and
+//! * moving it to a private pipe in the **stdin slot** still failed, because
+//!   `proc_spawn` spawns with stdin inherited, so a **grandchild** received a
+//!   writable handle and `>&0` forged a line — no builtin names a descriptor, the
+//!   OS simply hands one over.
+//!
+//! The child now takes the descriptor out of the stdin slot and reopens that slot
+//! onto the null device before running anything, so the channel has no name a
+//! program can reach and no slot a child can inherit. Three tests pin it: the
+//! end-to-end grandchild forgery (the only kind that would have caught these
+//! defects), the direct `println`/`warn` forgery, and the structural condition that
+//! no protocol verb reaches stdout/stderr. The last is necessary but NOT
+//! sufficient — treating it as sufficient is exactly what let the grandchild route
+//! through.
 //!
 //! The load-bearing assertion in each is the same: the killer test is reported as
 //! an ordinary failure, **every other test still runs**, and the summary is still
@@ -223,15 +234,103 @@ fn test_runner_ignores_forged_protocol_lines_from_a_test() {
     );
 }
 
-/// The structural guarantee behind the test above, pinned directly: the protocol
-/// is NOT carried on the child's stdout or stderr.
+/// A test that forges protocol lines THROUGH A GRANDCHILD must be inert too.
 ///
-/// This is the assertion with real teeth. The forgery test alone could pass
-/// vacuously against a nonce-authenticated stderr protocol (a forged line simply
-/// would not match the nonce), but this one fails the moment the protocol touches
-/// a stream a Lullaby program can write to — which is the only reason forgery was
-/// ever possible. A test can reach stdout and stderr and nothing else, so a
-/// protocol absent from both is unforgeable regardless of what any attacker knows.
+/// This is the end-to-end pin, and it is the one that matters: it is the only
+/// test here that would have caught any of this feature's three blocking defects,
+/// all of which passed a fully green `cargo test --all`. Each escaped through the
+/// **OS**, not the language — a grandchild outliving the deadline, `argv` handing
+/// over a nonce, and here process inheritance handing over a descriptor.
+///
+/// The protocol pipe's write end is given to the test process in its stdin slot,
+/// and `proc_spawn` spawns with stdin **inherited** — so a grandchild receives a
+/// writable handle to the channel and `>&0` injects a forged line. No builtin
+/// names a descriptor; the OS hands one over regardless. Unfixed, this produced a
+/// green run for a suite containing `assert(false)` (`3 passed, 0 failed`, exit 0)
+/// or a corrupted tally (`5 passed, 1 failed` from three tests).
+///
+/// Note this defeats validating `done` against `last_reported`: the forger reports
+/// every index first, so `done` then completes the batch legitimately. Only the
+/// channel's unreachability makes the protocol trustworthy — which is why the fix
+/// reopens the stdin slot onto the null device rather than patching a spawn site.
+#[test]
+fn test_runner_ignores_protocol_forged_through_a_spawned_grandchild() {
+    let fixture = workspace_root().join("tests/fixtures/test_runner/forges_via_spawn.lby");
+    let output = lullaby()
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("run lullaby test");
+    let text = stdout(&output);
+
+    // A genuinely failing test must still be reported as failing...
+    assert!(text.contains("FAIL test_c_fails"), "stdout: {text}");
+    assert!(text.contains("assertion failed"), "stdout: {text}");
+    // ...and must never appear as a phantom PASS.
+    assert!(
+        !text.contains("PASS test_c_fails"),
+        "a forged `pass` invented a PASS for a failing test: {text}"
+    );
+
+    // The tally is exactly the three real tests — not inflated by forged results.
+    assert!(
+        text.contains("2 passed, 1 failed"),
+        "the tally was corrupted by forged protocol lines: {text}"
+    );
+    assert!(
+        !output.status.success(),
+        "a test forged its way to a green run through a grandchild: {text}"
+    );
+}
+
+/// A test's `read_line` sees a clean EOF, not an error.
+///
+/// The child reopens its stdin slot onto the null device after taking the protocol
+/// descriptor out of it, so stdin behaves exactly as it did when the runner passed
+/// `Stdio::null()`. Pinned because the reclaim-only design left a *write* handle in
+/// the slot, and a stdin-reading test then failed with `Access is denied`
+/// (`L0419`) — harmless but a real behavior change that the reopen removes.
+#[test]
+fn test_runner_gives_tests_a_readable_null_stdin() {
+    let dir = std::env::temp_dir().join("lullaby_cli_test_stdin_eof");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let fixture = dir.join("stdin_eof.lby");
+    std::fs::write(
+        &fixture,
+        "fn test_a_reads_stdin -> void\n    \
+         match read_line()\n        \
+         some(s) -> assert(false)\n        \
+         none -> assert(true)\n",
+    )
+    .expect("write fixture");
+
+    let output = lullaby()
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("run lullaby test");
+    let text = stdout(&output);
+
+    assert!(
+        text.contains("PASS test_a_reads_stdin"),
+        "read_line must see a clean EOF (`none`): {text}"
+    );
+    assert!(text.contains("1 passed, 0 failed"), "stdout: {text}");
+    assert!(output.status.success(), "stdout: {text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A NECESSARY condition for the two tests above, pinned directly: the protocol is
+/// not carried on the child's stdout or stderr.
+///
+/// This catches a regression that puts the protocol back on a stream a Lullaby
+/// program can `println`/`warn` onto. It is deliberately NOT the whole guarantee —
+/// believing it was is what let the grandchild forgery through. A test reaches the
+/// channel by two distinct routes: **writing** to a stream it shares (what this
+/// pins), and **inheriting** a descriptor from the process that holds it (what
+/// `test_runner_ignores_protocol_forged_through_a_spawned_grandchild` pins). Both
+/// are needed; neither implies the other.
 #[test]
 fn test_runner_protocol_never_touches_the_shared_streams() {
     let fixture = workspace_root().join("examples/valid/tests_demo/tests_demo.lby");
@@ -250,9 +349,12 @@ fn test_runner_protocol_never_touches_the_shared_streams() {
     for verb in ["start ", "pass ", "fail ", "done "] {
         assert!(
             !streams.contains(verb),
-            "protocol verb `{verb}` leaked onto a stream a test can write to; \
-             forgery is only possible when the protocol shares a channel with the \
-             program under test. streams: {streams}"
+            "protocol verb `{verb}` leaked onto a stream a test can write to \
+             (`println`/`warn` reach stdout/stderr). This is ONE of two routes to \
+             the channel — the other is inheriting the descriptor from the process \
+             that holds it, pinned by \
+             `test_runner_ignores_protocol_forged_through_a_spawned_grandchild`. \
+             streams: {streams}"
         );
     }
 }

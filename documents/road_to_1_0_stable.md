@@ -160,25 +160,42 @@ These are toolchain-completeness items, not language decisions.
     passing suite). Pinned by a wall-clock bound in `suite19.rs` — the `FAIL` line
     alone printed on schedule while the run was unbounded, so only elapsed time
     catches it.
-  - **Unforgeable reporting (review finding).** Isolating the *process* is not
-    enough if the *report* can be faked. The protocol first rode on the child's
-    stderr with a per-run nonce in `argv` — unsound twice over: `warn()` writes
-    to that same stderr, and a process may read its own command line
-    (`/proc/self/cmdline`; `Get-CimInstance Win32_Process` via `sys_output`), so
-    the nonce was never secret. A test could forge `done` and truncate the run to
-    a green `0 passed, 0 failed` + exit 0 — "passes having run nothing", a mode
-    this project has shipped once before — or forge `pass` for a test that
-    actually failed. Fixed structurally, not cryptographically: the protocol now
-    travels on a **private pipe** handed to the child in its stdin slot. A
-    Lullaby program reaches only stdout and stderr (no builtin writes to a raw
-    descriptor, none writes to stdin), so forgery is impossible **by
-    construction** — there is no secret to leak and no channel to write on.
-    `done` is additionally validated against what was actually reported, so no
-    verb can declare a batch complete on its own say-so. Pinned twice in
-    `suite19.rs`: a fixture firing every forgery shape on both streams, and a
-    structural assertion that no protocol verb ever reaches stdout/stderr (the
-    one with teeth against a regression — a forgery test alone passes vacuously
-    against a nonce scheme).
+  - **Unforgeable reporting (review finding, three rounds).** Isolating the
+    *process* is not enough if the *report* can be faked, and this took three
+    attempts. Every escape came through the **OS**, not the language surface —
+    and none was findable by running the suite: `cargo test --all` was green,
+    444 tests, while the hole was open. Only asking "what if the program under
+    test is hostile?" found them.
+    1. The protocol rode on the child's **stderr** with a per-run nonce in
+       `argv`. `warn()` writes to that same stderr, and a process may read its
+       own command line (`/proc/self/cmdline`; `Get-CimInstance Win32_Process`
+       via `sys_output`), so the nonce was never secret. A forged `done`
+       truncated the run to a green `0 passed, 0 failed` + exit 0 — "passes
+       having run nothing", a mode this project has shipped once before.
+    2. Moving it to a **private pipe in the stdin slot** was defeated too:
+       `proc_spawn` spawns with stdin **inherited**, so a grandchild received a
+       writable handle and `cmd /c echo pass 1 >&0` forged a line. The audit
+       that missed this verified no builtin *names* a descriptor (true) and
+       concluded the channel was unreachable — but **process inheritance hands
+       the descriptor over with no builtin involved**.
+    3. **Fixed:** before any test code runs, the child takes the descriptor out
+       of the stdin slot, duplicates it onto one that cannot be inherited
+       (no-inherit `DuplicateHandle` / `F_DUPFD_CLOEXEC`), closes the inherited
+       original, and reopens the slot onto the null device. The channel then has
+       no name a program can reach and no slot a child can inherit — holding
+       against spawn routes nobody has thought of, rather than depending on every
+       spawning builtin to null its own stdin (which would also be outside the
+       CLI's scope). Bonus: `read_line` regains a clean EOF.
+    Validating `done` against `last_reported` is an integrity check, NOT a
+    security control — the forger reported every index first, satisfying it, so
+    `done` then completed the batch legitimately. Only unreachability works.
+    Pinned in `suite19.rs` by an **end-to-end** grandchild forgery (the only kind
+    that would have caught any of the three), a direct `println`/`warn` forgery,
+    and a structural check that no verb reaches stdout/stderr — the last is
+    necessary but not sufficient, and believing otherwise is what let round 2
+    through. Out of scope, stated: a test can `proc_spawn` an arbitrary **native**
+    binary, which could steal a handle out of the process — but that is arbitrary
+    code execution as the user, against which no in-process boundary helps.
   - **Design: batch-with-resume, not process-per-test.** A process per test would
     pay a spawn (~13ms) plus a full recompile per test — ~1.6s on a 100-test
     suite against ~20ms in-process, a tax on the all-passing path where nothing
@@ -211,7 +228,7 @@ These are toolchain-completeness items, not language decisions.
 | A5 | Safe-tier failure semantics | **DECIDED** | Abort + diagnostic, no unwinding | 2026-07-15 |
 | B1 | Closures native codegen | PLANNED | schedule post-arena | — |
 | B2 | Concrete stdlib contents | PLANNED | enumerate near finish | — |
-| B3 | Stable-grade toolchain | **PARTIAL** | test runner SHIPPED (+`--filter`, suite17); isolation now COMPLETE — subprocess + process-tree kill + per-test `--timeout` (default 60s) contain stack-overflow, non-terminating AND grandchild-spawning tests, pinned by suite19 (incl. a wall-clock bound), +12ms/+22ms overhead on the all-passing path; results reported on a private pipe, unforgeable by construction (a nonce in argv was not — a process reads its own cmdline); remaining uncontained: machine-wide resource exhaustion (reachable), a descendant that leaves the tree, `spawn`-thread blame misattribution, crash-vs-timeout attribution under a sub-teardown deadline; `test --backend` (AST-only), DWARF + LSP/pkg remain; `test` declaration surface (`test_*` vs `test "name"` block) is an open owner call | 2026-07-16 |
+| B3 | Stable-grade toolchain | **PARTIAL** | test runner SHIPPED (+`--filter`, suite17); isolation now COMPLETE — subprocess + process-tree kill + per-test `--timeout` (default 60s) contain stack-overflow, non-terminating AND grandchild-spawning tests, pinned by suite19 (incl. a wall-clock bound), +12ms/+22ms overhead on the all-passing path; results reported on a private pipe whose stdin slot is reopened onto the null device, so it has no name a program can reach and no slot a child can inherit (a nonce in argv was not secret; a reclaimed-but-not-reopened slot was inherited by `proc_spawn` grandchildren); remaining uncontained: machine-wide resource exhaustion (reachable), a descendant that leaves the tree, `spawn`-thread blame misattribution, crash-vs-timeout attribution under a sub-teardown deadline; `test --backend` (AST-only), DWARF + LSP/pkg remain; `test` declaration surface (`test_*` vs `test "name"` block) is an open owner call | 2026-07-16 |
 
 ## Owner decisions — 2026-07-16
 

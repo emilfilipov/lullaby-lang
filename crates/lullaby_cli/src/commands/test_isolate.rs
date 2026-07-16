@@ -47,18 +47,36 @@
 //! failing test, and a fake `done` truncated the run into a green
 //! `0 passed, 0 failed`.
 //!
-//! The fix is structural, not cryptographic. The parent creates a pipe and passes
-//! its **write end as the child's stdin slot**; the child reclaims that descriptor
-//! and writes the protocol there. The child's stdout and stderr are plain
-//! `inherit`, so a test's `print`/`println`/`warn` go straight to the terminal,
-//! untouched and never parsed by us. A Lullaby program can reach **only** stdout
-//! and stderr: no builtin writes to an arbitrary fd or handle, and no builtin
-//! writes to stdin at all. The protocol is therefore unforgeable *by
-//! construction* — there is no secret to leak and no channel to write on, so
-//! knowing everything about the protocol buys an attacker nothing.
+//! Moving the protocol to a private pipe in the child's **stdin slot** was the
+//! next attempt, and it was *also* broken — by a different OS route. `proc_spawn`
+//! spawns with stdin **inherited**, so a grandchild received a writable handle to
+//! the protocol channel and `cmd /c echo pass 1 >&0` forged a line. The audit that
+//! missed it checked that no builtin *names* a descriptor (true: zero
+//! `from_raw_fd`/`as_raw_handle` in the runtime) and concluded the channel was
+//! unreachable. It only ruled out one route. **Process inheritance hands the
+//! descriptor over with no builtin involved.**
 //!
-//! Reclaiming the stdin slot costs nothing real: `lullaby test` already gave the
-//! child a null stdin, so `read_line` in a test had nothing to read either way.
+//! Note what the forger did to the `done` validation: it reported *every* index
+//! first, satisfying `last_reported + 1 == names.len()`, after which `done`
+//! completed the batch legitimately. Validating a verb against state the attacker
+//! also controls is not validation.
+//!
+//! So the child now **destroys the slot's identity** before running anything (see
+//! [`take_protocol_channel`]): it reclaims the descriptor, duplicates it onto one
+//! that cannot be inherited (no-inherit `DuplicateHandle` / `F_DUPFD_CLOEXEC`),
+//! closes the inherited original, and reopens the stdin slot onto the null device.
+//! The channel then has **no name a program can reach and no slot a child can
+//! inherit**, which holds against spawn routes nobody has thought of yet — rather
+//! than depending on every present and future builtin remembering to null its
+//! stdin.
+//!
+//! The child's stdout and stderr stay plain `inherit`, so a test's
+//! `print`/`println`/`warn` go straight to the terminal, untouched and never
+//! parsed by us.
+//!
+//! Reclaiming the stdin slot costs nothing: the child leaves the null device
+//! there, so a test's `read_line` gets a clean EOF — exactly what it got when the
+//! runner passed a null stdin.
 //!
 //! # Completion and ordering
 //!
@@ -110,28 +128,96 @@ const DONE: &str = "done";
 /// payload. A control character, so it cannot occur in a rendered diagnostic.
 const FIELD_SEPARATOR: char = '\u{1f}';
 
-/// The child's end of the private protocol channel: the descriptor the parent put
-/// in the stdin slot, reclaimed as an owned `File`. The child never reads its
-/// stdin, and `lullaby test` gave it a null stdin before this, so taking the slot
-/// costs nothing.
+/// Windows `STD_INPUT_HANDLE`, and the one call needed to repoint it.
 #[cfg(windows)]
-fn protocol_channel() -> Option<File> {
+const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetStdHandle(std_handle: u32, handle: *mut core::ffi::c_void) -> i32;
+}
+
+/// Take the protocol descriptor **out** of the stdin slot and leave the null
+/// device in its place, before any test code runs.
+///
+/// Reclaiming alone is not enough, and this is the third time that lesson has
+/// been learned the hard way. The parent hands the pipe's write end over in the
+/// stdin slot; `proc_spawn` spawns with **stdin inherited**, so a grandchild
+/// receives a writable handle to the protocol channel and `>&0` injects a forged
+/// line — a green run for a suite whose tests fail. No builtin ever *names* a
+/// descriptor (grep confirms zero `from_raw_fd`/`as_raw_handle` in the runtime),
+/// but that only rules out one route: **the OS hands the descriptor over through
+/// process inheritance**, no builtin required.
+///
+/// So the slot's identity is destroyed rather than merely read:
+///
+/// 1. reclaim the descriptor the parent put in the stdin slot;
+/// 2. duplicate it onto a descriptor of our own — Windows `try_clone` duplicates
+///    without inheritance, POSIX `try_clone` uses `F_DUPFD_CLOEXEC`, so in both
+///    cases no child can ever receive the duplicate;
+/// 3. close the original, which is the inheritable/inherited one; and
+/// 4. reopen the stdin slot onto the null device.
+///
+/// After this the protocol lives on a descriptor with **no name a program can
+/// reach and no standard slot a child can inherit**, so the property holds
+/// against spawn routes nobody has thought of yet — including any future builtin
+/// that spawns with inherited stdin. Fixing `proc_spawn` to null its stdin would
+/// work today and silently re-break on the next such builtin (and is outside this
+/// crate anyway).
+///
+/// It also makes the "costs nothing" claim actually true: a test's `read_line`
+/// reads the null device and gets a clean EOF, exactly as it did when the runner
+/// gave the child a null stdin.
+#[cfg(windows)]
+fn take_protocol_channel() -> Option<File> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    let handle = std::io::stdin().as_raw_handle();
-    if handle.is_null() {
+
+    let raw = std::io::stdin().as_raw_handle();
+    if raw.is_null() {
         return None;
     }
-    Some(unsafe { File::from_raw_handle(handle) })
+    // Own it, so dropping it below actually closes the inheritable handle the
+    // parent passed us.
+    let inherited = unsafe { File::from_raw_handle(raw) };
+    // `try_clone` -> `DuplicateHandle` with inheritance OFF: this duplicate cannot
+    // be passed to any child, however it is spawned.
+    let private = inherited.try_clone().ok()?;
+    drop(inherited);
+
+    // Point the slot at the null device. `Stdio::Inherit` reads the slot at spawn
+    // time, so every future grandchild inherits NUL instead of our pipe.
+    let nul = File::open("NUL").ok()?;
+    if unsafe { SetStdHandle(STD_INPUT_HANDLE, nul.as_raw_handle()) } == 0 {
+        return None;
+    }
+    // The slot owns this handle for the life of the process now.
+    std::mem::forget(nul);
+    Some(private)
 }
 
 #[cfg(unix)]
-fn protocol_channel() -> Option<File> {
-    use std::os::fd::FromRawFd;
-    Some(unsafe { File::from_raw_fd(0) })
+fn take_protocol_channel() -> Option<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let inherited = unsafe { File::from_raw_fd(0) };
+    // `try_clone` -> `F_DUPFD_CLOEXEC`: close-on-exec, so a grandchild (fork+exec)
+    // never inherits the duplicate.
+    let private = inherited.try_clone().ok()?;
+    // Close fd 0, then reopen it. POSIX guarantees `open` returns the lowest free
+    // descriptor — which is 0 now — and this runs before any test code, while the
+    // process is still single-threaded, so nothing can race us for it.
+    drop(inherited);
+    let nul = File::open("/dev/null").ok()?;
+    if nul.as_raw_fd() != 0 {
+        return None;
+    }
+    std::mem::forget(nul);
+    Some(private)
 }
 
 #[cfg(not(any(windows, unix)))]
-fn protocol_channel() -> Option<File> {
+fn take_protocol_channel() -> Option<File> {
     None
 }
 
@@ -367,10 +453,13 @@ fn run_batch(
             Ok(line) => {
                 let (verb, payload) = line.split_once(' ').unwrap_or((line.as_str(), ""));
                 if verb == DONE {
-                    // Validated, not taken on faith: the child may only claim the
-                    // batch is complete if it actually reported every test in it.
-                    // `done` must never be the one verb that can end a run
-                    // unconditionally.
+                    // The child may only claim the batch is complete if it actually
+                    // reported every test in it: `done` must never be the one verb
+                    // that can end a run unconditionally. This is an integrity check
+                    // against a confused child, NOT a security control — a forger
+                    // able to write to this channel would simply report every index
+                    // first and satisfy it. Only the channel's unreachability makes
+                    // the protocol trustworthy.
                     break match last_reported {
                         Some(index) if index + 1 == names.len() => names.len(),
                         other => resume_after_reported(other),
@@ -500,7 +589,9 @@ pub(crate) fn run_batch_child(
     verbose: bool,
     filter: Option<String>,
 ) -> Result<(), String> {
-    let Some(mut protocol) = protocol_channel() else {
+    // FIRST, before compiling and long before any test code runs: take the
+    // protocol descriptor out of the stdin slot and leave the null device there.
+    let Some(mut protocol) = take_protocol_channel() else {
         return Err("the isolated test process has no protocol channel".to_string());
     };
     let compiled = match compile(&path, SourceMode::Library) {
