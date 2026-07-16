@@ -422,10 +422,22 @@ impl<'a> IrRuntime<'a> {
     /// `shelf_needed` true for as long as `F` lives, so every call `F` makes from that
     /// point on shelves `F`'s environment — and `F`'s region cannot outlive `F`,
     /// because [`RawPointerMemory::exit_frame`] drops it.
+    ///
+    /// `#[inline]` matters: this wraps every call the tree-walker makes, and inlining
+    /// is what collapses the untaken branch into a single predictable test next to the
+    /// dispatch rather than a closure call through a function boundary.
+    #[inline]
     fn with_env_shelved<R>(&mut self, env: &mut Env, body: impl FnOnce(&mut Self) -> R) -> R {
         if !self.raw_ptrs.shelf_needed() {
             return body(self);
         }
+        self.shelve_and_run(env, body)
+    }
+
+    /// The cold half of [`Self::with_env_shelved`], kept out of line so the fast path
+    /// stays small enough to inline into each call site.
+    #[inline(never)]
+    fn shelve_and_run<R>(&mut self, env: &mut Env, body: impl FnOnce(&mut Self) -> R) -> R {
         let mut hollow = Env::hollow();
         std::mem::swap(env, &mut hollow);
         self.env_shelf.push(hollow);

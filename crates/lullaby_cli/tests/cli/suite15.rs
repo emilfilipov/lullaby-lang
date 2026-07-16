@@ -567,6 +567,56 @@ fn cross_frame_addr_of_reaches_the_callers_place() {
     }
 }
 
+/// An `addr_of` pointer sent to **another thread** is refused — and refused as
+/// `L0406`, not `L0459`.
+///
+/// The env shelf reaches a *caller's* frame, which is same-thread by construction. A
+/// `spawn`/`async fn` builds its own interpreter with its own `RawPointerMemory`, so
+/// the address names no region there at all: it is unmapped, not dangling. This is
+/// pinned because the distinction is easy to get wrong in the docs (an earlier draft of
+/// this very change claimed `L0459` here), and because the property that actually
+/// matters — **a stack address never silently resolves on the wrong thread** — must not
+/// regress into a read of unrelated storage.
+#[test]
+fn an_addr_of_pointer_cannot_cross_a_thread_boundary() {
+    let source = "async fn worker p ptr<i64> -> i64\n\
+                  \x20   unsafe\n\
+                  \x20       ptr_read(p)\n\
+                  \n\
+                  fn main -> i64\n\
+                  \x20   let x i64 = 7\n\
+                  \x20   unsafe\n\
+                  \x20       let p ptr<i64> = addr_of(x)\n\
+                  \x20       let f = worker(p)\n\
+                  \x20       await f\n";
+    let scratch = ScratchDir::new("cross_thread_addr_of");
+    let path = scratch.join("cross_thread_addr_of.lby");
+    std::fs::write(&path, source).expect("write fixture");
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                path.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        let errors = stderr(&output);
+        assert!(
+            !output.status.success(),
+            "[{backend}] a stack address must not resolve on another thread. \
+             stderr: {errors}"
+        );
+        assert!(
+            errors.contains("L0406"),
+            "[{backend}] a cross-thread addr_of pointer names no region in the child \
+             interpreter's address space, so it is unmapped (L0406), not dangling \
+             (L0459). stderr: {errors}"
+        );
+    }
+}
+
 /// An `int_to_ptr` address that merely lands in the raw-pointer space (an MMIO
 /// register, a fixed physical address) is **not** an `addr_of` pointer, and the
 /// diagnostic must not blame one. It is unmapped: `L0406`, not `L0459`.

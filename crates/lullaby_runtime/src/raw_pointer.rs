@@ -99,16 +99,18 @@
 //! block that has ended, is undefined behaviour in C, so refusing them forbids no
 //! defined program. `L0459` now means exactly that and nothing else.
 //!
-//! The one residue is a place in a live frame the current execution path cannot
-//! reach — a pointer handed to another **thread** (`spawn`/async/`parallel_map`),
-//! whose interpreter has its own address space and shelf. That is refused by
-//! [`unreachable_frame`], never guessed at.
+//! A pointer handed to another **thread** (`spawn`/async/`parallel_map`) is a separate
+//! case and not `L0459`: each thread builds its own interpreter with its own
+//! [`RawPointerMemory`], so the address names no region there and is refused as
+//! unmapped ([`unmapped_raw`], `L0406`).
 //!
 //! # Honest refusal is the invariant
 //!
 //! There are exactly two outcomes for a deref: the owning `Env` is found and the
 //! access goes to the **real, live storage**, or it is not found and the access is a
-//! hard error. There is no path that reads a copy. This matters because the
+//! hard error ([`unreachable_frame`], the fail-closed guard). There is no path that
+//! reads a copy — so even a *missed* shelving site could only ever cost a loud
+//! refusal, never a wrong answer. This matters because the
 //! predecessor of this model *did* read a by-value snapshot, which silently returned
 //! the pre-`addr_of` value for `addr_of(x); x = 99; peek(p)` — a wrong answer dressed
 //! as a right one. A stale read is the failure mode this model exists to prevent, and
@@ -120,28 +122,33 @@
 
 use crate::{ResolvedPlace, RuntimeError, Value};
 
-/// `L0459` for a raw address whose place is alive in some frame, but in one this
-/// execution path cannot reach.
+/// `L0459` **fail-closed guard**: a live region resolved to a place, but the `Env` that
+/// owns it was not reachable — neither the current frame's nor anything on the shelf.
 ///
-/// Cross-frame `addr_of` **is** supported: a callee reaches its caller's locals
-/// through the env shelf (see the module docs). This fires only for the genuine
-/// residue — a pointer handed to **another thread** (`spawn`, an `async fn`,
-/// `parallel_map`), whose interpreter has its own raw-pointer space and its own
-/// shelf and so cannot see the originating frame's `Env` at all. Sharing a stack
-/// address across threads is not something the abstract model can honour, so it is
-/// refused rather than approximated.
+/// This is not expected to fire in delivered code, and it is deliberately **not**
+/// `unreachable!()` or an `unwrap`. It is the branch that makes the model's central
+/// guarantee true by construction rather than by audit: a deref either finds the owning
+/// `Env` and touches the **real, live storage**, or it is a **hard error**. There is no
+/// third path that reads a copy. If a dispatch site were ever added that runs user code
+/// without shelving the calling frame (see `with_env_shelved`), the cost is a loud,
+/// specific refusal here — never a silent stale read, which is the failure mode this
+/// whole model exists to prevent.
+///
+/// Note what this is *not*: a pointer handed to **another thread** (`spawn`, an
+/// `async fn`, `parallel_map`) does not reach this at all. Each thread builds its own
+/// interpreter with its own [`RawPointerMemory`], so the address names no region there
+/// and is refused as unmapped ([`unmapped_raw`], `L0406`) — verified, not assumed.
 pub fn unreachable_frame(name: &str) -> RuntimeError {
     RuntimeError::new(
         "L0459",
         format!(
-            "this `addr_of` pointer refers to `{name}`, a place that belongs to a frame \
-             on another thread, which this interpreter cannot reach. Passing an address \
-             into a *called function* works — the callee reads and writes the caller's \
-             place for real — but each thread runs its own interpreter with its own \
-             stack, so an `addr_of` pointer cannot cross a `spawn`, an `async fn`, or a \
-             `parallel_map`. Refusing is the only honest option: reading here would name \
-             the wrong storage. Send the value itself across the boundary, or use an \
-             `alloc`-backed `ptr<T>`, which has no frame lifetime"
+            "this `addr_of` pointer refers to `{name}`, whose place is live but whose \
+             environment this execution path cannot reach, so it cannot be dereferenced \
+             here. Passing an address into a called function works — the callee reads \
+             and writes the caller's place for real — so reaching this is unexpected and \
+             is refused rather than answered from storage that cannot be verified. If \
+             you can reproduce it, please report it: it indicates an interpreter \
+             dispatch path that does not shelve its calling frame"
         ),
     )
 }
@@ -395,7 +402,9 @@ impl RawPointerMemory {
     /// can consult an `Env` and the shelf's contents are unobservable.
     ///
     /// Once a region exists it stays until its frame returns, so the flag simply
-    /// tracks "this program is doing raw addressing right now".
+    /// tracks "this program is doing raw addressing right now". `#[inline]` because
+    /// this is tested once per call on every interpreter's hot path.
+    #[inline]
     pub fn shelf_needed(&self) -> bool {
         !self.regions.is_empty()
     }
