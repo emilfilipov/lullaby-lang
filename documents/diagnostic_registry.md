@@ -41,6 +41,14 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 
 ## Codes
 
+A diagnostic code is a stable, user-facing and tool-facing identifier. Three invariants hold, and `crates/lullaby_diagnostics/tests/registry_sync.rs` enforces all three against the real sources on every `cargo test --all`:
+
+- **One number, one meaning.** A code is never reused for a second, unrelated diagnostic. Two rows for one number would leave a user (and a tool matching on codes) unable to tell which error they have.
+- **Everything emitted is documented.** Every `L####` the compiler can emit has a row here.
+- **Everything documented is emitted.** A code that is no longer emitted is removed rather than left to advertise an impossible error. A number deliberately held for future use is marked *reserved* in this table instead of being deleted, so it is not silently handed to a new meaning.
+
+Codes are grouped in families by phase (`L01xx` lexer, `L02xx` parser, `L03xx` semantic/loader/ir, `L04xx` runtime/resource and the later semantic additions, `L05xx` ir/optimizer, `L06xx` bytecode). Gaps within a family are expected — a retired or never-implemented number is not backfilled, because renumbering to close a gap would break references for purely cosmetic gain. When a new diagnostic needs a number, take the next free one in its family.
+
 | Code | Phase | Meaning | Likely cause | Suggested fix |
 | :--- | :--- | :--- | :--- | :--- |
 | `L0001` | source | Unsupported source extension. | File path does not end in `.lby`. | Rename the source file or pass a `.lby` file. |
@@ -51,21 +59,23 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `L0103` | lexer | Semicolons are forbidden. | Source uses `;` as a statement terminator. | Remove semicolons and use one statement per line. |
 | `L0104` | lexer | Unterminated string literal. | A closing quote is missing. | Add the closing quote. |
 | `L0105` | lexer | Invalid char literal. | A `'...'` literal was empty, held more than one character, or was never closed. | Write a single-character char literal such as `'a'`, or use a string literal for text. |
-| `L0201` | parser | Expected top-level function declaration. | Non-function syntax appears at top level. | Start top-level code with `fn`. |
+| `L0201` | parser | Invalid top-level declaration. | Non-declaration syntax appears at top level, a `pub` does not prefix a `fn`/`struct`/`enum`/`alias`/`const`/`trait`/`actor`, an incompatible modifier pair (`export`+`async`, `export`+`extern`, or `extern`+`async`) was combined on one `fn`, an `actor` body has something other than `state`/`init`/`on`, or a `no-runtime` directive is not the module's first line. | Start top-level code with a declaration keyword, apply `pub` directly to a declaration, use at most one of `export`/`extern`/`async` per `fn`, keep actor bodies to `state`/`init`/`on`, and put `no-runtime` on the first line. |
 | `L0202` | parser | Missing return arrow before function return type. | Function signature lacks `->`. | Add `-> ReturnType`. |
 | `L0203` | parser | Expected type syntax. | Type annotation is missing or malformed. | Use current type spelling such as `i64`, `bool`, `string`, or `array<T>`. |
 | `L0204` | parser | Expected identifier. | A name is missing where required. | Add a valid identifier. |
 | `L0205` | parser | Expected structural token. | Missing newline, indent, or dedent. | Check indentation and required block bodies. |
-| `L0206` | parser | Expected `=` in a let binding. | A `let` statement lacks an initializer separator. | Use `let name Type = expression` or `let name = expression`. |
+| `L0206` | parser | Expected `=` in a `let` or `const` initializer. | A `let` statement or a `const` declaration lacks its initializer separator. | Use `let name Type = expression`, `let name = expression`, or `const NAME Type = expression`. |
 | `L0207` | parser | Invalid expression. | Unsupported or malformed expression syntax. | Use supported expression forms and matching delimiters. |
-| `L0210` | parser | Malformed region declaration. | The `region NAME: size=N[, ...]` form has a missing colon, `=`, field value, or unknown field. | Write `region NAME: size=N` with optional `align`, `kind`, and `mutable` fields. |
 | `L0208` | parser | Expected assignment operator. | Assignment statement has malformed operator. | Use `=`, `+=`, `-=`, `*=`, or `/=`. |
-| `L0209` | parser | Expected `from` in for loop. | Range loop header is malformed. | Use `for name from start to end`. |
-| `L0210` | parser | Expected `to` in for loop. | Range loop header is missing its end marker. | Add `to end`. |
+| `L0209` | parser | Expected `from` or `in` in for loop. | A `for` header matched neither the range form nor the iteration form. | Use `for name from start to end` or `for name in collection`. |
+| `L0210` | parser | Malformed region declaration. | The `region NAME: size=N[, ...]` form has a missing colon, `=`, field value, or unknown field. | Write `region NAME: size=N` with optional `align`, `kind`, and `mutable` fields. |
 | `L0211` | parser | Planned syntax is not supported yet. | Source uses future constructs such as modules, imports, structs, pattern matching, or try/catch. | Remove the planned construct or rewrite with the current surface. |
 | `L0212` | parser | Malformed type alias declaration. | An `alias NAME = TYPE` declaration lacks `=` or a target type. | Write `alias NAME = TYPE`, e.g. `alias Count = i64`. |
 | `L0213` | parser | `try` block missing its `catch`. | A `try` block was not followed by a `catch NAME` handler. | Add a `catch NAME` block after the `try` body. |
+| `L0214` | parser | Invalid assignment target. | The left-hand side of an assignment did not parse, or is not an assignable place (a variable with optional `.field` / `[index]` accessors). | Assign to a local variable, a struct field, or an array element. |
+| `L0215` | parser | Malformed `match` arm. | A `match` arm is missing the `->` after its pattern, or a payload binding list is missing a `,` or its closing `)`. | Write `Variant -> body` or `Variant(a, b) -> body`, separating payload bindings with commas. |
 | `L0216` | parser | Malformed `trait`/`impl` declaration. | A `trait` method signature or `impl Trait for Type` block is missing `fn`, the `self` receiver, `for`, `->`, or a method body. | Write `trait NAME` with `fn method self ... -> Ret` signatures, and `impl Trait for Type` with `fn method self ... -> Ret` bodies. |
+| `L0217` | parser | Expected `to` in for loop. | A range `for name from start ...` header is missing its end marker. | Add `to end`, e.g. `for i from 0 to n`. |
 | `L0300` | semantic | Duplicate function. | Two functions share a name. | Rename or remove one function. |
 | `L0301` | semantic | Non-void function has no final value of declared type. | Control reaches the end without the expected value. | Add a final expression or return the declared type. |
 | `L0302` | semantic | Duplicate parameter. | Function has repeated parameter names. | Rename one parameter. |
@@ -73,7 +83,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `L0304` | semantic | Return type mismatch. | Return expression differs from function return type. | Return the declared type or change the signature. |
 | `L0305` | semantic | Condition is not bool. | An `if`, `while`, or inline-conditional (`THEN if COND else ELSE`) condition has non-bool type. | Use a bool expression. |
 | `L0306` | semantic | Unknown variable. | Name is not visible in current scope. | Add a `let`, parameter, or fix the name. |
-| `L0307` | semantic | Arithmetic operands are not both the same numeric type (`i64`, `f64`, `i32`, or `u32`). | Mixed numeric widths, or arithmetic on non-numeric values. | Convert to a common width (`to_i32`/`to_u32`/`to_i64`) so both operands share one numeric type. |
+| `L0307` | semantic | Operand types are invalid for an arithmetic, bitwise, or unary operator. | Arithmetic (`+ - * /`) operands are not both the same numeric type (`i64`, `f64`, `i32`, or `u32`); `%` or a bitwise operator (`& \| ^ << >>`) got operands that are not both the same integer type; `~` got a non-integer; unary `-` got a non-numeric operand. (`+` additionally accepts two strings, or a string and a char.) | Convert to a common width (`to_i32`/`to_u32`/`to_i64`) so both operands share one numeric type, and use `%`/bitwise operators and `~` only on integers. |
 | `L0308` | semantic | Equality operands have different types. | `==` or `!=` compares mismatched types. | Compare values of the same type. |
 | `L0309` | semantic | Unknown function. | Called function is not declared or builtin. | Define the function or fix the name. |
 | `L0310` | semantic | Pointer builtin expected pointer. | `load` or `store` got a non-pointer. | Pass a `ptr_*` value. |
@@ -91,13 +101,13 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `L0322` | semantic | For-loop step is not `i64`. | `by` expression is non-`i64`. | Use an `i64` step. |
 | `L0323` | semantic | Empty arrays unsupported. | Array literal contains no values. | Provide at least one value. |
 | `L0324` | semantic | Array literal type mismatch. | Array values are not homogeneous. | Use values of one type. |
-| `L0325` | semantic | Index target is not an array. | Index syntax used on a non-array value. | Index only `array<T>` values. |
+| `L0325` | semantic | Index target is not an array or string. | Index syntax used on a value that is neither an `array<T>` nor a `string`. | Index only `array<T>` values (yielding `T`) or a `string` (yielding a `char`). |
 | `L0326` | semantic | Array index is not `i64`. | Index expression has wrong type. | Use an `i64` index. |
-| `L0327` | semantic | Ordering operands are not both the same orderable scalar (`i64`, `f64`, `i32`, `u32`, `char`, or `byte`). | `<`, `<=`, `>`, or `>=` used on mismatched or non-orderable operands. | Use two operands of the same orderable scalar type. |
+| `L0327` | semantic | Ordering operands are not both the same orderable type (`i64`, `f64`, `i32`, `u32`, `char`, `byte`, or `string`). | `<`, `<=`, `>`, or `>=` used on mismatched or non-orderable operands. | Use two operands of the same orderable type; strings compare lexicographically. |
 | `L0328` | semantic | `store` value type mismatch. | Stored value does not match pointer element type. | Store a value matching the pointer type. |
 | `L0329` | semantic | Executable entry point is missing or has parameters. | Source passed to `compile`, `build`, or source `run` lacks a zero-argument `main`. | Add `fn main -> Type` with no parameters and call helpers from there. |
-| `L0330` | semantic | Raw pointer operation used outside `unsafe`. | `ptr_read`/`ptr_write` were called outside an `unsafe` block. | Wrap the operation in `unsafe`, or use safe `rc<T>`/`ref<T>` references. |
-| `L0331` | semantic | Reference builtin received the wrong type. | An `rc`/`ref`/raw-pointer builtin was called with a value of a different kind. | Pass an `rc<T>` to rc builtins, a `ref<T>` to `ref_get`, or a raw pointer to `ptr_read`/`ptr_write`. |
+| `L0330` | semantic | Operation requiring `unsafe` used outside an `unsafe` block. | A raw pointer operation (`ptr_read`/`ptr_write`/`addr_of` and the other `ptr_*`/`volatile_*` builtins) or an `asm` inline-assembly statement appeared outside an `unsafe` block. | Wrap the operation in `unsafe`, or use safe `rc<T>`/`ref<T>` references instead of raw pointers. |
+| `L0331` | semantic / runtime | Reference/pointer builtin received the wrong kind of value. | An `rc`/`ref`/raw-pointer builtin was called with a value of a different kind (semantic), or an interpreter found that an `addr_of` operand was not an addressable array element or was a place whose type has no defined memory layout (runtime). | Pass an `rc<T>` to rc builtins, a `ref<T>` to `ref_get`, or a raw pointer to `ptr_read`/`ptr_write`, and apply `addr_of` only to a place of a type with a defined layout. |
 | `L0332` | semantic | Process builtin argument type or arity mismatch. | `env`/`args` was called with the wrong number of arguments, or `env` with a non-`string` argument. | Call `env(name string)` with one `string` and `args()` with no arguments. |
 | `L0333` | semantic | File-system builtin argument type or arity mismatch. | `read_lines`/`read_bytes`/`write_bytes`/`file_size`/`is_file`/`is_dir`/`list_dir`/`make_dir`/`remove_file`/`remove_dir` had the wrong arity, a non-`string` path, or a non-`list<byte>` data argument. | Pass a `string` path (and a `list<byte>` for `write_bytes`) and match the builtin arity. |
 | `L0334` | semantic | `parallel_map` argument type or arity mismatch. | A `parallel_map` call did not receive exactly a `fn(i64) -> i64` first argument and a `list<i64>` second argument. | Pass a `fn(i64) -> i64` function value and a `list<i64>` of arguments to `parallel_map`. |
@@ -155,7 +165,7 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `L0502` | optimizer | Optimizer mode is incompatible with the selected backend. | `--optimize` was requested with the default AST backend. | Add `--backend ir` or `--backend bytecode`, or use `--optimize none`. |
 | `L0601` | bytecode | Bytecode artifact failed to load. | The `.lbc` artifact is malformed, has an unsupported format/version/metadata target or payload, names an unsupported or missing entry point, contains duplicate functions or parameters, has a mismatched function table, or contains an invalid instruction contract such as `break`/`continue` outside a loop. | Recompile the source with the current `lullaby compile` or `lullaby build` command. |
 | `L0422` | runtime | Missing `main`. | Runtime cannot find an entrypoint. | Define `fn main`. |
-| `L0401` | runtime | Unknown function at runtime. | Runtime call target was not found. | Check semantic validation and function names. |
+| `L0401` | runtime | Runtime call target not found, or a concurrency primitive failed. | A runtime call target was not found or was not callable (an unknown function, a `spawn` of an unknown actor, a `tell`/`ask` to a non-handle or unknown actor handle, or an actor with no such handler), **or** a concurrency primitive failed (a poisoned channel/mutex/task/future handle, a panicked spawned/`parallel_map` worker thread, `send` with no live receiver, or `recv` on a closed empty channel). | For a missing target, check semantic validation and function/actor/handler names. For a concurrency failure, look for a panic in a spawned task — a panicking worker poisons the handle its peers then observe. |
 | `L0402` | runtime | Runtime function arity mismatch. | Runtime call has wrong argument count. | Match the function signature. |
 | `L0403` | runtime | Unknown variable at runtime. | Runtime scope lookup failed. | Check variable declaration and scope. |
 | `L0404` | runtime | Division by zero. | Divisor evaluated to zero. | Guard or change the divisor. |
@@ -167,14 +177,14 @@ Fields that are not known for a diagnostic are `null` or an empty array. Orderin
 | `L0410` | runtime | Loop control escaped function. | `break` or `continue` reached function boundary. | Keep loop control inside loops. |
 | `L0411` | runtime | For-loop step is zero. | Step expression evaluated to 0. | Use non-zero step. |
 | `L0412` | runtime | Runtime index target is not array. | Index target evaluated to non-array. | Index only arrays. |
-| `L0413` | runtime | Array index out of bounds. | Computed index is negative or too large. | Check index before indexing. |
+| `L0413` | runtime | Array index out of bounds, or `pop` from an empty list. | A computed index is negative or too large, or `pop` was called on a `list<T>` with no elements. | Check the index before indexing, and check `len` before `pop`. |
 | `L0414` | resource | File read failed. | Missing, unreadable, or unsupported text file. | Check path, working directory, and permissions. |
 | `L0415` | resource | File write or append failed. | Destination or parent directory is unavailable. | Use a writable path. |
 | `L0416` | resource | Command launch failed. | Program not found or not executable. | Pass a valid executable and argv array. |
-| `L0417` | runtime | Expected string. | Runtime value kind was wrong. | Pass a string value. |
+| `L0417` | runtime | Expected string, or a string builtin got an empty pattern. | A runtime value kind was wrong where a `string` (or a `string`/`char`) was required, or `replace` was given an empty `from` pattern / `split` an empty separator, neither of which has a well-defined match. | Pass a string value, and give `replace`/`split` a non-empty pattern or separator. |
 | `L0418` | runtime | Expected `array<string>`. | Runtime value kind was wrong. | Pass an array of strings. |
 | `L0419` | resource | Standard stream read, write, or flush failed. | stdout/stderr was closed or the pipe was broken, or stdin could not be read (e.g. non-UTF-8 bytes). | Keep the stream open, redirect output to a writable destination, or feed valid UTF-8 on stdin. |
-| `L0420` | runtime | Uncaught thrown error. | A `throw` propagated past every enclosing `try`/`catch`. | Wrap the throwing code in `try` / `catch NAME`, or avoid the throwing condition. |
+| `L0420` | runtime | Uncaught thrown error, or a failed `assert`. | A `throw` propagated past every enclosing `try`/`catch`, or an `assert` condition evaluated to `false` (a failing `assert` raises through the same throw mechanism and so is catchable by `try`/`catch`). | Wrap the throwing code in `try` / `catch NAME`, avoid the throwing condition, or fix the condition the `assert` checks. |
 | `L0421` | runtime | Expected `f64`. | An f64 operation received a non-float value. | Ensure the operand is an `f64`; the type checker normally prevents this. |
 | `L0423` | runtime | Cannot call an `extern fn` (C-ABI) function on an interpreter. | The AST/IR/bytecode interpreters cannot execute real C FFI; an `extern fn` only has meaning after native codegen + linking. | Compile with `lullaby native`, link against the C runtime, and run the resulting `.exe`. |
 | `L0424` | semantic | Unsupported `extern`/`export fn` (C-ABI) signature. | An FFI signature used a type outside the marshalling set. An `export fn` covers only the Win64 scalar set (`i64`/`f64`/`f32`, non-generic). An `extern fn` parameter must be a C scalar (`i8`…`u64`/`isize`/`usize`/`bool`/`char`/`byte`/`f32`/`f64`), a raw pointer `ptr<T>`, `cstr`, or a **callback** `fn(A...) -> R` whose own parameters are C scalars/raw pointers and whose return is `void`/a C scalar/a raw pointer (a Lullaby top-level function passed to C as a C-ABI function pointer); its return must be `void`, a C scalar, or `ptr<T>`. Structs by value, a callback whose own signature is *not* C-marshallable (e.g. it takes a `string`/`list`/struct), a callback used as an extern *return*, `string`, `list`/`map`, and a `cstr` return are not yet marshallable, and neither an `extern` nor an `export` may be generic. | Restrict the exported function to the `i64`/`f64`/`f32` scalar set; for an extern, use a C scalar, a raw pointer `ptr<T>`, `cstr` (for a `string` argument), or a callback whose own parameters/return are C scalars or raw pointers, and receive an inbound C string as `ptr<byte>`. |

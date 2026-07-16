@@ -1105,7 +1105,7 @@ impl<'a> Parser<'a> {
         }
         let start = self.parse_expr_until_keywords(span, &[Keyword::To])?;
         if self.eat_keyword(Keyword::To).is_none() {
-            self.error("L0206", "expected `to` in for loop", self.peek().span);
+            self.error("L0217", "expected `to` in for loop", self.peek().span);
             return None;
         }
         let end = self.parse_expr_until_keywords(span, &[Keyword::By])?;
