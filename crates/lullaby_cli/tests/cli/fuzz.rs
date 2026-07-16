@@ -2174,3 +2174,10 @@ fn fuzz_branch_tail_native_matches_interpreter_when_linkable() {
     // Windows host every program produces an exe and this prints the full count.)
     eprintln!("branch-tail native fuzz: ran {ran}/{PROGRAMS} real exes");
 }
+
+// The `alloc` heap-box fuzzers (arena interaction, cross-frame boxes, and the
+// `ptr_cast` laundering route) live in their own file: this one is at the ~2500-line
+// test-file cap. A submodule rather than a peer so it keeps seeing `Rng`,
+// `Outcome`, `run_interpreters`, and `fuzz_native_exit` via `use super::*`.
+#[path = "fuzz_alloc.rs"]
+mod fuzz_alloc;

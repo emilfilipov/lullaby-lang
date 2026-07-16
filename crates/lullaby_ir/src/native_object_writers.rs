@@ -1477,3 +1477,11 @@ mod native_object_void_tests;
 #[cfg(test)]
 #[path = "native_object_portio_tests.rs"]
 mod native_object_portio_tests;
+
+// The interim heap-box builtins (`alloc`/`dealloc`): the one-cell lowering, the
+// clean skips (including `dealloc`'s deliberate one), the `alloc`-box pointer
+// identity/arithmetic gate, and the arena exclusion. Own file for the size-cap
+// reason.
+#[cfg(test)]
+#[path = "native_object_heapbox_tests.rs"]
+mod native_object_heapbox_tests;

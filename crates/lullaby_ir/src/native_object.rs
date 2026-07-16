@@ -732,6 +732,10 @@ pub(crate) use expr_lowering::*;
 mod rawptr;
 pub(crate) use rawptr::*;
 
+#[path = "native_object_heapbox.rs"]
+mod heapbox;
+pub(crate) use heapbox::*;
+
 #[path = "native_object_portio.rs"]
 mod portio;
 pub(crate) use portio::*;

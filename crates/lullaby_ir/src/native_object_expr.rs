@@ -583,6 +583,15 @@ pub(crate) fn lower_native_expr(
             if let Some(result) = lower_raw_pointer_call(ctx, name, args, &expr.ty, code) {
                 return result;
             }
+            // The interim heap-box builtins (`alloc`/`dealloc`). Dispatched before
+            // the unknown-function gate for the same reason as the raw-pointer
+            // surface: neither name is ever a user function. `alloc` lowers to a
+            // one-cell block through the shared allocator; `dealloc` deliberately
+            // returns a precise `Err` so its function skips cleanly (see
+            // `native_object_heapbox.rs`).
+            if let Some(result) = lower_heap_box_call(ctx, name, args, &expr.ty, code) {
+                return result;
+            }
             // The freestanding-tier port-mapped I/O surface (`port_in8/16/32`,
             // `port_out8/16/32`), lowered to real x86 `in`/`out`. Dispatched
             // before the unknown-function gate for the same reason as the

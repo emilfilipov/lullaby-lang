@@ -1485,9 +1485,10 @@ fn body_has_unbounded_heap_loop(
 /// **confines** its allocations to the iteration (stage 2), so each such loop gets
 /// a per-iteration sub-region that bounds it; a loop whose heap escapes the
 /// iteration would grow the region unboundedly and keeps the function on the RC
-/// path. All heap allocations of a qualifying function are dead at every return
-/// edge (and, for a confined loop, at every iteration edge), so rewinding the bump
-/// pointer there reclaims them soundly.
+/// path, and (5) it has no `alloc` heap box (see [`alloc_defeats_arena`]). All heap
+/// allocations of a qualifying function are dead at every return edge (and, for a
+/// confined loop, at every iteration edge), so rewinding the bump pointer there
+/// reclaims them soundly.
 pub(crate) fn arena_eligible_functions(
     module: &BytecodeModule,
     eligible_names: &[String],
@@ -1544,6 +1545,11 @@ pub(crate) fn arena_eligible_functions(
         // allocations to the iteration (stage 2 gives it a per-iteration
         // sub-region); a loop whose heap escapes stays on the RC path.
         if body_has_unbounded_heap_loop(&function.instructions, &heap_aggs) {
+            continue;
+        }
+        // (5) No `alloc` heap box — a manually-managed cell this analysis cannot see,
+        // so a rewind could reclaim a live box (see `native_object_heapbox.rs`).
+        if alloc_defeats_arena(&function.instructions, &module.closures) {
             continue;
         }
         arena.insert(name.clone());

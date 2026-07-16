@@ -24,11 +24,12 @@ This document covers the memory management architecture for **Lullaby** (lullaby
 
 The first executable runtime implements a deliberately small memory model so the language can be tested end to end before the full arena + RC design lands:
 
-- `alloc(value)` stores a runtime value in an internal heap slot and returns an interim pointer value.
+- `alloc(value)` stores a runtime value in an internal heap slot and returns an interim pointer value. **It is a box constructor, not a byte allocator** — the argument is a *value*, not a size. `alloc(8)` is a cell holding `8`, so `load`/`ptr_read` of it yields `8`; it does not reserve 8 bytes. The result types as `ptr_{typeof value}`.
 - `load(ptr)` reads a cloned value from a valid heap slot.
 - `store(ptr, value)` replaces the value in a valid heap slot. Static checking requires the stored value type to match the pointer element type.
-- `dealloc(ptr)` clears a heap slot and reports a runtime error on invalid or double deallocation.
-- Static semantic checking models pointer types with concrete names such as `ptr_i64`.
+- `dealloc(ptr)` clears a heap slot and reports a runtime error on invalid or double deallocation. Note the free tracking is layered: `L0350` catches a use-after-free / double-free **statically but by variable name**, so it does not survive aliasing (`let q = p` / `dealloc(p)` / `ptr_read(q)` compiles); the aliased case is caught at run time by the interpreters' `L0406`.
+- Static semantic checking models pointer types with concrete names such as `ptr_i64`. This spelling is usable in a `let` annotation, a parameter, and a return type — and it is **distinct from, and not convertible to, the typed `ptr<T>`** family (`let p ptr<i64> = alloc(8)` is `L0303`; passing a `ptr_i64` to a `ptr<i64>` parameter is `L0313`). `ptr_read`/`ptr_write` accept both spellings; `dealloc` accepts only `ptr_T`. See "The Two Pointer Models" in [native_backend_contract.md](native_backend_contract.md) for the full survey and the open owner decision on unifying them.
+- **Native backend status.** `alloc` has native codegen: one 8-byte cell from the shared `__lullaby_alloc` bump/RC helper plus an initializing store, returning the cell's real address, so a heap-box program compiles to a real executable and agrees with all three interpreters — including **across frame boundaries** (the out-parameter idiom and a returned allocation), which is the one pointer form with that property on every tier. `dealloc` is deliberately **not** lowered natively and skips cleanly (`L0339`) to the interpreters, because they *detect* a later use / double free (`L0406`) and no lowering on a bump/RC heap can reproduce that without turning a detected error into silent corruption. An `alloc`'d cell is never reclaimed natively (matching the interpreters, whose heap `Vec` also only grows) and, being invisible to the arena escape analysis, excludes its function from arena routing (`alloc_defeats_arena`) so no bump rewind can free a live box.
 - Typed IR analysis reports memory operations with artifact-order sequence metadata and safety metadata for live-resource requirements, bounds checks, memory mutation, cleanup role, and unsafe-boundary handling. Current reported operations are `alloc`, `load`, `store`, `dealloc`, and array-index bounds checks. Region create, region resize, copy, and compiler cleanup operation kinds now have safety metadata reserved for future lowering. Version 5 `.lbc` bytecode artifacts preserve this metadata in `memory_operations`, and artifact decoding validates that the metadata still matches the module instructions.
 - Arena / region allocation is the primary, default heap model; reference counting is the secondary, opt-in tool for escaping data (see [memory_model_decision.md](memory_model_decision.md) for the implementation staging). The native backend already ships the RC substrate — a free-list allocator with a per-block RC header plus `rc_dec`/`rc_free` helpers and scope-based drop insertion for uniquely-owned, borrow-only `string`/`array<string>` loop temporaries. Arena-first allocation, broader RC drop coverage, and the freestanding `unsafe`/raw-pointer tier remain planned work; Perceus-style reuse is deferred (with arenas as the default, most allocation never touches RC). There is no tracing garbage collector.
 
@@ -519,8 +520,11 @@ struct Mixed
   >   divergence** between the tiers — loud on the interpreters, never silent.
   >
   > On the interpreters, pass or return the *value* instead of its address, or use an
-  > `alloc`-backed `ptr<T>`, which has no frame lifetime and is unaffected by any of
-  > this.
+  > `alloc`-backed pointer, which has no frame lifetime and is unaffected by any of
+  > this. (Note the spelling: an `alloc` result is typed `ptr_T` — e.g. `ptr_i64` —
+  > **not** `ptr<T>`; the two are distinct and not convertible. An `alloc` box is the
+  > one pointer form that crosses a frame boundary on all four tiers, including the
+  > native backend.)
 
 ### Memory Safety Features
 
