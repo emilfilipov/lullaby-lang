@@ -174,8 +174,59 @@ pub(crate) fn pointee_access(name: &str) -> Option<PointeeAccess> {
 /// address is sound in principle, but `ptr_read` cannot return a float into the
 /// integer `rax` path, so admitting it would only produce pointers nothing here
 /// can dereference.
-fn is_addressable_word_type(name: &str) -> bool {
+///
+/// Also the pointee gate for an `alloc` heap box (`native_object_heapbox.rs`), for
+/// the same width reason: the box's initializing store and the `ptr_read` load must
+/// agree exactly.
+pub(crate) fn is_addressable_word_type(name: &str) -> bool {
     matches!(name, "i64" | "u64" | "isize" | "usize") || is_raw_pointer_type_name(name)
+}
+
+/// Whether `name` is the **legacy `ptr_T` spelling** that only `alloc` produces, as
+/// opposed to the typed `ptr<T>` spelling. The two are distinct types to the
+/// checker (`let p ptr<i64> = alloc(8)` is `L0303`) and are NOT interchangeable at
+/// a function boundary (`L0313`), so a `ptr_T` value is always an `alloc`-derived
+/// heap box that never left the frame that created it.
+///
+/// This is the provenance signal behind [`refuse_legacy_box_pointer`]: the
+/// interpreters model an `alloc` box as a heap-slot INDEX, not an address, so the
+/// builtins that expose a pointer's numeric identity or stride over it disagree
+/// with a real machine address and must not be lowered for such a pointer.
+fn is_legacy_box_pointer(name: &str) -> bool {
+    name.starts_with("ptr_")
+}
+
+/// Refuse `builtin` when its pointer operand is an `alloc`-derived heap box, so the
+/// enclosing function skips cleanly (`L0339`) instead of computing an answer the
+/// interpreters define differently.
+///
+/// The interpreters represent an `alloc` box as `Value::Ptr(slot_index)` over a
+/// `Vec<Option<Value>>`, not as an address, and the box is **one cell**:
+///
+/// * `ptr_to_int(alloc(7))` is `0` on the interpreters (the first slot index) —
+///   natively it would be a real heap address. A defined program, two different
+///   answers.
+/// * `ptr_offset(p, 1)` over a box is REFUSED by the interpreters at run time
+///   (`L0406`: "ptr_offset requires a pointer produced by addr_of"). Natively it
+///   would stride 8 bytes off the end of a one-cell block into the allocator's own
+///   RC header — garbage, not a meaningful definition of the program.
+///
+/// A `ptr<T>` operand (from `addr_of`/`int_to_ptr`) is unaffected: it keeps its full
+/// existing lowering, including the buffer-walking `addr_of(buf[0])` + `ptr_offset`
+/// kernel idiom.
+fn refuse_legacy_box_pointer(pointer: &BytecodeExpr, builtin: &str) -> Result<(), String> {
+    if !is_legacy_box_pointer(&pointer.ty.name) {
+        return Ok(());
+    }
+    Err(format!(
+        "`{builtin}` over the `{}` produced by `alloc` is not lowered natively: the \
+         interpreters model an `alloc` box as a heap-SLOT INDEX over one cell, not as an \
+         address, so `ptr_to_int` of it is a slot number (not a machine address) and \
+         `ptr_offset` over it is refused outright (`L0406`). Natively these would answer \
+         differently, so the function runs on the interpreters instead. Use an \
+         `addr_of`-derived `ptr<T>` for pointer arithmetic and address identity",
+        pointer.ty.name
+    ))
 }
 
 /// The `PointeeAccess` of the pointer-typed expression `expr` (its `ptr<T>` type's
@@ -252,6 +303,14 @@ fn lower_checked(
             let [operand] = args else {
                 return Err(format!("`{name}` takes exactly one argument"));
             };
+            // `ptr_to_int` of an `alloc` box exposes the pointer's numeric identity,
+            // which the interpreters define as a heap-slot index rather than an
+            // address — refuse (see `refuse_legacy_box_pointer`). `ptr_cast` only
+            // reinterprets the pointee type and `int_to_ptr` takes an integer, so
+            // neither exposes an `alloc` box's identity and both stay unrestricted.
+            if name == "ptr_to_int" {
+                refuse_legacy_box_pointer(operand, name)?;
+            }
             lower_native_expr(ctx, operand, code)
         }
         "addr_of" => {
@@ -295,6 +354,10 @@ fn lower_checked(
             let [pointer, count] = args else {
                 return Err("`ptr_offset` takes exactly two arguments".to_string());
             };
+            // An `alloc` box is ONE cell and the interpreters refuse to stride over
+            // it at all (`L0406`); natively a stride would walk into the allocator's
+            // RC header. Refuse rather than define it as garbage.
+            refuse_legacy_box_pointer(pointer, name)?;
             let pointee = raw_pointee_name(&pointer.ty.name).ok_or_else(|| {
                 format!(
                     "`ptr_offset` expects a `ptr<T>` operand on the native backend, found `{}`",

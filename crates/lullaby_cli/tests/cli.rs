@@ -1412,6 +1412,10 @@ mod suite15;
 #[path = "cli/suite16.rs"]
 mod suite16;
 
+// -- Interim heap-box builtins (`alloc`/`dealloc`) on the native backend
+#[path = "cli/suite17.rs"]
+mod suite17;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {
