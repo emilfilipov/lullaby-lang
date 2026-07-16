@@ -1,0 +1,25 @@
+# A `no-runtime` module may not supervise an actor: supervision is part of the
+# safe-tier actor runtime (a scheduler, mailboxes, and the restart of a live
+# actor's state), none of which the freestanding tier has. The `supervise` clause
+# adds no new construct — it rides on the existing `spawn` node — so the actor
+# declaration, the `spawn`, and the `ask` are each rejected with the same L0441
+# gate as any other actor surface.
+no-runtime
+
+actor Tank
+    state
+        level i64
+
+    init
+        level = 0
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > 10
+            return err("overflow")
+        level += amount
+        ok(level)
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank() supervise restart
+    let outcome result<i64, string> = await ask t.deposit(4)
+    0

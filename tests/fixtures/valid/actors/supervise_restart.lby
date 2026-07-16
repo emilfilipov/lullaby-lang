@@ -1,0 +1,46 @@
+# Stage-4 supervision: `supervise restart`. A `Tank` accumulates deposits, but
+# rejects one that would overflow its capacity by replying `err` from its
+# fallible `-> result<i64, string>` handler. That `err` is an actor *failure*,
+# and the supervisor's `restart` policy gives the tank a fresh start: its state
+# is discarded and `init` re-runs with the original `spawn` argument.
+#
+# Note what the asker sees: the failing `deposit` still replies `err(...)` to
+# whoever awaited it — the reply is published before the policy is applied, so a
+# failure is never lost and an in-flight `ask` never strands. Only *then* is the
+# actor restarted.
+actor Tank
+    state
+        level i64
+        cap i64
+
+    init capacity i64
+        level = 0
+        cap = capacity
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > cap
+            return err("overflow")
+        level += amount
+        ok(level)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank(10) supervise restart
+
+    # Two good deposits accumulate: 4, then 4 + 3 = 7.
+    println(describe(await ask t.deposit(4)))
+    println(describe(await ask t.deposit(3)))
+
+    # 7 + 9 > 10: the handler replies `err`. The asker receives that `err`, and
+    # the supervisor then restarts the tank — `init` re-runs with 10, so `level`
+    # is back to 0.
+    println(describe(await ask t.deposit(9)))
+
+    # The restart is observable: this deposit lands on fresh state, so the level
+    # is 5 (not 12), and the same handle still addresses the actor.
+    println(describe(await ask t.deposit(5)))
+    0

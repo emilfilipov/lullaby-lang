@@ -1,0 +1,26 @@
+# A `supervise` clause on an actor that can never fail. `Counter` declares no
+# fallible (`-> result<R, E>`) handler and the program uses no `escalate`, so
+# nothing can ever trigger the `restart` policy.
+#
+# This is the diagnostic that corrects the expectation stage 4 most often meets:
+# supervision does NOT catch panics. Actor failure is result-based — a handler
+# declared `-> result<R, E>` replying `err(e)` — because decision A5 aborts
+# without unwinding, leaving a supervisor nothing to catch. -> L0358
+actor Counter
+    state
+        count i64
+
+    init start i64
+        count = start
+
+    on bump amount i64
+        count += amount
+
+    on value -> i64
+        count
+
+fn main -> i64
+    let c Actor<Counter> = spawn Counter(0) supervise restart
+    tell c.bump(5)
+    println(to_string(await ask c.value()))
+    0

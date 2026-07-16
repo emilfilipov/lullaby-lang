@@ -1,7 +1,10 @@
 use lullaby_lexer::{Keyword, Span, Token, TokenKind, lex};
 
 use crate::number_literal::parse_number_literal;
-use crate::{BinaryOp, Expr, ExprKind, Param, TypeRef, UnaryOp, function_type, generic_type};
+use crate::{
+    BinaryOp, Expr, ExprKind, Param, SupervisionPolicy, TypeRef, UnaryOp, function_type,
+    generic_type,
+};
 
 pub(crate) struct ExprParser<'a> {
     tokens: &'a [Token],
@@ -454,8 +457,13 @@ impl<'a> ExprParser<'a> {
                         }
                     }
                 }
+                let supervise = self.parse_supervise_clause()?;
                 Ok(Expr {
-                    kind: ExprKind::Spawn { actor, args },
+                    kind: ExprKind::Spawn {
+                        actor,
+                        args,
+                        supervise,
+                    },
                     span: token.span,
                 })
             }
@@ -602,6 +610,38 @@ impl<'a> ExprParser<'a> {
         } else {
             false
         }
+    }
+
+    /// Parse the optional `supervise POLICY` clause that may trail a
+    /// `spawn NAME(args)`, yielding `None` when no clause is present.
+    ///
+    /// `supervise`, `restart`, `stop` and `escalate` are **contextual** — plain
+    /// identifiers everywhere else, recognized only in this position — so no new
+    /// keyword is reserved and existing code that uses those words as names is
+    /// unaffected. The position is unambiguous: nothing else in the expression
+    /// grammar may follow a completed `spawn NAME(...)` with a bare identifier.
+    fn parse_supervise_clause(&mut self) -> Result<Option<SupervisionPolicy>, String> {
+        let is_supervise = matches!(
+            self.peek().map(|token| &token.kind),
+            Some(TokenKind::Identifier(word)) if word == "supervise"
+        );
+        if !is_supervise {
+            return Ok(None);
+        }
+        self.cursor += 1;
+        let Some(TokenKind::Identifier(word)) = self.peek().map(|token| &token.kind) else {
+            return Err(
+                "expected a policy (`restart`, `stop`, or `escalate`) after `supervise`"
+                    .to_string(),
+            );
+        };
+        let Some(policy) = SupervisionPolicy::from_word(word) else {
+            return Err(format!(
+                "unknown supervision policy `{word}`: expected `restart`, `stop`, or `escalate`"
+            ));
+        };
+        self.cursor += 1;
+        Ok(Some(policy))
     }
 
     fn is_at_end(&self) -> bool {

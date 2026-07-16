@@ -1,0 +1,57 @@
+# Stage-4 supervision: `supervise escalate` and a nested supervision tree.
+#
+#   main  --supervise restart-->  Manager  --supervise escalate-->  Worker
+#
+# The Manager spawns its Worker with `escalate`, so a Worker failure is not
+# handled locally: the Worker stops and the failure is passed to the Manager, its
+# supervisor. The Manager then applies *its own* policy — `restart`, set by main
+# at the Manager's spawn site — so the Manager restarts, re-runs `init`, and
+# spawns a fresh Worker.
+#
+# Note the Manager declares no fallible handler of its own: it is a pure
+# supervisor, failed only by its child's escalation. That is why the `L0358`
+# "policy can never apply" check stands down once a program uses `escalate`.
+actor Worker
+    state
+        budget i64
+
+    init limit i64
+        budget = limit
+
+    on consume cost i64 -> result<i64, string>
+        if cost > budget
+            return err("over budget")
+        budget -= cost
+        ok(budget)
+
+actor Manager
+    state
+        worker Actor<Worker>
+        generation i64
+
+    init
+        generation = 0
+        worker = spawn Worker(10) supervise escalate
+
+    on spend cost i64 -> i64
+        # The Manager forwards to its Worker. An `err` here is the Worker's
+        # failure: it escalates to the Manager rather than stopping the Worker.
+        match await ask worker.consume(cost)
+            ok(left) -> left
+            err(_) -> 0 - 1
+
+fn main -> i64
+    let m Actor<Manager> = spawn Manager() supervise restart
+
+    # Within budget: the Worker replies normally and nothing is supervised.
+    println(to_string(await ask m.spend(4)))
+
+    # Over budget: the Worker fails -> escalates -> the Worker stops and the
+    # Manager restarts, re-running `init` and spawning a fresh Worker with a
+    # full budget of 10.
+    println(to_string(await ask m.spend(99)))
+
+    # The Manager's restart is observable: the new Worker has a full budget, so
+    # spending 4 leaves 6 (not 2, which a surviving original Worker would show).
+    println(to_string(await ask m.spend(4)))
+    0

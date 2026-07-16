@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AssignOp, BinaryOp, EnumVariant, Expr, ExprKind, Function, INFERRED_RETURN, MatchArm,
-    MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt, StructField, TypeParam, TypeRef,
-    UnaryOp, function_type, generic_type,
+    MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt, StructField, SupervisionPolicy,
+    TypeParam, TypeRef, UnaryOp, function_type, generic_type,
 };
 
 mod semantics_actor_ownership;
@@ -94,6 +94,9 @@ pub fn validate(program: &Program) -> Result<CheckedProgram, Vec<SemanticDiagnos
     checker.diagnostics = alias_diagnostics;
     checker.diagnostics.extend(const_diagnostics);
     checker.validate();
+    // A `supervise` clause that can never apply is judged only now: the pass has
+    // seen every `spawn`, so it knows whether the program uses `escalate` at all.
+    checker.report_inert_supervise_clauses();
     // Freestanding-tier gate: in a `no-runtime` module, reject any construct that
     // requires the safe-tier runtime (growable heap allocation, actors/`spawn`/
     // `tell`, heap closures, `rc`/`ref` handles, host-allocator builtins) with
@@ -378,6 +381,14 @@ struct Checker<'a> {
     /// spurious `L0306` "unknown variable" diagnostics on top of the real
     /// constant error.
     consts: HashMap<String, TypeRef>,
+    /// `spawn ... supervise POLICY` sites whose actor declares no fallible
+    /// handler, judged at the end of the pass (see
+    /// [`Checker::report_inert_supervise_clauses`]).
+    supervise_candidates: Vec<SuperviseCandidate>,
+    /// True once any `spawn ... supervise escalate` has been seen. An escalation
+    /// can fail an actor that has no fallible handler of its own, so this
+    /// suppresses the `L0358` "policy can never apply" claim.
+    saw_escalate_spawn: bool,
     /// Declared actor types, keyed by actor name. Each entry records the actor's
     /// `init` parameter types (or `None` when the actor declares no `init`) and
     /// its message handlers' signatures, so `spawn`/`tell` sites can be typed and
@@ -409,6 +420,29 @@ struct HandlerSig {
     reply_type: Option<TypeRef>,
 }
 
+impl HandlerSig {
+    /// True when this handler is **fallible** — declared `-> result<R, E>`, so
+    /// it can report an actor failure by replying `err(e)`. This is the whole
+    /// supervised-failure channel: a genuine panic inside a handler aborts the
+    /// program (decision A5, no unwinding) and is never supervised.
+    fn is_fallible(&self) -> bool {
+        self.reply_type
+            .as_ref()
+            .is_some_and(|reply| reply.result_args().is_some())
+    }
+}
+
+/// A `spawn ... supervise POLICY` on an actor that declares no fallible handler,
+/// held until the end of the pass to be judged by
+/// [`Checker::report_inert_supervise_clauses`].
+#[derive(Debug, Clone)]
+struct SuperviseCandidate {
+    actor: String,
+    policy: SupervisionPolicy,
+    function: String,
+    span: Span,
+}
+
 impl<'a> Checker<'a> {
     fn new(program: &'a Program) -> Self {
         Self {
@@ -436,6 +470,8 @@ impl<'a> Checker<'a> {
             deferred_diagnostics: Vec::new(),
             inference_failed: HashSet::new(),
             consts: HashMap::new(),
+            supervise_candidates: Vec::new(),
+            saw_escalate_spawn: false,
             actors: HashMap::new(),
         }
     }
@@ -715,10 +751,48 @@ impl<'a> Checker<'a> {
     /// Rejects an unknown actor, an argument count that does not match the
     /// actor's `init`, an argument whose type differs from the corresponding
     /// `init` parameter, and a non-sendable argument (`L0349`/`L0353`).
+    /// Report every `supervise` clause that can never do anything (`L0358`).
+    ///
+    /// An actor can be failed two ways: its own fallible (`-> result<R, E>`)
+    /// handler replies `err`, or a child of its escalates to it. A clause on an
+    /// actor with neither is inert — nearly always because the author expected
+    /// `supervise` to catch a *panic*, which it deliberately does not: actor
+    /// failure is result-based (decision A5 stands, so there is no unwinding to
+    /// catch), and a genuine panic aborts the program. Saying so at the spawn site
+    /// is the most useful moment to correct that expectation.
+    ///
+    /// **Precision boundary (deliberate).** The second route is approximated: an
+    /// escalation's target is the spawning actor at runtime, which a `spawn` in a
+    /// free function makes non-local to resolve. Rather than under-approximate and
+    /// reject a valid supervision tree, the check stays silent for the whole
+    /// program as soon as *any* `supervise escalate` appears. With no `escalate`
+    /// anywhere, escalation-driven failure is impossible program-wide and "no
+    /// fallible handler ⇒ the policy can never apply" is exactly true — so this
+    /// diagnostic never fires on a correct program.
+    fn report_inert_supervise_clauses(&mut self) {
+        if self.saw_escalate_spawn {
+            return;
+        }
+        for candidate in std::mem::take(&mut self.supervise_candidates) {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0358",
+                format!(
+                    "`spawn {} ... supervise {}` supervises an actor that can never fail, so the policy can never apply: actor `{}` declares no fallible handler. Actor failure is reported by a handler declared `-> result<R, E>` replying `err(e)` — a handler that panics (an out-of-bounds index, a divide-by-zero) is a bug and aborts the program instead of being supervised",
+                    candidate.actor,
+                    candidate.policy.as_str(),
+                    candidate.actor
+                ),
+                Some(candidate.function),
+                candidate.span,
+            ));
+        }
+    }
+
     fn check_spawn(
         &mut self,
         actor: &str,
         args: &[Expr],
+        supervise: Option<SupervisionPolicy>,
         span: Span,
         scope: &Scope,
         function: &Function,
@@ -736,7 +810,27 @@ impl<'a> Checker<'a> {
             ));
             return None;
         };
+        // A `supervise` clause declares what to do when this actor fails. An
+        // actor with no failure channel at all can never trigger its policy —
+        // usually because the author expected supervision to catch a *panic*,
+        // which it deliberately does not (see `L0358`). Record the candidate and
+        // decide after the pass, once it is known whether the program uses
+        // `escalate` anywhere.
+        let has_fallible_handler = info.handlers.values().any(HandlerSig::is_fallible);
         let expected: Vec<TypeRef> = info.init_params.clone().unwrap_or_default();
+        if let Some(policy) = supervise {
+            if policy == SupervisionPolicy::Escalate {
+                self.saw_escalate_spawn = true;
+            }
+            if !has_fallible_handler {
+                self.supervise_candidates.push(SuperviseCandidate {
+                    actor: actor.to_string(),
+                    policy,
+                    function: function.name.clone(),
+                    span,
+                });
+            }
+        }
         let init_note = if info.init_params.is_some() {
             format!("actor `{actor}`'s `init`")
         } else {
@@ -3083,9 +3177,11 @@ impl<'a> Checker<'a> {
             ExprKind::StructLiteral { name, fields } => {
                 self.check_struct_literal(name, fields, expected, expr.span, scope, function)
             }
-            ExprKind::Spawn { actor, args } => {
-                self.check_spawn(actor, args, expr.span, scope, function)
-            }
+            ExprKind::Spawn {
+                actor,
+                args,
+                supervise,
+            } => self.check_spawn(actor, args, *supervise, expr.span, scope, function),
             ExprKind::Tell {
                 target,
                 handler,

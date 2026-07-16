@@ -1,0 +1,45 @@
+# Stage-4 supervision: an in-flight `ask` across a **restart** (the counterpart
+# to supervise_inflight_ask.lby, which stops instead).
+#
+# A restart preserves the child's mailbox, so a request already queued behind the
+# failing one is not lost: it is delivered to the *restarted* actor and gets a
+# real reply. The failing message itself is not replayed — it was consumed by the
+# turn that returned `err` — which is exactly why a restart cannot loop forever
+# on a poison message, and why no backoff or restart limit is needed.
+actor Tank
+    state
+        level i64
+        cap i64
+
+    init capacity i64
+        level = 0
+        cap = capacity
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > cap
+            return err("overflow")
+        level += amount
+        ok(level)
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank(10) supervise restart
+
+    println(describe(await ask t.deposit(6)))
+
+    # Queue both up front: the first will fail (6 + 9 > 10), the second is
+    # already in flight behind it.
+    let doomed Future<result<i64, string>> = ask t.deposit(9)
+    let inflight Future<result<i64, string>> = ask t.deposit(2)
+
+    # The failure replies `err` to its asker, then the tank restarts.
+    println(describe(await doomed))
+
+    # `inflight` survived the restart and ran on the fresh actor: level was reset
+    # to 0 by the re-run `init`, so this is 2, not 8.
+    println(describe(await inflight))
+    0
