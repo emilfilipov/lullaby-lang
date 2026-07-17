@@ -1,0 +1,17 @@
+# L0445: a static-buffer arena must be backed by a fixed `array<i64>`.
+#
+# The arena bumps in 8-byte CELLS because every Lullaby scalar is stored as a
+# normalized 8-byte cell — the same reason `addr_of` is 8-byte-only. A scalar is
+# not a buffer at all, so there is nothing to carve.
+no-runtime
+
+fn bad -> i64
+    let notabuffer i64 = 7
+    region scratch in notabuffer
+    unsafe
+        let p ptr<i64> = arena_alloc(scratch, 1)
+        ptr_write(p, 1)
+        ptr_read(p)
+
+fn main -> i64
+    bad()

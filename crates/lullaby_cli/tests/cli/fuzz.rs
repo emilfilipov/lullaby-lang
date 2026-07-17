@@ -2187,3 +2187,7 @@ mod fuzz_alloc;
 // same access to `Rng`/`Outcome`/`run_interpreters`/`fuzz_native_exit`.
 #[path = "fuzz_closure.rs"]
 mod fuzz_closure;
+
+// The static-buffer arena fuzzers (freestanding tier §5: scoping, overflow, and
+// four-tier agreement) live in their own file for the same reason.
+mod fuzz_arena;

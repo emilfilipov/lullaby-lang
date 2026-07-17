@@ -1,0 +1,20 @@
+# L0445: a `region <name> in <buffer>` is scoped to its ENCLOSING BLOCK, so it
+# cannot be allocated from after that block ends.
+#
+# The checker once tracked regions in a flat per-function map with no block
+# scoping, so it ACCEPTED this — while all three interpreters rejected it at run
+# time (the arena's env binding died at dedent) and native happily returned 7. The
+# checker must not accept what the tiers reject.
+no-runtime
+
+fn main -> i64
+    let buf array<i64> = [0, 0, 0, 0]
+    let i i64 = 0
+    while i < 1
+        region pool in buf
+        i += 1
+    # `pool`'s block ended at the dedent above.
+    unsafe
+        let p ptr<i64> = arena_alloc(pool, 1)
+        ptr_write(p, 7)
+        ptr_read(p)

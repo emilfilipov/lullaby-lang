@@ -1425,6 +1425,23 @@ impl<'a> IrRuntime<'a> {
                 if name == "addr_of" && args.len() == 1 {
                     return self.eval_addr_of(&args[0], env);
                 }
+                // The static-buffer arena surface (freestanding tier §5). Both are
+                // special forms handled before ordinary argument evaluation, because
+                // their region operand is a compile-time region name rather than a
+                // value — evaluating it would raise a misleading `L0403 unknown
+                // variable`.
+                //
+                // This is the tree-walker's dispatch ONLY. The bytecode VM does not
+                // route through `eval_expr` — it shares `dispatch_named_call`, which
+                // takes already-evaluated `Vec<Value>` args and therefore cannot
+                // receive a region name at all. `VmCompiler::compile_expr` refuses
+                // both markers outright so any function using them falls back here.
+                if name == "arena_region" && args.len() == 2 {
+                    return self.eval_arena_region(&args[0], &args[1], env);
+                }
+                if name == "arena_alloc" && args.len() == 2 {
+                    return self.eval_arena_alloc(&args[0], &args[1], env);
+                }
                 let values = args
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
@@ -1767,6 +1784,117 @@ impl<'a> IrRuntime<'a> {
     /// path and registered as a place-backed region, so reads and writes through the
     /// pointer reach the original storage and genuinely alias. See runtime
     /// `raw_pointer.rs`.
+    /// The `arena_region(name, buffer)` marker: open a static-buffer arena
+    /// (freestanding tier §5).
+    ///
+    /// The backing buffer is resolved to its `RootSlot` **here, once, at the
+    /// declaration** — see the AST interpreter's counterpart for why pinning the
+    /// slot rather than the name is what makes this agree with native and survive
+    /// both shadowing and the env shelf. The whole arena is one env binding, so it
+    /// inherits the declaration's block lifetime: it dies at dedent and is
+    /// re-created, cursor re-zeroed, on re-entry.
+    fn eval_arena_region(
+        &mut self,
+        region: &IrExpr,
+        buffer: &IrExpr,
+        env: &mut Env,
+    ) -> Result<Value, RuntimeError> {
+        let (IrExprKind::String(region), IrExprKind::String(backing)) =
+            (&region.kind, &buffer.kind)
+        else {
+            return Err(RuntimeError::new(
+                "L0445",
+                "`arena_region` takes the region and buffer names as string literals",
+            ));
+        };
+        let slot = env.locate(backing).ok_or_else(|| {
+            RuntimeError::new(
+                "L0445",
+                format!(
+                    "static-buffer arena `{region}` is backed by `{backing}`, \
+                     which is not a binding in scope"
+                ),
+            )
+        })?;
+        env.define(
+            arena_key(region),
+            Value::Arena(Box::new(ArenaState {
+                buffer: slot,
+                name: backing.clone().into(),
+                cursor: 0,
+            })),
+        );
+        Ok(Value::Void)
+    }
+
+    /// `arena_alloc(region, count) -> ptr<T>`: bump `count` cells out of a
+    /// static-buffer arena and return a pointer to the first (freestanding tier §5).
+    ///
+    /// The IR/bytecode counterpart of the AST interpreter's `eval_arena_alloc`; see
+    /// that function for the full reasoning. In short: the arena bumps in whole
+    /// 8-byte cells of an `array<i64>`, so allocating is exactly
+    /// `addr_of(buf[cursor])` over an element the buffer already has — nothing is
+    /// reinterpreted, and the pointer genuinely aliases. The buffer is resolved from
+    /// the `RootSlot` pinned at the declaration, never re-derived from a name.
+    fn eval_arena_alloc(
+        &mut self,
+        region: &IrExpr,
+        count: &IrExpr,
+        env: &mut Env,
+    ) -> Result<Value, RuntimeError> {
+        let IrExprKind::Variable(region) = &region.kind else {
+            return Err(RuntimeError::new(
+                "L0445",
+                "`arena_alloc` requires a static-buffer region name as its first operand",
+            ));
+        };
+        let key = arena_key(region);
+        let Some(Value::Arena(state)) = env.get_ref(&key).cloned() else {
+            return Err(RuntimeError::new(
+                "L0445",
+                format!(
+                    "`arena_alloc` names region `{region}`, which is not a \
+                     static-buffer arena declared in scope"
+                ),
+            ));
+        };
+        let requested = self.eval_expr(count, env)?.as_i64()?;
+        let cells = match env.at(&state.buffer) {
+            Some(Value::Array(cells)) => cells.clone(),
+            _ => {
+                return Err(RuntimeError::new(
+                    "L0445",
+                    format!(
+                        "static-buffer arena `{region}`'s backing buffer is no \
+                         longer a fixed array in scope"
+                    ),
+                ));
+            }
+        };
+        let capacity = cells.len() as i64;
+
+        // Overflow is a defined edge, not a wrap: the interpreter counterpart of the
+        // native `jc` + unsigned `ja`.
+        let cursor = state.cursor;
+        let end = cursor.checked_add(requested).filter(|end| *end >= cursor);
+        let Some(end) = end.filter(|end| *end <= capacity) else {
+            return Err(arena_overflow_error(region, requested, capacity - cursor));
+        };
+        env.assign(
+            &key,
+            Value::Arena(Box::new(ArenaState {
+                cursor: end,
+                ..(*state).clone()
+            })),
+        )?;
+
+        self.raw_ptrs
+            .addr_of_element(state.buffer, &state.name, Vec::new(), &cells, cursor)
+            .ok_or_else(|| {
+                RuntimeError::new("L0331", "arena_alloc element has no defined memory layout")
+            })
+    }
+
     fn eval_addr_of(&mut self, arg: &IrExpr, env: &mut Env) -> Result<Value, RuntimeError> {
         let (name, mut path) = self.resolve_addr_of_path(arg, env)?;
         let root = env

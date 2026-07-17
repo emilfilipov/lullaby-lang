@@ -203,6 +203,13 @@ impl<'a> Runtime<'a> {
                 if name == "addr_of" && args.len() == 1 {
                     return self.eval_addr_of(&args[0], env);
                 }
+                // `arena_alloc(region, count)` is likewise a special form: `region`
+                // names a compile-time `region <name> in <buffer>` declaration, not
+                // a value, so ordinary argument evaluation would look it up as a
+                // local and raise a misleading `L0403 unknown variable`.
+                if name == "arena_alloc" && args.len() == 2 {
+                    return self.eval_arena_alloc(&args[0], &args[1], env);
+                }
                 let values = args
                     .iter()
                     .map(|arg| self.eval_expr(arg, env))
@@ -898,6 +905,95 @@ impl<'a> Runtime<'a> {
     }
 
     /// Decompose an `addr_of` argument into its root binding name and the
+    /// `arena_alloc(region, count) -> ptr<T>`: bump `count` cells out of a
+    /// static-buffer arena and return a pointer to the first
+    /// (`documents/freestanding_tier_design.md` §5).
+    ///
+    /// # Why this is ordinary place-backed addressing, not a new pointer model
+    ///
+    /// The arena bumps in whole **8-byte cells of an `array<i64>`** — the buffer's
+    /// own element type. So there is nothing to *reinterpret*: allocating a cell is
+    /// exactly taking the address of an element the buffer already has. This
+    /// reduces to `addr_of(buf[cursor])` plus an integer cursor, and the
+    /// interpreters define both halves. The pointer returned is the same
+    /// place-backed pointer `addr_of(buf[i])` returns, and genuinely aliases.
+    ///
+    /// # The buffer is pinned to a slot, not a name
+    ///
+    /// The arena's `RootSlot` was resolved **once, at the `region` declaration**.
+    /// This never re-resolves the buffer by name, which is what a previous version
+    /// did — and that was wrong in two ways it could not see: an inner `let buf`
+    /// shadowing the arena's buffer silently retargeted every later allocation, and
+    /// (after the env shelf made a bare name resolve across frames) a name could
+    /// reach a *caller's* buffer entirely. Native binds the buffer to a frame slot
+    /// at compile time; pinning the slot here is what makes the two agree.
+    ///
+    /// The genuinely unmodellable case — a pointer escaping the frame that owns the
+    /// buffer — is not special to arenas and is handled by the shared `addr_of`
+    /// machinery this reuses.
+    fn eval_arena_alloc(
+        &mut self,
+        region: &Expr,
+        count: &Expr,
+        env: &mut Env,
+    ) -> Result<Value, RuntimeError> {
+        let ExprKind::Variable(region) = &region.kind else {
+            return Err(RuntimeError::new(
+                "L0445",
+                "`arena_alloc` requires a static-buffer region name as its first operand",
+            ));
+        };
+        let key = arena_key(region);
+        let Some(Value::Arena(state)) = env.get_ref(&key).cloned() else {
+            return Err(RuntimeError::new(
+                "L0445",
+                format!(
+                    "`arena_alloc` names region `{region}`, which is not a \
+                     static-buffer arena declared in scope"
+                ),
+            ));
+        };
+        let requested = self.eval_expr(count, env)?.as_i64()?;
+        let cells = match env.at(&state.buffer) {
+            Some(Value::Array(cells)) => cells.clone(),
+            _ => {
+                return Err(RuntimeError::new(
+                    "L0445",
+                    format!(
+                        "static-buffer arena `{region}`'s backing buffer is no \
+                         longer a fixed array in scope"
+                    ),
+                ));
+            }
+        };
+        let capacity = cells.len() as i64;
+
+        // Overflow is a defined edge, not a wrap. A negative or absurd `count` must
+        // not be able to bring the cursor back into range and hand out a pointer
+        // outside the buffer, so the sum is checked rather than wrapped — the
+        // interpreter counterpart of the native `jc` + unsigned `ja`.
+        let cursor = state.cursor;
+        let end = cursor.checked_add(requested).filter(|end| *end >= cursor);
+        let Some(end) = end.filter(|end| *end <= capacity) else {
+            return Err(arena_overflow_error(region, requested, capacity - cursor));
+        };
+        env.assign(
+            &key,
+            Value::Arena(Box::new(ArenaState {
+                cursor: end,
+                ..(*state).clone()
+            })),
+        )?;
+
+        // `&buffer[cursor]` — the same place-backed pointer `addr_of(buf[cursor])`
+        // yields, built from the PINNED slot rather than a name lookup.
+        self.raw_ptrs
+            .addr_of_element(state.buffer, &state.name, Vec::new(), &cells, cursor)
+            .ok_or_else(|| {
+                RuntimeError::new("L0331", "arena_alloc element has no defined memory layout")
+            })
+    }
+
     /// [`ResolvedPlace`] path beneath it (`s.f`, `a[i]`, `s.a[i].f`, …). Index
     /// expressions are evaluated here, exactly as ordinary assignment resolves them.
     /// Anything that is not rooted in a binding is not addressable — the checker

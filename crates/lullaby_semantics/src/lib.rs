@@ -9,6 +9,7 @@ use lullaby_parser::{
 
 mod semantics_actor_ownership;
 mod semantics_aliases;
+mod semantics_arena;
 mod semantics_consts;
 mod semantics_generics;
 mod semantics_no_runtime;
@@ -2542,7 +2543,17 @@ impl<'a> Checker<'a> {
                 Some(function.return_type.clone())
             }
             Stmt::Region(decl) => {
-                self.check_region(decl, function);
+                // Two forms share this statement: the delivered metadata region
+                // (`region N: size=...`) and the freestanding static-buffer arena
+                // (`region N in buf`, §5), which needs the scope to resolve its
+                // backing buffer.
+                match &decl.backing {
+                    Some(backing) => {
+                        let backing = backing.clone();
+                        self.check_region_arena(decl, &backing, scope, function)
+                    }
+                    None => self.check_region(decl, function),
+                }
                 None
             }
             Stmt::Throw { value, .. } => {
@@ -3931,6 +3942,18 @@ struct InherentMethodSig {
 #[derive(Debug, Clone, Default)]
 struct Scope {
     locals: HashMap<String, TypeRef>,
+    /// Static-buffer arena regions **in scope here**: region name -> backing buffer
+    /// name (`region NAME in BUFFER`, freestanding tier §5).
+    ///
+    /// This lives on `Scope`, not on the `Checker`, so it is **block-scoped** — a
+    /// `Scope` is cloned on entering a block and discarded on leaving it, which is
+    /// exactly the arena's lifetime on the interpreters (its env binding dies at
+    /// dedent) and natively (the cursor is re-zeroed at the declaration site). A
+    /// flat per-function map, which this used to be, let the checker accept
+    /// `arena_alloc(pool, …)` *after* `pool`'s block had ended — a program all three
+    /// interpreters then rejected at run time. The checker must not accept what the
+    /// tiers reject.
+    arena_regions: HashMap<String, String>,
 }
 
 /// The `Future<T>` type spelling for an inner type `T`, matching the canonical

@@ -1262,3 +1262,427 @@ fn port_io_is_available_in_a_no_runtime_module() {
          `ptr_read`/`volatile_*`. stderr: {errors}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Freestanding tier §5 — static-buffer arenas.
+//
+// The feature that gives a `no-runtime` module somewhere bounded to put data:
+// `alloc`/`list`/`map`/`string`/`rc` are all `L0441`-rejected in this tier by
+// design, so without an arena a driver can talk to hardware but has nowhere to
+// keep what it reads. See `documents/freestanding_tier_design.md` §5.
+// ---------------------------------------------------------------------------
+
+/// A static-buffer arena is **available in a `no-runtime` module** — the whole
+/// point of the feature, and the thing most at risk of regressing.
+///
+/// `L0441` rejects every construct that needs the host allocator. An arena needs
+/// none: its memory is a fixed `array<i64>` the caller already declared, and its
+/// bump cursor is a frame word. If a future change to the tier gate started
+/// rejecting this, the freestanding tier would lose its only bounded storage — so
+/// this asserts `check` accepts it rather than merely that some diagnostic differs.
+#[test]
+fn arena_is_available_in_a_no_runtime_module() {
+    let path =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    assert!(
+        output.status.success(),
+        "a static-buffer arena allocates from a caller-owned buffer, never the host \
+         allocator, so the `no-runtime` gate (`L0441`) must not reject it: {}",
+        stderr(&output)
+    );
+}
+
+/// The arena **runs natively**: bumping cells out of a caller-owned buffer,
+/// writing and reading through the returned pointers, and composing with a loop.
+///
+/// Native is the tier that matters for §5 — a kernel targets bare metal. The exit
+/// code is the real evidence: `two_cells` (42) proves two allocations do not alias,
+/// `loop_sum` (60) proves the arena composes with a loop, and `block` (7) proves a
+/// multi-cell request is walkable with `ptr_offset`.
+#[test]
+fn arena_alloc_runs_freestanding_native() {
+    let fixture =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby");
+    let out = std::env::temp_dir().join("lullaby_arena_alloc.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--freestanding",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        emit.status.success(),
+        "a no-runtime arena module must compile under `native --freestanding`: {}",
+        stderr(&emit)
+    );
+    let listing = stdout(&emit);
+    for symbol in ["compiled two_cells", "compiled loop_sum", "compiled block"] {
+        assert!(
+            listing.contains(symbol),
+            "the arena must be natively lowered, not skipped — expected `{symbol}`: {listing}"
+        );
+    }
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32 unavailable; skipping arena run (compile check ran)");
+        return;
+    }
+    let exe = std::process::Command::new(&out)
+        .output()
+        .expect("run native exe");
+    assert_eq!(
+        exe.status.code().expect("native exit code"),
+        109,
+        "arena result: two_cells (42, distinct allocations do not alias) + loop_sum (60, \
+         the arena composes with a loop) + block (7, a multi-cell request walked with \
+         ptr_offset)"
+    );
+}
+
+/// **The overflow edge.** An arena never grows and never calls an allocator, so a
+/// bump past the buffer's end must go somewhere defined. As delivered that is
+/// `ud2` — an invalid-opcode trap, the same edge the native bounds check uses.
+///
+/// This asserts **what is actually observable**: the process dies on the trap
+/// rather than exiting. It deliberately does NOT assert a clean exit code (there
+/// is none — the program never reaches its return), and it cannot hang: `ud2`
+/// faults immediately. The key assertion is that the run does **not** produce 6,
+/// the value `exhaust` would return if the third allocation had wrongly succeeded —
+/// that is what distinguishes a real trap from a silently-handed-out bad pointer.
+///
+/// §8 replaces the trap with a call to the program's own `panic fn`; the range
+/// check and the bump are already final.
+#[test]
+fn arena_overflow_hits_the_panic_edge_natively() {
+    let fixture =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_overflow.lby");
+    let out = std::env::temp_dir().join("lullaby_arena_overflow.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--freestanding",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            fixture.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        emit.status.success(),
+        "the overflow fixture must compile: {}",
+        stderr(&emit)
+    );
+    assert!(
+        stdout(&emit).contains("compiled exhaust"),
+        "the overflow path must be natively lowered, not skipped: {}",
+        stdout(&emit)
+    );
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32 unavailable; skipping overflow run (compile check ran)");
+        return;
+    }
+    let exe = std::process::Command::new(&out)
+        .output()
+        .expect("run native exe");
+    let code = exe.status.code().expect("native exit status");
+    assert_ne!(
+        code, 0,
+        "an arena overflow must not exit cleanly — it is a safety failure"
+    );
+    assert_ne!(
+        code, 6,
+        "6 is what `exhaust` would return if the overflowing third allocation had \
+         wrongly SUCCEEDED. Seeing it would mean the arena handed out a pointer past \
+         the buffer's end — the exact silent-wrong-answer this edge exists to prevent"
+    );
+}
+
+/// **Full four-tier parity**: the arena produces `109` on the AST, IR, and bytecode
+/// interpreters too, matching native exactly.
+///
+/// An earlier version of this increment *refused* the arena on all three
+/// interpreters (`L0460`), arguing their typed-cell pointer model could not
+/// reinterpret a buffer's storage. That argument did not survive its own design:
+/// because the arena bumps in whole 8-byte cells of an `array<i64>`,
+/// `arena_alloc(r, n)` is exactly `addr_of(buf[cursor])` plus an integer cursor —
+/// and the interpreters define both halves. There was nothing to reinterpret, so
+/// the refusal was work not done rather than an honest limitation. This test is the
+/// standing proof that it was modellable.
+#[test]
+fn arena_runs_identically_on_every_interpreter() {
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(
+            "tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby",
+            backend,
+        );
+        assert!(
+            output.status.success(),
+            "the {backend} interpreter must RUN a static-buffer arena, not refuse it — an \
+             arena cell is an ordinary `array<i64>` element, which this tier addresses \
+             natively via the same place-backed `addr_of` machinery: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "109",
+            "{backend} must agree with native (109) on the arena's result"
+        );
+    }
+}
+
+/// The **overflow edge** on the interpreters: a bump past the buffer aborts with
+/// `L0460` on all three, mirroring native's `ud2` trap.
+///
+/// Both terminate without producing a value, which is exactly the relationship the
+/// delivered array-bounds failure already has (`L0413` on the interpreters, `ud2`
+/// natively) and what decision **A5** requires — abort with a diagnostic, no
+/// unwinding. §8 will route both edges to the program's own `panic fn`.
+///
+/// `L0460` used to mean "an arena cannot run on an interpreter at all". It was
+/// retargeted to the failure that genuinely exists once the arena was implemented.
+#[test]
+fn arena_overflow_aborts_on_every_interpreter() {
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(
+            "tests/fixtures/valid/no_runtime/freestanding_arena_overflow.lby",
+            backend,
+        );
+        let errors = stderr(&output);
+        assert!(
+            !output.status.success(),
+            "an arena overflow must abort on the {backend} interpreter, not return a value"
+        );
+        assert!(
+            errors.contains("L0460"),
+            "the {backend} interpreter must abort an arena overflow with `L0460`: {errors}"
+        );
+        assert!(
+            !stdout(&output).contains('6'),
+            "the {backend} interpreter must not produce 6 — the value `exhaust` would return \
+             if the overflowing third allocation had wrongly succeeded"
+        );
+    }
+}
+
+/// A backing name that resolves to nothing has no memory to bump into.
+#[test]
+fn arena_backing_not_in_scope_is_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_backing_not_in_scope.lby",
+        "L0445",
+    );
+}
+
+/// The backing buffer must be a fixed `array<i64>`: the arena bumps in 8-byte
+/// cells, and a scalar is not a buffer at all.
+#[test]
+fn arena_backing_wrong_type_is_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_backing_wrong_type.lby",
+        "L0445",
+    );
+}
+
+/// `arena_alloc`'s region operand is a compile-time region name, so an undeclared
+/// one cannot resolve to a buffer.
+#[test]
+fn arena_alloc_unknown_region_is_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_alloc_unknown_region.lby",
+        "L0445",
+    );
+}
+
+/// `arena_alloc` hands back an unchecked raw pointer into caller memory, so it is
+/// `unsafe`-gated like every other raw-pointer producer.
+#[test]
+fn arena_alloc_outside_unsafe_is_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_alloc_outside_unsafe.lby",
+        "L0330",
+    );
+}
+
+/// `region <name> in <buffer>` survives a `lullaby fmt` round trip, and fmt is a
+/// fixed point on it.
+///
+/// The formatter must render the arena form *distinctly*: it carries no
+/// `size=`/`kind=`/`mutable=` metadata, because its extent is the backing buffer's.
+/// Rendering it through the delivered metadata-region path would emit
+/// `region scratch: size=0, kind=static, mutable=true` — which does not even
+/// re-parse as the same declaration.
+///
+/// This asserts the fmt *output* rather than `fmt --check` on the fixture: every
+/// `no_runtime` fixture is non-canonical under `--check` because fmt hoists the
+/// `no-runtime` directive above a leading comment block — a pre-existing property
+/// of the directive that has nothing to do with arenas.
+#[test]
+fn arena_region_survives_fmt_round_trip() {
+    let path =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby");
+    let first = lullaby()
+        .args(["fmt", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run fmt");
+    assert!(first.status.success(), "fmt failed: {}", stderr(&first));
+    let formatted = stdout(&first);
+    for region in ["region scratch in buf", "region pool in buf"] {
+        assert!(
+            formatted.contains(region),
+            "fmt must re-emit the static-buffer arena form verbatim as `{region}`, with no \
+             `size=`/`kind=` metadata: {formatted}"
+        );
+    }
+    assert!(
+        !formatted.contains("region scratch: size="),
+        "fmt must not render a static-buffer arena through the metadata-region path: \
+         {formatted}"
+    );
+
+    let temp = std::env::temp_dir().join("lullaby_arena_fmt_idempotent.lby");
+    std::fs::write(&temp, &formatted).expect("write temp");
+    let second = lullaby()
+        .args(["fmt", temp.to_str().expect("temp path")])
+        .output()
+        .expect("run fmt again");
+    assert!(
+        second.status.success(),
+        "second fmt failed: {}",
+        stderr(&second)
+    );
+    assert_eq!(stdout(&second), formatted, "fmt must be idempotent");
+}
+
+/// **Two arenas over ONE buffer must be rejected** — they would silently alias.
+///
+/// Each region bumps from its own cursor starting at zero, so `region a in buf` and
+/// `region b in buf` both hand out `&buf[0]`: two logically distinct arenas
+/// returning overlapping cells, each write clobbering the other. Before this was
+/// caught, the program compiled and returned 40 instead of 30 — a silent wrong
+/// answer, and one that directly contradicts `freestanding_arena_alloc.lby`'s
+/// `two_cells`, which exists to assert distinct allocations do not alias.
+///
+/// This is the shape §5's per-CPU-pool motivation actively invites: an author who
+/// wants two bounded pools reaches for two regions. Separate pools need separate
+/// buffers.
+#[test]
+fn arena_two_regions_over_one_buffer_are_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_two_regions_one_buffer.lby",
+        "L0445",
+    );
+}
+
+/// **The one scoping model, agreed by all four tiers.** Three shapes that each once
+/// produced a *silent wrong answer* now produce `406` everywhere.
+///
+/// The region scope/binding model existed in three incompatible forms — a flat
+/// per-function map in the checker, a block-scoped env with late name resolution on
+/// the interpreters, and a function-scoped frame word zeroed only in the prologue
+/// natively. It is now one model: a `region <name> in <buffer>` is scoped to its
+/// **enclosing block**, and its buffer is pinned at the **declaration**.
+///
+/// * `loop_region_resets` (300) — a region in a loop body resets at dedent. Native
+///   zeroed the cursor only in the prologue, so it never re-zeroed and kept bumping
+///   across iterations: **123 natively vs 300 on every interpreter**, undiagnosed,
+///   and contradicting this feature's own documented "reset at dedent".
+/// * `shadowing_does_not_retarget` (7) — an inner `let buf` cannot retarget a live
+///   arena, because the arena is pinned to the outer buffer's slot. The interpreters
+///   re-resolved the buffer **by name** on every allocation and wrote the shadowing
+///   buffer: **0 vs 7**, undiagnosed. Slot-pinning also immunizes this against the
+///   env shelf, which now resolves a bare name across frames — a name-keyed arena
+///   could otherwise have reached a *caller's* buffer.
+/// * `cross_frame` (99) — an arena pointer passed into a callee. Valid C (a call
+///   does not end the caller's block), and the shelf resolves it on the
+///   interpreters too, so this is ordinary parity rather than a divergence.
+#[test]
+fn arena_scoping_agrees_across_all_tiers() {
+    let fixture = "tests/fixtures/valid/no_runtime/freestanding_arena_scoping.lby";
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(fixture, backend);
+        assert!(
+            output.status.success(),
+            "{backend} must run the arena scoping fixture: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "406",
+            "{backend}: loop_region_resets (300) + shadowing_does_not_retarget (7) + \
+             cross_frame (99) + region_without_alloc (0)"
+        );
+    }
+
+    let path = workspace_root().join(fixture);
+    let out = std::env::temp_dir().join("lullaby_arena_scoping.exe");
+    let emit = lullaby()
+        .args([
+            "native",
+            "--freestanding",
+            "--verbose",
+            "-o",
+            out.to_str().expect("out path"),
+            path.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        emit.status.success(),
+        "the arena scoping fixture must compile: {}",
+        stderr(&emit)
+    );
+    for symbol in [
+        "compiled loop_region_resets",
+        "compiled shadowing_does_not_retarget",
+        "compiled cross_frame",
+        "compiled region_without_alloc",
+    ] {
+        assert!(
+            stdout(&emit).contains(symbol),
+            "the scoping shapes must be natively lowered, not skipped — expected \
+             `{symbol}`: {}",
+            stdout(&emit)
+        );
+    }
+
+    if rust_lld_path().is_none() || !kernel32_available() {
+        eprintln!("rust-lld/kernel32 unavailable; skipping scoping run (compile check ran)");
+        return;
+    }
+    let exe = std::process::Command::new(&out)
+        .output()
+        .expect("run native exe");
+    assert_eq!(
+        exe.status.code().expect("native exit code"),
+        406,
+        "native must agree with the interpreters on the region's block scope, on \
+         which buffer a shadowed arena writes, and on a region declared but never \
+         allocated from"
+    );
+}
+
+/// A `region` is scoped to its **enclosing block**, so allocating from it after that
+/// block ends must be rejected — **by the checker**, at the right layer.
+///
+/// The checker once tracked regions in a flat per-function map with no block
+/// scoping, so it *accepted* this program: all three interpreters then rejected it
+/// at run time (the arena's env binding died at dedent) and native happily returned
+/// 7. `check` must not accept what the tiers reject.
+#[test]
+fn arena_region_used_after_block_is_rejected() {
+    assert_check_rejected_with(
+        "tests/fixtures/invalid/no_runtime/arena_region_used_after_block.lby",
+        "L0445",
+    );
+}

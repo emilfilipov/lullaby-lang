@@ -1055,6 +1055,7 @@ impl<'a> Runtime<'a> {
             "port_in8" | "port_in16" | "port_in32" | "port_out8" | "port_out16" | "port_out32" => {
                 Err(port_io_interpreter_error(name))
             }
+
             "env" => Self::builtin_env(args),
             "os_random" => Self::builtin_os_random(args),
             "args" => self.builtin_args(args),

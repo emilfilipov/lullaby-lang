@@ -577,6 +577,14 @@ pub(crate) fn lower_native_expr(
             if let Some(result) = lower_raw_pointer_call(ctx, name, args, &expr.ty, code) {
                 return result;
             }
+            // The freestanding-tier static-buffer arena surface (`arena_region`,
+            // `arena_alloc`). Dispatched before the unknown-function gate for the
+            // same reason as the raw-pointer surface: neither name is ever a user
+            // function. A buffer shape this backend cannot lower soundly returns a
+            // precise `Err` so the enclosing function skips cleanly (`L0339`).
+            if let Some(result) = lower_arena_call(ctx, name, args, &expr.ty, code) {
+                return result;
+            }
             // The interim heap-box builtins (`alloc`/`dealloc`). Dispatched before
             // the unknown-function gate for the same reason as the raw-pointer
             // surface: neither name is ever a user function. `alloc` lowers to a

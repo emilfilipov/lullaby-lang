@@ -38,8 +38,8 @@ mod runtime_os;
 
 pub use interpreter::{run_main, run_main_with_args, run_named_function};
 pub use raw_pointer::{
-    RAW_POINTER_BASE, RawPointerMemory, RawResolve, RootSlot, dangling_place, next_env_id,
-    unmapped_raw, unreachable_frame,
+    RAW_POINTER_BASE, RawPointerMemory, RawResolve, RootSlot, arena_key, dangling_place,
+    next_env_id, unmapped_raw, unreachable_frame,
 };
 pub use runtime_concurrency::*;
 pub use runtime_error::*;
@@ -77,6 +77,12 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub fn value_type_name(value: &Value) -> String {
     match value {
         Value::I64(_) => "i64".to_string(),
+        // A live static-buffer arena's internal binding. It has no user-facing type
+        // and cannot be a method receiver — it is reachable only through the
+        // space-containing env keys in `raw_pointer.rs`, which the lexer cannot
+        // produce — but naming it accurately beats panicking if a future path ever
+        // does route one here.
+        Value::Arena(_) => "arena".to_string(),
         Value::Int { ty, .. } => ty.type_name().to_string(),
         Value::F64(_) => "f64".to_string(),
         Value::F32(_) => "f32".to_string(),
@@ -130,6 +136,17 @@ pub enum Value {
         value: i64,
         ty: IntKind,
     },
+    /// A live **static-buffer arena** (freestanding tier §5). See [`ArenaState`].
+    ///
+    /// **Boxed deliberately.** `Value` is the hottest type in all three
+    /// interpreters and every one of them recurses over it; its size is load-bearing
+    /// for stack depth. Inline, this variant's payload (a 24-byte `RootSlot` + a
+    /// 16-byte name + a cursor) grew `Value` from **24 to 56 bytes**, and the
+    /// deep-recursion tests promptly overflowed the stack — the whole enum pays for
+    /// one rare variant. An arena value exists once per `region` declaration and is
+    /// never on a hot path, so the indirection is free where it is used and costs
+    /// nothing where it is not.
+    Arena(Box<ArenaState>),
     F64(f64),
     /// A 32-bit IEEE-754 float. Stored as a native `f32`, so every operation is
     /// inherently rounded to `f32` precision (the required normalization); a
@@ -233,10 +250,37 @@ pub struct EnumValue {
     pub payload: Vec<Value>,
 }
 
+/// A live static-buffer arena's state (freestanding tier §5), behind a `Box` in
+/// [`Value::Arena`] so the hot `Value` enum stays small.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArenaState {
+    /// The backing buffer's slot. **This is what resolution uses** — pinned once at
+    /// the `region` declaration, never re-derived from `name`. Pinning the slot is
+    /// what makes the interpreters agree with native (which binds the buffer to a
+    /// frame slot at compile time), and what stops a later `let` that shadows the
+    /// buffer — or, since the env shelf, a same-named binding in a *caller's* frame
+    /// — from silently retargeting a live arena.
+    pub buffer: RootSlot,
+    /// The backing buffer's source name, carried for **diagnostics only** (it flows
+    /// into `RawRegion::name`, so a message about an arena pointer says `buf`, not an
+    /// internal key). Never used to resolve storage — that is the point of pinning
+    /// `buffer`.
+    pub name: Box<str>,
+    /// The bump cursor: a cell index into the buffer.
+    pub cursor: i64,
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::I64(value) => write!(formatter, "{value}"),
+            // Not user-reachable (see `value_type_name`); rendered accurately rather
+            // than panicking, so a diagnostic that ever carries one stays truthful.
+            Self::Arena(state) => write!(
+                formatter,
+                "<arena {} buffer={:?} cursor={}>",
+                state.name, state.buffer, state.cursor
+            ),
             // The cell is normalized, so an unsigned kind prints the unsigned
             // reinterpretation and a signed kind prints its sign-extended value.
             Self::Int { value, ty } => {
@@ -734,6 +778,28 @@ mod value_size_check {
             std::mem::size_of::<super::Value>() <= 24,
             "Value grew past 24 bytes ({}); box the offending variant",
             std::mem::size_of::<super::Value>()
+        );
+    }
+}
+
+#[cfg(test)]
+mod value_size_guard {
+    /// `Value` is the hottest type in all three interpreters, and every one of them
+    /// recurses over it — its size directly bounds interpreter stack depth.
+    ///
+    /// This guard exists because a regression here is **silent until it is a stack
+    /// overflow in an unrelated test**. Adding a static-buffer arena variant inline
+    /// grew `Value` from 24 to 56 bytes and blew the stack in the WASM parity test,
+    /// which looked like an environment failure rather than what it was. Boxing the
+    /// payload restored 24. Any new variant must be boxed if it would grow this.
+    #[test]
+    fn value_stays_small() {
+        assert_eq!(
+            std::mem::size_of::<crate::Value>(),
+            24,
+            "`Value` must stay 24 bytes: it is the hot interpreter type and every \
+             engine recurses over it, so growing it costs stack depth everywhere. Box \
+             a large variant's payload instead of inlining it."
         );
     }
 }

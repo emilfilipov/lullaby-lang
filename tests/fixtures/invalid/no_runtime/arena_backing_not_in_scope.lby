@@ -1,0 +1,14 @@
+# L0445: a static-buffer arena's backing name must be a binding in scope. The
+# arena's whole guarantee is that its memory is a buffer THE CALLER OWNS, so a
+# name that resolves to nothing has no memory to bump into.
+no-runtime
+
+fn bad -> i64
+    region scratch in nonexistent
+    unsafe
+        let p ptr<i64> = arena_alloc(scratch, 1)
+        ptr_write(p, 1)
+        ptr_read(p)
+
+fn main -> i64
+    bad()

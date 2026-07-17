@@ -319,3 +319,75 @@ pub(crate) fn max_outgoing_stack_words(
     }
     max
 }
+
+/// A static-buffer arena region declared in a function body (freestanding tier §5,
+/// `documents/freestanding_tier_design.md`): the region's name and the name of the
+/// `array<i64>` local backing it, recovered from the `arena_region` marker call the
+/// AST->IR lowering emits for `region <name> in <buffer>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ArenaRegion {
+    /// The region's source name — what `arena_alloc`'s first operand names.
+    pub(crate) name: String,
+    /// The backing buffer's local name. Resolved against the frame's locals when
+    /// `arena_alloc` is lowered, so its extent and slot come from the real array.
+    pub(crate) buffer: String,
+}
+
+/// Collect every static-buffer arena region declared anywhere in `body`.
+///
+/// This is frame-sizing work, which is why it lives here: each arena needs **one
+/// dedicated frame word** to hold its bump cursor, reserved by `NativeCtx::plan`
+/// exactly as the arena-first `arena_mark_slot` word is. The cursor cannot be an
+/// ordinary local — it has no source-level binding — and it cannot be shared
+/// between regions, since two arenas over two buffers are live at once.
+///
+/// Regions are collected from the **whole body**, recursing through nested control
+/// flow, and de-duplicated by name (the checker already rejects a duplicate region
+/// name with `L0445`, so a repeat here is the same region, not a second one).
+/// Collecting the whole body rather than tracking block scope is deliberate and
+/// conservative: a cursor word costs 8 bytes of frame, and over-reserving is
+/// harmless where mis-resolving would not be.
+pub(crate) fn collect_arena_regions(body: &[BytecodeInstruction]) -> Vec<ArenaRegion> {
+    let mut found = Vec::new();
+    collect_arena_regions_into(body, &mut found);
+    found
+}
+
+fn collect_arena_regions_into(body: &[BytecodeInstruction], out: &mut Vec<ArenaRegion>) {
+    for instruction in body {
+        if let BytecodeInstruction::Expr(expr) = instruction
+            && let BytecodeExprKind::Call { name, args } = &expr.kind
+            && name == "arena_region"
+            && let [region, buffer] = args.as_slice()
+            && let (BytecodeExprKind::String(region), BytecodeExprKind::String(buffer)) =
+                (&region.kind, &buffer.kind)
+            && !out.iter().any(|r: &ArenaRegion| &r.name == region)
+        {
+            out.push(ArenaRegion {
+                name: region.clone(),
+                buffer: buffer.clone(),
+            });
+        }
+        match instruction {
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    collect_arena_regions_into(&branch.body, out);
+                }
+                collect_arena_regions_into(else_body, out);
+            }
+            BytecodeInstruction::While { body, .. }
+            | BytecodeInstruction::Loop { body, .. }
+            | BytecodeInstruction::For { body, .. } => collect_arena_regions_into(body, out),
+            BytecodeInstruction::Match { arms, .. } => {
+                for arm in arms {
+                    collect_arena_regions_into(&arm.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}

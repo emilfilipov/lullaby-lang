@@ -62,6 +62,12 @@ impl<'a> NativeCtx<'a> {
             is_arena: false,
             arena_mark_slot: 0,
             arena_loop_mark_base: 0,
+            // A synthesized closure body never declares a static-buffer arena: a
+            // closure literal needs a heap-allocated capture environment and is
+            // therefore `L0441`-rejected in `no-runtime`, the only tier where arenas
+            // exist. An `arena_alloc` reaching here would find no binding and skip
+            // cleanly (`L0339`) rather than miscompile.
+            arena_buffers: HashMap::new(),
             heap_aggregates: std::collections::HashSet::new(),
             closure_locals: HashMap::new(),
             closure_layouts,

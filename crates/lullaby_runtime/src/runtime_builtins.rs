@@ -1354,7 +1354,24 @@ impl<'a> Runtime<'a> {
             // codegen + linking; the AST interpreter cannot execute it, so reject
             // it with `L0425` (like `extern`'s `L0423`) rather than no-op.
             Stmt::Asm { .. } => Err(asm_interpreter_error()),
-            // A region declaration is compile-time metadata; it has no runtime
+            // A **static-buffer arena** (`region N in buf`, freestanding tier §5)
+            // opens a real bump arena over the caller's buffer.
+            //
+            // The backing buffer is resolved to its `RootSlot` **here, once, at the
+            // declaration** — never re-resolved by name at each allocation. That is
+            // what makes this agree with native (which binds the buffer to a frame
+            // slot at compile time) and what makes it immune to two ways a
+            // name-keyed arena silently writes the wrong buffer: an inner `let buf`
+            // shadowing the arena's buffer, and — since the env shelf — a bare name
+            // resolving into a *caller's* frame.
+            //
+            // The whole arena is one env binding, so it inherits the declaration's
+            // block lifetime exactly: it dies at dedent and is re-created, cursor
+            // re-zeroed, on re-entry. That is "reset at dedent".
+            Stmt::Region(decl) if decl.backing.is_some() => {
+                self.open_static_buffer_arena(decl, env)
+            }
+            // A metadata region declaration is compile-time only; it has no runtime
             // effect in the current analysis-only region model.
             Stmt::Region(_) => Ok(Control::Value(Value::Void)),
             Stmt::Throw { value, .. } => {
@@ -1379,5 +1396,67 @@ impl<'a> Runtime<'a> {
             },
         };
         result.map_err(|error| self.annotate_error(error, span))
+    }
+}
+
+impl Runtime<'_> {
+    /// Open a **static-buffer arena** (`region N in buf`, freestanding tier §5) over
+    /// the caller's buffer.
+    ///
+    /// The backing buffer is resolved to its `RootSlot` **here, once, at the
+    /// declaration** — never re-resolved by name at each allocation. That is what
+    /// makes this agree with native (which binds the buffer to a frame slot at
+    /// compile time) and what makes it immune to two ways a name-keyed arena
+    /// silently writes the wrong buffer: an inner `let buf` shadowing the arena's
+    /// buffer, and — since the env shelf — a bare name resolving into a *caller's*
+    /// frame.
+    ///
+    /// The whole arena is one env binding, so it inherits the declaration's block
+    /// lifetime exactly: it dies at dedent and is re-created, cursor re-zeroed, on
+    /// re-entry. That is "reset at dedent".
+    ///
+    /// # Why this is a separate function, called as a bare tail call
+    ///
+    /// Its caller is the interpreter's **recursive** statement executor, and in a
+    /// debug build every match arm's temporaries live in that one frame — they do
+    /// not overlap. Windows' default main-thread stack is 1 MB, and the AST
+    /// interpreter's recursive chain already sits close to it: writing this arm's
+    /// body inline (a `String`, an `ArenaState`, `format!`'s machinery), or even
+    /// keeping it out of line but calling it with `?` — which materializes a
+    /// 120-byte `Result<_, RuntimeError>` temporary in the recursive frame — was
+    /// enough to **overflow the stack on a `fib(10)` that had always worked**.
+    ///
+    /// Returning `Result<Control, _>` so the arm is a bare tail call
+    /// (`=> self.open_static_buffer_arena(decl, env)`) adds no temporary, and keeps
+    /// the frame where it was. Measured, not assumed: the `?` form failed ~4 runs in
+    /// 5, the tail-call form passes 8/8, and `wasm_execution_parity_with_node` is
+    /// the test that catches a regression here. `#[inline(never)]` was tried first
+    /// and is **not** needed — the temporary was the cost, not the inlining — so it
+    /// is deliberately absent.
+    fn open_static_buffer_arena(
+        &mut self,
+        decl: &lullaby_parser::RegionDecl,
+        env: &mut Env,
+    ) -> Result<Control, RuntimeError> {
+        let backing = decl.backing.clone().unwrap_or_default();
+        let buffer = env.locate(&backing).ok_or_else(|| {
+            RuntimeError::new(
+                "L0445",
+                format!(
+                    "static-buffer arena `{}` is backed by `{backing}`, \
+                     which is not a binding in scope",
+                    decl.name
+                ),
+            )
+        })?;
+        env.define(
+            arena_key(&decl.name),
+            Value::Arena(Box::new(ArenaState {
+                buffer,
+                name: backing.into(),
+                cursor: 0,
+            })),
+        );
+        Ok(Control::Value(Value::Void))
     }
 }

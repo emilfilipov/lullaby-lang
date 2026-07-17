@@ -1182,6 +1182,14 @@ impl<'a> Checker<'a> {
             "addr_of" => self.check_addr_of(args, call_span, scope, function),
             "ptr_offset" => self.check_ptr_offset(args, call_span, scope, function),
             "ptr_cast" => self.check_ptr_cast(args, call_span, expected, scope, function),
+            // Freestanding static-buffer arenas (§5): bump `count` 8-byte cells out
+            // of a `region <name> in <buffer>` arena. `unsafe`-gated (`L0330`) and
+            // typed in `semantics_arena.rs`. Runs on **all four tiers** — an arena
+            // cell is an ordinary `array<i64>` element, so the interpreters address
+            // it with the same place-backed `addr_of` machinery native uses.
+            crate::semantics_arena::ARENA_ALLOC_BUILTIN => {
+                self.check_arena_alloc(args, call_span, expected, scope, function)
+            }
             // Freestanding port-mapped I/O (stage 3): `port_in8/16/32` and
             // `port_out8/16/32`. `unsafe`-gated (`L0330`) and width-checked
             // (`L0442`) in `semantics_port_io.rs`; native-only at run time (the

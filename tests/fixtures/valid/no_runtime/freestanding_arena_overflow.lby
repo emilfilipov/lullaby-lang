@@ -1,0 +1,40 @@
+# The static-buffer arena OVERFLOW EDGE (freestanding_tier_design.md §5).
+#
+# An arena never grows and never calls an allocator — that is the whole point in
+# `no-runtime`. So a bump that would leave the buffer has to go somewhere, and §5
+# fixes where: a defined, deterministic failure edge.
+#
+# As delivered, that edge is `ud2` — an architecturally guaranteed invalid-opcode
+# trap, the same instruction and the same reasoning as the delivered native bounds
+# check for an out-of-range `buf[i]`. It is immediate and impossible to mistake
+# for success. Critically, it can NEVER hand back a pointer past the buffer's end:
+# a null or truncated pointer would be a silent wrong answer that corrupts memory
+# at some later, unrelated point.
+#
+# §8 (the pluggable panic handler) turns this trap into a call to the program's
+# own `panic fn` with `kind = arena_overflow`. That is the one seam that changes;
+# the range check and the bump are already in their final form.
+#
+# RUNS NATIVELY, AND IS EXPECTED TO CRASH — the test asserts the trap is observable
+# (a non-zero, non-109 failure status), never that it exits cleanly. It does not
+# hang.
+no-runtime
+
+# Exhaust a 2-cell buffer: two single-cell bumps fit exactly, the third cannot.
+# The third `arena_alloc` is the one that traps.
+fn exhaust -> i64
+    let buf array<i64> = [0, 0]
+    region tiny in buf
+    unsafe
+        let a ptr<i64> = arena_alloc(tiny, 1)
+        ptr_write(a, 1)
+        let b ptr<i64> = arena_alloc(tiny, 1)
+        ptr_write(b, 2)
+        # The buffer is full. This bump overflows -> the panic edge. Nothing
+        # below it ever runs.
+        let c ptr<i64> = arena_alloc(tiny, 1)
+        ptr_write(c, 3)
+        ptr_read(a) + ptr_read(b) + ptr_read(c)
+
+fn main -> i64
+    exhaust()
