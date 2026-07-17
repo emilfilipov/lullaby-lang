@@ -18,6 +18,7 @@ pub(crate) fn checks_valid_fixture() {
 
 #[test]
 pub(crate) fn fmt_prints_canonical_source_and_is_idempotent() {
+    let scratch = ScratchDir::new("fmt_prints_canonical_source_and_is_idemp");
     let fixture = workspace_root().join("tests/fixtures/valid/run_match.lby");
     let first = lullaby()
         .args(["fmt", fixture.to_str().expect("fixture path")])
@@ -29,7 +30,7 @@ pub(crate) fn fmt_prints_canonical_source_and_is_idempotent() {
 
     // Formatting an already-canonical fixture is a no-op, and re-formatting the
     // output through a temp file yields identical text.
-    let tmp = std::env::temp_dir().join("lullaby_fmt_roundtrip.lby");
+    let tmp = scratch.join("lullaby_fmt_roundtrip.lby");
     std::fs::write(&tmp, &formatted).expect("write temp");
     let second = lullaby()
         .args(["fmt", tmp.to_str().expect("temp path")])
@@ -52,8 +53,9 @@ pub(crate) fn fmt_check_passes_on_canonical_fixture() {
 
 #[test]
 pub(crate) fn fmt_check_fails_on_unformatted_input() {
+    let scratch = ScratchDir::new("fmt_check_fails_on_unformatted_input");
     // A deliberately non-canonical file (extra spacing collapses on format).
-    let tmp = std::env::temp_dir().join("lullaby_fmt_check_bad.lby");
+    let tmp = scratch.join("lullaby_fmt_check_bad.lby");
     std::fs::write(&tmp, "fn main -> i64\n    1 +  2\n").expect("write temp");
     let output = lullaby()
         .args(["fmt", "--check", tmp.to_str().expect("temp path")])
@@ -494,8 +496,9 @@ pub(crate) fn runs_inferred_return_fixture_on_all_backends() {
 /// the interpreter result (21) when the platform can link.
 #[test]
 pub(crate) fn native_inferred_return_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_inferred_return_parity_when_linka");
     let fixture = workspace_root().join("tests/fixtures/valid/run_inferred_return.lby");
-    let out = std::env::temp_dir().join("lullaby_native_inferred_return.exe");
+    let out = scratch.join("lullaby_native_inferred_return.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -590,8 +593,9 @@ pub(crate) fn runs_conditional_fixture_on_all_backends() {
 /// interpreter result (560 mod 256).
 #[test]
 pub(crate) fn native_simd_map_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_simd_map_execution_parity_when_li");
     let fixture = workspace_root().join("tests/fixtures/valid/run_simd_map.lby");
-    let out = std::env::temp_dir().join("lullaby_native_simd_map.exe");
+    let out = scratch.join("lullaby_native_simd_map.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -634,8 +638,9 @@ pub(crate) fn native_simd_map_execution_parity_when_linkable() {
 /// portable across Windows/Unix exit-code truncation).
 #[test]
 pub(crate) fn native_bitwise_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_bitwise_execution_parity_when_lin");
     let fixture = workspace_root().join("tests/fixtures/valid/run_simd_bitwise.lby");
-    let out = std::env::temp_dir().join("lullaby_native_bitwise.exe");
+    let out = scratch.join("lullaby_native_bitwise.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -670,8 +675,9 @@ pub(crate) fn native_bitwise_execution_parity_when_linkable() {
 /// the SIMD fixture does not.
 #[test]
 pub(crate) fn native_scalar_bitwise_edge_cases_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_scalar_bitwise_edge_cases_parity_");
     let fixture = workspace_root().join("tests/fixtures/valid/run_bitwise.lby");
-    let out = std::env::temp_dir().join("lullaby_native_scalar_bitwise.exe");
+    let out = scratch.join("lullaby_native_scalar_bitwise.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -710,8 +716,9 @@ pub(crate) fn native_scalar_bitwise_edge_cases_parity_when_linkable() {
 /// the interpreter result (115 mod 256).
 #[test]
 pub(crate) fn native_conditional_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_conditional_execution_parity_when");
     let fixture = workspace_root().join("tests/fixtures/valid/run_conditional.lby");
-    let out = std::env::temp_dir().join("lullaby_native_conditional_parity.exe");
+    let out = scratch.join("lullaby_native_conditional_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -748,8 +755,9 @@ pub(crate) fn native_conditional_execution_parity_when_linkable() {
 /// clobbered the tail `if`'s result.
 #[test]
 pub(crate) fn native_tail_if_return_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_tail_if_return_parity_when_linkab");
     let fixture = workspace_root().join("tests/fixtures/valid/run_tail_if.lby");
-    let out = std::env::temp_dir().join("lullaby_native_tail_if_parity.exe");
+    let out = scratch.join("lullaby_native_tail_if_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -797,8 +805,9 @@ pub(crate) fn native_tail_if_return_parity_when_linkable() {
 /// agrees), overflow is an `err`, and `i64::MAX` parses without a false overflow.
 #[test]
 pub(crate) fn native_parse_i64_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_parse_i64_execution_parity_when_l");
     let fixture = workspace_root().join("tests/fixtures/valid/run_parse_i64.lby");
-    let out = std::env::temp_dir().join("lullaby_native_parse_i64_parity.exe");
+    let out = scratch.join("lullaby_native_parse_i64_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -847,8 +856,9 @@ pub(crate) fn native_parse_i64_execution_parity_when_linkable() {
 /// leading/trailing/consecutive separators), and `join` reverses it.
 #[test]
 pub(crate) fn native_split_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_split_execution_parity_when_linka");
     let fixture = workspace_root().join("tests/fixtures/valid/run_split.lby");
-    let out = std::env::temp_dir().join("lullaby_native_split_parity.exe");
+    let out = scratch.join("lullaby_native_split_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -893,8 +903,9 @@ pub(crate) fn native_split_execution_parity_when_linkable() {
 /// heap-exhaustion crash would mean it regressed.
 #[test]
 pub(crate) fn native_rc_string_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_string_reclaim_execution_parit");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_string_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -949,8 +960,9 @@ pub(crate) fn native_rc_string_reclaim_execution_parity_when_linkable() {
 /// the arena analogue of `native_rc_string_reclaim_execution_parity_when_linkable`.
 #[test]
 pub(crate) fn native_arena_string_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_arena_string_reclaim_execution_pa");
     let fixture = workspace_root().join("tests/fixtures/valid/run_arena_string_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_arena_reclaim.exe");
+    let out = scratch.join("lullaby_native_arena_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1008,8 +1020,9 @@ pub(crate) fn native_arena_string_reclaim_execution_parity_when_linkable() {
 /// analogue of `native_arena_string_reclaim_execution_parity_when_linkable`.
 #[test]
 pub(crate) fn native_arena_loop_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_arena_loop_reclaim_execution_pari");
     let fixture = workspace_root().join("tests/fixtures/valid/run_arena_loop_scratch_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_arena_loop_reclaim.exe");
+    let out = scratch.join("lullaby_native_arena_loop_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1062,7 +1075,8 @@ pub(crate) fn native_arena_loop_reclaim_execution_parity_when_linkable() {
 /// unconditionally: the direct-PE path needs no linker.
 #[test]
 pub(crate) fn native_heap_overflow_traps_cleanly() {
-    let dir = std::env::temp_dir().join("lullaby_native_overflow");
+    let scratch = ScratchDir::new("native_heap_overflow_traps_cleanly");
+    let dir = scratch.join("lullaby_native_overflow");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let src = dir.join("overflow.lby");
     let out = dir.join("overflow.exe");
@@ -1130,8 +1144,9 @@ pub(crate) fn native_heap_overflow_traps_cleanly() {
 /// `len` helper reclaims it.
 #[test]
 pub(crate) fn native_rc_len_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_len_reclaim_execution_parity_w");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_len_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_len_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_len_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1183,8 +1198,9 @@ pub(crate) fn native_rc_len_reclaim_execution_parity_when_linkable() {
 /// argument temporaries are reclaimed (this case previously crashed).
 #[test]
 pub(crate) fn native_rc_split_literal_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_split_literal_reclaim_executio");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_split_literal_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_split_literal_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_split_literal_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1232,8 +1248,9 @@ pub(crate) fn native_rc_split_literal_reclaim_execution_parity_when_linkable() {
 /// heap with the interpreter's result.
 #[test]
 pub(crate) fn native_rc_readop_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_readop_reclaim_execution_parit");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_readop_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_readop_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_readop_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1285,8 +1302,9 @@ pub(crate) fn native_rc_readop_reclaim_execution_parity_when_linkable() {
 /// reclaimed per-iteration split records.
 #[test]
 pub(crate) fn native_rc_array_string_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_array_string_reclaim_execution");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_array_string_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_array_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_array_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1337,8 +1355,9 @@ pub(crate) fn native_rc_array_string_reclaim_execution_parity_when_linkable() {
 /// free-list-corrupting double-free would crash or return the wrong value).
 #[test]
 pub(crate) fn native_rc_string_continue_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_string_continue_reclaim_execut");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_string_continue_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_string_continue_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_string_continue_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1389,8 +1408,9 @@ pub(crate) fn native_rc_string_continue_reclaim_execution_parity_when_linkable()
 /// break-edge drop is balanced.
 #[test]
 pub(crate) fn native_rc_string_break_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_rc_string_break_reclaim_execution");
     let fixture = workspace_root().join("tests/fixtures/valid/run_rc_string_break_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_rc_string_break_reclaim.exe");
+    let out = scratch.join("lullaby_native_rc_string_break_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1864,8 +1884,8 @@ pub(crate) fn runs_non_blocking_socket_fixture_on_all_backends() {
 pub(crate) fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.lby");
-    let artifact = root.join("target/run_arithmetic.lbc");
-    let _ = std::fs::remove_file(&artifact);
+    let scratch = ScratchDir::new("compile_artifact");
+    let artifact = scratch.join("run_arithmetic.lbc");
 
     let compile = lullaby()
         .args([
@@ -1903,8 +1923,8 @@ pub(crate) fn compiles_fixture_to_bytecode_artifact_and_runs_it() {
 pub(crate) fn builds_fixture_to_bytecode_artifact_and_runs_it() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.lby");
-    let artifact = root.join("target/build_arithmetic.lbc");
-    let _ = std::fs::remove_file(&artifact);
+    let scratch = ScratchDir::new("build_artifact");
+    let artifact = scratch.join("build_arithmetic.lbc");
 
     let build = lullaby()
         .args([
@@ -1946,8 +1966,8 @@ pub(crate) fn builds_fixture_to_bytecode_artifact_and_runs_it() {
 pub(crate) fn inspects_bytecode_artifact() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_store.lby");
-    let artifact = root.join("target/inspect_memory.lbc");
-    let _ = std::fs::remove_file(&artifact);
+    let scratch = ScratchDir::new("inspect_artifact");
+    let artifact = scratch.join("inspect_memory.lbc");
 
     let compile = lullaby()
         .args([
@@ -2041,8 +2061,8 @@ pub(crate) fn inspects_bytecode_artifact() {
 
 #[test]
 pub(crate) fn rejects_invalid_bytecode_artifact() {
-    let root = workspace_root();
-    let artifact = root.join("target/invalid_artifact.lbc");
+    let scratch = ScratchDir::new("invalid_artifact");
+    let artifact = scratch.join("invalid_artifact.lbc");
     std::fs::write(
         &artifact,
         "{\"format\":\"not-lullaby\",\"version\":1,\"entry\":\"main\",\"module\":{\"functions\":[]}}",
@@ -2148,8 +2168,8 @@ pub(crate) fn rejects_import_cycle_with_l0393() {
 
 #[test]
 pub(crate) fn reports_invalid_bytecode_artifact_with_verbose_guidance() {
-    let root = workspace_root();
-    let artifact = root.join("target/invalid_artifact_verbose.lbc");
+    let scratch = ScratchDir::new("invalid_artifact_verbose");
+    let artifact = scratch.join("invalid_artifact_verbose.lbc");
     std::fs::write(
         &artifact,
         "{\"format\":\"not-lullaby\",\"version\":1,\"entry\":\"main\",\"module\":{\"functions\":[]}}",
@@ -2176,8 +2196,8 @@ pub(crate) fn reports_invalid_bytecode_artifact_with_verbose_guidance() {
 
 #[test]
 pub(crate) fn reports_invalid_bytecode_artifact_as_json() {
-    let root = workspace_root();
-    let artifact = root.join("target/invalid_artifact_json.lbc");
+    let scratch = ScratchDir::new("invalid_artifact_json");
+    let artifact = scratch.join("invalid_artifact_json.lbc");
     std::fs::write(
         &artifact,
         "{\"format\":\"not-lullaby\",\"version\":1,\"entry\":\"main\",\"module\":{\"functions\":[]}}",
@@ -2204,8 +2224,8 @@ pub(crate) fn reports_invalid_bytecode_artifact_as_json() {
 
 #[test]
 pub(crate) fn reports_missing_bytecode_instructions_as_json() {
-    let root = workspace_root();
-    let artifact = root.join("target/missing_instructions_artifact_json.lbc");
+    let scratch = ScratchDir::new("missing_instructions_json");
+    let artifact = scratch.join("missing_instructions_artifact_json.lbc");
     std::fs::write(
         &artifact,
         "{\"format\":\"lullaby-bytecode\",\"version\":4,\"metadata\":{\"producer\":\"test\",\"target\":\"lullaby-vm\",\"payload\":\"instruction-bytecode\"},\"entry\":\"main\",\"function_table\":[],\"module\":{\"functions\":[{\"name\":\"main\",\"params\":[],\"return_type\":{\"name\":\"i64\"},\"span\":{\"line\":1,\"column\":1}}]}}",
@@ -2233,8 +2253,8 @@ pub(crate) fn reports_missing_bytecode_instructions_as_json() {
 
 #[test]
 pub(crate) fn reports_invalid_bytecode_instruction_contract_as_json() {
-    let root = workspace_root();
-    let artifact = root.join("target/invalid_instruction_artifact_json.lbc");
+    let scratch = ScratchDir::new("invalid_instruction_json");
+    let artifact = scratch.join("invalid_instruction_artifact_json.lbc");
     std::fs::write(
         &artifact,
         "{\"format\":\"lullaby-bytecode\",\"version\":5,\"metadata\":{\"producer\":\"test\",\"target\":\"lullaby-vm\",\"payload\":\"instruction-bytecode\"},\"entry\":\"main\",\"function_table\":[{\"name\":\"main\",\"params\":[],\"return_type\":{\"name\":\"i64\"}}],\"module\":{\"functions\":[{\"name\":\"main\",\"params\":[],\"return_type\":{\"name\":\"i64\"},\"instructions\":[{\"Break\":{\"line\":1,\"column\":1}}],\"span\":{\"line\":1,\"column\":1}}]}}",
@@ -2266,9 +2286,12 @@ pub(crate) fn reports_invalid_bytecode_instruction_contract_as_json() {
 pub(crate) fn reports_compile_write_failure_as_json() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_arithmetic.lby");
-    let missing_dir = root.join("target/lullaby_missing_compile_dir");
+    // The scratch root exists, but this subdir deliberately does NOT — the point
+    // is to prove `-o` into a missing directory fails with L0003. A unique scratch
+    // makes that "missing" state robust against any concurrent run.
+    let scratch = ScratchDir::new("compile_write_failure");
+    let missing_dir = scratch.join("lullaby_missing_compile_dir");
     let artifact = missing_dir.join("run_arithmetic.lbc");
-    let _ = std::fs::remove_dir_all(&missing_dir);
 
     let output = lullaby()
         .args([
@@ -2552,11 +2575,17 @@ pub(crate) fn runs_array_fixture() {
 pub(crate) fn runs_file_io_fixture() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/valid/run_file_io.lby");
-    let output_path = root.join("target/lullaby_fixture_io.txt");
-    let _ = std::fs::remove_file(&output_path);
+    // The fixture writes/reads the RELATIVE path `target/lullaby_fixture_io.txt`,
+    // so give the CLI a private working directory (with that `target/` subdir) as
+    // its cwd rather than the shared workspace root — otherwise concurrent runs
+    // clobber one another's output file. The fixture itself is unchanged.
+    let scratch = ScratchDir::new("file_io_fixture");
+    let work = scratch.join("cwd");
+    std::fs::create_dir_all(work.join("target")).expect("create target dir");
+    let output_path = work.join("target/lullaby_fixture_io.txt");
 
     let output = lullaby()
-        .current_dir(&root)
+        .current_dir(&work)
         .args(["run", fixture.to_str().expect("fixture path")])
         .output()
         .expect("run cli");
@@ -2567,7 +2596,6 @@ pub(crate) fn runs_file_io_fixture() {
         std::fs::read_to_string(&output_path).expect("written fixture file"),
         "alpha beta"
     );
-    let _ = std::fs::remove_file(output_path);
 }
 
 #[test]
@@ -2748,8 +2776,8 @@ pub(crate) fn check_allows_library_style_source_without_main() {
 pub(crate) fn compile_requires_zero_argument_main_entrypoint() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/invalid/missing_main.lby");
-    let artifact = root.join("target/missing_main.lbc");
-    let _ = std::fs::remove_file(&artifact);
+    let scratch = ScratchDir::new("missing_main");
+    let artifact = scratch.join("missing_main.lbc");
 
     let output = lullaby()
         .args([
@@ -2976,10 +3004,15 @@ pub(crate) fn rejects_store_after_dealloc_at_runtime() {
 pub(crate) fn rejects_missing_file_with_structured_resource_error() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/invalid/read_missing_file.lby");
-    let _ = std::fs::remove_file(root.join("target/lullaby_missing_file.txt"));
+    // The fixture reads the relative path `target/lullaby_missing_file.txt`; run in
+    // a private, empty working dir so no concurrent test can make this "missing
+    // file" read spuriously succeed. The file is never created here.
+    let scratch = ScratchDir::new("missing_file_read");
+    let work = scratch.join("cwd");
+    std::fs::create_dir_all(&work).expect("create work dir");
 
     let output = lullaby()
-        .current_dir(root)
+        .current_dir(&work)
         .args(["run", fixture.to_str().expect("fixture path")])
         .output()
         .expect("run cli");
@@ -2993,10 +3026,14 @@ pub(crate) fn rejects_missing_file_with_structured_resource_error() {
 pub(crate) fn reports_missing_file_resource_error_as_json() {
     let root = workspace_root();
     let fixture = root.join("tests/fixtures/invalid/read_missing_file.lby");
-    let _ = std::fs::remove_file(root.join("target/lullaby_missing_file.txt"));
+    // See `rejects_missing_file_with_structured_resource_error`: a private cwd keeps
+    // the "missing file" read from racing a concurrent test's `target/` output.
+    let scratch = ScratchDir::new("missing_file_read_json");
+    let work = scratch.join("cwd");
+    std::fs::create_dir_all(&work).expect("create work dir");
 
     let output = lullaby()
-        .current_dir(root)
+        .current_dir(&work)
         .args([
             "run",
             "--format",
@@ -3068,10 +3105,10 @@ pub(crate) fn rejects_system_builtin_argument_type_mismatch() {
 
 #[test]
 pub(crate) fn run_passes_trailing_program_args_to_args_builtin() {
+    let scratch = ScratchDir::new("run_passes_trailing_program_args_to_args");
     // `lullaby run <file.lby> alpha beta` exposes ["alpha", "beta"] through the
     // `args()` builtin on every backend, so the program observes 2 arguments.
-    let mut prog = std::env::temp_dir();
-    prog.push("lullaby_cli_args_count.lby");
+    let prog = scratch.join("lullaby_cli_args_count.lby");
     std::fs::write(&prog, "fn main -> i64\n    len(args())\n").expect("write program");
 
     for backend in ["ast", "ir", "bytecode"] {
@@ -3104,10 +3141,10 @@ pub(crate) fn run_passes_trailing_program_args_to_args_builtin() {
 
 #[test]
 pub(crate) fn run_env_builtin_reads_process_environment() {
+    let scratch = ScratchDir::new("run_env_builtin_reads_process_environmen");
     // `env(name)` reads a variable the child process is given, and reports a
     // definitely-unset variable as `none`.
-    let mut prog = std::env::temp_dir();
-    prog.push("lullaby_cli_env_read.lby");
+    let prog = scratch.join("lullaby_cli_env_read.lby");
     std::fs::write(
         &prog,
         "fn main -> string\n    match env(\"LULLABY_CLI_ENV_TEST\")\n        some(v) -> v\n        none -> \"MISSING\"\n",

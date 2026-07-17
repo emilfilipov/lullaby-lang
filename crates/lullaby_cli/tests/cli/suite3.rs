@@ -6,11 +6,12 @@ use std::process::Command;
 
 #[test]
 pub(crate) fn native_reports_no_eligible_functions() {
+    let scratch = ScratchDir::new("native_reports_no_eligible_functions");
     // `main` uses `to_string(f64)` (dtoa, deferred), so it skips and nothing is
     // eligible for native. (Plain string values are now in the native subset, so
     // the not-eligible example uses the still-deferred float `to_string`.)
     let source = "fn main -> i64\n    len(to_string(1.5))\n";
-    let tmp = std::env::temp_dir().join("lullaby_native_none.lby");
+    let tmp = scratch.join("lullaby_native_none.lby");
     std::fs::write(&tmp, source).expect("write temp");
     let output = lullaby()
         .args(["native", "--verbose", tmp.to_str().expect("temp path")])
@@ -33,8 +34,9 @@ pub(crate) fn native_reports_no_eligible_functions() {
 /// result (mod 256). Also asserts no object file is written on this path.
 #[test]
 pub(crate) fn native_freestanding_direct_pe_runs() {
+    let scratch = ScratchDir::new("native_freestanding_direct_pe_runs");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_direct_pe.exe");
+    let out = scratch.join("lullaby_direct_pe.exe");
     let obj = out.with_extension("obj");
     let _ = std::fs::remove_file(&out);
     let _ = std::fs::remove_file(&obj);
@@ -95,8 +97,9 @@ pub(crate) fn native_freestanding_direct_pe_runs() {
 /// (`len("hello") + len("native") + len("")`).
 #[test]
 pub(crate) fn native_freestanding_direct_pe_heap_runs() {
+    let scratch = ScratchDir::new("native_freestanding_direct_pe_heap_runs");
     let fixture = workspace_root().join("tests/fixtures/valid/native_strings.lby");
-    let out = std::env::temp_dir().join("lullaby_direct_pe_heap.exe");
+    let out = scratch.join("lullaby_direct_pe_heap.exe");
     let _ = std::fs::remove_file(&out);
 
     let emit = lullaby()
@@ -143,8 +146,9 @@ pub(crate) fn native_freestanding_direct_pe_heap_runs() {
 /// If `rust-lld` or `kernel32.lib` is unavailable, skip with a message.
 #[test]
 pub(crate) fn native_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_execution_parity_when_linkable");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_parity.exe");
+    let out = scratch.join("lullaby_native_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -193,8 +197,9 @@ pub(crate) fn native_execution_parity_when_linkable() {
 /// exiting 7.
 #[test]
 pub(crate) fn native_signed_div_overflow_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_signed_div_overflow_parity_when_l");
     let fixture = workspace_root().join("tests/fixtures/valid/run_div_overflow.lby");
-    let out = std::env::temp_dir().join("lullaby_native_div_overflow_parity.exe");
+    let out = scratch.join("lullaby_native_div_overflow_parity.exe");
 
     // All three interpreters agree on 7 (plain-i64 and fixed-width isize paths).
     for backend in ["ast", "ir", "bytecode"] {
@@ -256,8 +261,9 @@ pub(crate) fn native_signed_div_overflow_parity_when_linkable() {
 /// Gated on `rust-lld` + `kernel32.lib` exactly like the scalar parity test.
 #[test]
 pub(crate) fn native_aggregates_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_aggregates_execution_parity_when_");
     let fixture = workspace_root().join("tests/fixtures/valid/native_aggregates.lby");
-    let out = std::env::temp_dir().join("lullaby_native_aggregates_parity.exe");
+    let out = scratch.join("lullaby_native_aggregates_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -318,8 +324,9 @@ pub(crate) fn native_aggregates_execution_parity_when_linkable() {
 /// always run.
 #[test]
 pub(crate) fn native_fat_array_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_fat_array_execution_parity_when_l");
     let fixture = workspace_root().join("tests/fixtures/valid/native_fat_array.lby");
-    let out = std::env::temp_dir().join("lullaby_native_fat_array_parity.exe");
+    let out = scratch.join("lullaby_native_fat_array_parity.exe");
 
     // Make MSVC's `LIB` available (source vcvars64 if unset) so the link+run runs.
     ensure_msvc_env();
@@ -393,8 +400,9 @@ pub(crate) fn native_fat_array_execution_parity_when_linkable() {
 /// linkable — the `.exe` exit code equals the interpreter result.
 #[test]
 pub(crate) fn native_fat_array_f64_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_fat_array_f64_execution_parity_wh");
     let fixture = workspace_root().join("tests/fixtures/valid/native_fat_array_f64.lby");
-    let out = std::env::temp_dir().join("lullaby_native_fat_array_f64_parity.exe");
+    let out = scratch.join("lullaby_native_fat_array_f64_parity.exe");
 
     ensure_msvc_env();
 
@@ -467,8 +475,9 @@ pub(crate) fn native_fat_array_f64_execution_parity_when_linkable() {
 /// MSVC's `LIB` (via vcvars64) when unset so the link+run executes.
 #[test]
 pub(crate) fn native_many_args_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_many_args_execution_parity_when_l");
     let fixture = workspace_root().join("tests/fixtures/valid/native_many_args.lby");
-    let out = std::env::temp_dir().join("lullaby_native_many_args_parity.exe");
+    let out = scratch.join("lullaby_native_many_args_parity.exe");
 
     // Make MSVC's `LIB` available (source vcvars64 if unset) so the link+run runs.
     ensure_msvc_env();
@@ -543,6 +552,7 @@ pub(crate) fn native_many_args_execution_parity_when_linkable() {
 /// interpreter-truth assertions always run.
 #[test]
 pub(crate) fn native_aggregate_boundary_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_aggregate_boundary_execution_pari");
     for (name, funcs) in [
         (
             "native_aggregate_params",
@@ -562,7 +572,7 @@ pub(crate) fn native_aggregate_boundary_execution_parity_when_linkable() {
         ),
     ] {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+        let out = scratch.join(format!("lullaby_{name}_parity.exe"));
 
         let emit = lullaby()
             .args([
@@ -628,13 +638,14 @@ pub(crate) fn native_aggregate_boundary_execution_parity_when_linkable() {
 /// Gated on `rust-lld` + `kernel32.lib` like the other native parity tests.
 #[test]
 pub(crate) fn native_enum_match_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_enum_match_execution_parity_when_");
     for (name, expected) in [
         ("native_enum_option", 49i64),
         ("native_enum_result", 44),
         ("native_enum_user", 206),
     ] {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+        let out = scratch.join(format!("lullaby_{name}_parity.exe"));
 
         let emit = lullaby()
             .args([
@@ -692,9 +703,10 @@ pub(crate) fn native_enum_match_execution_parity_when_linkable() {
 /// `kernel32.lib` like the other native parity tests.
 #[test]
 pub(crate) fn native_overflow_arith_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_overflow_arith_execution_parity_w");
     ensure_msvc_env();
     let fixture = workspace_root().join("tests/fixtures/valid/run_overflow_codegen.lby");
-    let out = std::env::temp_dir().join("lullaby_native_overflow_codegen.exe");
+    let out = scratch.join("lullaby_native_overflow_codegen.exe");
 
     let emit = lullaby()
         .args([
@@ -749,8 +761,9 @@ pub(crate) fn native_overflow_arith_execution_parity_when_linkable() {
 /// module's `main` export returns the interpreter's exact `i64` result.
 #[test]
 pub(crate) fn wasm_overflow_arith_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_overflow_arith_execution_parity_wit");
     let fixture = workspace_root().join("tests/fixtures/valid/run_overflow_codegen.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_overflow_codegen.wasm");
+    let out = scratch.join("lullaby_wasm_overflow_codegen.wasm");
 
     let emit = lullaby()
         .args([
@@ -785,7 +798,7 @@ pub(crate) fn wasm_overflow_arith_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_overflow_runner.js");
+    let runner = scratch.join("lullaby_wasm_overflow_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -821,8 +834,9 @@ pub(crate) fn wasm_overflow_arith_execution_parity_with_node() {
 /// all bit-for-bit with the interpreters.
 #[test]
 pub(crate) fn wasm_math_builtins_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_math_builtins_execution_parity_with");
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_math_builtins.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_math_builtins.wasm");
+    let out = scratch.join("lullaby_wasm_math_builtins.wasm");
 
     let emit = lullaby()
         .args([
@@ -862,7 +876,7 @@ pub(crate) fn wasm_math_builtins_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_math_builtins_runner.js");
+    let runner = scratch.join("lullaby_wasm_math_builtins_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -904,6 +918,7 @@ pub(crate) fn wasm_math_builtins_execution_parity_with_node() {
 /// `kernel32.lib` like the other native parity tests.
 #[test]
 pub(crate) fn native_string_collections_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_string_collections_execution_pari");
     ensure_msvc_env();
     for (name, expected) in [
         ("native_list_string", 31i64),
@@ -911,7 +926,7 @@ pub(crate) fn native_string_collections_execution_parity_when_linkable() {
         ("native_result_string", 52),
     ] {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+        let out = scratch.join(format!("lullaby_{name}_parity.exe"));
 
         let emit = lullaby()
             .args([
@@ -976,10 +991,11 @@ pub(crate) fn native_string_collections_execution_parity_when_linkable() {
 /// link+run actually executes; gated on `rust-lld` + `kernel32.lib`.
 #[test]
 pub(crate) fn native_list_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_list_execution_parity_when_linkab");
     ensure_msvc_env();
     for name in ["native_list_build", "native_list_value_semantics"] {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+        let out = scratch.join(format!("lullaby_{name}_parity.exe"));
 
         let emit = lullaby()
             .args([
@@ -1045,10 +1061,11 @@ pub(crate) fn native_list_execution_parity_when_linkable() {
 /// MSVC's `LIB` when unset; gated on `rust-lld` + `kernel32.lib`.
 #[test]
 pub(crate) fn native_list_struct_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_list_struct_execution_parity_when");
     ensure_msvc_env();
     let name = "native_list_struct";
     let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-    let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+    let out = scratch.join(format!("lullaby_{name}_parity.exe"));
 
     let emit = lullaby()
         .args([
@@ -1112,10 +1129,11 @@ pub(crate) fn native_list_struct_execution_parity_when_linkable() {
 /// unset; gated on `rust-lld` + `kernel32.lib` like the other native parity tests.
 #[test]
 pub(crate) fn native_map_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_map_execution_parity_when_linkabl");
     ensure_msvc_env();
     for name in ["native_map_build", "native_map_value_semantics"] {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_{name}_parity.exe"));
+        let out = scratch.join(format!("lullaby_{name}_parity.exe"));
 
         let emit = lullaby()
             .args([
@@ -1177,8 +1195,9 @@ pub(crate) fn native_map_execution_parity_when_linkable() {
 /// parity tests.
 #[test]
 pub(crate) fn native_control_flow_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_control_flow_execution_parity_whe");
     let fixture = workspace_root().join("tests/fixtures/valid/native_control_flow.lby");
-    let out = std::env::temp_dir().join("lullaby_native_control_flow_parity.exe");
+    let out = scratch.join("lullaby_native_control_flow_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -1237,8 +1256,9 @@ pub(crate) fn native_control_flow_execution_parity_when_linkable() {
 /// native parity tests.
 #[test]
 pub(crate) fn native_strings_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_strings_execution_parity_when_lin");
     let fixture = workspace_root().join("tests/fixtures/valid/native_strings.lby");
-    let out = std::env::temp_dir().join("lullaby_native_strings_parity.exe");
+    let out = scratch.join("lullaby_native_strings_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -1299,8 +1319,9 @@ pub(crate) fn native_strings_execution_parity_when_linkable() {
 /// when unset so the link+run executes.
 #[test]
 pub(crate) fn native_string_ops_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_string_ops_execution_parity_when_");
     let fixture = workspace_root().join("tests/fixtures/valid/native_string_ops.lby");
-    let out = std::env::temp_dir().join("lullaby_native_string_ops_parity.exe");
+    let out = scratch.join("lullaby_native_string_ops_parity.exe");
 
     // Make MSVC's `LIB` available (source vcvars64 if unset) so the link+run runs.
     ensure_msvc_env();
@@ -1376,8 +1397,9 @@ pub(crate) fn native_string_ops_execution_parity_when_linkable() {
 /// result is a fresh temporary reclaimed through `str_read_own`).
 #[test]
 pub(crate) fn native_string_case_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_string_case_execution_parity_when");
     let fixture = workspace_root().join("tests/fixtures/valid/run_string_case.lby");
-    let out = std::env::temp_dir().join("lullaby_native_string_case_parity.exe");
+    let out = scratch.join("lullaby_native_string_case_parity.exe");
     ensure_msvc_env();
 
     let emit = lullaby()
@@ -1422,8 +1444,9 @@ pub(crate) fn native_string_case_execution_parity_when_linkable() {
 /// interpreters' `f64::sqrt`. Also exercises f64 parameters routed through XMM.
 #[test]
 pub(crate) fn native_sqrt_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_sqrt_execution_parity_when_linkab");
     let fixture = workspace_root().join("tests/fixtures/valid/run_sqrt.lby");
-    let out = std::env::temp_dir().join("lullaby_native_sqrt_parity.exe");
+    let out = scratch.join("lullaby_native_sqrt_parity.exe");
     ensure_msvc_env();
 
     let emit = lullaby()
@@ -1471,8 +1494,9 @@ pub(crate) fn native_sqrt_execution_parity_when_linkable() {
 /// through XMM (the `dist` helper).
 #[test]
 pub(crate) fn native_abs_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_abs_execution_parity_when_linkabl");
     let fixture = workspace_root().join("tests/fixtures/valid/run_abs.lby");
-    let out = std::env::temp_dir().join("lullaby_native_abs_parity.exe");
+    let out = scratch.join("lullaby_native_abs_parity.exe");
     ensure_msvc_env();
 
     let emit = lullaby()
@@ -1520,8 +1544,9 @@ pub(crate) fn native_abs_execution_parity_when_linkable() {
 /// `min`/`max`. Exercises i64 parameters across a function boundary too.
 #[test]
 pub(crate) fn native_min_max_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_min_max_execution_parity_when_lin");
     let fixture = workspace_root().join("tests/fixtures/valid/run_minmax.lby");
-    let out = std::env::temp_dir().join("lullaby_native_minmax_parity.exe");
+    let out = scratch.join("lullaby_native_minmax_parity.exe");
     ensure_msvc_env();
 
     let emit = lullaby()
@@ -1569,8 +1594,9 @@ pub(crate) fn native_min_max_execution_parity_when_linkable() {
 /// magnitudes). Exercises i64 parameters across a function boundary too.
 #[test]
 pub(crate) fn native_gcd_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_gcd_execution_parity_when_linkabl");
     let fixture = workspace_root().join("tests/fixtures/valid/run_gcd.lby");
-    let out = std::env::temp_dir().join("lullaby_native_gcd_parity.exe");
+    let out = scratch.join("lullaby_native_gcd_parity.exe");
     ensure_msvc_env();
 
     let emit = lullaby()
@@ -1618,8 +1644,9 @@ pub(crate) fn native_gcd_execution_parity_when_linkable() {
 /// `i64::signum` and the `clamp` branch semantics.
 #[test]
 pub(crate) fn native_sign_clamp_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_sign_clamp_execution_parity_when_");
     let fixture = workspace_root().join("tests/fixtures/valid/run_signclamp.lby");
-    let out = std::env::temp_dir().join("lullaby_native_signclamp_parity.exe");
+    let out = scratch.join("lullaby_native_signclamp_parity.exe");
     ensure_msvc_env();
 
     let emit = lullaby()
@@ -1672,8 +1699,9 @@ pub(crate) fn native_sign_clamp_execution_parity_when_linkable() {
 /// `LIB` (via vcvars64) when unset so the link+run executes.
 #[test]
 pub(crate) fn native_string_build_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_string_build_execution_parity_whe");
     let fixture = workspace_root().join("tests/fixtures/valid/native_string_build.lby");
-    let out = std::env::temp_dir().join("lullaby_native_string_build_parity.exe");
+    let out = scratch.join("lullaby_native_string_build_parity.exe");
 
     // Make MSVC's `LIB` available (source vcvars64 if unset) so the link+run runs.
     ensure_msvc_env();
@@ -1735,8 +1763,9 @@ pub(crate) fn native_string_build_execution_parity_when_linkable() {
 /// Gated on `rust-lld` + `kernel32.lib` like the other native parity tests.
 #[test]
 pub(crate) fn native_floats_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_floats_execution_parity_when_link");
     let fixture = workspace_root().join("tests/fixtures/valid/native_floats.lby");
-    let out = std::env::temp_dir().join("lullaby_native_floats_parity.exe");
+    let out = scratch.join("lullaby_native_floats_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -1790,8 +1819,9 @@ pub(crate) fn native_floats_execution_parity_when_linkable() {
 /// single precision. Gated like the other native parity tests.
 #[test]
 pub(crate) fn native_f32_precision_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_f32_precision_execution_parity_wh");
     let fixture = workspace_root().join("tests/fixtures/valid/run_f32.lby");
-    let out = std::env::temp_dir().join("lullaby_native_f32_parity.exe");
+    let out = scratch.join("lullaby_native_f32_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -1846,8 +1876,9 @@ pub(crate) fn native_f32_precision_execution_parity_when_linkable() {
 /// `main` result (31).
 #[test]
 pub(crate) fn native_struct_string_field_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_struct_string_field_execution_par");
     let fixture = workspace_root().join("tests/fixtures/valid/native_struct_string_field.lby");
-    let out = std::env::temp_dir().join("lullaby_native_struct_string_field.exe");
+    let out = scratch.join("lullaby_native_struct_string_field.exe");
 
     let emit = lullaby()
         .args([
@@ -1911,9 +1942,10 @@ pub(crate) fn native_struct_string_field_execution_parity_when_linkable() {
 /// list). The struct is stack-flattened, so only the string field is heap.
 #[test]
 pub(crate) fn native_struct_string_field_rc_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_struct_string_field_rc_reclaim_ex");
     let fixture =
         workspace_root().join("tests/fixtures/valid/run_rc_struct_string_field_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_struct_string_rc_reclaim.exe");
+    let out = scratch.join("lullaby_native_struct_string_rc_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -1966,9 +1998,10 @@ pub(crate) fn native_struct_string_field_rc_reclaim_execution_parity_when_linkab
 /// This is the arena analogue of the RC reclaim test above.
 #[test]
 pub(crate) fn native_struct_string_field_arena_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_struct_string_field_arena_reclaim");
     let fixture =
         workspace_root().join("tests/fixtures/valid/run_arena_struct_string_field_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_struct_string_arena_reclaim.exe");
+    let out = scratch.join("lullaby_native_struct_string_arena_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -2020,8 +2053,9 @@ pub(crate) fn native_struct_string_field_arena_reclaim_execution_parity_when_lin
 /// interpreter result (mod 256) — value-neutral.
 #[test]
 pub(crate) fn native_generic_heap_string_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_generic_heap_string_execution_par");
     let fixture = workspace_root().join("tests/fixtures/valid/native_generic_heap_string.lby");
-    let out = std::env::temp_dir().join("lullaby_native_generic_heap_string.exe");
+    let out = scratch.join("lullaby_native_generic_heap_string.exe");
 
     let emit = lullaby()
         .args([
@@ -2083,9 +2117,10 @@ pub(crate) fn native_generic_heap_string_execution_parity_when_linkable() {
 /// (a leak exhausts the heap; a double-free corrupts the free list).
 #[test]
 pub(crate) fn native_generic_heap_string_rc_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_generic_heap_string_rc_reclaim_ex");
     let fixture =
         workspace_root().join("tests/fixtures/valid/run_rc_generic_heap_string_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_generic_heap_string_rc_reclaim.exe");
+    let out = scratch.join("lullaby_native_generic_heap_string_rc_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -2139,9 +2174,10 @@ pub(crate) fn native_generic_heap_string_rc_reclaim_execution_parity_when_linkab
 /// double-free. The arena analogue of the RC reclaim test above.
 #[test]
 pub(crate) fn native_generic_heap_string_arena_reclaim_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_generic_heap_string_arena_reclaim");
     let fixture =
         workspace_root().join("tests/fixtures/valid/run_arena_generic_heap_string_reclaim.lby");
-    let out = std::env::temp_dir().join("lullaby_native_generic_heap_string_arena_reclaim.exe");
+    let out = scratch.join("lullaby_native_generic_heap_string_arena_reclaim.exe");
 
     let emit = lullaby()
         .args([
@@ -2194,8 +2230,9 @@ pub(crate) fn native_generic_heap_string_arena_reclaim_execution_parity_when_lin
 /// exit code equals the interpreter result.
 #[test]
 pub(crate) fn native_string_utf8_foreach_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_string_utf8_foreach_parity_when_l");
     let fixture = workspace_root().join("tests/fixtures/valid/native_string_utf8_foreach.lby");
-    let out = std::env::temp_dir().join("lullaby_native_string_utf8_foreach_parity.exe");
+    let out = scratch.join("lullaby_native_string_utf8_foreach_parity.exe");
 
     ensure_msvc_env();
 
@@ -2277,9 +2314,10 @@ pub(crate) fn native_string_utf8_foreach_parity_when_linkable() {
 /// `Box<i64>` the interpreters run. Gated on `rust-lld` + `kernel32.lib`.
 #[test]
 pub(crate) fn native_generic_scalar_execution_parity_when_linkable() {
+    let scratch = ScratchDir::new("native_generic_scalar_execution_parity_w");
     ensure_msvc_env();
     let fixture = workspace_root().join("tests/fixtures/valid/native_generic_scalar.lby");
-    let out = std::env::temp_dir().join("lullaby_native_generic_scalar_parity.exe");
+    let out = scratch.join("lullaby_native_generic_scalar_parity.exe");
 
     let emit = lullaby()
         .args([
@@ -2384,6 +2422,7 @@ pub(crate) fn native_generic_scalar_execution_parity_when_linkable() {
 ///   instead of `48`) makes exactly these four fail.
 #[test]
 pub(crate) fn native_closures_direct_pe_run_parity() {
+    let scratch = ScratchDir::new("native_closures_direct_pe_run_parity");
     let fixtures = [
         "native_closure_scalar",
         "native_closure_multi_capture",
@@ -2401,7 +2440,7 @@ pub(crate) fn native_closures_direct_pe_run_parity() {
     ];
     for name in fixtures {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_{name}.exe"));
+        let out = scratch.join(format!("lullaby_{name}.exe"));
         let obj = out.with_extension("obj");
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(&obj);

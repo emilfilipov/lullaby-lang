@@ -111,8 +111,9 @@ pub(crate) fn pop_empty_list_aborts_l0413_on_all_backends() {
 /// rather than exiting 0 or access-violating. On a non-Windows host the run is
 /// skipped (the exe is a Windows PE).
 fn assert_native_list_op_traps(fixture: &str, tag: &str) {
+    let scratch = ScratchDir::new("assert_native_list_op_traps");
     let src = workspace_root().join(fixture);
-    let out = std::env::temp_dir().join(format!("lullaby_native_{tag}.exe"));
+    let out = scratch.join(format!("lullaby_native_{tag}.exe"));
     let _ = std::fs::remove_file(&out);
 
     let emit = lullaby()
@@ -193,7 +194,9 @@ pub(crate) fn abort_is_not_catchable_by_try_catch_on_all_backends() {
         "    catch message\n",
         "        999\n",
     );
-    let (dir, base) = fs_temp_dir("a5_uncatchable");
+    // `_dir` is the scratch guard: unused by name, but it must stay bound for the
+    // whole test — dropping it early would delete the directory `base` names.
+    let (_dir, base) = fs_temp_dir("a5_uncatchable");
     let path = format!("{base}/uncatchable.lby");
     std::fs::write(&path, source).expect("write temp source");
     for backend in BACKENDS {
@@ -217,7 +220,6 @@ pub(crate) fn abort_is_not_catchable_by_try_catch_on_all_backends() {
             "[{backend}] the catch handler ran on a safety abort — it must not. stdout: {stdout}"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An UNCAUGHT `throw` aborts with `L0420` on every backend — the boundary of the

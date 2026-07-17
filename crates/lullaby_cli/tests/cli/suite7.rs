@@ -63,13 +63,14 @@ pub(crate) fn const_mixed_scalar_kinds_identical_on_all_backends() {
 /// toolchain being reachable; skipped gracefully otherwise.
 #[test]
 pub(crate) fn const_scalars_native_matches_interpreter() {
+    let scratch = ScratchDir::new("const_scalars_native_matches_interpreter");
     ensure_msvc_env();
     if !kernel32_available() {
         eprintln!("kernel32.lib not reachable; skipping const native link+run");
         return;
     }
     let fixture = workspace_root().join("tests/fixtures/valid/const/scalars.lby");
-    let exe = std::env::temp_dir().join("lullaby_const_scalars.exe");
+    let exe = scratch.join("lullaby_const_scalars.exe");
     let output = lullaby()
         .args([
             "native",

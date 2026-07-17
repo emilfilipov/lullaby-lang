@@ -67,8 +67,9 @@ pub(crate) fn generic_methods_run_identically_on_all_backends() {
 /// direct-PE path runs it with no linker.
 #[test]
 pub(crate) fn generic_methods_compile_native() {
+    let scratch = ScratchDir::new("generic_methods_compile_native");
     let fixture = workspace_root().join("tests/fixtures/valid/generics/methods.lby");
-    let out = std::env::temp_dir().join("lullaby_generic_methods.exe");
+    let out = scratch.join("lullaby_generic_methods.exe");
     let _ = std::fs::remove_file(&out);
     let output = lullaby()
         .args([

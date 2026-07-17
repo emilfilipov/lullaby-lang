@@ -42,7 +42,7 @@ fn native_exit_for(source: &str, tag: &str) -> Option<i32> {
         eprintln!("not a Windows host; skipping {tag}");
         return None;
     }
-    let dir = std::env::temp_dir();
+    let dir = ScratchDir::new("native_exit_for");
     let src = dir.join(format!("{tag}.lby"));
     let exe = dir.join(format!("{tag}.exe"));
     std::fs::write(&src, source).expect("write source");
@@ -329,6 +329,7 @@ fn native_void_call_in_a_loop_runs() {
 /// and one that does not (1234 -> 210), so a fix that merely truncated would fail.
 #[test]
 fn native_void_main_exits_zero_like_the_interpreters() {
+    let scratch = ScratchDir::new("native_void_main_exits_zero_like_the_int");
     for (leak, tag) in [(77, "77"), (1234, "1234")] {
         let source = format!(
             "fn f -> i64\n    {leak}\n\nfn main -> void\n    let x i64 = f()\n    return\n"
@@ -336,7 +337,7 @@ fn native_void_main_exits_zero_like_the_interpreters() {
         // The interpreters are the oracle: a void `main` produces no exit code, so
         // the process exits 0.
         for backend in ["ast", "ir", "bytecode"] {
-            let path = std::env::temp_dir().join(format!("lullaby_void_main_{tag}_{backend}.lby"));
+            let path = scratch.join(format!("lullaby_void_main_{tag}_{backend}.lby"));
             std::fs::write(&path, &source).expect("write source");
             let output = lullaby()
                 .args([
@@ -405,6 +406,7 @@ fn native_void_main_exits_zero_on_every_return_path() {
 /// a bare `return`, and a void function calling another void function.
 #[test]
 fn native_void_effects_fixture_matches_the_interpreters() {
+    let scratch = ScratchDir::new("native_void_effects_fixture_matches_the_");
     let path = workspace_root().join("tests/fixtures/valid/native_void_effects.lby");
     let fixture = path.to_str().expect("fixture path");
 
@@ -429,7 +431,7 @@ fn native_void_effects_fixture_matches_the_interpreters() {
         eprintln!("not a Windows host; skipping the native leg");
         return;
     }
-    let exe = std::env::temp_dir().join("lullaby_void_effects_fixture.exe");
+    let exe = scratch.join("lullaby_void_effects_fixture.exe");
     let _ = std::fs::remove_file(&exe);
     // `--verbose` is what prints the per-function `compiled`/`skipped` notes.
     let emit = lullaby()
