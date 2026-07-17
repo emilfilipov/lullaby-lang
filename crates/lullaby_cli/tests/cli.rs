@@ -1435,6 +1435,9 @@ mod suite19;
 #[path = "cli/suite20.rs"]
 mod suite20;
 
+#[path = "cli/suite21.rs"]
+mod suite21;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

@@ -548,6 +548,16 @@ struct Mixed
     conversion, no address change. `U` comes from the surrounding annotation
     (`let bp ptr<byte> = ptr_cast(base)`), defaulting to `ptr<i64>`, exactly as
     `int_to_ptr` resolves its pointee.
+    **`ptr_cast` preserves the pointer model.** The two pointer models — the legacy
+    `ptr_T` heap box that only `alloc` produces and the modern `ptr<T>` address — are
+    not convertible, and `ptr_cast` is no exception: the result's model comes from the
+    *operand*, only its pointee is retargetable. A `ptr_T` operand casts to exactly
+    `ptr_T` (a box is one opaque cell, so there is nothing to reinterpret — the cast is
+    an identity), and a `ptr<T>` operand only accepts a modern `ptr<U>` annotation.
+    Annotating across the models is `L0303` at the binding, the same wall `let` and
+    parameter passing already enforce. Without this, `let q ptr<i64> = ptr_cast(alloc(8))`
+    laundered a box into an address and `ptr_offset` over it then type-checked, striding
+    off the one-cell payload into the allocator's block header.
   All three are `unsafe`-gated (`L0330` outside `unsafe`) and available in both tiers
   and in a `no-runtime` module (they are kernel core, not gate-rejected). On the
   interpreters `addr_of` snapshots the place into a byte-addressed region so
