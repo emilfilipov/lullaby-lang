@@ -351,9 +351,11 @@ fn native_alloc_is_not_reclaimed_by_an_arena_rewind() {
 /// diverges from the interpreters, which invalidate the cell and DETECT a later use
 /// or a double free (`L0406`): `rc_free` would make a use-after-free read free-list
 /// memory silently and a double free alias two live allocations; a no-op would make
-/// a use-after-free succeed. The `L0350` static check does not close the gap — it is
-/// name-based and does not survive aliasing (`let q = p  dealloc(p)  ptr_read(q)`
-/// compiles and reaches the backend).
+/// a use-after-free succeed. The `L0350` static check does not close the gap: it now
+/// rejects a DIRECT copy (`let q = p  dealloc(p)  ptr_read(q)`, suite21), but it is
+/// copy tracking rather than alias analysis, so an alias through a call or an
+/// aggregate still compiles and reaches the backend — and one untracked alias is all
+/// `rc_free` needs to turn a detected `L0406` into silent corruption.
 #[test]
 fn native_dealloc_skips_gracefully() {
     assert_native_skips_because(

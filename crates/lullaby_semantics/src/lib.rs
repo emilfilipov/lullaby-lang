@@ -12,6 +12,7 @@ mod semantics_aliases;
 mod semantics_arena;
 mod semantics_consts;
 mod semantics_generics;
+mod semantics_lifetime_alias;
 mod semantics_no_runtime;
 mod semantics_port_io;
 mod semantics_raw_ptr;
@@ -25,6 +26,9 @@ pub use semantics_generics::{
     unify_param,
 };
 pub(crate) use semantics_generics::{decompose_generic, substitute_self, type_contains_var};
+pub(crate) use semantics_lifetime_alias::{
+    FreedTracker, double_free_message, use_after_free_message,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticDiagnostic {
@@ -2634,7 +2638,10 @@ impl<'a> Checker<'a> {
     /// - A borrowed `ref<T>` may not be returned from a function, because the
     ///   borrow cannot outlive the owner it points into (`L0351`).
     /// - Straight-line use-after-free / double-free of a resource freed by
-    ///   `dealloc`/`rc_release` is reported (`L0350`). The per-block cleanup
+    ///   `dealloc`/`rc_release` is reported (`L0350`), **including through a direct
+    ///   copy** (`let q = p; dealloc(p); ptr_read(q)`) — see
+    ///   `semantics_lifetime_alias.rs`, which also states precisely which aliasing
+    ///   shapes remain runtime-detected rather than static. The per-block cleanup
     ///   ordering itself is the deterministic plan produced by
     ///   `lullaby_ir::frame_layout`.
     fn check_lifetimes(&mut self, function: &Function) {
@@ -2649,34 +2656,34 @@ impl<'a> Checker<'a> {
                 function.span,
             ));
         }
-        let mut freed: HashSet<String> = HashSet::new();
+        let mut freed = FreedTracker::new();
         self.walk_lifetimes(&function.body, &mut freed, function);
     }
 
-    fn walk_lifetimes(&mut self, body: &[Stmt], freed: &mut HashSet<String>, function: &Function) {
+    fn walk_lifetimes(&mut self, body: &[Stmt], freed: &mut FreedTracker, function: &Function) {
         for statement in body {
             match statement {
                 Stmt::Let { name, value, .. } => {
                     self.check_freed_uses(value, freed, function);
-                    // Re-binding revives a name.
-                    freed.remove(name);
+                    // Re-binding revives a name; a direct copy aliases its source.
+                    freed.record_binding(name, value);
                 }
                 Stmt::Assign { name, value, .. } => {
                     self.check_freed_uses(value, freed, function);
-                    freed.remove(name);
+                    freed.record_binding(name, value);
                 }
                 Stmt::Return(Some(expr)) | Stmt::Expr(expr) => {
                     if let Some(target) = free_call_target(expr) {
-                        // The freeing call may double-free an already-dead resource.
-                        if freed.contains(target) {
+                        // The freeing call may double-free an already-dead resource —
+                        // directly, or through a binding it was copied from.
+                        if let Some(origin) = freed.record_free(target) {
                             self.diagnostics.push(SemanticDiagnostic::at(
                                 "L0350",
-                                format!("`{target}` is used after it was already freed"),
+                                double_free_message(target, &origin),
                                 Some(function.name.clone()),
                                 expr.span,
                             ));
                         }
-                        freed.insert(target.to_string());
                     } else {
                         self.check_freed_uses(expr, freed, function);
                     }
@@ -2737,14 +2744,15 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Flag any use of a freed binding inside an expression.
-    fn check_freed_uses(&mut self, expr: &Expr, freed: &HashSet<String>, function: &Function) {
+    /// Flag any use of a freed binding inside an expression — including a binding
+    /// that only aliases the one the free was written on.
+    fn check_freed_uses(&mut self, expr: &Expr, freed: &FreedTracker, function: &Function) {
         match &expr.kind {
             ExprKind::Variable(name) => {
-                if freed.contains(name) {
+                if let Some(origin) = freed.freed_origin(name) {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0350",
-                        format!("`{name}` is used after it was freed"),
+                        use_after_free_message(name, origin),
                         Some(function.name.clone()),
                         expr.span,
                     ));

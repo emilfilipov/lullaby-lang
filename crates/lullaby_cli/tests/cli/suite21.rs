@@ -163,3 +163,184 @@ fn ptr_cast_of_an_alloc_box_is_an_identity_that_stays_a_box() {
         42,
     );
 }
+
+/// Run `lullaby check` on `source` and return `(exit code, stdout+stderr)`. The
+/// `L0350` lifetime check is a frontend check, so `check` is the whole surface.
+fn check_source(source: &str, tag: &str) -> (i32, String) {
+    let dir = std::env::temp_dir();
+    let src = dir.join(format!("{tag}.lby"));
+    std::fs::write(&src, source).expect("write source");
+    let out = lullaby()
+        .args(["check", src.to_str().expect("src path")])
+        .output()
+        .expect("run check");
+    (
+        out.status.code().expect("exit code"),
+        format!("{}{}", stdout(&out), stderr(&out)),
+    )
+}
+
+fn assert_check_rejects(source: &str, tag: &str, code: &str) {
+    let (exit, output) = check_source(source, tag);
+    assert_ne!(exit, 0, "must be REJECTED for {tag}:\n{source}\n{output}");
+    assert!(
+        output.contains(code),
+        "must be rejected with {code} for {tag}:\n{source}\n{output}"
+    );
+}
+
+fn assert_check_accepts(source: &str, tag: &str) {
+    let (exit, output) = check_source(source, tag);
+    assert_eq!(exit, 0, "must be ACCEPTED for {tag}:\n{source}\n{output}");
+}
+
+/// THE `L0350` alias repro: a copy of a box escaped the freed-name tracking
+/// entirely, so this type-checked and reached the backend, failing only at RUN time
+/// (`L0406`). That hole is why native `dealloc` skips instead of lowering to
+/// `rc_free` — under `rc_free` this would silently read free-list memory.
+#[test]
+fn use_after_free_through_a_direct_alias_is_rejected() {
+    assert_check_rejects(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let p = alloc(8)\n",
+            "        let q = p\n",
+            "        dealloc(p)\n",
+            "        ptr_read(q)\n",
+        ),
+        "lullaby_l0350_alias_uaf",
+        "L0350",
+    );
+}
+
+/// Aliasing is transitive AND symmetric over copies: `p`/`q`/`r` denote one box, so
+/// freeing `r` — the last copy — kills the ORIGINAL `p`. This is the direction a
+/// naive "dest aliases source" rule gets wrong.
+#[test]
+fn use_after_free_through_a_transitive_alias_is_rejected() {
+    assert_check_rejects(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let p = alloc(8)\n",
+            "        let q = p\n",
+            "        let r = q\n",
+            "        dealloc(r)\n",
+            "        ptr_read(p)\n",
+        ),
+        "lullaby_l0350_alias_transitive",
+        "L0350",
+    );
+}
+
+/// A double free through an alias. Under a native `rc_free` this would push one
+/// block onto the free list twice, making it cyclic.
+#[test]
+fn double_free_through_a_direct_alias_is_rejected() {
+    assert_check_rejects(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let p = alloc(8)\n",
+            "        let q = p\n",
+            "        dealloc(p)\n",
+            "        dealloc(q)\n",
+            "        0\n",
+        ),
+        "lullaby_l0350_alias_double_free",
+        "L0350",
+    );
+}
+
+/// FALSE-POSITIVE CONTROL: re-binding an alias detaches it from the group and
+/// revives it. `q` gets a fresh box after `p` is freed, so reading it is fine. If
+/// this fails, the alias tracking is too eager and breaks working programs.
+#[test]
+fn rebinding_an_alias_after_a_free_is_accepted() {
+    assert_check_accepts(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let p = alloc(8)\n",
+            "        let q = p\n",
+            "        dealloc(p)\n",
+            "        q = alloc(5)\n",
+            "        ptr_read(q)\n",
+        ),
+        "lullaby_l0350_alias_rebound",
+    );
+}
+
+/// FALSE-POSITIVE CONTROL: two independent boxes are not aliases. Freeing one must
+/// not implicate the other — a whole-type-based or too-coarse rule would fail here.
+#[test]
+fn freeing_one_box_does_not_implicate_an_independent_box() {
+    assert_check_accepts(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let a = alloc(10)\n",
+            "        let b = alloc(20)\n",
+            "        dealloc(a)\n",
+            "        ptr_read(b)\n",
+        ),
+        "lullaby_l0350_independent_boxes",
+    );
+}
+
+/// FALSE-POSITIVE CONTROL: using an alias BEFORE the free is legal, and must stay
+/// legal — the check is straight-line and order-sensitive, not name-based.
+#[test]
+fn using_an_alias_before_the_free_is_accepted() {
+    assert_check_accepts(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let p = alloc(8)\n",
+            "        let q = p\n",
+            "        let v = ptr_read(q)\n",
+            "        dealloc(p)\n",
+            "        v\n",
+        ),
+        "lullaby_l0350_alias_use_before_free",
+    );
+}
+
+/// HONESTY PIN — this documents a hole that is still OPEN, not a fix.
+///
+/// An alias laundered through a **call** is not tracked: `identity(p)` returns the
+/// same box, but the checker sees an opaque call, so this compiles and dies at RUN
+/// time with `L0406`. Closing it needs interprocedural alias analysis, which is out
+/// of scope. If a later change closes it, this test will start failing — that is the
+/// intent: it must be rewritten, not deleted, so the frontier stays documented.
+#[test]
+fn alias_through_a_call_is_not_tracked_and_still_fails_only_at_runtime() {
+    let source = concat!(
+        "fn identity p ptr_i64 -> ptr_i64\n",
+        "    p\n",
+        "\n",
+        "fn main -> i64\n",
+        "    unsafe\n",
+        "        let p = alloc(8)\n",
+        "        let q = identity(p)\n",
+        "        dealloc(p)\n",
+        "        ptr_read(q)\n",
+    );
+    let (exit, output) = check_source(source, "lullaby_l0350_alias_via_call");
+    assert_eq!(
+        exit, 0,
+        "an alias through a call is NOT statically tracked today; if this now fails, \
+         interprocedural aliasing was closed and this pin needs rewriting:\n{output}"
+    );
+    // It is still caught, but only at run time, by the interpreters.
+    let (run_exit, run_output) = run_backend(source, "ast", "lullaby_l0350_alias_via_call_run");
+    assert_ne!(
+        run_exit, 0,
+        "the runtime must still catch it:\n{run_output}"
+    );
+    assert!(
+        run_output.contains("L0406"),
+        "the runtime diagnostic should be L0406:\n{run_output}"
+    );
+}
