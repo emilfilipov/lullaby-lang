@@ -37,11 +37,22 @@
 //!    `arena_alloc(work, n)` — which is also what a kernel actually writes.
 //!
 //! The bump unit is the **8-byte cell**, not the byte, and the buffer is
-//! `array<i64>` rather than §5's `array<byte>`. That is forced by the delivered
-//! native value model: every Lullaby scalar is a *normalized 8-byte cell* (an `i32`
-//! local occupies a full sign-extended word), which is exactly why native `addr_of`
-//! lowers for 8-byte scalars only. A byte-granular arena over `array<byte>` would
-//! need a packed-byte representation that no tier has.
+//! `array<i64>` rather than §5's `array<byte>`. The forcing fact is narrow and
+//! specific: **`arena_alloc`'s pointee is 8 bytes**. A cell is handed out as a
+//! `ptr<T>` whose reads and writes go through the raw-pointer surface at `T`'s
+//! C-natural width, so the backing element must be exactly that 8-byte cell for the
+//! bump index and the load/store width to agree. A byte-granular arena over
+//! `array<byte>` would hand out cells the bump cursor and the accessor disagree
+//! about.
+//!
+//! Note what this reason is **not**. It is tempting to say "because every Lullaby
+//! scalar is a normalized 8-byte cell, which is why `addr_of` lowers for 8-byte
+//! scalars only" — but that is no longer true as stated. Narrow array *elements* are
+//! packed to their C width and `addr_of(a[0])` lowers over them
+//! (`native_object_place.rs`); it is narrow **scalars** whose frame word is still a
+//! normalized 8-byte cell. So the scalar normalization is a real fact about locals,
+//! but it is not what forces the arena's cell unit — `arena_alloc`'s own pointee
+//! width is.
 //!
 //! # Diagnostics
 //!
@@ -60,8 +71,8 @@
 use super::*;
 
 /// The element type a static-buffer arena's backing buffer must have. See the
-/// module docs: the native value model normalizes every scalar to an 8-byte cell,
-/// so the arena's bump unit is the cell and the buffer is a cell array.
+/// module docs: `arena_alloc` hands out an 8-byte cell, so the bump unit is the cell
+/// and the buffer must be a cell array for the cursor and the accessor to agree.
 pub(crate) const ARENA_BUFFER_TYPE: &str = "array<i64>";
 
 /// The `arena_alloc` builtin name.
@@ -101,7 +112,9 @@ impl Checker<'_> {
                 format!(
                     "region `{}` is backed by `{backing}`, which is `{}`, but a static-buffer \
                      arena must be backed by a fixed `{ARENA_BUFFER_TYPE}`: the arena bumps in \
-                     8-byte cells because every Lullaby scalar is a normalized 8-byte cell",
+                     8-byte cells because `arena_alloc`'s pointee is an 8-byte cell, so the \
+                     backing element must be that same cell for the bump index and the \
+                     pointer's load/store width to agree",
                     decl.name, buffer_ty.name
                 ),
                 Some(function.name.clone()),
@@ -156,9 +169,16 @@ impl Checker<'_> {
     /// `region ... in ...` declaration in scope (`L0446` otherwise), exactly as a
     /// `region` name is a compile-time entity everywhere else in the language.
     /// `count` is an `i64` cell count. The pointee `T` comes from the caller's
-    /// expected annotation when it is a raw pointer, defaulting to `ptr<i64>` —
-    /// mirroring the delivered `int_to_ptr` / `ptr_cast` context rule, since the
+    /// expected annotation when it is a **modern** `ptr<T>`, defaulting to
+    /// `ptr<i64>` — mirroring the delivered `int_to_ptr` context rule, since the
     /// raw-pointer builtins take no turbofish.
+    ///
+    /// The annotation supplies the **pointee only, never the pointer model**: an
+    /// arena cell is a real address in a caller-owned static buffer, so a legacy
+    /// `ptr_T` annotation (which asserts `alloc`-box provenance) cannot capture the
+    /// result. It yields `ptr<T>` and the `let` then collides at `L0303`. See
+    /// `semantics_raw_ptr::annotated_address_type` for why this builtin is
+    /// annotation-governed rather than operand-governed like `ptr_cast`.
     ///
     /// `unsafe`-gated with `L0330` like every other raw-pointer producer: the
     /// result is an unchecked `ptr<T>` into caller memory.
@@ -189,11 +209,6 @@ impl Checker<'_> {
         let _ = region;
         self.expect_arg_type(ARENA_ALLOC_BUILTIN, 2, &args[1], "i64", scope, function);
         self.require_unsafe(ARENA_ALLOC_BUILTIN, call_span, function)?;
-        Some(
-            expected
-                .filter(|ty| ty.is_raw_pointer())
-                .cloned()
-                .unwrap_or_else(|| TypeRef::new("ptr<i64>")),
-        )
+        Some(crate::semantics_raw_ptr::annotated_address_type(expected))
     }
 }

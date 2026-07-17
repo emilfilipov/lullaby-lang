@@ -143,8 +143,62 @@ impl Checker<'_> {
     ///   defaulting to `ptr<i64>`. A legacy `ptr_U` annotation no longer captures it.
     ///
     /// The native backend keeps its own `refuse_legacy_box_pointer` gate on the
-    /// operand as defense in depth; this check is what makes that spelling test sound
-    /// as a whole-program property rather than a patch applied from the backend.
+    /// operand as defense in depth.
+    ///
+    /// # What is, and is not, a whole-program property
+    ///
+    /// This check was originally documented as making the backend's spelling test
+    /// "sound as a whole-program property". **That over-claimed, and it still would.**
+    /// `ptr_cast` was not the only annotation-governed pointer producer: `int_to_ptr`
+    /// and `arena_alloc` carried the identical
+    /// `expected.filter(|ty| ty.is_raw_pointer())` pattern. `arena_alloc` was a real
+    /// third door and is now closed ([`annotated_address_type`]). `int_to_ptr` is
+    /// **deliberately left open**, so the strong property is false and cannot be
+    /// recovered. What actually holds:
+    ///
+    /// > **Every builtin whose pointer model is derivable now derives it.** `alloc` is
+    /// > the only producer of the legacy spelling; `ptr_cast` takes its model from the
+    /// > operand; `ptr_offset` preserves its operand's type; `addr_of` derives `ptr<T>`
+    /// > from the place; `arena_alloc` yields only `ptr<T>`. `let`/parameter binding
+    /// > (`L0303`/`L0313`) keeps the two spellings from meeting anywhere else.
+    ///
+    /// > **`int_to_ptr` is the sole remaining exception, and it is irreducible.** Its
+    /// > operand is an `i64`, and **an integer carries no provenance** — so neither
+    /// > model is derivable from it, by construction rather than by omission. On the
+    /// > interpreters an integer genuinely may be either (a heap-slot handle below
+    /// > `RAW_POINTER_BASE`, a byte address above it), and both round trips are
+    /// > delivered and fixture-pinned: `run_ptr_cast.lby` reconstructs a real box from
+    /// > `ptr_to_int(box)` as `ptr_i64`, and `freestanding_mmio_vga.lby` names
+    /// > `0xB8000` as `ptr<i64>`. Its annotation is therefore an **`unsafe`
+    /// > assertion**, not an inference — and a false one (`let fake ptr_i64 =
+    /// > int_to_ptr(ptr_to_int(addr_of(buf[0])))`) still compiles.
+    ///
+    /// Three ways to close it were designed and attacked; all three failed:
+    ///
+    /// * **Track provenance into the `i64`.** Defeated by arithmetic, arrays, and
+    ///   function boundaries — the integer is an ordinary value.
+    /// * **Split the builtin** (`int_to_ptr` for addresses, `int_to_box` for handles).
+    ///   Disproven empirically: `int_to_ptr(753664)` — a *pure constant* — already
+    ///   yields a `ptr_i64` under a legacy annotation, so `int_to_box` would launder
+    ///   identically. Renaming relocates the assertion; it does not remove it.
+    /// * **Refuse the `addr_of`-derived shape.** `run_ptr_cast.lby` launders through a
+    ///   temp var, which is indistinguishable from the legitimate round trip.
+    ///
+    /// Only removing `ptr_to_int(box)` from the language closes it, and that is an
+    /// owner-level surface decision, not a checker fix.
+    ///
+    /// So the spelling test is **not** sound whole-program, and this doc makes no
+    /// claim that anything downstream compensates for that. In particular, do **not**
+    /// read the backend's `refuse_legacy_box_pointer` gate as containment: it is a
+    /// prefix test on the *outer* type name, so it does not see a box model nested in a
+    /// pointee (`ptr<ptr_i64>`), and the model mismatch is reachable in shapes whose
+    /// operand is never spelled `ptr_T` at all. The gate guards the cases it names and
+    /// nothing more.
+    ///
+    /// What is **not** implied either way: this is a spelling property, not provenance
+    /// analysis. It says a `ptr_T` came from `alloc`; it says nothing about *which*
+    /// box, whether it is live, or whether two `ptr_T`s alias. Lifetime is `L0350`'s
+    /// job, and its limits are documented in `semantics_lifetime_alias.rs`.
     pub(crate) fn check_ptr_cast(
         &mut self,
         args: &[Expr],
@@ -182,6 +236,71 @@ fn is_legacy_box_spelling(ty: &TypeRef) -> bool {
 
 /// Whether `ty` is the modern `ptr<T>` raw-pointer spelling (an address), excluding
 /// the legacy `ptr_T` box spelling that `TypeRef::is_raw_pointer` also admits.
-fn is_modern_raw_pointer(ty: &TypeRef) -> bool {
+///
+/// This is the predicate an annotation-driven pointer producer must filter its
+/// expected type through **when the builtin's own model is fixed**.
+/// `TypeRef::is_raw_pointer` admits both spellings, so using it to capture a caller's
+/// annotation lets that annotation *choose the pointer model*. That is a bug for a
+/// producer whose model is known (`arena_alloc`), and correct-by-design for the one
+/// producer whose model genuinely is not (`int_to_ptr`). See
+/// [`annotated_address_type`].
+pub(crate) fn is_modern_raw_pointer(ty: &TypeRef) -> bool {
     ty.generic_arg("ptr").is_some()
+}
+
+/// The result type of a builtin that **mints a fresh machine address** whose model is
+/// therefore known, and takes only its *pointee* from the caller's annotation. Today
+/// that is `arena_alloc`.
+///
+/// # Why `arena_alloc` is annotation-governed, but only over the pointee
+///
+/// `check_ptr_cast` takes its result *model* from the operand, because its operand is
+/// a pointer and so carries a model to preserve. `arena_alloc(region, count)` has no
+/// such operand — a region name is a compile-time entity, not a value — so the
+/// annotation must supply the pointee. But the **model** is fixed by what the builtin
+/// *is*: an arena cell is a real address bumped out of a caller-owned `array<i64>`,
+/// the host allocator is never involved, and **only `alloc` produces a box**. So the
+/// result is always the modern `ptr<T>` spelling.
+///
+/// # The laundering this closes
+///
+/// `arena_alloc` used to filter the annotation through `TypeRef::is_raw_pointer`,
+/// which admits the legacy `ptr_T` box spelling too, so the annotation could mint a
+/// lie:
+///
+/// ```text
+/// let fake ptr_i64 = arena_alloc(pool, 1)
+/// ```
+///
+/// — a value spelled "I am an `alloc` box" over an arena cell, falsifying the
+/// invariant `native_object_rawptr.rs`'s `is_legacy_box_pointer` spelling test rests
+/// on. Filtering through [`is_modern_raw_pointer`] means a legacy annotation no longer
+/// captures the result; the builtin yields its natural `ptr<T>` and the `let` then
+/// collides at the existing `L0303` wall, exactly as the `ptr_cast` fix does.
+///
+/// Refusing the legacy spelling here costs nothing real: there was never a legitimate
+/// meaning for it. A `ptr_T` from `arena_alloc` was *always* a false claim.
+///
+/// # Why `int_to_ptr` is NOT routed through here
+///
+/// `int_to_ptr` looks like the same pattern and is deliberately left alone. Its
+/// operand is an `i64`, and on the interpreters an integer may be *either* model — a
+/// heap-slot handle below `RAW_POINTER_BASE`, or a byte address above it. Both round
+/// trips are delivered and fixture-pinned:
+///
+/// ```text
+/// let back ptr_i64  = int_to_ptr(ptr_to_int(box))  # run_ptr_cast.lby — TRUTHFUL
+/// let base ptr<i64> = int_to_ptr(753664)           # freestanding_mmio_vga.lby
+/// ```
+///
+/// So `int_to_ptr` has **no derivable model** — an `i64` carries no provenance, and
+/// restricting it to `ptr<T>` breaks the first fixture, which rebuilds a genuine box.
+/// Its annotation is an `unsafe` assertion, not a hole. See `check_ptr_cast`'s
+/// "What is, and is not, a whole-program property" for the closure designs that were
+/// attacked and why each failed.
+pub(crate) fn annotated_address_type(expected: Option<&TypeRef>) -> TypeRef {
+    expected
+        .filter(|ty| is_modern_raw_pointer(ty))
+        .cloned()
+        .unwrap_or_else(|| TypeRef::new("ptr<i64>"))
 }
