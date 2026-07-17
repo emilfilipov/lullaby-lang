@@ -64,9 +64,24 @@ User-defined generic types (`struct Stack<T>`, `enum Opt<T>`) do not parse today
   (interpreters, native, WASM) sees a `const`; a folded constant in an all-`i64`
   function stays native-eligible. See `semantics_consts.rs`,
   `lullaby_type_system.md`, and `tests/fixtures/valid/const/`.
-- **Next (remaining A2):** const-sized arrays (`array<T, N>` where `N` is a
-  constant) — needs type-system work; the clean follow-up. Full const-fn
-  evaluation stays post-1.0.
+- **Const-sized arrays: SHIPPED (frontend + all tiers via erasure).** `array<T, N>`
+  where `N` folds to a positive constant (a literal or a named `const`), plus a
+  `[value; count]` fill literal. A dedicated pass (`semantics_array_extent.rs`)
+  runs after const-folding: it validates every extent and construction count, then
+  **erases** `array<T, N>`→`array<T>` and **expands** each fill to an ordinary array
+  literal, so the checker and every backend see only `array<T>` — a fixed-extent
+  program therefore compiles/runs exactly where the same-length `array<T>` already
+  does, with no new codegen and no miscompile surface (native-eligible shapes
+  native-compile; the rest skip cleanly with `L0339`, identically to plain arrays).
+  New diagnostics `L0463` (non-const extent/count), `L0464` (zero/negative),
+  `L0465` (construction count ≠ extent). The `[value; count]` form uses a lexer
+  bracket-depth rule (`;` is a symbol only inside `[]`; statement-level `;` stays
+  `L0103`), reviewed immune to the in-string bracket-counter bug. The genuinely-new
+  **inline, no-heap, by-value native storage** for fixed-extent arrays is the
+  queued follow-up increment (a representation change, not a new miscompile
+  surface). See `semantics_array_extent.rs`, `lullaby_type_system.md`, `suite23`.
+- **Next (remaining A2):** native inline storage for fixed-extent arrays; then WASM.
+  Full const-fn evaluation stays post-1.0.
 
 ### A3. FFI completeness — **DECIDED: callbacks in 1.0**
 Base FFI ships; deferred today (L0424): callbacks (fn pointers), struct-by-value,
