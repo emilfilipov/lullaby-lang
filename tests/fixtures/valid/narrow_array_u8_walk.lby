@@ -1,0 +1,18 @@
+# A BYTE-BUFFER walk — the driver idiom, and the reason packed narrow array
+# elements exist. `array<u8>` stores one byte per element, so `addr_of(buf[0])`
+# plus `ptr_offset` strides 1 byte and lands on consecutive bytes, exactly as C
+# would.
+#
+# main = 10 + 20 + 30 + 40 (the four bytes, walked) + 1 (the size law) = 101.
+fn main -> i64
+    let buf array<u8> = [to_u8(10), to_u8(20), to_u8(30), to_u8(40)]
+    let total i64 = 0
+    unsafe
+        let p ptr<u8> = addr_of(buf[0])
+        let stride i64 = ptr_to_int(ptr_offset(p, 1)) - ptr_to_int(p)
+        let i i64 = 0
+        while i < 4
+            total = total + to_i64(ptr_read(ptr_offset(p, i)))
+            i = i + 1
+        total = total + stride
+    total

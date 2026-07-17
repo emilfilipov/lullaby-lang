@@ -1,0 +1,29 @@
+# The size law at every packed width, plus WHOLE-ARRAY DECAY.
+#
+# `addr_of(a)` on an `array<T>` decays to a `ptr<T>` at element 0, so it must
+# answer the same address as `addr_of(a[0])` and stride the same way.
+#
+#   i16 size law  2
+# + i8  size law  1
+# + u16 size law  2
+# + decay read of a16[1] (77)
+# + decay-vs-element-0 address agreement (1 when equal)
+# = 83.
+fn main -> i64
+    let a16 array<i16> = [to_i16(55), to_i16(77)]
+    let a8 array<i8> = [to_i8(3), to_i8(4)]
+    let au16 array<u16> = [to_u16(9), to_u16(10)]
+    let out i64 = 0
+    unsafe
+        let p16 ptr<i16> = addr_of(a16[0])
+        out = out + (ptr_to_int(ptr_offset(p16, 1)) - ptr_to_int(p16))
+        let p8 ptr<i8> = addr_of(a8[0])
+        out = out + (ptr_to_int(ptr_offset(p8, 1)) - ptr_to_int(p8))
+        let pu16 ptr<u16> = addr_of(au16[0])
+        out = out + (ptr_to_int(ptr_offset(pu16, 1)) - ptr_to_int(pu16))
+        # Whole-array decay: `addr_of(a16)` is a `ptr<i16>` at element 0.
+        let decayed ptr<i16> = addr_of(a16)
+        out = out + to_i64(ptr_read(ptr_offset(decayed, 1)))
+        if ptr_to_int(decayed) == ptr_to_int(p16)
+            out = out + 1
+    out

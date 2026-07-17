@@ -43,15 +43,33 @@
 //! # Cells, not bytes — and why the buffer is `array<i64>`
 //!
 //! §5 sketches the backing buffer as `array<byte>` with byte-granular bumping. The
-//! delivered native value model forbids that: **every Lullaby scalar is a
-//! normalized 8-byte cell** (an `i32` local occupies a full sign-extended word),
-//! which is precisely why `addr_of` lowers for 8-byte scalars only (see
-//! `native_object_rawptr.rs`). An `array<byte>` is therefore an array of 8-byte
-//! cells, not packed bytes, so a byte-granular arena over one would hand back
-//! pointers whose reads and writes corrupt the cell invariant every other native
-//! path depends on. The arena bumps in **cells** and the buffer is `array<i64>`,
-//! which makes every pointer it returns exactly as well-formed as an
-//! `addr_of(buf[i])` — the delivered, tested kernel idiom this reuses wholesale.
+//! delivered arena bumps in **8-byte cells** over an `array<i64>` instead, which
+//! makes every pointer it returns exactly as well-formed as an `addr_of(buf[i])` —
+//! the delivered, tested kernel idiom this reuses wholesale.
+//!
+//! The reason is `arena_alloc`'s own contract, not a limitation of arrays: it
+//! yields a `ptr<T>` for an **8-byte pointee** (`i64`/`u64`/`isize`/`usize`), so
+//! the buffer it bumps must be made of 8-byte cells for the returned pointer's
+//! stride and its storage to agree. A buffer of any other element width would hand
+//! back pointers whose `ptr_read`/`ptr_write` and `ptr_offset` disagree with the
+//! memory underneath them.
+//!
+//! **This is NOT because narrow arrays are unpacked — they are packed.** An earlier
+//! version of this note claimed an `array<byte>` was "an array of 8-byte cells, not
+//! packed bytes", and that `addr_of` lowers for 8-byte scalars only. Both are false
+//! as of the packed-narrow-element work: an `array<u8>` stores one byte per
+//! element, and `addr_of(a[i])` into it IS lowered (see the width-agreement law in
+//! `native_object_rawptr.rs`). What remains true — and is the only thing this
+//! module depends on — is that a narrow SCALAR is still a normalized 8-byte cell,
+//! and that an arena needs 8-byte cells because its pointee is 8 bytes.
+//!
+//! A packed buffer is therefore refused, and refused on the right property: the
+//! backend gate below checks the element's BYTE width (`byte_size() != 8`), not its
+//! word count. A word-count check would silently admit a packed `array<u8>` (whose
+//! `words()` is 1) and let the arena over-run it 8x. `L0445`
+//! (`semantics_no_runtime.rs`) refuses such a buffer first, so the backend gate is
+//! defense-in-depth — but it is gated on the property that is actually load-bearing
+//! rather than on a proxy that used to coincide with it.
 //!
 //! # Overflow: a real, deterministic edge — `ud2`
 //!
@@ -175,8 +193,10 @@ fn lower_arena_alloc(
         ));
     };
     // The call must type as `ptr<P>`; the pointee must be an 8-byte cell so a
-    // `ptr_read`/`ptr_write` through the result is width-exact, for the same
-    // normalized-cell reason `addr_of` is 8-byte-only.
+    // `ptr_read`/`ptr_write` through the result is width-exact against the
+    // 8-byte-cell buffer this bumps. (`addr_of` is no longer 8-byte-only — a packed
+    // narrow ARRAY ELEMENT is addressable — but an arena's buffer is `array<i64>`,
+    // so its cells are 8 bytes and its pointee must match them.)
     let pointee = raw_pointee_name(&expr_ty.name).ok_or_else(|| {
         format!(
             "`{ARENA_ALLOC_BUILTIN}` must type as a `ptr<T>` on the native backend, found `{}`",
@@ -209,8 +229,8 @@ fn lower_arena_alloc(
     // it shares the CALLER's storage read-only, and an arena hands out writable
     // pointers into its buffer.
     let local = ctx.local(&binding.buffer)?;
-    let (elem_words, len) = match &local.ty {
-        NativeType::Array { elem, len } => (elem.words(), *len),
+    let (elem_bytes, len) = match &local.ty {
+        NativeType::Array { elem, len } => (elem.byte_size(), *len),
         NativeType::FatArray { .. } => {
             return Err(format!(
                 "static-buffer arena `{region_name}` is backed by the fat-pointer \
@@ -228,10 +248,24 @@ fn lower_arena_alloc(
             ));
         }
     };
-    if elem_words != 1 {
+    // The element must be an 8-BYTE cell, checked by its byte width rather than its
+    // word count. This is defense-in-depth: `L0445` (`semantics_no_runtime.rs`)
+    // already refuses a non-`array<i64>` arena buffer before the backend is
+    // consulted, so this cannot fire today — but it is gated rather than trusted,
+    // and it must be gated on the thing that is actually true.
+    //
+    // A word-count check (`elem.words() != 1`) is NOT a valid proxy for that any
+    // more. `NativeType::Narrow::words()` answers 1 (a narrow value never needs
+    // more than one word), so a PACKED `array<u8>` — 1 byte per element — would
+    // pass a word-count gate while the arena bumps in 8-byte cells, handing out
+    // pointers that run 8x past the buffer's end with the overflow `ud2` checking
+    // against a limit measured in the wrong unit. `byte_size()` distinguishes them:
+    // a packed element answers 1/2/4, an `i64` cell answers 8.
+    if elem_bytes != 8 {
         return Err(format!(
-            "static-buffer arena `{region_name}` must be backed by a fixed `array<i64>` (a \
-             one-word element type), but `{}`'s element occupies {elem_words} words",
+            "static-buffer arena `{region_name}` must be backed by a fixed `array<i64>` (an \
+             8-byte cell element type), but `{}`'s element is {elem_bytes} bytes wide — the \
+             arena bumps in 8-byte cells, so a packed narrow buffer would be over-run",
             binding.buffer
         ));
     }

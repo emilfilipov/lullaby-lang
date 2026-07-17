@@ -1,0 +1,25 @@
+no-runtime
+# THE DRIVER IDIOM in the freestanding tier: walk a BYTE buffer through a raw
+# pointer, in a `no-runtime` module with no host allocator and no runtime.
+#
+# This is what packed narrow array elements are for. A driver's buffers are
+# bytes; before packing, `array<u8>` stored 8-byte cells and `addr_of(buf[0])`
+# was refused outright (`L0339`), so a byte buffer could not be walked natively
+# at all. Now `array<u8>` is packed one byte per element, so the walk strides 1
+# and matches C.
+#
+# Sums the buffer via the walk, then writes a byte through the pointer and reads
+# it back by index (proving the pointer and the array name the same storage).
+#
+# main = 1 + 2 + 3 + 4 + 5 + 6 (walked) + 99 (written through, read by index) = 120.
+fn main -> i64
+    let buf array<u8> = [to_u8(1), to_u8(2), to_u8(3), to_u8(4), to_u8(5), to_u8(6)]
+    let total i64 = 0
+    unsafe
+        let p ptr<u8> = addr_of(buf[0])
+        let i i64 = 0
+        while i < 6
+            total = total + to_i64(ptr_read(ptr_offset(p, i)))
+            i = i + 1
+        ptr_write(ptr_offset(p, 5), to_u8(99))
+    total + to_i64(buf[5])

@@ -706,15 +706,27 @@ also what a kernel actually writes.
 
 **Deviation 3 — the buffer is `array<i64>` and the bump unit is the 8-byte CELL,
 not the byte.** This section spells the buffer `static ... array<byte>` with
-byte-granular bumping. The delivered native value model forbids it: **every Lullaby
-scalar is a normalized 8-byte cell** (an `i32` local occupies a full sign-extended
-word), which is precisely why native `addr_of` lowers for 8-byte scalars only. An
-`array<byte>` is therefore an array of 8-byte cells rather than packed bytes, so a
-byte-granular arena over one would hand back pointers whose stores corrupt the cell
-invariant every other native path depends on. Bumping in cells makes every pointer
-the arena returns exactly as well-formed as an `addr_of(buf[i])` — the delivered,
-tested kernel idiom this reuses wholesale. A packed-byte arena needs a
-representation no tier has, and is not a 1.0 item.
+byte-granular bumping. The delivered arena bumps 8-byte cells over an `array<i64>`
+instead, which makes every pointer it returns exactly as well-formed as an
+`addr_of(buf[i])` — the delivered, tested kernel idiom it reuses wholesale.
+
+The reason is `arena_alloc`'s own contract: it yields a `ptr<T>` for an **8-byte
+pointee** (`i64`/`u64`/`isize`/`usize`), so the buffer it bumps must be made of
+8-byte cells for the returned pointer's stride and its storage to agree. A buffer of
+any other element width is refused (`L0445`), and the native backend gates on the
+element's **byte width** rather than its word count — a packed `array<u8>` reports a
+word count of 1 and would otherwise pass and be over-run 8x.
+
+> **Note (superseded reasoning).** An earlier version of this deviation justified
+> the `array<i64>` buffer by claiming an `array<byte>` "is an array of 8-byte cells
+> rather than packed bytes", and that native `addr_of` "lowers for 8-byte scalars
+> only". **Both are now false.** Narrow-element arrays ARE packed at their C width
+> (`array<u8>` is one byte per element) and `addr_of(a[i])` into one IS lowered —
+> see "Narrow array elements are PACKED" in `native_backend_contract.md`. What
+> remains true, and is all this deviation actually needs, is that a narrow *scalar*
+> is still a normalized 8-byte cell and that an arena's pointee is 8 bytes. A
+> byte-granular arena is therefore no longer blocked by the value model; it is
+> simply not a 1.0 item.
 
 **Deviation 4 — the buffer is a function-LOCAL `array<i64>`, not a `static`.** §5's
 example declares `static kernel_scratch array<byte> = array_fill(64 * 1024, 0b)` at
@@ -1631,8 +1643,8 @@ model bound soundness, and both refusals are precise `L0339` skips:
 | `ptr<T>` as a parameter / local / return | **compiles** (GPR scalar) |
 | `addr_of` of an **array element** (`a[0]`, `a[i]`) or a **whole array** (decay to `ptr<element>`) | **compiles** — native stack aggregates now ASCEND in address (measured: `addr_of(pair.hi) − addr_of(pair.lo) == +8`, agreeing with `offset_of`), so `ptr_offset(addr_of(buf[0]), 1)` walks FORWARD, agreeing with C, `offset_of`, *and* the interpreters. **This is the buffer-walk kernel idiom.** A runtime index keeps the ordinary unsigned bounds-check trap |
 | `addr_of` into a **fat-pointer (runtime-length) array parameter** | **skips** — the descriptor shares the *caller's* storage with no copy, sound only because the parameter is read-only; an address into it could be used to mutate the caller's array |
-| `addr_of` of an `array<i32>` element / decay | **skips** — the narrow-cell rule below: the cell is 8 bytes but `ptr_offset` strides by `size_of(i32) == 4`, so a walk would desynchronize |
-| `addr_of` of a narrower-than-8-byte scalar | **skips** — stored as a normalized 8-byte cell; a width-correct store would corrupt its upper half |
+| `addr_of` of a **narrow array element / decay** (`array<i32>`, `array<u8>`, `array<i16>`, …) | **compiles** — narrow-element arrays are **packed** at the element's C width, so `ptr_offset` strides `size_of(T)` and lands on the next element, agreeing with C and with the interpreters' `size_of(element)` region stride. **This is what makes a driver's BYTE BUFFER walkable.** (Previously skipped: the element cell was 8 bytes while `ptr_offset` strided 4/1, so a walk desynchronized) |
+| `addr_of` of a narrower-than-8-byte **scalar** | **skips** — a narrow *scalar* is still stored as a normalized 8-byte cell (only array ELEMENTS pack), so a width-correct store would corrupt its upper half. Refused by the width-agreement law: 8-byte storage vs a 4-byte pointee |
 | a `bool`/`char` pointee | **skips** — a raw load could break the cell's value invariant |
 | an `f64`/`f32` pointee | **skips** — the result would have to land in XMM, not `rax` |
 | a struct/array pointee for `ptr_offset` | **skips** — its C stride is not guessed |

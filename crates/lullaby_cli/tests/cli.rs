@@ -1435,6 +1435,11 @@ mod suite19;
 #[path = "cli/suite20.rs"]
 mod suite20;
 
+// -- Packed narrow array elements: walking a narrow-element buffer (`array<i32>`,
+//    `array<u8>`, ...) through raw pointers (road_to_1_0_stable C3)
+#[path = "cli/suite22.rs"]
+mod suite22;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {
