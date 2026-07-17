@@ -1131,6 +1131,15 @@ impl<'a> Checker<'a> {
     /// other parameter/return type — a wider marshalling case (pointers, structs,
     /// strings) not yet exported — is `L0424`. Generic exports are also rejected
     /// (a C symbol is monomorphic).
+    ///
+    /// A **`void` return is exportable** (a C `void NAME(...)`), which a parameter
+    /// naturally is not: there is no `void` value to pass. That asymmetry is why the
+    /// return type is checked against its own predicate rather than reusing the
+    /// parameter one. `void NAME(...)` is the natural C-ABI shape for a driver or
+    /// callback entry point, and it needs nothing from the ABI beyond *not* setting a
+    /// return register: the callee simply leaves `rax` undefined and no C caller of a
+    /// `void` function may read it. This mirrors `extern fn`, whose return type has
+    /// always admitted `void`.
     fn check_export_signature(&mut self, function: &Function) {
         if !function.type_params.is_empty() {
             self.diagnostics.push(SemanticDiagnostic::at(
@@ -1156,11 +1165,11 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
-        if !Self::is_exportable_scalar(&function.return_type.name) {
+        if !Self::is_exportable_return(&function.return_type.name) {
             self.diagnostics.push(SemanticDiagnostic::at(
                 "L0424",
                 format!(
-                    "`export fn {}` returns `{}`; exports support the scalar set `i64`/`f64`/`f32` (pointers, structs, and strings are not yet exportable)",
+                    "`export fn {}` returns `{}`; exports support the scalar set `i64`/`f64`/`f32` and `void` (pointers, structs, and strings are not yet exportable)",
                     function.name, function.return_type.name
                 ),
                 Some(function.name.clone()),
@@ -1171,9 +1180,19 @@ impl<'a> Checker<'a> {
 
     /// Whether a type name is in the delivered `export fn` C-ABI scalar set:
     /// `i64` (integer register) or an `f64`/`f32` float (SSE register). Wider
-    /// scalar/aggregate marshalling for exports is deferred.
+    /// scalar/aggregate marshalling for exports is deferred. This is the
+    /// **parameter** predicate: `void` is deliberately absent, since there is no
+    /// `void` value to pass as an argument.
     fn is_exportable_scalar(type_name: &str) -> bool {
         matches!(type_name, "i64" | "f64" | "f32")
+    }
+
+    /// Whether a type name is exportable as an `export fn`'s **return** type: the
+    /// scalar set, plus `void` for a C `void NAME(...)` — the natural shape for a
+    /// driver/callback entry point. A `void` export sets no return register; no C
+    /// caller of a `void` function may read `rax`.
+    fn is_exportable_return(type_name: &str) -> bool {
+        type_name == "void" || Self::is_exportable_scalar(type_name)
     }
 
     /// Check that a body-less `extern fn` has a C-marshallable signature. The

@@ -307,6 +307,248 @@ fn using_an_alias_before_the_free_is_accepted() {
     );
 }
 
+/// Locate `llvm-nm.exe` in the rustc toolchain bin dir, mirroring
+/// `llvm_readobj_path`. `None` when the toolchain or tool cannot be found.
+fn llvm_nm_path() -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sysroot = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let tool = std::path::PathBuf::from(sysroot)
+        .join("lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-nm.exe");
+    tool.is_file().then_some(tool)
+}
+
+/// A void `export fn` is the natural C-ABI shape for a driver/callback entry point
+/// (`void NAME(...)`), but `is_exportable_scalar` admitted only `i64`/`f64`/`f32`
+/// for BOTH parameters and the return, so it was rejected with `L0424` — even
+/// though void functions compile natively. It must now check, compile, and emit a
+/// real external symbol.
+///
+/// The symbol assertion is unconditional (the name is in the COFF symbol table
+/// bytes); the `llvm-nm` decode below is the stronger, gated check.
+#[test]
+fn void_export_fn_compiles_and_emits_a_c_callable_symbol() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("lullaby_void_export.lby");
+    let obj = dir.join("lullaby_void_export.obj");
+    // No `main`: an export-only program is a C-callable LIBRARY object, which is
+    // exactly the driver/callback shape a void export exists for.
+    let source = concat!(
+        "export fn tick x i64 -> void\n",
+        "    let y = x + 1\n",
+        "\n",
+        "export fn compute a i64 -> i64\n",
+        "    a * 2\n",
+    );
+    std::fs::write(&src, source).expect("write source");
+    let _ = std::fs::remove_file(&obj);
+
+    let check = lullaby()
+        .args(["check", src.to_str().expect("src path")])
+        .output()
+        .expect("run check");
+    assert!(
+        check.status.success(),
+        "a void `export fn` must type-check:\n{}",
+        stderr(&check)
+    );
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            obj.to_str().expect("obj path"),
+            src.to_str().expect("src path"),
+        ])
+        .output()
+        .expect("run native");
+    assert!(
+        emit.status.success(),
+        "a void `export fn` must emit natively:\n{}",
+        stderr(&emit)
+    );
+    let listing = format!("{}{}", stdout(&emit), stderr(&emit));
+    assert!(
+        listing.contains("compiled tick"),
+        "the void export must COMPILE, not skip:\n{listing}"
+    );
+    assert!(obj.is_file(), "expected a native object:\n{listing}");
+
+    // Unconditional: the exported name must be in the object's symbol table.
+    let bytes = std::fs::read(&obj).expect("read object");
+    assert!(
+        contains_subslice(&bytes, b"tick"),
+        "the exported symbol `tick` must appear in the object's symbol table"
+    );
+
+    // Stronger, toolchain-gated: decode the symbol table and assert `tick` is an
+    // external DEFINED text symbol (`T`) — i.e. genuinely C-callable, not a local.
+    match llvm_nm_path() {
+        Some(tool) => {
+            let dump = std::process::Command::new(tool)
+                .arg(obj.to_str().expect("obj path"))
+                .output()
+                .expect("run llvm-nm");
+            let symbols = String::from_utf8_lossy(&dump.stdout).to_string();
+            assert!(
+                symbols.lines().any(|line| line.ends_with(" T tick")),
+                "`tick` must be an external defined text symbol (T):\n{symbols}"
+            );
+            assert!(
+                symbols.lines().any(|line| line.ends_with(" T compute")),
+                "the i64 export must still be external too:\n{symbols}"
+            );
+            eprintln!("llvm-nm decode ran: verified `T tick` and `T compute`");
+        }
+        None => eprintln!(
+            "llvm-nm not found; ran the unconditional symbol-table byte check only \
+             (the `T tick` linkage decode was NOT executed)"
+        ),
+    }
+}
+
+/// The C ABI of a void export: it must take its argument in the Win64 integer
+/// register and return WITHOUT publishing a return value — no C caller of a `void`
+/// function may read `rax`. Pinned by disassembling the emitted symbol.
+///
+/// This is the mirror of the entry-stub defect where a void `main` leaked `rax` as
+/// the process exit code: a void function has no value position, so nothing may
+/// treat its `rax` as meaningful.
+#[test]
+fn void_export_fn_uses_the_c_abi_and_publishes_no_return_value() {
+    let Some(nm) = llvm_nm_path() else {
+        eprintln!("llvm-nm not found; the void-export ABI disassembly did NOT run");
+        return;
+    };
+    let objdump = nm.with_file_name("llvm-objdump.exe");
+    if !objdump.is_file() {
+        eprintln!("llvm-objdump not found; the void-export ABI disassembly did NOT run");
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let src = dir.join("lullaby_void_export_abi.lby");
+    let obj = dir.join("lullaby_void_export_abi.obj");
+    std::fs::write(&src, "export fn tick x i64 -> void\n    let y = x + 1\n")
+        .expect("write source");
+    let _ = std::fs::remove_file(&obj);
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "-o",
+            obj.to_str().expect("obj path"),
+            src.to_str().expect("src path"),
+        ])
+        .output()
+        .expect("run native");
+    assert!(
+        emit.status.success(),
+        "void export must emit:\n{}",
+        stderr(&emit)
+    );
+
+    let dump = std::process::Command::new(&objdump)
+        .args(["-d", obj.to_str().expect("obj path")])
+        .output()
+        .expect("run llvm-objdump");
+    let text = String::from_utf8_lossy(&dump.stdout).to_string();
+    let body: String = text
+        .lines()
+        .skip_while(|line| !line.contains("<tick>:"))
+        .take_while(|line| !line.contains("<compute>:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!body.is_empty(), "could not find `tick` in:\n{text}");
+    // Win64: the first integer argument arrives in `rcx`.
+    assert!(
+        body.contains("%rcx"),
+        "a void export must read its i64 argument from the Win64 register `rcx`:\n{body}"
+    );
+    // It must return normally...
+    assert!(
+        body.contains("retq"),
+        "a void export must return to its C caller:\n{body}"
+    );
+    // ...and must not publish a computed value: the void path zeroes `rax` rather
+    // than leaving the body's last value in it, so nothing can be mistaken for a
+    // return value (and nothing leaks).
+    assert!(
+        body.contains("xorq\t%rax, %rax") || body.contains("xorq %rax, %rax"),
+        "a void export must not publish a return value in `rax`:\n{body}"
+    );
+    eprintln!("llvm-objdump decode ran: verified rcx arg, retq, and a zeroed rax");
+}
+
+/// A void export must still be CALLABLE and return control correctly on every tier.
+/// The exported symbol is ordinary code, so calling it from Lullaby's own `main`
+/// exercises the same lowering a C caller would reach — and `main`'s exit code
+/// proves the void call returned cleanly without disturbing the caller's value.
+///
+/// Note what this does NOT do: it cannot observe a side effect, because an export's
+/// parameters are limited to the `i64`/`f64`/`f32` scalar set — a `ptr<i64>`
+/// out-parameter is itself still `L0424` (a separate, pre-existing limit that this
+/// change deliberately does not touch). So a void export currently has no way to
+/// communicate anything back to a caller. That makes the feature real but narrow:
+/// useful for a callback invoked purely for its effect on external state, not yet
+/// for the `poke(addr_of(cell), v)` driver spelling. Widening export parameters to
+/// pointers is the follow-up that makes void exports genuinely useful.
+#[test]
+fn void_export_fn_is_callable_and_returns_cleanly_on_every_tier() {
+    assert_all_interpreters_yield(
+        concat!(
+            "export fn tick x i64 -> void\n",
+            "    let y = x + 1\n",
+            "\n",
+            "fn main -> i64\n",
+            "    let v i64 = 42\n",
+            "    tick(7)\n",
+            "    return v\n",
+        ),
+        "lullaby_void_export_call",
+        42,
+    );
+}
+
+/// NEGATIVE CONTROL: admitting `void` must not open the export gate generally. A
+/// genuinely non-exportable return (`string`) is still `L0424`.
+#[test]
+fn a_non_exportable_return_type_is_still_rejected() {
+    assert_check_rejects(
+        concat!(
+            "export fn name -> string\n",
+            "    \"hi\"\n",
+            "\n",
+            "fn main -> i64\n",
+            "    0\n",
+        ),
+        "lullaby_export_string_return",
+        "L0424",
+    );
+}
+
+/// NEGATIVE CONTROL: `void` is a RETURN-only concession. There is no `void` value
+/// to pass, so a `void` PARAMETER stays rejected — the asymmetry is deliberate.
+#[test]
+fn a_void_parameter_is_still_rejected() {
+    assert_check_rejects(
+        concat!(
+            "export fn sink x void -> void\n",
+            "    let y = 1\n",
+            "\n",
+            "fn main -> i64\n",
+            "    0\n",
+        ),
+        "lullaby_export_void_param",
+        "L0424",
+    );
+}
+
 /// HONESTY PIN — this documents a hole that is still OPEN, not a fix.
 ///
 /// An alias laundered through a **call** is not tracked: `identity(p)` returns the
