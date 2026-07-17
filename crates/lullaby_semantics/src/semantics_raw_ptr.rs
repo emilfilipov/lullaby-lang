@@ -244,6 +244,18 @@ impl Checker<'_> {
     /// analysis. It says a `ptr_T` came from `alloc`; it says nothing about *which*
     /// box, whether it is live, or whether two `ptr_T`s alias. Lifetime is `L0350`'s
     /// job, and its limits are documented in `semantics_lifetime_alias.rs`.
+    ///
+    /// One frontier is worth naming, because the hole this closed was itself a
+    /// spelling test that could not see through one wrapper. Being a spelling test,
+    /// this one is **not transparent through a named struct**: given
+    /// `struct Holder { b ptr_i64 }`, `ptr_cast(addr_of(h))` sees `ptr<Holder>`,
+    /// which is box-free, so a cast to `ptr<i64>` is accepted. That is not reachable
+    /// today, but only because native default-denies an aggregate pointee — a
+    /// *different* subsystem's posture, i.e. an independent failure mode from this
+    /// check's own. Widening native's `ptr_cast` pointee support to aggregates
+    /// reopens exactly this class. The "new producer must route through
+    /// [`is_annotatable_address_type`]" rule above does not cover it: the producer
+    /// here is unchanged and the model is buried in a field.
     pub(crate) fn check_ptr_cast(
         &mut self,
         args: &[Expr],
