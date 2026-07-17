@@ -34,7 +34,7 @@
 //! The data width is fixed by the builtin name (8/16/32 → `u8`/`u16`/`u32`), and
 //! it is **unsigned** in both directions: a port read yields a raw device byte /
 //! word / dword with no sign to extend, so `port_in8` returns `u8`, never `i8`.
-//! A wrong port or data width is [`L0442`] — a dedicated code rather than the
+//! A wrong port or data width is `L0442` — a dedicated code rather than the
 //! generic argument-type diagnostics, so the message can explain *why* the width
 //! is fixed (see [`Checker::port_io_type_error`]).
 //!
