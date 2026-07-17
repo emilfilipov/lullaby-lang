@@ -1018,7 +1018,30 @@ impl<'a> IrRuntime<'a> {
         // A closure body is its own frame — see the AST interpreter's
         // `invoke_closure` and runtime `raw_pointer.rs`.
         let outer_frame = self.raw_ptrs.enter_frame();
-        let result = self.eval_expr(&def.body, &mut env);
+        // Run the body's own hoisted scaffolding (the inline-conditional desugar)
+        // here, in the closure's frame, where its parameters and captures are
+        // bound — that is the whole point of `IrClosureDef::prelude`. It is re-run
+        // on every invocation, so the conditional re-decides per call against this
+        // call's arguments, matching the AST interpreter, which evaluates
+        // `ExprKind::Conditional` lazily at the same moment.
+        //
+        // `Control::Return` is honored as the closure's value rather than dropped.
+        // A single-expression body cannot spell `return`, so the conditional
+        // desugar never produces one; only the `?` desugar does. **`?` inside a
+        // closure body remains a known cross-tier divergence** and is deliberately
+        // not resolved here: semantics binds `?` to the *enclosing* function's
+        // return type (`L0427`), a model that cannot hold for a closure that may be
+        // invoked when that function is not on the stack. Yielding the value is the
+        // least-surprising local behavior; the real fix is a semantics decision
+        // (see "Still open — the postfix `?` in a closure body" in
+        // `documents/closures_capture_design.md`). `Break`/`Continue` cannot occur:
+        // no desugar emits a loop control out of an expression body.
+        let result = self
+            .eval_block(&def.prelude, &mut env)
+            .and_then(|control| match control {
+                Control::Return(value) => Ok(value),
+                _ => self.eval_expr(&def.body, &mut env),
+            });
         self.raw_ptrs.exit_frame(outer_frame);
         result
     }

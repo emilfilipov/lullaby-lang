@@ -432,24 +432,63 @@ still holds.
   the interpreters. No new `L03xx` code is needed — skipping is the established,
   non-fatal degradation.
 
-**A closure body is a single expression**, at every level: the grammar is
-`fn PARAMS -> EXPR` (the parser reads the body with `parse_conditional`), and both
-`ExprKind::Closure` and `BytecodeClosureDef` store one expression. There is no
-block-bodied closure form, so "a closure body with locals and control flow" is not
-a deferred backend feature — the language has no such shape, and adding one would
-be a language change, not a codegen one.
+**A closure body is a single expression** in the *surface grammar*: the form is
+`fn PARAMS -> EXPR` (the parser reads the body with `parse_conditional`), and
+`ExprKind::Closure` stores one expression. There is no block-bodied closure form,
+so "a closure body with locals and control flow" is not a deferred backend
+feature — the language has no such shape, and adding one would be a language
+change, not a codegen one.
 
-**Known bug — an inline conditional in a closure body.** `A if C else B` parses
-inside a closure body, but the IR lowerer desugars a conditional into a hoisted
-`let __cond_N` + `if` statement pushed into the *enclosing statement's* prelude.
-A closure body is an expression with nowhere to hoist to, so those statements
-escape into the enclosing function, where the closure's parameters are not in
-scope. Result: the AST interpreter computes the right answer while the IR
-interpreter and bytecode VM both fail at runtime with `L0403 unknown variable`.
-The native backend refuses the shape (the hoisted parameter is not a native local),
-so it stays consistent with the majority and never miscompiles it. Fixing this is a
-prerequisite for control flow inside a compiled closure body; the same hazard
-should be checked for the postfix `?` desugar, which uses the same hoist buffer.
+**But a single surface expression does not lower to a single IR expression.** An
+inline conditional (`A if C else B`) desugars to a hoisted `let __cond_N` plus an
+`if`, and that scaffolding reads the closure's **parameters**. `IrClosureDef` and
+`BytecodeClosureDef` therefore carry a `prelude` alongside the body expression: the
+statements the body's own lowering hoisted, evaluated in the **closure's** frame,
+on every invocation, immediately before the body. The closure lowerer captures them
+with `lower_captured` rather than `lower_expr`, so they never reach the shared
+`try_prelude` the enclosing block lowerer drains.
+
+**Fixed — an inline conditional in a closure body.** Previously the closure lowerer
+used a plain `lower_expr`, so the hoisted `let __cond_N` + `if` escaped into the
+*enclosing* function, whose runtime frame has no such parameter:
+
+| tier            | `fn x i64 -> 1 if x > 0 else 0` (before the fix) |
+|-----------------|--------------------------------------------------|
+| AST interpreter | correct answer — it evaluates `ExprKind::Conditional` directly and never hoists |
+| IR interpreter  | `L0403 unknown variable \`x\`` at runtime, in the *enclosing* function |
+| bytecode VM     | same (it invokes closures through the IR interpreter) |
+| native          | clean `L0339` skip |
+
+Two tiers died at runtime, naming the user's own closure parameter, on a program
+semantics had accepted and one tier answered correctly. All three interpreter tiers
+now agree, and the conditional is re-decided per call with only the taken arm
+evaluated. Pinned by `run_closure_conditional.lby` (value agreement) and
+`run_closure_conditional_lazy.lby` (call-time laziness, via a stdout transcript).
+
+**Native still refuses a ternary-bodied closure, deliberately.** The body lowers to
+`__cond_N`, which native's capture analysis cannot bind to a native local, so the
+function skips cleanly to the interpreters (`skipped main: closure #0 captures
+`__cond_0`, which is not a native local`). That is the correct-or-refuse contract —
+a tier answers like the others or declines. Pinned by
+`native_closure_conditional_skip.lby`, whose *only* disqualifying trait is the
+ternary body. Compiling the body while ignoring the prelude would answer
+differently from the other three tiers and is the one outcome the rule forbids.
+
+**Still open — the postfix `?` in a closure body (a language question, not a
+codegen one).** The `?` desugar uses the same hoist buffer, so `prelude` now carries
+it into the closure's frame too — but semantics binds `?` to the **enclosing
+function's** return type (`L0427` checks the *enclosing* `fn`, not the closure), and
+that model is incoherent for a closure: a closure may be returned or passed
+elsewhere and invoked when the "enclosing function" is not on the stack at all.
+
+The tiers accordingly still disagree for `fn x i64 -> half(x)? + 1` inside a
+`result`-returning function: the AST interpreter propagates the error out of the
+enclosing function, while the IR interpreter and bytecode VM fail at runtime. This
+divergence **predates** the conditional fix (it was `L0403 unknown variable \`x\``
+before; the `?`'s `return` now runs in the closure frame and mistypes instead).
+Resolving it needs a semantics decision — most plausibly rejecting `?` inside a
+closure body with a dedicated `L####` until closures gain their own error-propagation
+model — and so is deliberately out of scope for the conditional fix.
 
 ## Interaction with concurrency
 

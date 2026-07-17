@@ -2116,13 +2116,38 @@ impl<'a> Lowerer<'a> {
                 for param in params {
                     body_scope.insert(param.name.clone(), param.ty.clone());
                 }
-                let lowered_body = self.lower_expr(body, &body_scope)?;
+                // Lower the body with `lower_captured`, not `lower_expr`: the body
+                // is a single *surface* expression, but its lowering is not. An
+                // inline conditional (`A if C else B`) hoists a temporary plus an
+                // `if`, and that scaffolding reads `body_scope` — which includes
+                // the closure's **parameters**. A plain `lower_expr`
+                // leaves those statements in the shared `try_prelude`, where the
+                // enclosing block lowerer drains them into the *enclosing*
+                // function, whose runtime frame has no such parameter. That is
+                // exactly how `fn x i64 -> 1 if x > 0 else 0` came to die with
+                // `L0403 unknown variable \`x\`` in `main` on the IR interpreter and
+                // bytecode VM while the AST interpreter (which never hoists)
+                // answered correctly. Capturing the prelude here keeps it with the
+                // closure, to be run in the closure's own frame on each call.
+                //
+                // This also captures the `?` desugar's prelude, which uses the same
+                // buffer — but `?` inside a closure body is a *separate*, still-open
+                // divergence (semantics binds it to the enclosing function's return
+                // type), not something this fix resolves. See `IrRuntime::invoke_closure`.
+                //
+                // `expected` is deliberately *not* threaded down: it describes the
+                // closure (`fn(i64) -> i64`), not the body (`i64`). The previous
+                // `lower_expr` call passed `None`, and passing the function type
+                // here would hand `desugar_conditional` an `fn(...)` result type
+                // and fail `zero_ir_expr`. The body's type is inferred, as before.
+                let (prelude, lowered_body) = self.lower_captured(body, None, &body_scope)?;
                 let param_types: Vec<TypeRef> =
                     params.iter().map(|param| param.ty.clone()).collect();
                 let ty = function_type(&param_types, &lowered_body.ty);
                 self.closures.borrow_mut().push(IrClosureDef {
                     id: *id,
                     params: params.iter().map(|param| param.name.clone()).collect(),
+                    prelude,
                     body: lowered_body,
                 });
                 (IrExprKind::Closure { id: *id }, ty)
