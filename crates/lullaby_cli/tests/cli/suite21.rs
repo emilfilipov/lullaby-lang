@@ -1,16 +1,38 @@
-//! CLI integration tests, part 21 — three semantics fixes that close frontend
-//! holes: model-preserving `ptr_cast`, the `L0350` simple-alias use-after-free
-//! case, and void `export fn`.
+//! CLI integration tests, part 21 — semantics fixes that close frontend holes:
+//! model-preserving `ptr_cast`, model-honest `int_to_ptr`/`arena_alloc`, the
+//! `L0350` simple-alias use-after-free case, and void `export fn`.
 //!
-//! # `ptr_cast` and the two pointer models
+//! # The two pointer models, and the three doors that crossed them
 //!
 //! Lullaby has two non-convertible pointer models — the legacy `ptr_T` heap box
 //! that only `alloc` produces (a heap-SLOT INDEX over a one-cell store on the
 //! interpreters) and the modern `ptr<T>` address from `addr_of`/`int_to_ptr`.
-//! `let`/parameter binding enforced that (`L0303`/`L0313`); `ptr_cast` did not,
-//! because it derived its result type purely from the caller's annotation and never
-//! from the operand. Both laundering directions are pinned below, plus the
-//! negative control that a legitimate `ptr<T>` retarget still works.
+//! `let`/parameter binding enforced that (`L0303`/`L0313`); three *builtins* did
+//! not, because each derived its result type from the caller's annotation via
+//! `expected.filter(|ty| ty.is_raw_pointer())` — a predicate that admits BOTH
+//! spellings, so the annotation got to pick the model:
+//!
+//! * `ptr_cast` — both directions, closed first (its operand is a pointer, so it has
+//!   a model to preserve).
+//! * `arena_alloc` — `let fake ptr_i64 = arena_alloc(pool, 1)`. Closed here: an arena
+//!   cell is unambiguously an address, so the annotation supplies the **pointee only**
+//!   and a legacy annotation no longer captures it (the `let` collides at `L0303`).
+//! * `int_to_ptr` — `let fake ptr_i64 = int_to_ptr(ptr_to_int(addr_of(buf[0])))`.
+//!   **Deliberately still open, and irreducibly so.** Its operand is an `i64`, which
+//!   carries **no provenance**, so neither model is derivable from it; on the
+//!   interpreters an integer may genuinely be either. Both round trips are delivered
+//!   and fixture-pinned — `run_ptr_cast.lby` rebuilds a *real box* from
+//!   `ptr_to_int(box)` as `ptr_i64`, `freestanding_mmio_vga.lby` names `0xB8000` as
+//!   `ptr<i64>` — so the annotation is an `unsafe` **assertion**, not an inference,
+//!   and restricting it breaks the first fixture. Provenance tracking, splitting the
+//!   builtin, and refusing the `addr_of`-derived shape were each designed and each
+//!   failed; only removing `ptr_to_int(box)` from the language closes it.
+//!
+//! Each closure is pinned below with a negative control proving it did not over-reach
+//! (the freestanding MMIO idiom must still COMPILE), and `int_to_ptr`'s open route is
+//! pinned as an honesty test. **Nothing here should be read as claiming the native
+//! gate contains the model mismatch in general — it does not** (it is a prefix test on
+//! the outer type name); the gate test below pins the gate's own behaviour only.
 
 use crate::*;
 
@@ -162,6 +184,273 @@ fn ptr_cast_of_an_alloc_box_is_an_identity_that_stays_a_box() {
         "lullaby_ptr_cast_box_identity",
         42,
     );
+}
+
+/// HONESTY PIN — this documents a route that is deliberately OPEN, not a fix.
+///
+/// `int_to_ptr` carries the same `expected.filter(|ty| ty.is_raw_pointer())` shape
+/// `ptr_cast` was fixed for, so a `ptr_i64` annotation captures a pointer built from a
+/// real machine address — asserting `alloc` provenance it does not have. **This still
+/// compiles, on purpose.**
+///
+/// Restricting it to `ptr<T>` was tried and is wrong. `int_to_ptr`'s operand is an
+/// `i64`, and **an integer carries no provenance** — so neither model is derivable
+/// from it, by construction. On the interpreters an integer genuinely may be either,
+/// and both round trips are delivered and fixture-pinned: `run_ptr_cast.lby`
+/// reconstructs a *real box* from `ptr_to_int(box)` as `ptr_i64` (restricting the
+/// builtin breaks that fixture), and `freestanding_mmio_vga.lby` names `0xB8000` as
+/// `ptr<i64>`. Three closure designs were attacked and all failed — tracking
+/// provenance into the `i64` (defeated by arithmetic, arrays, function boundaries),
+/// splitting the builtin (`int_to_ptr(753664)`, a pure constant, already yields a
+/// `ptr_i64`, so `int_to_box` would launder identically), and refusing the
+/// `addr_of`-derived shape (`run_ptr_cast.lby` launders through a temp var,
+/// indistinguishable). Only removing `ptr_to_int(box)` from the language closes it.
+///
+/// So the annotation is an `unsafe` **assertion** that may be false. This test pins
+/// only that the false assertion compiles and that *this* program's value reads back
+/// correctly — it asserts nothing about the mismatch being contained in general.
+///
+/// If a later change closes this, the test will start failing — that is the intent: it
+/// must be rewritten, not deleted, so the frontier stays documented.
+#[test]
+fn int_to_ptr_may_still_assert_the_box_spelling_over_an_address() {
+    let source = concat!(
+        "fn main -> i64\n",
+        "    unsafe\n",
+        "        let buf array<i64> = [10, 20, 30]\n",
+        "        let fake ptr_i64 = int_to_ptr(ptr_to_int(addr_of(buf[0])))\n",
+        "        ptr_read(fake)\n",
+    );
+    let (exit, output) = check_source(source, "lullaby_int_to_ptr_box_assertion");
+    assert_eq!(
+        exit, 0,
+        "`int_to_ptr`'s annotation is an unsafe ASSERTION over both models; if this now \
+         fails, the builtin was restricted and both this pin and `run_ptr_cast.lby` \
+         need revisiting:\n{output}"
+    );
+    // The value is a real address, so it reads back correctly on every tier: the
+    // spelling is a lie, but nothing consumes the lie.
+    assert_all_interpreters_yield(source, "lullaby_int_to_ptr_box_assertion_run", 10);
+}
+
+/// The native gate's own behaviour: a `ptr_T`-spelled operand is refused, so the
+/// function skips to the interpreters rather than computing an answer natively.
+/// Asserting the SKIP — not just the answer — is the point, since the skip is the
+/// gate's entire observable contract.
+///
+/// **Scope, deliberately narrow:** this pins the gate on the shape it names. It is
+/// *not* evidence that the gate contains the pointer-model mismatch in general, and
+/// must not be cited as such — `is_legacy_box_pointer` is a prefix test on the OUTER
+/// type name, so a box model nested in a pointee (`ptr<ptr_i64>`, which `addr_of` over
+/// a box place yields) never reaches it.
+#[test]
+fn a_falsely_boxed_address_is_refused_by_the_native_gate() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("lullaby_int_to_ptr_gate_skip.lby");
+    let obj = dir.join("lullaby_int_to_ptr_gate_skip.obj");
+    std::fs::write(
+        &src,
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let buf array<i64> = [10, 20, 30]\n",
+            "        let fake ptr_i64 = int_to_ptr(ptr_to_int(addr_of(buf[0])))\n",
+            "        ptr_to_int(fake)\n",
+        ),
+    )
+    .expect("write source");
+    let _ = std::fs::remove_file(&obj);
+    let emit = lullaby()
+        .args([
+            "native",
+            "--verbose",
+            "-o",
+            obj.to_str().expect("obj path"),
+            src.to_str().expect("src path"),
+        ])
+        .output()
+        .expect("run native");
+    let listing = format!("{}{}", stdout(&emit), stderr(&emit));
+    assert!(
+        listing.contains("skipped main"),
+        "the native gate must REFUSE a `ptr_T`-spelled operand — that skip IS the \
+         containment for `int_to_ptr`'s unsafe assertion:\n{listing}"
+    );
+    assert!(
+        !listing.contains("compiled main"),
+        "`main` must not compile natively:\n{listing}"
+    );
+}
+
+/// THE third door, which neither the original `ptr_cast` report nor the `int_to_ptr`
+/// follow-up named — and unlike `int_to_ptr`, this one closes cleanly. An arena cell is
+/// a real address bumped out of a caller-owned `array<i64>`; the host allocator is
+/// never involved and no integer is in play, so `arena_alloc`'s model is *known* and a
+/// `ptr_i64` spelling over it is a plain falsehood with no legitimate reading.
+#[test]
+fn arena_alloc_cannot_relabel_an_arena_cell_as_an_alloc_box() {
+    assert_all_interpreters_reject(
+        concat!(
+            "fn main -> i64\n",
+            "    let backing array<i64> = [0, 0, 0, 0]\n",
+            "    region pool in backing\n",
+            "    unsafe\n",
+            "        let fake ptr_i64 = arena_alloc(pool, 1)\n",
+            "        ptr_write(fake, 77)\n",
+            "        ptr_read(fake)\n",
+        ),
+        "lullaby_arena_alloc_relabel_cell",
+        "L0303",
+    );
+}
+
+/// A falsely-`ptr_i64` address handed to `dealloc`, which exists only for real boxes.
+/// It is **detected, not silent** — the interpreters raise `L0406` ("invalid pointer")
+/// because the value is a byte address above `RAW_POINTER_BASE` rather than a heap-slot
+/// handle, and native does not lower `dealloc` at all.
+///
+/// **Scope:** this pins the outcome of *this* shape only. It is not a general claim
+/// that a false `int_to_ptr` assertion is always detected — do not generalize it into
+/// one.
+#[test]
+fn deallocing_a_falsely_boxed_address_is_detected_at_runtime() {
+    let source = concat!(
+        "fn main -> i64\n",
+        "    unsafe\n",
+        "        let buf array<i64> = [10, 20, 30]\n",
+        "        let fake ptr_i64 = int_to_ptr(ptr_to_int(addr_of(buf[0])))\n",
+        "        dealloc(fake)\n",
+        "        0\n",
+    );
+    for backend in ["ast", "ir", "bytecode"] {
+        let (exit, output) = run_backend(source, backend, "lullaby_int_to_ptr_false_dealloc");
+        assert_ne!(
+            exit, 0,
+            "{backend} must DETECT a `dealloc` of a non-box address:\n{output}"
+        );
+        assert!(
+            output.contains("L0406"),
+            "{backend} must report L0406 (invalid pointer), not free arbitrary \
+             memory:\n{output}"
+        );
+    }
+}
+
+/// NEGATIVE CONTROL: a legitimate `int_to_ptr` -> `ptr<T>` -> `ptr_offset` walk must
+/// still work on every tier. The round trip through an integer is the delivered
+/// pointer-identity idiom; only the *legacy annotation* was ever wrong. If this
+/// fails, the fix over-reached and broke `int_to_ptr` generally.
+#[test]
+fn int_to_ptr_still_round_trips_a_genuine_address_for_a_walk() {
+    assert_all_interpreters_yield(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let buf array<i64> = [10, 20, 30]\n",
+            "        let base = addr_of(buf[0])\n",
+            "        let back ptr<i64> = int_to_ptr(ptr_to_int(base))\n",
+            "        ptr_read(ptr_offset(back, 2))\n",
+        ),
+        "lullaby_int_to_ptr_roundtrip_walk",
+        30,
+    );
+}
+
+/// NEGATIVE CONTROL: `int_to_ptr` with NO annotation must still default to
+/// `ptr<i64>` and stay walkable. The fix changed which annotations capture the
+/// result; it must not have disturbed the default.
+#[test]
+fn int_to_ptr_without_an_annotation_still_defaults_to_a_walkable_pointer() {
+    assert_all_interpreters_yield(
+        concat!(
+            "fn main -> i64\n",
+            "    unsafe\n",
+            "        let buf array<i64> = [10, 20, 30]\n",
+            "        let back = int_to_ptr(ptr_to_int(addr_of(buf[0])))\n",
+            "        ptr_read(ptr_offset(back, 1))\n",
+        ),
+        "lullaby_int_to_ptr_default_pointee",
+        20,
+    );
+}
+
+/// NEGATIVE CONTROL: `arena_alloc` under a legitimate modern annotation still bumps,
+/// still hands out a walkable pointer, and still aliases its backing buffer.
+#[test]
+fn arena_alloc_still_hands_out_a_walkable_arena_pointer() {
+    assert_all_interpreters_yield(
+        concat!(
+            "fn main -> i64\n",
+            "    let backing array<i64> = [0, 0, 0, 0]\n",
+            "    region pool in backing\n",
+            "    unsafe\n",
+            "        let cells ptr<i64> = arena_alloc(pool, 2)\n",
+            "        ptr_write(cells, 5)\n",
+            "        ptr_write(ptr_offset(cells, 1), 6)\n",
+            "        ptr_read(cells) + ptr_read(ptr_offset(cells, 1))\n",
+        ),
+        "lullaby_arena_alloc_walkable",
+        11,
+    );
+}
+
+/// NEGATIVE CONTROL — THE POINT OF THE FREESTANDING TIER. The MMIO idiom
+/// (`int_to_ptr(0xB8000)` + `ptr_offset` + `volatile_store`) in a `no-runtime`
+/// module must keep compiling NATIVELY. This mirrors
+/// `tests/fixtures/valid/no_runtime/freestanding_mmio_vga.lby`, which is the whole
+/// reason `int_to_ptr` is annotation-governed in the first place: a driver names a
+/// fixed physical address and says what lives there.
+///
+/// Asserting `compiled`, not merely `check`-clean: a skip would silently gut the
+/// tier while staying green.
+#[test]
+fn the_freestanding_mmio_idiom_still_compiles_natively() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("lullaby_mmio_after_int_to_ptr_fix.lby");
+    let obj = dir.join("lullaby_mmio_after_int_to_ptr_fix.obj");
+    let source = concat!(
+        "no-runtime\n",
+        "\n",
+        "fn vga_put off i64 ch i64\n",
+        "    unsafe\n",
+        "        let base ptr<i64> = int_to_ptr(753664)\n",
+        "        volatile_store(ptr_offset(base, off), ch)\n",
+        "\n",
+        "fn vga_get off i64 -> i64\n",
+        "    unsafe\n",
+        "        let base ptr<i64> = int_to_ptr(753664)\n",
+        "        volatile_load(ptr_offset(base, off))\n",
+        "\n",
+        "fn main -> i64\n",
+        "    vga_put(0, 65)\n",
+        "    vga_get(0)\n",
+    );
+    std::fs::write(&src, source).expect("write source");
+    let _ = std::fs::remove_file(&obj);
+
+    let emit = lullaby()
+        .args([
+            "native",
+            "--freestanding",
+            "--verbose",
+            "-o",
+            obj.to_str().expect("obj path"),
+            src.to_str().expect("src path"),
+        ])
+        .output()
+        .expect("run native");
+    let listing = format!("{}{}", stdout(&emit), stderr(&emit));
+    assert!(
+        emit.status.success(),
+        "the freestanding MMIO idiom must still emit natively:\n{listing}"
+    );
+    for name in ["vga_put", "vga_get"] {
+        assert!(
+            listing.contains(&format!("compiled {name}")),
+            "`{name}` must COMPILE, not skip — a skip would gut the freestanding \
+             tier while staying green:\n{listing}"
+        );
+    }
 }
 
 /// Run `lullaby check` on `source` and return `(exit code, stdout+stderr)`. The

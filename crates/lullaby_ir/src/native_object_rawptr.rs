@@ -207,9 +207,16 @@ pub(crate) fn is_addressable_word_type(name: &str) -> bool {
 /// heap box.
 ///
 /// **This is a spelling test, not a provenance analysis** — and that distinction is
-/// load-bearing, because one builtin can change the spelling. See
-/// [`refuse_legacy_box_pointer`] for why gating `ptr_cast` is what makes the spelling
-/// test sound as a whole-program property.
+/// load-bearing, because `int_to_ptr`'s annotation can still assert the `ptr_T`
+/// spelling over a value that is not `alloc`-derived (its operand is an `i64`, which
+/// carries no provenance; the assertion is what `unsafe` buys). So "`ptr_T` implies
+/// `alloc`-derived" is a **heuristic here, not a theorem**.
+///
+/// It is also a test on the **outer** type name only: a box model nested in a pointee
+/// (`ptr<ptr_i64>`, which `addr_of` over a box place produces) is invisible to it. See
+/// [`refuse_legacy_box_pointer`]'s "What this gate does NOT do" and
+/// `semantics_raw_ptr.rs`'s "What is, and is not, a whole-program property" for the
+/// precise boundary.
 fn is_legacy_box_pointer(name: &str) -> bool {
     name.starts_with("ptr_")
 }
@@ -250,13 +257,37 @@ fn is_legacy_box_pointer(name: &str) -> bool {
 /// fuzzer now exercise; without it, both would have degraded into frontend-only tests
 /// that stay green while this gate rots.
 ///
-/// The gate is **complete, not whack-a-mole**, because `ptr_cast` was the only
-/// builtin whose result type ignored its operand:
+/// # Scope: this gate guards the cases it names, and nothing more
 ///
+/// The frontend audit behind the original "complete, not whack-a-mole" claim was
+/// wrong. `ptr_cast` was described as "the only builtin whose result type ignored its
+/// operand"; in fact `int_to_ptr` and `arena_alloc` carried the identical
+/// annotation-driven pattern. The verified enumeration of every pointer producer:
+///
+/// * `alloc` — the ONLY producer of the legacy `ptr_T` box spelling.
 /// * `check_ptr_offset` returns `Some(ptr_ty)` — it *preserves* the operand's type.
 /// * `check_addr_of` derives `ptr<T>` from the addressed **place**.
-/// * `int_to_ptr` takes an `i64`; the only way to get a box's address into one is
-///   `ptr_to_int`, refused above.
+/// * `check_ptr_cast` takes its result *model* from the operand.
+/// * `arena_alloc` is annotation-governed but filtered to the modern `ptr<T>`
+///   spelling, so it cannot claim `alloc` provenance (fixed alongside this).
+/// * **`int_to_ptr` is annotation-governed over BOTH spellings, deliberately.** Its
+///   operand is an `i64`, which carries no provenance, and both round trips are real:
+///   `int_to_ptr(ptr_to_int(box))` truthfully rebuilds a box (`run_ptr_cast.lby`),
+///   `int_to_ptr(0xB8000)` truthfully names an address (`freestanding_mmio_vga.lby`).
+///   Its annotation is an `unsafe` assertion and it **can be false**, so a `ptr_T` here
+///   may not be `alloc`-derived. That route is irreducible (an `i64` carries no
+///   provenance) and is documented in `semantics_raw_ptr.rs`, not compensated for here.
+///
+/// # What this gate does NOT do
+///
+/// It is a **prefix test on the OUTER type name** (`is_legacy_box_pointer`). So it does
+/// not see a box model nested inside a pointee: `addr_of` over a `ptr_i64` place yields
+/// `ptr<ptr_i64>`, whose outer spelling is *modern*, and this gate never fires on it.
+/// The pointer-model mismatch is therefore reachable in shapes whose operand is never
+/// spelled `ptr_T` at all, and this gate is **not** a containment for the mismatch in
+/// general — only for the cases it names. Do not reason "the gate refuses it" about any
+/// shape not literally covered above, and do not treat the frontend's spelling rules as
+/// backed up by this gate.
 ///
 /// It closes the **cross-function** route for free: a model-preserving helper
 /// (`fn rebox p ptr_i64 -> ptr_i64` whose body is `ptr_cast(p)`) has the `ptr_T`
@@ -358,15 +389,19 @@ fn lower_checked(
             };
             // `ptr_to_int` of an `alloc` box exposes the pointer's numeric identity,
             // which the interpreters define as a heap-slot index rather than an
-            // address. `ptr_cast` of one LAUNDERS its model: `check_ptr_cast` derives
-            // the result type from the CALLER'S ANNOTATION (defaulting to `ptr<i64>`),
-            // never from the operand, so `ptr_cast(box)` rewrites `ptr_i64` into
-            // `ptr<i64>` — the exact spelling this gate keys on — and every downstream
-            // check would then treat a one-cell box as a walkable typed pointer. Both
-            // are refused here (see `refuse_legacy_box_pointer`).
+            // address. `ptr_cast` of one is refused alongside it: the frontend now
+            // makes `ptr_cast` model-preserving, so a `ptr_i64` operand here is a
+            // genuine box (an identity cast), and striding or numbering it would
+            // answer differently from the interpreters. Both go through
+            // `refuse_legacy_box_pointer`.
             //
-            // `int_to_ptr` needs no gate: it takes an `i64`, and the only way to get a
-            // box's address into one is `ptr_to_int`, refused just above.
+            // `int_to_ptr` is NOT gated here: it takes an `i64`, so there is no pointer
+            // operand to test. Its own model-laundering route — a `ptr_T` ANNOTATION
+            // capturing the result — is deliberately OPEN at the frontend and cannot be
+            // closed there (an `i64` carries no provenance, so neither model is
+            // derivable; see `semantics_raw_ptr::check_ptr_cast`'s "What is, and is not,
+            // a whole-program property"). Nothing here compensates for that, and this
+            // gate must not be read as if it did.
             if matches!(name, "ptr_to_int" | "ptr_cast") {
                 refuse_legacy_box_pointer(operand, name)?;
             }

@@ -1136,10 +1136,18 @@ impl<'a> Checker<'a> {
     /// naturally is not: there is no `void` value to pass. That asymmetry is why the
     /// return type is checked against its own predicate rather than reusing the
     /// parameter one. `void NAME(...)` is the natural C-ABI shape for a driver or
-    /// callback entry point, and it needs nothing from the ABI beyond *not* setting a
-    /// return register: the callee simply leaves `rax` undefined and no C caller of a
-    /// `void` function may read it. This mirrors `extern fn`, whose return type has
-    /// always admitted `void`.
+    /// callback entry point, and it needs nothing from the ABI beyond *not publishing
+    /// a return value* — no C caller of a `void` function may read `rax`.
+    ///
+    /// Codegen does not leave `rax` undefined, it **zeroes** it, and that is
+    /// load-bearing rather than incidental: the body's last expression would otherwise
+    /// still be sitting in `rax`, indistinguishable from a returned value. The
+    /// precedent is the entry-stub defect where a void `main` leaked exactly that
+    /// stale `rax` as the process exit code. Zeroing leaves nothing to mistake for a
+    /// return value and nothing to leak — and
+    /// `void_export_fn_uses_the_c_abi_and_publishes_no_return_value` (`suite21.rs`)
+    /// pins the `xor rax, rax` in the disassembly. This mirrors `extern fn`, whose
+    /// return type has always admitted `void`.
     fn check_export_signature(&mut self, function: &Function) {
         if !function.type_params.is_empty() {
             self.diagnostics.push(SemanticDiagnostic::at(

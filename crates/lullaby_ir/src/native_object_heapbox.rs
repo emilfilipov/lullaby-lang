@@ -126,15 +126,27 @@
 //! # The `ptr_cast` laundering route (why the identity gate covers it)
 //!
 //! `refuse_legacy_box_pointer` in `native_object_rawptr.rs` keys on the *spelling*
-//! `ptr_T`, and `ptr_cast` is free to CHANGE that spelling: `check_ptr_cast` derives
-//! its result type from the caller's annotation, not from the operand, so
-//! `let q ptr<i64> = ptr_cast(p)` turns a box into a `ptr<i64>` and `ptr_offset(q, 1)`
+//! `ptr_T`, and `ptr_cast` used to be free to CHANGE that spelling: it derived its
+//! result type from the caller's annotation, not from the operand, so
+//! `let q ptr<i64> = ptr_cast(p)` turned a box into a `ptr<i64>` and `ptr_offset(q, 1)`
 //! would then stride 8 bytes past the one-cell payload into the NEXT block's `[size]`
 //! header — the word the allocator's free-list scan reads — so a write through it
-//! corrupts allocator metadata. `ptr_cast` is therefore gated on a `ptr_T` operand
-//! too. See `refuse_legacy_box_pointer`'s docs for why that gate is complete (it is
-//! the only builtin whose result type ignores its operand) and how it closes the
-//! cross-function laundering route through the demotion fixpoint.
+//! corrupts allocator metadata. **`check_ptr_cast` now takes the result's model from
+//! the operand**, so that source is `L0303` at the frontend; `ptr_cast` stays gated on
+//! a `ptr_T` operand as defense in depth, still reachable via the model-preserving
+//! identity cast `let q = ptr_cast(p)`.
+//!
+//! **The gate is NOT complete, and the earlier claim that it was is retracted.** It
+//! rested on `ptr_cast` being "the only builtin whose result type ignores its operand",
+//! which a follow-up audit disproved: `int_to_ptr` and `arena_alloc` carried the same
+//! annotation-driven pattern. `arena_alloc` is now filtered to the modern spelling;
+//! **`int_to_ptr` is irreducibly annotation-governed** (an `i64` carries no provenance,
+//! so neither model is derivable, and both round trips are fixture-pinned), so a
+//! `ptr_T` is an `unsafe` assertion that may be false. The gate is also a prefix test
+//! on the OUTER type name, so a box model nested in a pointee (`ptr<ptr_i64>`) is
+//! invisible to it. It guards the cases it names and nothing more. See
+//! `refuse_legacy_box_pointer`'s "What this gate does NOT do" and
+//! `semantics_raw_ptr.rs`'s "What is, and is not, a whole-program property".
 
 use super::*;
 

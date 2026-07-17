@@ -1162,10 +1162,28 @@ impl<'a> Checker<'a> {
                 self.require_unsafe("ptr_to_int", call_span, function)?;
                 Some(TypeRef::new("i64"))
             }
-            // `int_to_ptr(n) -> ptr<T>`: reconstruct a raw pointer from an
-            // integer handle. Fabricating a pointer from an integer is `unsafe`.
-            // The concrete pointee comes from the caller's expected annotation
-            // when it is a raw pointer; otherwise it defaults to `ptr<i64>`.
+            // `int_to_ptr(n) -> ptr<T>`: reconstruct a raw pointer from an integer
+            // handle. Fabricating a pointer from an integer is `unsafe`. The result
+            // type comes from the caller's expected annotation when it is a raw
+            // pointer — in EITHER spelling — and defaults to `ptr<i64>`.
+            //
+            // This is the one pointer producer whose annotation legitimately picks the
+            // pointer MODEL, and it is deliberate rather than an oversight. Its operand
+            // is an `i64`, which carries no provenance, and both round trips are real,
+            // delivered, and fixture-pinned:
+            //
+            //   let back ptr_i64  = int_to_ptr(ptr_to_int(box))  # a box SLOT handle
+            //   let base ptr<i64> = int_to_ptr(753664)           # an MMIO ADDRESS
+            //
+            // An `i64` carries **no provenance**, so `int_to_ptr` cannot tell a slot
+            // handle from an address and neither spelling is derivable — the programmer
+            // asserts it, which is exactly what `unsafe` is for. Restricting this to
+            // `is_modern_raw_pointer` (as `arena_alloc` is restricted) would break the
+            // first fixture, which rebuilds a genuine box. The assertion may be FALSE
+            // and nothing downstream catches that in general. See
+            // `semantics_raw_ptr::check_ptr_cast`'s "What is, and is not, a
+            // whole-program property" for the closure designs that were attacked and
+            // why each failed.
             "int_to_ptr" => {
                 self.expect_arg_count(name, args, 1, function)?;
                 self.expect_arg_type(name, 1, &args[0], "i64", scope, function)?;
