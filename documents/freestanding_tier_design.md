@@ -812,12 +812,34 @@ escape-analysis fuzzers stay green.
 AST, IR, and bytecode interpreters as well as native, all agreeing on `109`.
 
 **How bytecode gets there: a deliberate tree-walker fallback**, the same shape §10.4
-documents for `addr_of`. Both arena markers (`arena_region`, `arena_alloc`) are
-special forms whose region operand is a compile-time region *name*, not a value.
-`VmOp::Call` evaluates every argument to a `Value` and `dispatch_named_call` receives
-a `Vec<Value>`, so a region name cannot survive the flat op stream — the VM could not
-implement these even in principle. `VmCompiler::compile_expr` therefore refuses both
-**by name**, and any function using an arena runs on the tree-walker.
+documents for `addr_of`. `VmCompiler::compile_expr` refuses both arena markers
+(`arena_region`, `arena_alloc`) **by name**, so any function using an arena runs on
+the tree-walker.
+
+This is **deliberately unimplemented, not impossible** — a distinction this document
+gets wrong once already (the `L0460` refusal below claimed an impossibility the
+mechanism disproved) and must not repeat, because a false structural claim here
+forecloses a real option for the next implementer:
+
+- `arena_region`'s operands are lowered as **string literals** (`IrExprKind::String`),
+  so they compile to `VmOp::PushConst(Value::String(..))` and reach
+  `dispatch_named_call` fully intact — measured with a temporary arm that echoes its
+  arguments: `args=[String("pool"), String("buf")]`. `VmOp::FieldLocal(usize, String)`
+  already carries a name in the op stream, so a `VmOp::ArenaRegion(String, String)` is
+  constructible with existing machinery.
+- The shipped bug corroborates this: it was `L0401 unknown **function**
+  'arena_region'`, not `L0403 unknown **variable**`. The arguments evaluated and the
+  name arrived; only the arm was missing.
+- The **real** obstacle is that `dispatch_named_call(&mut self, name, args:
+  Vec<Value>)` has no `env` access, while arena state is a name-keyed env binding
+  (`arena_key`). A dedicated op or env plumbing would be needed.
+- Only `arena_alloc` carries a bare `Variable` region operand, and that is a
+  *lowering choice* — `arena_region` disproves any claim that a region name cannot
+  survive the flat stream.
+
+The choice not to build it is a cost/benefit one: the arena is a freestanding-tier
+declaration rather than a hot path, and the tree-walker already models it exactly. It
+is reversible by anyone who wants the VM to carry arenas natively.
 
 This refusal is written down because for one increment it was **accidental**, and the
 gap it left was real. `arena_alloc`'s bare region operand resolved to no VM slot, so

@@ -1443,7 +1443,8 @@ impl Runtime<'_> {
             RuntimeError::new(
                 "L0445",
                 format!(
-                    "static-buffer arena `{}` is backed by `{backing}`, which is not a binding                      in scope",
+                    "static-buffer arena `{}` is backed by `{backing}`, \
+                     which is not a binding in scope",
                     decl.name
                 ),
             )

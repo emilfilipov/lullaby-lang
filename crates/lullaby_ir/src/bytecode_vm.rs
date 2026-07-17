@@ -531,25 +531,42 @@ impl VmCompiler {
                 if name == "addr_of" {
                     return Err(());
                 }
-                // The static-buffer arena markers (freestanding tier §5) are special
-                // forms for the same structural reason: their region operand is a
-                // compile-time region *name*, not a value. `VmOp::Call` evaluates
-                // every argument to a `Value` and `dispatch_named_call` receives a
-                // `Vec<Value>`, so a region name cannot survive the flat op stream —
-                // implementing these there is impossible by construction, not merely
-                // unimplemented. The tree-walker intercepts both in `eval_expr`
-                // before argument evaluation; these functions run there.
+                // The static-buffer arena markers (freestanding tier §5) are
+                // **deliberately unimplemented** on the VM — the `addr_of` precedent
+                // above. This is a choice, not an impossibility, and the difference
+                // matters to anyone who later wants to lift it:
                 //
-                // This refusal is deliberate and load-bearing. It was previously
+                //   * `arena_region`'s operands are `IrExprKind::String` literals
+                //     (see its lowering below), so they compile to
+                //     `VmOp::PushConst(Value::String(..))` and arrive at
+                //     `dispatch_named_call` fully intact. Measured, not argued: an
+                //     arm echoing its args prints
+                //     `args=[String("pool"), String("buf")]`. `VmOp::FieldLocal(usize,
+                //     String)` already carries a name in the op stream, so a
+                //     `VmOp::ArenaRegion(String, String)` is constructible today.
+                //   * The real obstacle is that `dispatch_named_call(&mut self,
+                //     name, args: Vec<Value>)` has **no `env` access**, while arena
+                //     state is a name-keyed env binding (`arena_key`). Implementing
+                //     the markers there needs a dedicated op or env plumbing. We
+                //     chose not to build it: the arena is a freestanding-tier
+                //     declaration, not a hot path, and the tree-walker already
+                //     models it exactly.
+                //   * Only `arena_alloc` has a bare `Variable` region operand, and
+                //     that is a lowering choice — `arena_region` disproves any claim
+                //     that a region name *cannot* survive the stream.
+                //
+                // The refusal itself is correct and load-bearing. It was previously
                 // *accidental*: `arena_alloc`'s bare `Variable(region)` operand
                 // resolved to no slot, so `compile_expr` happened to `Err(())` on
                 // its own and the function fell back. A `region` with no `alloc` has
                 // no such operand, compiled cleanly, and reached `VmOp::Call` —
                 // where the missing arm raised `L0401 unknown function
-                // 'arena_region'` on bytecode while every other tier returned 0.
-                // Naming both markers here makes the fallback intentional and
-                // total, and covers a region that is declared but never allocated
-                // from. Regression: `freestanding_arena_scoping.lby`.
+                // 'arena_region'` (note: unknown *function*, not unknown *variable*
+                // — the names had arrived fine; only the arm was missing) while
+                // every other tier returned 0. Naming both markers here makes the
+                // fallback intentional and total, and covers a region that is
+                // declared but never allocated from. Regression:
+                // `freestanding_arena_scoping.lby`.
                 if name == "arena_region" || name == "arena_alloc" {
                     return Err(());
                 }
