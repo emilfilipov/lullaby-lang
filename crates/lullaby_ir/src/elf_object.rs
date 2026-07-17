@@ -51,8 +51,13 @@
 //! bad index reclassifies `_start` as local. But `readelf` did **not** flag that
 //! same corrupted object: it renders each symbol's binding from `st_info` and
 //! never validates `sh_info` against it, so "readelf is happy" is *not* evidence
-//! about this field. `ld` is. Being manual, that check guards nothing on its
-//! own; the committed guard is `symtab_sh_info_*` in the test module below.
+//! about this field. `ld` is — but only as **stderr text**: it *warns* and still
+//! exits 0, so a gate keyed on `ld`'s exit code would read false-green. The
+//! cross-link+run test is blind here too: with a bad `sh_info`, `ld` defaults the
+//! entry to `.text`'s start, which is exactly where `_start` sits, so the binary
+//! links, runs, and returns the right answer anyway. No external tool available
+//! here guards this field. The committed `symtab_sh_info_*` tests below are the
+//! only real guard — do not retire them believing an e2e or linker check covers it.
 
 use crate::object_model::{
     DwarfSection, ObjectMachine, ObjectModel, ObjectRelocationKind, ObjectSectionKind,
