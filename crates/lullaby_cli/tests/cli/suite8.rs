@@ -61,9 +61,10 @@ pub(crate) fn generic_struct_runs_identically_on_all_backends() {
 /// interpreter result (mod 256). Gated on the link toolchain.
 #[test]
 pub(crate) fn generic_struct_scalar_compiles_native() {
+    let scratch = ScratchDir::new("generic_struct_scalar_compiles_native");
     ensure_msvc_env();
     let fixture = workspace_root().join("tests/fixtures/valid/generics/box_pair.lby");
-    let out = std::env::temp_dir().join("lullaby_generic_struct_scalar_parity.exe");
+    let out = scratch.join("lullaby_generic_struct_scalar_parity.exe");
     let output = lullaby()
         .args([
             "native",

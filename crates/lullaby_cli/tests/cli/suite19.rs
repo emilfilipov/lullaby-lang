@@ -61,7 +61,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{lullaby, stderr, stdout, workspace_root};
+use super::{ScratchDir, lullaby, stderr, stdout, workspace_root};
 
 /// A test that OVERFLOWS THE STACK (unbounded recursion) as the 2nd of 4 must be
 /// reported as a failure, must not prevent the other three from running, and must
@@ -292,7 +292,8 @@ fn test_runner_ignores_protocol_forged_through_a_spawned_grandchild() {
 /// (`L0419`) — harmless but a real behavior change that the reopen removes.
 #[test]
 fn test_runner_gives_tests_a_readable_null_stdin() {
-    let dir = std::env::temp_dir().join("lullaby_cli_test_stdin_eof");
+    let scratch = ScratchDir::new("test_runner_gives_tests_a_readable_null_");
+    let dir = scratch.join("lullaby_cli_test_stdin_eof");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let fixture = dir.join("stdin_eof.lby");

@@ -79,9 +79,10 @@ pub(crate) fn recursive_generic_enum_through_indirection_runs() {
 /// `.exe` exit code must equal the interpreter result (mod 256).
 #[test]
 pub(crate) fn generic_enum_scalar_compiles_native() {
+    let scratch = ScratchDir::new("generic_enum_scalar_compiles_native");
     ensure_msvc_env();
     let fixture = workspace_root().join("tests/fixtures/valid/generics/opt_res.lby");
-    let out = std::env::temp_dir().join("lullaby_generic_enum_scalar_parity.exe");
+    let out = scratch.join("lullaby_generic_enum_scalar_parity.exe");
     let output = lullaby()
         .args([
             "native",

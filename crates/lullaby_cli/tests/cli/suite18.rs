@@ -49,7 +49,7 @@ use std::process::Command;
 
 /// Run `source` on one interpreter backend and return its printed `main` result.
 fn interpreter_result(source: &str, backend: &str, tag: &str) -> String {
-    let dir = std::env::temp_dir();
+    let dir = ScratchDir::new("interpreter_result");
     let src = dir.join(format!("{tag}_{backend}.lby"));
     std::fs::write(&src, source).expect("write source");
     let out = lullaby()
@@ -73,7 +73,7 @@ fn native_exit_for(source: &str, tag: &str) -> Option<i32> {
         eprintln!("not a Windows host; skipping {tag}");
         return None;
     }
-    let dir = std::env::temp_dir();
+    let dir = ScratchDir::new("native_exit_for");
     let src = dir.join(format!("{tag}.lby"));
     let exe = dir.join(format!("{tag}.exe"));
     std::fs::write(&src, source).expect("write source");
@@ -124,7 +124,7 @@ fn assert_all_four_tiers_agree(source: &str, tag: &str, expected: i64) {
 /// Assert `source` does NOT compile natively — it must skip cleanly (`L0339`) — and
 /// that the reported reason mentions `reason`.
 fn assert_native_skips_because(source: &str, tag: &str, reason: &str) {
-    let dir = std::env::temp_dir();
+    let dir = ScratchDir::new("assert_native_skips_because");
     let src = dir.join(format!("{tag}.lby"));
     let exe = dir.join(format!("{tag}.exe"));
     std::fs::write(&src, source).expect("write source");
@@ -262,7 +262,7 @@ fn native_returned_alloc_box_matches_interpreters() {
 /// would not compile. Recorded for the owner decision on unifying the two families.
 #[test]
 fn an_alloc_box_is_not_a_typed_ptr_at_a_boundary() {
-    let dir = std::env::temp_dir();
+    let dir = ScratchDir::new("an_alloc_box_is_not_a_typed_ptr_at_a_bou");
     let src = dir.join("lullaby_alloc_model_mismatch.lby");
     std::fs::write(
         &src,

@@ -130,13 +130,14 @@ fn no_runtime_raw_pointer_surface_is_allowed() {
 
 #[test]
 fn no_runtime_scalar_core_compiles_freestanding_native() {
+    let scratch = ScratchDir::new("no_runtime_scalar_core_compiles_freestan");
     // The scalar-core `main` is native-eligible, so `lullaby native --freestanding`
     // compiles it (the `no-runtime` directive composes with the existing
     // `--freestanding` no-CRT output path). When the linker + kernel32 are
     // available, the exit code equals the interpreter result (37).
     let fixture =
         workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_scalar_core.lby");
-    let out = std::env::temp_dir().join("lullaby_no_runtime_scalar_core.exe");
+    let out = scratch.join("lullaby_no_runtime_scalar_core.exe");
 
     let emit = lullaby()
         .args([
@@ -244,9 +245,10 @@ fn no_runtime_host_allocator_builtin_is_rejected() {
 
 #[test]
 fn misplaced_no_runtime_directive_is_rejected() {
+    let scratch = ScratchDir::new("misplaced_no_runtime_directive_is_reject");
     // The directive is only valid as the first non-comment line of the module; a
     // later occurrence is a parse-time misplacement (`L0201`), not a declaration.
-    let temp = std::env::temp_dir().join("lullaby_no_runtime_misplaced.lby");
+    let temp = scratch.join("lullaby_no_runtime_misplaced.lby");
     std::fs::write(&temp, "fn main -> i64\n    0\nno-runtime\n").expect("write temp");
     let output = lullaby()
         .args(["check", temp.to_str().expect("temp path")])
@@ -265,6 +267,7 @@ fn misplaced_no_runtime_directive_is_rejected() {
 
 #[test]
 fn no_runtime_directive_survives_fmt_round_trip() {
+    let scratch = ScratchDir::new("no_runtime_directive_survives_fmt_round_");
     // `lullaby fmt` re-emits the `no-runtime` directive at the top of the module,
     // and re-formatting the output is a fixed point (idempotent).
     let path =
@@ -280,7 +283,7 @@ fn no_runtime_directive_survives_fmt_round_trip() {
         "fmt must re-emit the `no-runtime` directive first: {formatted}"
     );
 
-    let temp = std::env::temp_dir().join("lullaby_no_runtime_fmt_idempotent.lby");
+    let temp = scratch.join("lullaby_no_runtime_fmt_idempotent.lby");
     std::fs::write(&temp, &formatted).expect("write temp");
     let second = lullaby()
         .args(["fmt", temp.to_str().expect("temp path")])
@@ -296,9 +299,10 @@ fn no_runtime_directive_survives_fmt_round_trip() {
 
 #[test]
 fn ordinary_program_without_directive_is_unaffected() {
+    let scratch = ScratchDir::new("ordinary_program_without_directive_is_un");
     // A program WITHOUT the `no-runtime` directive is completely unaffected by the
     // gate: it may freely use a growable `list`, and it runs normally.
-    let temp = std::env::temp_dir().join("lullaby_no_runtime_absent.lby");
+    let temp = scratch.join("lullaby_no_runtime_absent.lby");
     std::fs::write(
         &temp,
         "fn main -> i64\n    let xs list<i64> = list_new()\n    xs = push(xs, 7)\n    len(xs)\n",
@@ -732,8 +736,9 @@ fn addr_of_cleanly_skips_wasm() {
 /// CRT, so this needs no toolchain gate — only a Windows host to execute on.
 /// Returns `None` (with a printed note) when the host cannot run a PE image.
 fn native_exit_code(fixture: &str, out_name: &str, extra_args: &[&str]) -> Option<i32> {
+    let scratch = ScratchDir::new("native_exit_code");
     let path = workspace_root().join(fixture);
-    let out = std::env::temp_dir().join(out_name);
+    let out = scratch.join(out_name);
     let _ = std::fs::remove_file(&out);
 
     let mut args: Vec<&str> = vec!["native", "--verbose", "-o"];
@@ -1045,8 +1050,9 @@ fn native_buffer_write_through_walk_aliases_the_buffer() {
 /// process. Compilation plus the emitted bytes are the evidence; see
 /// `crates/lullaby_ir/src/native_object_portio_tests.rs` for the byte assertions.
 fn compile_freestanding_only(fixture: &str, exe_name: &str) -> String {
+    let scratch = ScratchDir::new("compile_freestanding_only");
     let path = workspace_root().join(fixture);
-    let out = std::env::temp_dir().join(exe_name);
+    let out = scratch.join(exe_name);
     let emit = lullaby()
         .args([
             "native",
@@ -1305,9 +1311,10 @@ fn arena_is_available_in_a_no_runtime_module() {
 /// multi-cell request is walkable with `ptr_offset`.
 #[test]
 fn arena_alloc_runs_freestanding_native() {
+    let scratch = ScratchDir::new("arena_alloc_runs_freestanding_native");
     let fixture =
         workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby");
-    let out = std::env::temp_dir().join("lullaby_arena_alloc.exe");
+    let out = scratch.join("lullaby_arena_alloc.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1363,9 +1370,10 @@ fn arena_alloc_runs_freestanding_native() {
 /// check and the bump are already final.
 #[test]
 fn arena_overflow_hits_the_panic_edge_natively() {
+    let scratch = ScratchDir::new("arena_overflow_hits_the_panic_edge_nativ");
     let fixture =
         workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_overflow.lby");
-    let out = std::env::temp_dir().join("lullaby_arena_overflow.exe");
+    let out = scratch.join("lullaby_arena_overflow.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1529,6 +1537,7 @@ fn arena_alloc_outside_unsafe_is_rejected() {
 /// of the directive that has nothing to do with arenas.
 #[test]
 fn arena_region_survives_fmt_round_trip() {
+    let scratch = ScratchDir::new("arena_region_survives_fmt_round_trip");
     let path =
         workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_arena_alloc.lby");
     let first = lullaby()
@@ -1550,7 +1559,7 @@ fn arena_region_survives_fmt_round_trip() {
          {formatted}"
     );
 
-    let temp = std::env::temp_dir().join("lullaby_arena_fmt_idempotent.lby");
+    let temp = scratch.join("lullaby_arena_fmt_idempotent.lby");
     std::fs::write(&temp, &formatted).expect("write temp");
     let second = lullaby()
         .args(["fmt", temp.to_str().expect("temp path")])
@@ -1608,6 +1617,7 @@ fn arena_two_regions_over_one_buffer_are_rejected() {
 ///   interpreters too, so this is ordinary parity rather than a divergence.
 #[test]
 fn arena_scoping_agrees_across_all_tiers() {
+    let scratch = ScratchDir::new("arena_scoping_agrees_across_all_tiers");
     let fixture = "tests/fixtures/valid/no_runtime/freestanding_arena_scoping.lby";
     for backend in ["ast", "ir", "bytecode"] {
         let output = run_backend(fixture, backend);
@@ -1625,7 +1635,7 @@ fn arena_scoping_agrees_across_all_tiers() {
     }
 
     let path = workspace_root().join(fixture);
-    let out = std::env::temp_dir().join("lullaby_arena_scoping.exe");
+    let out = scratch.join("lullaby_arena_scoping.exe");
     let emit = lullaby()
         .args([
             "native",

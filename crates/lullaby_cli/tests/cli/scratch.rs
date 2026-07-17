@@ -19,6 +19,26 @@
 //! constructor that accepts a caller-chosen path. A new fuzzer physically cannot
 //! hand them a fixed directory — the only way to obtain one is `ScratchDir::new`,
 //! which always mints a fresh unique path.
+//!
+//! # A fixed path also masks dead assertions
+//!
+//! Isolation is the headline reason, but not the only one. `%TEMP%` is never
+//! cleaned, so a *fixed* path accumulates artifacts from every past run — and an
+//! assertion that reads one cannot tell this run's output from one left months
+//! ago. Converting the harness to `ScratchDir` caught four tests doing exactly
+//! that: three read a `.obj` the direct-PE fast path had long since stopped
+//! emitting (they were scanning a three-day-old file), and `ffi_calls_c_abs_when_linkable`
+//! ran a stale exe when its link step had silently skipped. All four passed
+//! green while proving nothing. A scratch dir starts empty, so a missing artifact
+//! fails loudly the first time.
+//!
+//! # Every writer goes through here
+//!
+//! The whole CLI harness now mints its paths this way; `std::env::temp_dir()`
+//! should not appear in these tests outside this module. Helpers that hand a path
+//! to a caller (`fs_temp_dir`, `new_project_work_dir`, `fmt_comments::write_temp`)
+//! return the `ScratchDir` *with* the path so the guard outlives the borrow —
+//! returning the path alone deletes the directory at the helper's `}`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

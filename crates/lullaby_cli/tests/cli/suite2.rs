@@ -6,11 +6,12 @@ use std::process::Command;
 
 #[test]
 pub(crate) fn wasm_emits_module_and_lists_functions() {
+    let scratch = ScratchDir::new("wasm_emits_module_and_lists_functions");
     // The scalar fixture: an arithmetic function, a recursive `if` function, a
     // bool-returning comparison, a `for`-loop function, plus a `main` the
     // interpreter uses for ground truth. Every function is in the scalar subset.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_scalars.wasm");
+    let out = scratch.join("lullaby_wasm_scalars.wasm");
     let output = lullaby()
         .args([
             "wasm",
@@ -41,6 +42,7 @@ pub(crate) fn wasm_emits_module_and_lists_functions() {
 
 #[test]
 pub(crate) fn wasm_reports_no_eligible_functions() {
+    let scratch = ScratchDir::new("wasm_reports_no_eligible_functions");
     // A file whose only function uses a type outside the supported WASM value set
     // (strings/structs/arrays/enums, scalar-/string-/struct-/nested-list-element
     // `list`s, maps with a scalar or `string` value or a `struct` value, and enums
@@ -51,7 +53,7 @@ pub(crate) fn wasm_reports_no_eligible_functions() {
     // make `main` itself return that type so nothing is eligible and the emitter
     // reports L0338 rather than compiling anything.
     let source = "fn main -> map<i64, map<i64, i64>>\n    map_new()\n";
-    let tmp = std::env::temp_dir().join("lullaby_wasm_none.lby");
+    let tmp = scratch.join("lullaby_wasm_none.lby");
     std::fs::write(&tmp, source).expect("write temp");
     let output = lullaby()
         .args(["wasm", "--verbose", tmp.to_str().expect("temp path")])
@@ -68,10 +70,11 @@ pub(crate) fn wasm_reports_no_eligible_functions() {
 
 #[test]
 pub(crate) fn wasm_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_execution_parity_with_node");
     // Emit the module, then (if `node` is available) instantiate it and assert
     // each exported function matches the interpreter's ground truth.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_parity.wasm");
+    let out = scratch.join("lullaby_wasm_parity.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -99,7 +102,7 @@ pub(crate) fn wasm_execution_parity_with_node() {
 
     // A tiny JS runner: print several exported results. i64 params/returns are
     // BigInt in JS, so pass `10n` and stringify the BigInt result.
-    let runner = std::env::temp_dir().join("lullaby_wasm_runner.js");
+    let runner = scratch.join("lullaby_wasm_runner.js");
     // The module imports the host functions `env.log_i64`, `env.console_log`, and
     // `env.dom_set_text`, so instantiation must supply all three even though these
     // scalar functions do not call them.
@@ -151,12 +154,13 @@ pub(crate) fn wasm_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_log_import_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_log_import_execution_parity_with_no");
     // The linear-memory step: a program whose exported function calls the
     // `wasm_log` host import with several computed values. The generated JS
     // harness supplies `env.log_i64`, capturing each call into an array, then
     // asserts the captured sequence equals what the interpreter computes.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_log.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_log.wasm");
+    let out = scratch.join("lullaby_wasm_log.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -201,7 +205,7 @@ pub(crate) fn wasm_log_import_execution_parity_with_node() {
 
     // The harness provides `env.log_i64`, capturing each call into `logged`,
     // then calls the exported `emit` and prints the captured BigInts.
-    let runner = std::env::temp_dir().join("lullaby_wasm_log_runner.js");
+    let runner = scratch.join("lullaby_wasm_log_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -237,13 +241,14 @@ pub(crate) fn wasm_log_import_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_heap_types_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_heap_types_execution_parity_with_no");
     // The heap-types step: a program that builds a string, a struct (with a field
     // mutation), and a fixed array (with an indexed write and a `for`-loop read),
     // all laid out in linear memory. Each exported function's WASM result must
     // match the interpreter, and the emitted `memory` must hold the interned
     // string literal.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_heap.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_heap.wasm");
+    let out = scratch.join("lullaby_wasm_heap.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -286,7 +291,7 @@ pub(crate) fn wasm_heap_types_execution_parity_with_node() {
     // `[char_len i32][byte_len i32][utf8]` string layout straight out of `memory`
     // at the reserved base (offset 16): char count at +0, byte count at +4, bytes
     // at +8.
-    let runner = std::env::temp_dir().join("lullaby_wasm_heap_runner.js");
+    let runner = scratch.join("lullaby_wasm_heap_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -340,6 +345,7 @@ pub(crate) fn wasm_heap_types_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_string_concat_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_string_concat_execution_parity_with");
     // Runtime string concatenation (`a + b` on two `string` values) compiles to
     // WASM: each function allocates a fresh `[char_len][byte_len][utf8]` record and
     // copies both operands' byte ranges. The fixture exercises direct concat, a
@@ -347,7 +353,7 @@ pub(crate) fn wasm_string_concat_execution_parity_with_node() {
     // deterministic `i64` char counts via `len(...)`. Every export's WASM result
     // must match the interpreter bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_string_concat.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_string_concat.wasm");
+    let out = scratch.join("lullaby_wasm_string_concat.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -395,7 +401,7 @@ pub(crate) fn wasm_string_concat_execution_parity_with_node() {
     // Instantiate under node, call each export, and additionally decode a
     // concatenated record built at runtime straight out of `memory` (char count at
     // +0, byte count at +4, bytes at +8) to prove the layout round-trips.
-    let runner = std::env::temp_dir().join("lullaby_wasm_string_concat_runner.js");
+    let runner = scratch.join("lullaby_wasm_string_concat_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -451,6 +457,7 @@ pub(crate) fn wasm_string_concat_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_string_ops_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_string_ops_execution_parity_with_no");
     // Index-based string operations compile to WASM: char-indexed `substring`/`find`
     // (which decode UTF-8 to map char indices to byte offsets) and byte-exact
     // `contains`/`starts_with`/`ends_with`. The fixture exercises a multi-byte
@@ -460,7 +467,7 @@ pub(crate) fn wasm_string_ops_execution_parity_with_node() {
     // exports the node runner decodes. Every export's WASM result must match the
     // interpreter bit-for-bit — including the char-vs-byte distinction.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_string_ops.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_string_ops.wasm");
+    let out = scratch.join("lullaby_wasm_string_ops.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -517,7 +524,7 @@ pub(crate) fn wasm_string_ops_execution_parity_with_node() {
     // The decoded text and headers must match the interpreters' `builtin_substring`
     // — critically, `substring("café", 3, 4)` is the multi-byte `é` (char_len 1,
     // byte_len 2), proving the char->byte mapping.
-    let runner = std::env::temp_dir().join("lullaby_wasm_string_ops_runner.js");
+    let runner = scratch.join("lullaby_wasm_string_ops_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -585,6 +592,7 @@ pub(crate) fn wasm_string_ops_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_to_string_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_to_string_execution_parity_with_nod");
     // `to_string(x)` compiles to WASM for integer/bool/char/byte/string arguments,
     // building `[char_len][byte_len][utf8]` records identical to the interpreters'
     // `Value::Display`. Floats are DEFERRED (no float `to_string` appears in the
@@ -593,7 +601,7 @@ pub(crate) fn wasm_to_string_execution_parity_with_node() {
     // the string identity, returning a deterministic joined `i64` length from
     // `main` plus per-type `string`-returning exports the node runner decodes.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_to_string.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_to_string.wasm");
+    let out = scratch.join("lullaby_wasm_to_string.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -645,7 +653,7 @@ pub(crate) fn wasm_to_string_execution_parity_with_node() {
     // +8). The decoded text must match the interpreters' `to_string` bit-for-bit,
     // including `i64::MIN`, `u64::MAX`, a byte magnitude passed as a parameter, and
     // a 2-byte UTF-8 char (char_len = 1, byte_len = 2).
-    let runner = std::env::temp_dir().join("lullaby_wasm_to_string_runner.js");
+    let runner = scratch.join("lullaby_wasm_to_string_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -723,11 +731,12 @@ pub(crate) fn wasm_to_string_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_value_if_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_value_if_execution_parity_with_node");
     // A value-producing tail `if`/`elif`/`else` (each branch yields the function's
     // result value) now compiles to WASM: the `if` emits a typed block so the
     // branch value is left on the stack. Previously such functions were skipped.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_value_if.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_value_if.wasm");
+    let out = scratch.join("lullaby_wasm_value_if.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -759,7 +768,7 @@ pub(crate) fn wasm_value_if_execution_parity_with_node() {
         eprintln!("node not found on PATH; skipping WASM value-if execution parity");
         return;
     }
-    let runner = std::env::temp_dir().join("lullaby_wasm_value_if_runner.js");
+    let runner = scratch.join("lullaby_wasm_value_if_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -785,6 +794,7 @@ pub(crate) fn wasm_value_if_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_aggregate_args_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_aggregate_args_execution_parity_wit");
     // Aggregates across call boundaries: a `main -> i64` that passes a struct to a
     // function reading its fields, receives a struct another function returns, and
     // takes+returns a fixed array — plus a value-semantics probe where a callee
@@ -792,7 +802,7 @@ pub(crate) fn wasm_aggregate_args_execution_parity_with_node() {
     // Every aggregate argument is deep-copied at the call site, so the WASM result
     // must equal the interpreter's ground truth bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_aggregate_args.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_aggregate_args.wasm");
+    let out = scratch.join("lullaby_wasm_aggregate_args.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -839,7 +849,7 @@ pub(crate) fn wasm_aggregate_args_execution_parity_with_node() {
     // the deep copies are baked into `main`: `arr_untouched` (1, not 101) proves
     // `bump` did not mutate the caller's array, and `caller_unchanged` (11, not
     // 1998) proves `mutate_point` did not mutate the caller's struct.
-    let runner = std::env::temp_dir().join("lullaby_wasm_aggregate_args_runner.js");
+    let runner = scratch.join("lullaby_wasm_aggregate_args_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -869,13 +879,14 @@ pub(crate) fn wasm_aggregate_args_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_nested_aggregate_args_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_nested_aggregate_args_execution_par");
     // The recursive deep-copy path: aggregates nested inside aggregates crossing
     // call boundaries — a struct holding a struct, and an array of arrays. When a
     // callee mutates a nested field/element of its parameter, the caller's copy
     // must be untouched, which requires the copy-on-pass to recurse into nested
     // mutable aggregates. `main` returns the interpreter-checked total.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_aggregate_nested.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_aggregate_nested.wasm");
+    let out = scratch.join("lullaby_wasm_aggregate_nested.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -909,7 +920,7 @@ pub(crate) fn wasm_nested_aggregate_args_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_aggregate_nested_runner.js");
+    let runner = scratch.join("lullaby_wasm_aggregate_nested_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -939,6 +950,7 @@ pub(crate) fn wasm_nested_aggregate_args_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_fixed_width_integers_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_fixed_width_integers_execution_pari");
     // The fixed-width integer step: three fixtures whose `main` returns `i64` but
     // whose bodies exercise the width-normalized operations (wrapping arithmetic,
     // signedness-correct comparison/division, bitwise/shift, `~`, and the
@@ -957,7 +969,7 @@ pub(crate) fn wasm_fixed_width_integers_execution_parity_with_node() {
     let mut wasm_paths: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     for (name, expected) in cases {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_wasm_{name}.wasm"));
+        let out = scratch.join(format!("lullaby_wasm_{name}.wasm"));
         let emit = lullaby()
             .args([
                 "wasm",
@@ -994,7 +1006,7 @@ pub(crate) fn wasm_fixed_width_integers_execution_parity_with_node() {
     // A runner that instantiates each module and prints `name=main()`. `main`
     // returns `i64`, which is a BigInt in JS.
     for (name, out, expected) in &wasm_paths {
-        let runner = std::env::temp_dir().join(format!("lullaby_wasm_{name}_runner.js"));
+        let runner = scratch.join(format!("lullaby_wasm_{name}_runner.js"));
         let js = format!(
             "const fs=require('fs');\
              const bytes=fs.readFileSync({wasm:?});\
@@ -1025,6 +1037,7 @@ pub(crate) fn wasm_fixed_width_integers_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_float_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_float_execution_parity_with_node");
     // The float step: two fixtures whose `main` returns `i64` but whose bodies
     // exercise `f32`/`f64` arithmetic, comparisons, and the `to_f32`/`to_f64`
     // conversions. Each compiles to WASM now (single-precision `f32.*` ops keep
@@ -1035,7 +1048,7 @@ pub(crate) fn wasm_float_execution_parity_with_node() {
     let mut wasm_paths: Vec<(String, std::path::PathBuf, String)> = Vec::new();
     for (name, expected) in cases {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_wasm_{name}.wasm"));
+        let out = scratch.join(format!("lullaby_wasm_{name}.wasm"));
         let emit = lullaby()
             .args([
                 "wasm",
@@ -1072,7 +1085,7 @@ pub(crate) fn wasm_float_execution_parity_with_node() {
     // A runner that instantiates each module and prints `main=main()`. `main`
     // returns `i64`, which is a BigInt in JS.
     for (name, out, expected) in &wasm_paths {
-        let runner = std::env::temp_dir().join(format!("lullaby_wasm_{name}_runner.js"));
+        let runner = scratch.join(format!("lullaby_wasm_{name}_runner.js"));
         let js = format!(
             "const fs=require('fs');\
              const bytes=fs.readFileSync({wasm:?});\
@@ -1103,6 +1116,7 @@ pub(crate) fn wasm_float_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_enum_match_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_enum_match_execution_parity_with_no");
     // The enum + match step: a program whose `main` returns `i64` but whose body
     // exercises enum construction and `match` over the built-in `option<i64>`,
     // `result<i64, i64>` (scalar payloads), and a small user enum with a scalar
@@ -1111,7 +1125,7 @@ pub(crate) fn wasm_enum_match_execution_parity_with_node() {
     // records in linear memory), and the exported `main` must equal the
     // interpreter's ground truth bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_enum_match.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_enum_match.wasm");
+    let out = scratch.join("lullaby_wasm_enum_match.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1149,7 +1163,7 @@ pub(crate) fn wasm_enum_match_execution_parity_with_node() {
 
     // Instantiate the module (no-op host imports) and call the exported `main`,
     // which threads every enum construction and match through linear memory.
-    let runner = std::env::temp_dir().join("lullaby_wasm_enum_match_runner.js");
+    let runner = scratch.join("lullaby_wasm_enum_match_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1179,6 +1193,7 @@ pub(crate) fn wasm_enum_match_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_list_build_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_list_build_execution_parity_with_no");
     // The growable `list<T>` step: a program that builds a scalar-element list via
     // `list_new`/`push` (crossing the initial capacity to trigger a grow+copy),
     // reads it with `get`/`len`, replaces an element with `set`, and drops the last
@@ -1186,7 +1201,7 @@ pub(crate) fn wasm_list_build_execution_parity_with_node() {
     // in linear memory), and the exported `main` must equal the interpreter's
     // ground truth bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_list_build.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_list_build.wasm");
+    let out = scratch.join("lullaby_wasm_list_build.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1222,7 +1237,7 @@ pub(crate) fn wasm_list_build_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_list_build_runner.js");
+    let runner = scratch.join("lullaby_wasm_list_build_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1251,6 +1266,7 @@ pub(crate) fn wasm_list_build_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_list_value_semantics_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_list_value_semantics_execution_pari");
     // The list value-semantics step: assigning a list to another binding shares an
     // `i32` pointer, but every mutating op (`push`/`set`) deep-copies first and a
     // list crossing a call boundary is deep-copied, so mutating one binding is
@@ -1258,7 +1274,7 @@ pub(crate) fn wasm_list_value_semantics_execution_parity_with_node() {
     // push-derived list, a set-derived list, and a callee that pushes to its
     // parameter; the WASM result must equal the interpreter's.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_list_value_semantics.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_list_value_semantics.wasm");
+    let out = scratch.join("lullaby_wasm_list_value_semantics.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1291,7 +1307,7 @@ pub(crate) fn wasm_list_value_semantics_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_list_value_semantics_runner.js");
+    let runner = scratch.join("lullaby_wasm_list_value_semantics_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1320,6 +1336,7 @@ pub(crate) fn wasm_list_value_semantics_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_list_struct_and_nested_and_map_struct_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_list_struct_and_nested_and_map_stru");
     // Mutable-heap collection ELEMENTS/VALUES: a `list<struct>` (push structs, read a
     // field, `set` an element), a `list<list<i64>>` (one level of mutable nesting,
     // summed through nested `get`s), and a `map<i64, struct>` (`map_set`/`map_get`
@@ -1332,7 +1349,7 @@ pub(crate) fn wasm_list_struct_and_nested_and_map_struct_execution_parity_with_n
     // into the struct/nested list), and the exported `main` must equal the
     // interpreter's ground truth.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_list_struct.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_list_struct.wasm");
+    let out = scratch.join("lullaby_wasm_list_struct.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1377,7 +1394,7 @@ pub(crate) fn wasm_list_struct_and_nested_and_map_struct_execution_parity_with_n
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_list_struct_runner.js");
+    let runner = scratch.join("lullaby_wasm_list_struct_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1406,6 +1423,7 @@ pub(crate) fn wasm_list_struct_and_nested_and_map_struct_execution_parity_with_n
 
 #[test]
 pub(crate) fn wasm_map_build_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_map_build_execution_parity_with_nod");
     // The growable `map<K, V>` step: a program that builds a scalar-key,
     // scalar-value map via `map_new`/`map_set` (inserting several keys plus an
     // in-place update, and crossing the initial capacity to trigger a grow+copy),
@@ -1414,7 +1432,7 @@ pub(crate) fn wasm_map_build_execution_parity_with_node() {
     // block in linear memory), and the exported `main` must equal the
     // interpreter's ground truth bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_map_build.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_map_build.wasm");
+    let out = scratch.join("lullaby_wasm_map_build.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1450,7 +1468,7 @@ pub(crate) fn wasm_map_build_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_map_build_runner.js");
+    let runner = scratch.join("lullaby_wasm_map_build_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1479,6 +1497,7 @@ pub(crate) fn wasm_map_build_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_map_value_semantics_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_map_value_semantics_execution_parit");
     // The map value-semantics step: assigning a map to another binding shares an
     // `i32` pointer, but every mutating op (`map_set`) deep-copies first and a map
     // crossing a call boundary is deep-copied, so mutating one binding is never
@@ -1486,7 +1505,7 @@ pub(crate) fn wasm_map_value_semantics_execution_parity_with_node() {
     // derived map, an update-derived map, and a callee that inserts into its
     // parameter; the WASM result must equal the interpreter's.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_map_value_semantics.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_map_value_semantics.wasm");
+    let out = scratch.join("lullaby_wasm_map_value_semantics.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1519,7 +1538,7 @@ pub(crate) fn wasm_map_value_semantics_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_map_value_semantics_runner.js");
+    let runner = scratch.join("lullaby_wasm_map_value_semantics_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1548,6 +1567,7 @@ pub(crate) fn wasm_map_value_semantics_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_map_string_key_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_map_string_key_execution_parity_wit");
     // The `map<string, V>` step: a `string`-KEYED map compiles now. The lookup
     // compares keys by CONTENT (equal `byte_len` and identical UTF-8 bytes), not
     // pointer identity, exactly like the interpreters' `Value` equality — so a key
@@ -1558,7 +1578,7 @@ pub(crate) fn wasm_map_string_key_execution_parity_with_node() {
     // and reads with `map_get`/`map_has`/`map_len`. The exported `main` must equal
     // the interpreters' ground truth bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_map_string_key.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_map_string_key.wasm");
+    let out = scratch.join("lullaby_wasm_map_string_key.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1612,7 +1632,7 @@ pub(crate) fn wasm_map_string_key_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_map_string_key_runner.js");
+    let runner = scratch.join("lullaby_wasm_map_string_key_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1641,6 +1661,7 @@ pub(crate) fn wasm_map_string_key_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_list_string_and_map_string_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_list_string_and_map_string_executio");
     // The `string`-element/value step: a `list<string>` (built with `push` of
     // literal, concatenated, and `to_string` strings, read with `get`/`len`, and
     // passed to helpers) and a `map<i64, string>` (built with `map_set`, read with
@@ -1652,7 +1673,7 @@ pub(crate) fn wasm_list_string_and_map_string_execution_parity_with_node() {
     // unaffected. All functions must compile to WASM and the exported `main` must
     // equal each interpreter backend's ground truth bit-for-bit.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_list_string.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_list_string.wasm");
+    let out = scratch.join("lullaby_wasm_list_string.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1711,7 +1732,7 @@ pub(crate) fn wasm_list_string_and_map_string_execution_parity_with_node() {
         return;
     }
 
-    let runner = std::env::temp_dir().join("lullaby_wasm_list_string_runner.js");
+    let runner = scratch.join("lullaby_wasm_list_string_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1740,6 +1761,7 @@ pub(crate) fn wasm_list_string_and_map_string_execution_parity_with_node() {
 
 #[test]
 pub(crate) fn wasm_js_dom_interop_execution_parity_with_node() {
+    let scratch = ScratchDir::new("wasm_js_dom_interop_execution_parity_wit");
     // The JS/DOM interop step: a program whose exported function calls the
     // `console_log(s)` and `dom_set_text(id, text)` host imports with computed
     // strings. The generated JS harness supplies `env.console_log` and
@@ -1747,7 +1769,7 @@ pub(crate) fn wasm_js_dom_interop_execution_parity_with_node() {
     // captures them; the captured strings must equal what the interpreter prints,
     // and the exported `main` must equal the interpreter's `main`.
     let fixture = workspace_root().join("tests/fixtures/valid/wasm_interop.lby");
-    let out = std::env::temp_dir().join("lullaby_wasm_interop.wasm");
+    let out = scratch.join("lullaby_wasm_interop.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1800,7 +1822,7 @@ pub(crate) fn wasm_js_dom_interop_execution_parity_with_node() {
     // points directly at the first UTF-8 byte and `len` is the byte length — so
     // it slices `[ptr, ptr + len)`, captures console/dom calls, and prints the
     // whole-program `main`.
-    let runner = std::env::temp_dir().join("lullaby_wasm_interop_runner.js");
+    let runner = scratch.join("lullaby_wasm_interop_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -1864,8 +1886,9 @@ pub(crate) fn fullstack_example_files_check() {
 /// is the ground truth for both.
 #[test]
 pub(crate) fn fullstack_frontend_wasm_matches_shared_logic() {
+    let scratch = ScratchDir::new("fullstack_frontend_wasm_matches_shared_l");
     let fixture = workspace_root().join("examples/valid/fullstack/frontend.lby");
-    let out = std::env::temp_dir().join("lullaby_fullstack_frontend.wasm");
+    let out = scratch.join("lullaby_fullstack_frontend.wasm");
     let emit = lullaby()
         .args([
             "wasm",
@@ -1932,7 +1955,7 @@ pub(crate) fn fullstack_frontend_wasm_matches_shared_logic() {
 
     // Instantiate under node with capturing host imports and assert the rendered
     // shared labels and the exported score match the interpreter.
-    let runner = std::env::temp_dir().join("lullaby_fullstack_frontend_runner.js");
+    let runner = scratch.join("lullaby_fullstack_frontend_runner.js");
     let js = format!(
         "const fs=require('fs');\
          const bytes=fs.readFileSync({wasm:?});\
@@ -2080,6 +2103,7 @@ pub(crate) fn fullstack_shared_logic_round_trip() {
 /// assert its exit code equals the interpreter's `main` result (mod 256).
 #[test]
 pub(crate) fn native_default_direct_pe_runs_without_linker() {
+    let scratch = ScratchDir::new("native_default_direct_pe_runs_without_li");
     let cases = [
         ("native_scalars", 39_i64),
         ("native_strings", 11),
@@ -2088,7 +2112,7 @@ pub(crate) fn native_default_direct_pe_runs_without_linker() {
     ];
     for (name, expected) in cases {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
-        let out = std::env::temp_dir().join(format!("lullaby_default_direct_pe_{name}.exe"));
+        let out = scratch.join(format!("lullaby_default_direct_pe_{name}.exe"));
         let obj = out.with_extension("obj");
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(&obj);
@@ -2153,8 +2177,9 @@ pub(crate) fn native_default_direct_pe_runs_without_linker() {
 /// before any link attempt).
 #[test]
 pub(crate) fn native_debug_keeps_object_and_skips_direct_pe() {
+    let scratch = ScratchDir::new("native_debug_keeps_object_and_skips_dire");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_debug_no_direct_pe.exe");
+    let out = scratch.join("lullaby_debug_no_direct_pe.exe");
     let obj = out.with_extension("obj");
     let _ = std::fs::remove_file(&out);
     let _ = std::fs::remove_file(&obj);

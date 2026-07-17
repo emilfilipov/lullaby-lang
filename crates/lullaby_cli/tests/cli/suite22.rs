@@ -56,8 +56,9 @@ fn run_backend(fixture: &str, backend: &str) -> std::process::Output {
 /// `.exe`, and return its exit code. `None` on a non-Windows host, where the COFF
 /// output cannot be executed.
 fn native_exit_code(fixture: &str, out_name: &str, extra_args: &[&str]) -> Option<i32> {
+    let scratch = ScratchDir::new("native_exit_code");
     let path = workspace_root().join(fixture);
-    let out = std::env::temp_dir().join(out_name);
+    let out = scratch.join(out_name);
     let _ = std::fs::remove_file(&out);
 
     let out_str = out.to_str().expect("out path").to_string();
@@ -200,8 +201,9 @@ fn freestanding_byte_buffer_walk_matches_the_interpreters() {
 /// with its storage.
 #[test]
 fn addr_of_a_narrow_scalar_is_still_refused_natively() {
+    let scratch = ScratchDir::new("addr_of_a_narrow_scalar_is_still_refused");
     let path = workspace_root().join("tests/fixtures/native_only/addr_of_narrow_scalar.lby");
-    let out = std::env::temp_dir().join("lullaby_narrow_scalar_skip.exe");
+    let out = scratch.join("lullaby_narrow_scalar_skip.exe");
     let _ = std::fs::remove_file(&out);
     let output = lullaby()
         .args([

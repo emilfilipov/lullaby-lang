@@ -5,23 +5,29 @@
 //! format round-trip. A formatter that silently deletes comments is a defect;
 //! these tests are the regression guard for it.
 
-use super::{lullaby, stdout};
+use super::{ScratchDir, lullaby, stdout};
 
 /// The exact reported repro: a full-line comment and a trailing comment inside a
 /// function body, both of which the pre-fix formatter deleted.
 const REPRO: &str =
     "fn main -> i64\n    # this is a comment\n    let x i64 = 5  # trailing comment\n    x\n";
 
-/// Write `source` to a fresh `.lby` file under the temp dir and return its path.
-fn write_temp(name: &str, source: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("lullaby_fmt_comments_{name}.lby"));
+/// Write `source` to a fresh `.lby` file in a scratch directory of its own.
+///
+/// Returns the [`ScratchDir`] guard with the path: the guard owns the directory
+/// and deletes it on drop, so the caller must keep it alive for as long as it
+/// uses the path. Returning the path alone would delete the file before the
+/// caller could read it.
+fn write_temp(name: &str, source: &str) -> (ScratchDir, std::path::PathBuf) {
+    let scratch = ScratchDir::new("fmt_comments");
+    let path = scratch.join(format!("lullaby_fmt_comments_{name}.lby"));
     std::fs::write(&path, source).expect("write temp source");
-    path
+    (scratch, path)
 }
 
 #[test]
 fn fmt_print_preserves_comments_in_repro() {
-    let path = write_temp("print_repro", REPRO);
+    let (_scratch, path) = write_temp("print_repro", REPRO);
     let output = lullaby()
         .args(["fmt", path.to_str().expect("path")])
         .output()
@@ -29,12 +35,11 @@ fn fmt_print_preserves_comments_in_repro() {
     assert!(output.status.success(), "fmt failed: {output:?}");
     // The full-line and trailing comments both survive verbatim.
     assert_eq!(stdout(&output), REPRO);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn fmt_write_then_check_is_clean_and_idempotent() {
-    let path = write_temp("write_check", REPRO);
+    let (_scratch, path) = write_temp("write_check", REPRO);
 
     // `--write` rewrites the file but keeps every comment.
     let write = lullaby()
@@ -54,7 +59,6 @@ fn fmt_write_then_check_is_clean_and_idempotent() {
         check.status.success(),
         "fmt --check must be clean on a formatted commented file: {check:?}"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -72,7 +76,7 @@ fn fmt_preserves_leading_standalone_and_trailing_comments() {
         "fn main -> i64\n",
         "    helper(21)\n",
     );
-    let path = write_temp("leading_standalone_trailing", source);
+    let (_scratch, path) = write_temp("leading_standalone_trailing", source);
     let output = lullaby()
         .args(["fmt", path.to_str().expect("path")])
         .output()
@@ -89,5 +93,4 @@ fn fmt_preserves_leading_standalone_and_trailing_comments() {
         check.status.success(),
         "fmt --check must be clean: {check:?}"
     );
-    let _ = std::fs::remove_file(&path);
 }

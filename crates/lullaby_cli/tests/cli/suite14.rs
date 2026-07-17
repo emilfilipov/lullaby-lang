@@ -186,6 +186,7 @@ fn actor_external_state_write_is_rejected() {
 
 #[test]
 fn actor_program_formats_idempotently() {
+    let scratch = ScratchDir::new("actor_program_formats_idempotently");
     // `lullaby fmt` renders an actor program canonically, and re-formatting the
     // output is a fixed point (the formatter round-trips the new construct).
     let path = workspace_root().join("tests/fixtures/valid/actors/counter_logger.lby");
@@ -198,7 +199,7 @@ fn actor_program_formats_idempotently() {
 
     // Write the formatted text to a temp file and format it again; the result
     // must be byte-identical (idempotent).
-    let temp = std::env::temp_dir().join("lullaby_actor_fmt_idempotent.lby");
+    let temp = scratch.join("lullaby_actor_fmt_idempotent.lby");
     std::fs::write(&temp, &formatted).expect("write temp");
     let second = lullaby()
         .args(["fmt", temp.to_str().expect("temp path")])
@@ -364,6 +365,7 @@ fn actor_ask_in_no_runtime_module_is_rejected() {
 
 #[test]
 fn ask_await_program_formats_idempotently() {
+    let scratch = ScratchDir::new("ask_await_program_formats_idempotently");
     // `lullaby fmt` renders `ask`/`await`/`Future<R>` canonically and
     // re-formatting is a fixed point (the formatter round-trips request-reply).
     let path = workspace_root().join("tests/fixtures/valid/actors/ask_chained.lby");
@@ -378,7 +380,7 @@ fn ask_await_program_formats_idempotently() {
         "formatted output should render `await ask`: {formatted}"
     );
 
-    let temp = std::env::temp_dir().join("lullaby_ask_fmt_idempotent.lby");
+    let temp = scratch.join("lullaby_ask_fmt_idempotent.lby");
     std::fs::write(&temp, &formatted).expect("write temp");
     let second = lullaby()
         .args(["fmt", temp.to_str().expect("temp path")])
@@ -722,6 +724,7 @@ fn supervise_ir_and_bytecode_reject_cleanly() {
 
 #[test]
 fn supervise_clause_formats_idempotently() {
+    let scratch = ScratchDir::new("supervise_clause_formats_idempotently");
     // The formatter must render the `supervise POLICY` clause back out, so a
     // formatted program still supervises. Dropping it would silently unsupervise
     // an actor — a formatter changing program behavior — so pin both that the
@@ -743,7 +746,7 @@ fn supervise_clause_formats_idempotently() {
         "fmt must preserve `supervise escalate`. output: {formatted}"
     );
 
-    let temp = std::env::temp_dir().join("lullaby_actor_supervise_fmt_idempotent.lby");
+    let temp = scratch.join("lullaby_actor_supervise_fmt_idempotent.lby");
     std::fs::write(&temp, &formatted).expect("write temp");
     let second = lullaby()
         .args(["fmt", temp.to_str().expect("temp path")])

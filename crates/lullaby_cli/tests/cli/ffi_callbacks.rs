@@ -20,6 +20,7 @@ use std::process::Command;
 /// compiler; the object-emission and interpreter-rejection parts always run.
 #[test]
 pub(crate) fn ffi_callback_roundtrip_when_compilable() {
+    let scratch = ScratchDir::new("ffi_callback_roundtrip");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_callback_roundtrip.lby");
 
     // `check` validates the extern callback signature (a C-marshallable
@@ -37,7 +38,7 @@ pub(crate) fn ffi_callback_roundtrip_when_compilable() {
     let main_src = "extern fn apply_cmp cmp fn(i64, i64) -> i64 a i64 b i64 -> i64\n\n\
                     fn diff x i64 y i64 -> i64\n    x - y\n\n\
                     fn main -> i64\n    apply_cmp(diff, 10, 3)\n";
-    let main_tmp = std::env::temp_dir().join("lullaby_ffi_callback_main.lby");
+    let main_tmp = scratch.join("lullaby_ffi_callback_main.lby");
     std::fs::write(&main_tmp, main_src).expect("write callback main fixture");
     for backend in ["ast", "ir", "bytecode"] {
         let run = lullaby()
@@ -64,7 +65,7 @@ pub(crate) fn ffi_callback_roundtrip_when_compilable() {
     // there is no `main`, so the CLI reports a C-callable library object (the
     // `apply_cmp` symbol stays an undefined external the C driver resolves). The
     // object path is derived from the `-o` exe stem.
-    let exe_arg = std::env::temp_dir().join("lullaby_ffi_callback.exe");
+    let exe_arg = scratch.join("lullaby_ffi_callback.exe");
     let obj = exe_arg.with_extension("obj");
     let _ = std::fs::remove_file(&obj);
     let emit = lullaby()
@@ -98,7 +99,7 @@ pub(crate) fn ffi_callback_roundtrip_when_compilable() {
     // A C driver: `apply_cmp` invokes the passed-in Lullaby callback, and `main`
     // drives it through the exported `run_callback`. `apply_cmp` is a non-static
     // external symbol so the Lullaby object's undefined `apply_cmp` resolves to it.
-    let c_src = std::env::temp_dir().join("lullaby_ffi_callback_driver.c");
+    let c_src = scratch.join("lullaby_ffi_callback_driver.c");
     std::fs::write(
         &c_src,
         "typedef long long i64;\n\
@@ -107,8 +108,14 @@ pub(crate) fn ffi_callback_roundtrip_when_compilable() {
          int main(void) { return (int)run_callback(10, 3); }\n",
     )
     .expect("write c driver");
-    let out_exe = std::env::temp_dir().join("lullaby_ffi_callback_driver.exe");
+    let out_exe = scratch.join("lullaby_ffi_callback_driver.exe");
     let _ = std::fs::remove_file(&out_exe);
+
+    // `cl` drops its intermediate `driver.obj` into the working directory, so give
+    // it a directory of its own inside the scratch dir. Pointing it at the shared
+    // `%TEMP%` root would race every other `cl` in every other concurrent run.
+    let cc_cwd = scratch.join("cc");
+    std::fs::create_dir_all(&cc_cwd).expect("create cc working dir");
 
     let link = if cc == "cl" {
         // cl driver.c lullaby.obj /Fe:out.exe (MSVC driver links the CRT + obj).
@@ -117,7 +124,7 @@ pub(crate) fn ffi_callback_roundtrip_when_compilable() {
             .arg(&c_src)
             .arg(&obj)
             .arg(format!("/Fe:{}", out_exe.display()))
-            .current_dir(std::env::temp_dir())
+            .current_dir(&cc_cwd)
             .output()
     } else {
         Command::new("clang")

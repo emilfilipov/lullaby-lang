@@ -37,15 +37,24 @@ mod suite1;
 #[path = "cli/fmt_comments.rs"]
 mod fmt_comments;
 
-/// A fresh temp directory for a file-system test, using forward slashes so the
-/// path can be embedded in a `.lby` string literal on every platform (Windows
-/// accepts `/` in `std::fs` paths). The directory is recreated empty.
-pub(crate) fn fs_temp_dir(test_name: &str) -> (std::path::PathBuf, String) {
-    let dir = std::env::temp_dir().join(format!("lullaby_cli_{test_name}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let lby = dir.to_string_lossy().replace('\\', "/");
-    (dir, lby)
+/// A fresh scratch directory for a file-system test, plus a working directory
+/// inside it rendered with forward slashes so the path can be embedded in a
+/// `.lby` string literal on every platform (Windows accepts `/` in `std::fs`
+/// paths).
+///
+/// Returns the [`ScratchDir`] guard itself rather than a bare path: the guard
+/// must outlive the test body, and everything under it is removed when it drops.
+/// Name the returned directory (`let (dir, base) = fs_temp_dir(..)`), never `_`,
+/// or the directory is deleted before the test uses it.
+pub(crate) fn fs_temp_dir(test_name: &str) -> (ScratchDir, String) {
+    let scratch = ScratchDir::new(test_name);
+    // The `.lby` programs write into this child rather than the scratch root, so
+    // the string handed to the program names a directory reached through `join`
+    // like any other — the root itself is never handed out.
+    let work = scratch.join("fs");
+    std::fs::create_dir_all(&work).expect("create fs work dir");
+    let lby = work.to_string_lossy().replace('\\', "/");
+    (scratch, lby)
 }
 
 #[test]
@@ -80,8 +89,6 @@ pub(crate) fn run_write_bytes_read_bytes_round_trip_on_all_backends() {
         assert!(output.status.success(), "{backend}: {output:?}");
         // 72 + 105 + 33 + 3 == 213
         assert_eq!(stdout(&output).trim(), "213", "{backend}");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -92,7 +99,9 @@ pub(crate) fn run_read_lines_and_file_size_on_all_backends() {
         let path = format!("{base}/notes.txt");
         // Seed the file from the harness (a `.lby` string literal cannot hold a
         // raw newline). "a\nbb\nccc" is 8 bytes and three lines.
-        std::fs::write(dir.join("notes.txt"), "a\nbb\nccc").expect("seed file");
+        // Seed through `path` (the same string the program reads) so the harness
+        // and the program can never disagree about where the file lives.
+        std::fs::write(&path, "a\nbb\nccc").expect("seed file");
         let source = format!(
             "fn main -> i64\n    \
              let lines list<string> = read_lines(\"{path}\")\n    \
@@ -114,8 +123,6 @@ pub(crate) fn run_read_lines_and_file_size_on_all_backends() {
         assert!(output.status.success(), "{backend}: {output:?}");
         // 3 lines * 100 + 8 bytes == 308
         assert_eq!(stdout(&output).trim(), "308", "{backend}");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -154,8 +161,6 @@ pub(crate) fn run_directory_builtins_on_all_backends() {
         assert!(output.status.success(), "{backend}: {output:?}");
         // is_dir=1 -> 1000, is_file=1 -> 100, 1 entry -> 10, gone=false -> 0 == 1110
         assert_eq!(stdout(&output).trim(), "1110", "{backend}");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -218,7 +223,8 @@ pub(crate) fn tcp_client_round_trip_on_all_backends() {
          ok(text) -> len(text)\n        \
          err(message) -> 0 - 2\n"
     );
-    let prog = std::env::temp_dir().join("lullaby_tcp_client.lby");
+    let scratch = ScratchDir::new("tcp_client_round_trip");
+    let prog = scratch.join("lullaby_tcp_client.lby");
     std::fs::write(&prog, program).expect("write program");
 
     for backend in ["ast", "ir", "bytecode"] {
@@ -279,7 +285,8 @@ pub(crate) fn tcp_server_round_trip() {
          ok(count) -> count\n        \
          err(message) -> 0 - 4\n"
     );
-    let prog = std::env::temp_dir().join("lullaby_tcp_server.lby");
+    let scratch = ScratchDir::new("tcp_server_round_trip");
+    let prog = scratch.join("lullaby_tcp_server.lby");
     std::fs::write(&prog, program).expect("write program");
 
     // Run the Lullaby server in a background thread so the test can connect to it.
@@ -386,6 +393,8 @@ pub(crate) fn udp_round_trip_on_all_backends() {
         )
     };
 
+    let scratch = ScratchDir::new("udp_round_trip");
+
     for backend in ["ast", "ir", "bytecode"] {
         let responder = UdpSocket::bind("127.0.0.1:0").expect("responder bind");
         let responder_port = responder.local_addr().expect("addr").port();
@@ -403,7 +412,7 @@ pub(crate) fn udp_round_trip_on_all_backends() {
         });
 
         let program = program_template(responder_port);
-        let prog = std::env::temp_dir().join(format!("lullaby_udp_{backend}.lby"));
+        let prog = scratch.join(format!("lullaby_udp_{backend}.lby"));
         std::fs::write(&prog, program).expect("write program");
 
         let output = lullaby()
@@ -426,6 +435,7 @@ pub(crate) fn udp_round_trip_on_all_backends() {
 
 #[test]
 pub(crate) fn http_get_round_trip_on_all_backends() {
+    let scratch = ScratchDir::new("http_get_round_trip_on_all_backends");
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -462,7 +472,7 @@ pub(crate) fn http_get_round_trip_on_all_backends() {
         "ok(body) -> len(body)\n        ",
         "err(message) -> 0 - 1\n",
     );
-    let prog = std::env::temp_dir().join("lullaby_http_get.lby");
+    let prog = scratch.join("lullaby_http_get.lby");
     std::fs::write(&prog, program).expect("write program");
     let port_arg = port.to_string();
 
@@ -488,6 +498,7 @@ pub(crate) fn http_get_round_trip_on_all_backends() {
 
 #[test]
 pub(crate) fn http_post_round_trip_on_all_backends() {
+    let scratch = ScratchDir::new("http_post_round_trip_on_all_backends");
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -557,7 +568,7 @@ pub(crate) fn http_post_round_trip_on_all_backends() {
         "ok(body) -> len(body)\n        ",
         "err(message) -> 0 - 1\n",
     );
-    let prog = std::env::temp_dir().join("lullaby_http_post.lby");
+    let prog = scratch.join("lullaby_http_post.lby");
     std::fs::write(&prog, program).expect("write program");
     let port_arg = port.to_string();
 
@@ -586,7 +597,7 @@ pub(crate) fn http_post_round_trip_on_all_backends() {
 /// written in pure Lullaby (`examples/valid/http_server/server.lby`) on top of
 /// the socket builtins plus `tcp_shutdown`. A Rust `TcpStream` HTTP client
 /// sends a real request and reads the full response to EOF, asserting the
-/// status line and body â€” proving a graceful teardown delivers the buffered
+/// status line and body — proving a graceful teardown delivers the buffered
 /// response (no "Empty reply"). Runs on every backend.
 #[test]
 pub(crate) fn http_server_round_trip_on_all_backends() {
@@ -734,8 +745,9 @@ pub(crate) fn kernel32_available() -> bool {
 /// always runs: it exercises the emitter and CLI wiring regardless of linking.
 #[test]
 pub(crate) fn native_emits_object_and_lists_functions() {
+    let scratch = ScratchDir::new("native_emits_object_and_lists_functions");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_list.exe");
+    let out = scratch.join("lullaby_native_list.exe");
     let output = lullaby()
         .args([
             "native",
@@ -755,11 +767,24 @@ pub(crate) fn native_emits_object_and_lists_functions() {
         );
     }
 
-    // The object file is always written (the reliable floor) and starts with the
-    // AMD64 COFF machine magic (0x8664, little-endian).
-    let obj = out.with_extension("obj");
-    let bytes = std::fs::read(&obj).expect("read native object");
-    assert_eq!(&bytes[0..2], &[0x64, 0x86], "COFF AMD64 machine");
+    // `native_scalars` has a `main` and needs no C runtime, so the CLI takes the
+    // direct-PE fast path: it writes the runnable image straight to `-o` and emits
+    // no intermediate object at all (see `native.rs`). The exe is the artifact
+    // floor here, and a PE32+ image starts with the `MZ` DOS magic.
+    //
+    // Do NOT assert on an `out.with_extension("obj")` here: this path never writes
+    // one. Asserting on it passed for months only because `-o` was a fixed `%TEMP%`
+    // path and a stale object from before the fast path landed sat there unnoticed.
+    assert!(
+        listing.contains("direct PE, no linker"),
+        "expected the direct-PE fast path: {listing}"
+    );
+    assert!(
+        !out.with_extension("obj").exists(),
+        "the direct-PE path must not emit an intermediate object"
+    );
+    let bytes = std::fs::read(&out).expect("read native exe");
+    assert_eq!(&bytes[0..2], b"MZ", "PE32+ DOS magic");
 }
 
 /// `lullaby native --target x86_64-unknown-linux-gnu` writes a relocatable ELF64
@@ -768,8 +793,9 @@ pub(crate) fn native_emits_object_and_lists_functions() {
 /// exactly that.
 #[test]
 pub(crate) fn native_target_linux_emits_elf_object() {
+    let scratch = ScratchDir::new("native_target_linux_emits_elf_object");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_linux.o");
+    let out = scratch.join("lullaby_native_linux.o");
     let output = lullaby()
         .args([
             "native",
@@ -805,8 +831,9 @@ pub(crate) fn native_target_linux_emits_elf_object() {
 /// x86-64 object beginning with the Mach-O magic, also without linking.
 #[test]
 pub(crate) fn native_target_macos_emits_macho_object() {
+    let scratch = ScratchDir::new("native_target_macos_emits_macho_object");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_macos.o");
+    let out = scratch.join("lullaby_native_macos.o");
     let output = lullaby()
         .args([
             "native",
@@ -831,8 +858,9 @@ pub(crate) fn native_target_macos_emits_macho_object() {
 /// notice). This structural part always runs.
 #[test]
 pub(crate) fn native_target_aarch64_emits_elf_object() {
+    let scratch = ScratchDir::new("native_target_aarch64_emits_elf_object");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_aarch64.o");
+    let out = scratch.join("lullaby_native_aarch64.o");
     let output = lullaby()
         .args([
             "native",
@@ -907,6 +935,7 @@ pub(crate) fn docker_arm64_available() -> bool {
 /// correct, not just structurally well-formed.
 #[test]
 pub(crate) fn native_aarch64_links_and_runs_under_docker() {
+    let scratch = ScratchDir::new("native_aarch64_links_and_runs_under_dock");
     let Some(lld) = ld_lld_path() else {
         eprintln!("ld.lld not found in the Rust sysroot; skipping AArch64 link+run");
         return;
@@ -931,8 +960,7 @@ pub(crate) fn native_aarch64_links_and_runs_under_docker() {
     let expected_code = result.rem_euclid(256) as i32;
 
     // Fresh working directory for the object + linked executable.
-    let dir = std::env::temp_dir().join("lullaby_aarch64_run");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch.join("lullaby_aarch64_run");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let obj = dir.join("prog.o");
     let exe = dir.join("prog");
@@ -1008,6 +1036,7 @@ pub(crate) fn native_aarch64_links_and_runs_under_docker() {
 /// emitted encodings regardless.
 #[test]
 pub(crate) fn native_aarch64_math_builtins_link_and_run_parity() {
+    let scratch = ScratchDir::new("native_aarch64_math_builtins_link_and_ru");
     let Some(lld) = ld_lld_path() else {
         eprintln!("ld.lld not found in the Rust sysroot; skipping AArch64 builtin link+run");
         return;
@@ -1032,8 +1061,7 @@ pub(crate) fn native_aarch64_math_builtins_link_and_run_parity() {
     assert_eq!(result, 162, "builtin fixture computes 162");
     let expected_code = result.rem_euclid(256) as i32;
 
-    let dir = std::env::temp_dir().join("lullaby_aarch64_builtins_run");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch.join("lullaby_aarch64_builtins_run");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let obj = dir.join("prog.o");
     let exe = dir.join("prog");
@@ -1122,6 +1150,7 @@ pub(crate) fn docker_amd64_available() -> bool {
 /// Gated on Docker + `ld.lld`; skipped gracefully otherwise.
 #[test]
 pub(crate) fn native_elf_x86_64_links_and_runs_under_docker() {
+    let scratch = ScratchDir::new("native_elf_x86_64_links_and_runs_under_d");
     let Some(lld) = ld_lld_path() else {
         eprintln!("ld.lld not found in the Rust sysroot; skipping x86-64 ELF link+run");
         return;
@@ -1143,8 +1172,7 @@ pub(crate) fn native_elf_x86_64_links_and_runs_under_docker() {
         .expect("interpreter prints an integer result");
     let expected_code = result.rem_euclid(256) as i32;
 
-    let dir = std::env::temp_dir().join("lullaby_elf_x86_64_run");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch.join("lullaby_elf_x86_64_run");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let obj = dir.join("prog.o");
     let exe = dir.join("prog");
@@ -1225,8 +1253,9 @@ pub(crate) fn native_unknown_target_is_rejected() {
 /// `llvm-pdbutil` is discoverable it optionally reads back the CodeView stream.
 #[test]
 pub(crate) fn native_debug_emits_codeview_line_info() {
+    let scratch = ScratchDir::new("native_debug_emits_codeview_line_info");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_debug.exe");
+    let out = scratch.join("lullaby_native_debug.exe");
 
     let output = lullaby()
         .args([
@@ -1278,9 +1307,16 @@ pub(crate) fn native_debug_emits_codeview_line_info() {
         "source file name recorded in the debug section"
     );
 
-    // Without `--debug`, the object has no `.debug$S` section and is byte-for-byte
-    // the default native object.
-    let plain_out = std::env::temp_dir().join("lullaby_native_debug_off.exe");
+    // Without `--debug`, no CodeView info is produced anywhere. `--debug` is what
+    // forces the object + linker path above; the default build takes the direct-PE
+    // fast path, which writes the exe straight out and emits no intermediate
+    // object at all — so there is no `.debug$S` section to find.
+    //
+    // This used to read `lullaby_native_debug_off.obj` from a fixed `%TEMP%` path
+    // and scan it for `.debug$S`. That object stopped being written when the
+    // direct-PE fast path landed, so the check was silently scanning a stale file
+    // and proving nothing. Asserting no object exists is the honest, stronger form.
+    let plain_out = scratch.join("lullaby_native_debug_off.exe");
     let plain = lullaby()
         .args([
             "native",
@@ -1291,17 +1327,21 @@ pub(crate) fn native_debug_emits_codeview_line_info() {
         .output()
         .expect("run cli");
     assert!(plain.status.success(), "{}", stderr(&plain));
-    let plain_bytes =
-        std::fs::read(plain_out.with_extension("obj")).expect("read plain native object");
-    let plain_sections = u16::from_le_bytes([plain_bytes[2], plain_bytes[3]]) as usize;
-    for i in 0..plain_sections {
-        let ph = 20 + i * 40;
-        assert_ne!(
-            &plain_bytes[ph..ph + 8],
-            b".debug\x24S",
-            "default object must have no debug section"
-        );
-    }
+    assert!(
+        stdout(&plain).contains("direct PE, no linker"),
+        "expected the direct-PE fast path without --debug: {}",
+        stdout(&plain)
+    );
+    assert!(
+        !plain_out.with_extension("obj").exists(),
+        "the default build must not emit an intermediate object"
+    );
+    // The exe it does write carries no CodeView section marker.
+    let plain_bytes = std::fs::read(&plain_out).expect("read plain native exe");
+    assert!(
+        !contains_subslice(&plain_bytes, b".debug\x24S"),
+        "the default exe must carry no CodeView debug section"
+    );
 
     // Optional real-toolchain readback. Prefer `llvm-readobj` (bundled with the
     // rustc toolchain that already provides `rust-lld`), else any `llvm-pdbutil`
@@ -1575,6 +1615,7 @@ pub(crate) fn vs_2022_roots() -> Vec<PathBuf> {
 /// Gated on `rust-lld` + `kernel32.lib` + `ucrt.lib`; skips gracefully otherwise.
 #[test]
 pub(crate) fn ffi_calls_c_abs_when_linkable() {
+    let scratch = ScratchDir::new("ffi_calls_c_abs_when_linkable");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_llabs.lby");
 
     // `check` validates the extern declaration and its call site.
@@ -1607,8 +1648,18 @@ pub(crate) fn ffi_calls_c_abs_when_linkable() {
         );
     }
 
+    // Make MSVC's `LIB` available (source vcvars64 if it is not already set) so the
+    // link+run step actually executes rather than skipping.
+    //
+    // This must happen BEFORE the emit below, and this test is the reason: it was
+    // the only linkable FFI test missing the call, so it depended on some *other*
+    // test thread having set the process-global `LIB` first. Under a thread count
+    // where it ran first, the CLI linked nothing, yet the `ucrt_available()` gate
+    // below then saw the `LIB` a later thread had set and demanded an exe.
+    ensure_msvc_env();
+
     // Native codegen: emit + link + run.
-    let out = std::env::temp_dir().join("lullaby_ffi_llabs.exe");
+    let out = scratch.join("lullaby_ffi_llabs.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1650,6 +1701,7 @@ pub(crate) fn ffi_calls_c_abs_when_linkable() {
 /// C `toupper`. Gated on `rust-lld` + `kernel32.lib` + `ucrt.lib`; skips otherwise.
 #[test]
 pub(crate) fn ffi_calls_c_toupper_i32_when_linkable() {
+    let scratch = ScratchDir::new("ffi_calls_c_toupper_i32_when_linkable");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_toupper.lby");
 
     // `check` validates the extern declaration and its call site.
@@ -1682,7 +1734,7 @@ pub(crate) fn ffi_calls_c_toupper_i32_when_linkable() {
     }
 
     // Native codegen: emit + link + run.
-    let out = std::env::temp_dir().join("lullaby_ffi_toupper.exe");
+    let out = scratch.join("lullaby_ffi_toupper.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1724,6 +1776,7 @@ pub(crate) fn ffi_calls_c_toupper_i32_when_linkable() {
 /// `kernel32.lib` + `ucrt.lib`; skips gracefully otherwise.
 #[test]
 pub(crate) fn ffi_calls_c_sqrt_f64_when_linkable() {
+    let scratch = ScratchDir::new("ffi_calls_c_sqrt_f64_when_linkable");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_sqrt.lby");
 
     // `check` validates the extern declaration and its call site.
@@ -1760,7 +1813,7 @@ pub(crate) fn ffi_calls_c_sqrt_f64_when_linkable() {
     ensure_msvc_env();
 
     // Native codegen: emit + link + run.
-    let out = std::env::temp_dir().join("lullaby_ffi_sqrt.exe");
+    let out = scratch.join("lullaby_ffi_sqrt.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1804,6 +1857,7 @@ pub(crate) fn ffi_calls_c_sqrt_f64_when_linkable() {
 /// `kernel32.lib` + `ucrt.lib`; skips gracefully otherwise.
 #[test]
 pub(crate) fn ffi_calls_c_ldexp_mixed_scalars_when_linkable() {
+    let scratch = ScratchDir::new("ffi_calls_c_ldexp_mixed_scalars_when_lin");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_ldexp.lby");
 
     // `check` validates the extern declaration and its call site.
@@ -1838,7 +1892,7 @@ pub(crate) fn ffi_calls_c_ldexp_mixed_scalars_when_linkable() {
     ensure_msvc_env();
 
     // Native codegen: emit + link + run.
-    let out = std::env::temp_dir().join("lullaby_ffi_ldexp.exe");
+    let out = scratch.join("lullaby_ffi_ldexp.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1911,11 +1965,12 @@ pub(crate) fn assert_ffi_native_only_and_compiles(fixture: &Path) {
 /// `ucrt.lib`; sources MSVC's `LIB` when unset so the link+run executes.
 #[test]
 pub(crate) fn ffi_cstr_marshals_string_to_c_when_linkable() {
+    let scratch = ScratchDir::new("ffi_cstr_marshals_string_to_c_when_linka");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_cstr_strlen.lby");
     assert_ffi_native_only_and_compiles(&fixture);
 
     ensure_msvc_env();
-    let out = std::env::temp_dir().join("lullaby_ffi_cstr_strlen.exe");
+    let out = scratch.join("lullaby_ffi_cstr_strlen.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -1956,11 +2011,12 @@ pub(crate) fn ffi_cstr_marshals_string_to_c_when_linkable() {
 /// `rust-lld` + `kernel32.lib` + `ucrt.lib`; sources MSVC's `LIB` when unset.
 #[test]
 pub(crate) fn ffi_pointer_round_trips_through_c_when_linkable() {
+    let scratch = ScratchDir::new("ffi_pointer_round_trips_through_c_when_l");
     let fixture = workspace_root().join("tests/fixtures/native_only/ffi_ptr_roundtrip.lby");
     assert_ffi_native_only_and_compiles(&fixture);
 
     ensure_msvc_env();
-    let out = std::env::temp_dir().join("lullaby_ffi_ptr_roundtrip.exe");
+    let out = scratch.join("lullaby_ffi_ptr_roundtrip.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -2005,6 +2061,7 @@ pub(crate) fn ffi_pointer_round_trips_through_c_when_linkable() {
 /// `rust-lld` + `kernel32.lib` + `ucrt.lib`; sources MSVC's `LIB` when unset.
 #[test]
 pub(crate) fn ffi_extern_call_with_stack_args_when_linkable() {
+    let scratch = ScratchDir::new("ffi_extern_call_with_stack_args_when_lin");
     let caller = workspace_root().join("tests/fixtures/native_only/ffi_extern_sum6.lby");
     let callee = workspace_root().join("tests/fixtures/native_only/ffi_export_sum6.lby");
 
@@ -2025,8 +2082,8 @@ pub(crate) fn ffi_extern_call_with_stack_args_when_linkable() {
     // writes it unconditionally (the caller's own self-link fails on the
     // unresolved export symbol, but the object is still produced — the reliable
     // floor).
-    let caller_exe = std::env::temp_dir().join("lullaby_ffi_extern_sum6.exe");
-    let callee_exe = std::env::temp_dir().join("lullaby_ffi_export_sum6.exe");
+    let caller_exe = scratch.join("lullaby_ffi_extern_sum6.exe");
+    let callee_exe = scratch.join("lullaby_ffi_export_sum6.exe");
     let caller_obj = caller_exe.with_extension("obj");
     let callee_obj = callee_exe.with_extension("obj");
     let _ = std::fs::remove_file(&caller_obj);
@@ -2076,7 +2133,7 @@ pub(crate) fn ffi_extern_call_with_stack_args_when_linkable() {
     // library object's exported symbol. `ucrt.lib` is on the line for the caller's
     // recorded C-runtime dependency (unused for this intra-Lullaby symbol).
     let lld = rust_lld_path().expect("rust-lld present (gate checked)");
-    let linked = std::env::temp_dir().join("lullaby_ffi_sum6_linked.exe");
+    let linked = scratch.join("lullaby_ffi_sum6_linked.exe");
     let _ = std::fs::remove_file(&linked);
     let mut command = Command::new(&lld);
     command.args(["-flavor", "link", "/nologo", "/subsystem:console"]);
@@ -2134,6 +2191,7 @@ pub(crate) fn lib_dirs_from_env() -> Vec<PathBuf> {
 /// the process exits 42. Gated on `rust-lld` + `kernel32.lib`; skips gracefully.
 #[test]
 pub(crate) fn asm_emits_raw_bytes_when_linkable() {
+    let scratch = ScratchDir::new("asm_emits_raw_bytes_when_linkable");
     let fixture = workspace_root().join("tests/fixtures/native_only/asm_mov.lby");
 
     // `check` validates the asm shape (byte range + enclosing `unsafe`).
@@ -2166,7 +2224,7 @@ pub(crate) fn asm_emits_raw_bytes_when_linkable() {
     }
 
     // Native codegen: emit + (best-effort) link + run.
-    let out = std::env::temp_dir().join("lullaby_asm_mov.exe");
+    let out = scratch.join("lullaby_asm_mov.exe");
     let emit = lullaby()
         .args([
             "native",
@@ -2230,8 +2288,9 @@ pub(crate) fn contains_crt_marker(bytes: &[u8]) -> Option<String> {
 /// runs the object-level no-CRT assertion.
 #[test]
 pub(crate) fn native_freestanding_has_no_crt_dependency_when_linkable() {
+    let scratch = ScratchDir::new("native_freestanding_has_no_crt_dependenc");
     let fixture = workspace_root().join("tests/fixtures/valid/native_scalars.lby");
-    let out = std::env::temp_dir().join("lullaby_native_freestanding.exe");
+    let out = scratch.join("lullaby_native_freestanding.exe");
 
     let emit = lullaby()
         .args([
@@ -2255,18 +2314,28 @@ pub(crate) fn native_freestanding_has_no_crt_dependency_when_linkable() {
         "expected `main` compiled: {listing}"
     );
 
-    // Structural (always runs): the emitted object has no C-runtime marker. The
-    // only undefined external symbol is `ExitProcess` (from kernel32), which is
-    // not a CRT dependency.
-    let obj = out.with_extension("obj");
-    let obj_bytes = std::fs::read(&obj).expect("read native object");
-    if let Some(marker) = contains_crt_marker(&obj_bytes) {
-        panic!("freestanding object must not reference the C runtime; found `{marker}`");
-    }
-    // Sanity: the object references `ExitProcess` (the minimal OS import).
+    // Structural (always runs): the emitted image has no C-runtime marker. The only
+    // imported external symbol is `ExitProcess` (from kernel32), which is not a CRT
+    // dependency.
+    //
+    // This checks the exe, not an object: `--freestanding` takes the direct-PE fast
+    // path, which writes the runnable image straight to `-o` and emits no
+    // intermediate object. The exe is also the artifact that actually ships, so it
+    // is the right thing to hold to the no-CRT guarantee. (Scanning
+    // `out.with_extension("obj")` passed for months only because `-o` was a fixed
+    // `%TEMP%` path holding a stale object from before the fast path landed.)
     assert!(
-        obj_bytes.windows(11).any(|w| w == b"ExitProcess"),
-        "freestanding object should import kernel32!ExitProcess for process exit"
+        !out.with_extension("obj").exists(),
+        "the direct-PE path must not emit an intermediate object"
+    );
+    let image_bytes = std::fs::read(&out).expect("read native exe");
+    if let Some(marker) = contains_crt_marker(&image_bytes) {
+        panic!("freestanding image must not reference the C runtime; found `{marker}`");
+    }
+    // Sanity: the image imports `ExitProcess` (the minimal OS import).
+    assert!(
+        contains_subslice(&image_bytes, b"ExitProcess"),
+        "freestanding image should import kernel32!ExitProcess for process exit"
     );
 
     // Interpreter ground truth for `main`.
@@ -2355,6 +2424,7 @@ pub(crate) fn find_c_compiler() -> Option<&'static str> {
 /// gracefully otherwise (the object emission part always runs).
 #[test]
 pub(crate) fn c_calls_into_exported_lullaby_function_when_compilable() {
+    let scratch = ScratchDir::new("c_calls_into_exported_lullaby_function_w");
     let fixture = workspace_root().join("tests/fixtures/native_only/export_add_seven.lby");
 
     // `check` validates the export declaration and body (i64-scalar signature).
@@ -2367,7 +2437,7 @@ pub(crate) fn c_calls_into_exported_lullaby_function_when_compilable() {
     // Native codegen: emit the library object. `add_seven` compiles; there is no
     // `main`, so the CLI reports a C-callable library object rather than an exe.
     // The CLI derives the object path from the `-o` exe path (same stem, `.obj`).
-    let exe_arg = std::env::temp_dir().join("lullaby_export_add_seven.exe");
+    let exe_arg = scratch.join("lullaby_export_add_seven.exe");
     let obj = exe_arg.with_extension("obj");
     let _ = std::fs::remove_file(&obj);
     let emit = lullaby()
@@ -2399,14 +2469,20 @@ pub(crate) fn c_calls_into_exported_lullaby_function_when_compilable() {
     };
 
     // A tiny C caller that calls the exported Lullaby function.
-    let c_src = std::env::temp_dir().join("lullaby_export_caller.c");
+    let c_src = scratch.join("lullaby_export_caller.c");
     std::fs::write(
         &c_src,
         "extern long long add_seven(long long);\nint main(void){ return (int)add_seven(35); }\n",
     )
     .expect("write c caller");
-    let out_exe = std::env::temp_dir().join("lullaby_export_caller.exe");
+    let out_exe = scratch.join("lullaby_export_caller.exe");
     let _ = std::fs::remove_file(&out_exe);
+
+    // `cl` drops its intermediate `caller.obj` into the working directory, so give
+    // it a directory of its own inside the scratch dir. Pointing it at the shared
+    // `%TEMP%` root would race every other `cl` in every other concurrent run.
+    let cc_cwd = scratch.join("cc");
+    std::fs::create_dir_all(&cc_cwd).expect("create cc working dir");
 
     let link = if cc == "cl" {
         // cl caller.c lullaby.obj /Fe:out.exe (MSVC driver links the CRT + obj).
@@ -2415,7 +2491,7 @@ pub(crate) fn c_calls_into_exported_lullaby_function_when_compilable() {
             .arg(&c_src)
             .arg(&obj)
             .arg(format!("/Fe:{}", out_exe.display()))
-            .current_dir(std::env::temp_dir())
+            .current_dir(&cc_cwd)
             .output()
     } else {
         Command::new("clang")
@@ -2473,9 +2549,10 @@ pub(crate) fn test_runner_passes_on_demo_suite() {
 
 #[test]
 pub(crate) fn test_runner_reports_failing_assert_and_exits_nonzero() {
+    let scratch = ScratchDir::new("test_runner_reports_failing_assert_and_e");
     // A test that `assert(false)`s must fail: `lullaby test` prints FAIL with the
     // `assertion failed` message and exits non-zero.
-    let tmp = std::env::temp_dir().join("lullaby_test_failing.lby");
+    let tmp = scratch.join("lullaby_test_failing.lby");
     std::fs::write(
         &tmp,
         "fn test_passes -> void\n    assert(true)\n\nfn test_fails -> void\n    assert(false)\n",
@@ -2584,18 +2661,23 @@ pub(crate) fn rejects_cross_package_private_use_with_l0392() {
     assert!(stderr.contains("hidden_helper"), "{stderr}");
 }
 
-/// A unique, empty scratch directory for a `lullaby new` test, cleaned first so
-/// re-runs start fresh. Keyed by the test name to avoid collisions.
-pub(crate) fn scratch_dir(key: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lullaby_new_test_{key}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+/// A unique, empty working directory for a `lullaby new` test, to be used as the
+/// CLI's current directory.
+///
+/// Returns the [`ScratchDir`] guard alongside the directory: the guard owns the
+/// cleanup and must be kept alive for as long as the directory is used. The
+/// working directory is a child of the scratch root, so it is reached through
+/// `join` like any other name and the root itself is never handed out.
+pub(crate) fn new_project_work_dir(key: &str) -> (ScratchDir, PathBuf) {
+    let scratch = ScratchDir::new(key);
+    let work = scratch.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    (scratch, work)
 }
 
 #[test]
 pub(crate) fn new_scaffolds_a_runnable_project() {
-    let work = scratch_dir("ok");
+    let (_scratch, work) = new_project_work_dir("new_ok");
     let created = lullaby()
         .current_dir(&work)
         .args(["new", "bedtime"])
@@ -2631,7 +2713,7 @@ pub(crate) fn new_scaffolds_a_runnable_project() {
 
 #[test]
 pub(crate) fn new_refuses_existing_directory() {
-    let work = scratch_dir("exists");
+    let (_scratch, work) = new_project_work_dir("new_exists");
     std::fs::create_dir(work.join("taken")).expect("pre-create dir");
     let output = lullaby()
         .current_dir(&work)
@@ -2649,7 +2731,7 @@ pub(crate) fn new_refuses_existing_directory() {
 
 #[test]
 pub(crate) fn new_rejects_invalid_names() {
-    let work = scratch_dir("invalid");
+    let (_scratch, work) = new_project_work_dir("new_invalid");
     for bad in ["my-app", "9lives", ""] {
         let output = lullaby()
             .current_dir(&work)
