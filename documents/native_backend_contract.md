@@ -1600,7 +1600,7 @@ interpreter. Implementation: `crates/lullaby_ir/src/native_object_rawptr.rs`
 
 | Builtin | Lowering |
 | :-- | :-- |
-| `addr_of(place) -> ptr<T>` | `lea rax, [rbp - slot]` — the **real** address of the frame word. A place with a **runtime array index** (`addr_of(a[i])`) instead computes the effective address into `rcx` (bounds-checked, ascending: `rcx = rbp - base + 8*elem_words*i`) and `mov rax, rcx`. A **whole-array** place (`addr_of(a)`) decays to element 0's address, like C |
+| `addr_of(place) -> ptr<T>` | `lea rax, [rbp - slot]` — the **real** address of the frame word. A place with a **runtime array index** (`addr_of(a[i])`) instead computes the effective address into `rcx` (bounds-checked, ascending: `rcx = rbp - base + elem_bytes*i`) and `mov rax, rcx`. A **whole-array** place (`addr_of(a)`) decays to element 0's address, like C. Admitted by the **width-agreement law** below, so a **packed narrow array element** (`array<i32>`, `array<u8>`, …) is addressable while a narrow *scalar* is not |
 | `ptr_read(p) -> T` / `volatile_load(p) -> T` | `mov rcx, rax` then a width- and signedness-correct load: `mov rax,[rcx]` (8), `movsxd rax,dword[rcx]` / `mov eax,[rcx]` (4 signed/unsigned), `movsx`/`movzx rax,word[rcx]` (2), `movsx`/`movzx rax,byte[rcx]` (1) — always renormalizing the 8-byte cell |
 | `ptr_write(p, v)` / `volatile_store(p, v)` | address spilled, value evaluated, `pop rcx`, then an exact-width store: `mov [rcx],rax` / `mov [rcx],eax` / `mov [rcx],ax` / `mov [rcx],al` |
 | `ptr_offset(p, n isize) -> ptr<T>` | one scaled `lea rax, [rcx + rax*size_of(T)]` (SIB scale 1/2/4/8); `n` is signed, so a negative `n` walks back |
@@ -1609,6 +1609,67 @@ interpreter. Implementation: `crates/lullaby_ir/src/native_object_rawptr.rs`
 
 `ptr_cast`/`int_to_ptr`/`ptr_to_int` are byte-for-byte free: a chain of them emits
 exactly the bytes of its operand (pinned by `pointer_identity_ops_emit_no_extra_work`).
+
+### The width-agreement law: what `addr_of` may address
+
+> **The addressed STORAGE must be exactly as wide as the pointee type claims.**
+
+A `ptr<T>` promises its holder that `ptr_read`/`ptr_write` moves `size_of(T)` bytes
+and that `ptr_offset(p, 1)` steps `size_of(T)` bytes. Both hold exactly when the
+storage width equals `size_of(T)`, so this one law replaces every earlier
+name-based gate. It is checked against the **resolved layout**, never the type
+name — which is what lets it separate two cases that spell the same type:
+
+| Place | Resolved storage | Pointee | Verdict |
+| :-- | :-- | :-- | :-- |
+| `addr_of(x)`, `x` an `i32` **local** | 8 bytes (a normalized cell) | `i32` = 4 | **refused** (`L0339`) — a 4-byte store would leave the cell's upper half stale |
+| `addr_of(a[0])`, `a` an `array<i32>` | 4 bytes (a **packed** element) | `i32` = 4 | **lowered** — C-walkable |
+| `addr_of(y)`, `y` an `i64` local | 8 bytes | `i64` = 8 | lowered |
+
+### Narrow array elements are PACKED
+
+An `array<T>` for a narrow integer `T` (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`byte`)
+stores its elements at their **C width**, not as 8-byte cells: element `k` begins at
+byte `k * size_of(T)`. This is what makes a **byte buffer walkable** — the driver
+idiom — and it is *forced*, not chosen. The interpreters' `addr_of` region stride is
+`Value::layout_size` of the element (4 for `i32`, 1 for `byte`), so they already
+define these walks: `tests/fixtures/valid/raw_ptr_addressing.lby` exits 18 on
+ast/ir/bytecode with an `i32` size law of **4**. An 8-byte-cell native layout would
+answer 22 — the same defined program with two answers. Striding the raw-pointer
+surface by the cell size instead was rejected for exactly that reason.
+
+Packing is scoped tightly, and the scope is the safety argument:
+
+- **Only the array-element position packs.** A narrow *scalar* (local, parameter,
+  struct field, list element, enum payload) is still a normalized 8-byte cell.
+  `NativeType::Narrow` is produced solely by `narrow_array_element`.
+- **The array still occupies whole words and stays word-aligned**, owning its tail
+  padding. Packing is internal to the array's own byte span, so every word-granular
+  copy path (aggregate copy-in, the by-hidden-pointer return ABI, scratch
+  allocation) is correct and unchanged. **Struct field offsets stay word-granular.**
+- **Auto-vectorization disqualifies narrow arrays by construction.** All four SIMD
+  bases resolve through the strict `resolve_place_steps` i64 resolver, which refuses
+  a `Narrow` element, so `paddq`'s 8-byte lanes can never run over packed elements.
+  This is why `Narrow` is a distinct `NativeType` variant rather than a width field
+  on `Array`: a width field would leave `elem` reading `I64` and let the vectorizer
+  through — silent corruption.
+- **`bool`/`char`/`f32` are deliberately NOT packed** even though the interpreters
+  stride them narrowly, because `addr_of` of them is refused before a stride is
+  observable, so no program can witness the difference.
+- **An arena buffer must still be `array<i64>`.** The arena bumps 8-byte cells, so
+  its backend gate checks the element's **byte width**, not its word count — a
+  packed `array<u8>` reports `words() == 1` and would pass a word-count gate while
+  being over-run 8x.
+
+Existing codegen does **not** move: `emit_scale_rax_by_stride` reproduces the
+historical `imul` + `shl rax, 3` pair exactly for 8-byte strides, so every COFF
+snapshot and emitted-byte-count pin is unchanged. Packed strides (1/2/4) scale with
+a single `shl`, or nothing at all for a byte array.
+
+Pinned by `suite22.rs` (four-tier agreement for the `i32` walk, the `u8` byte-buffer
+walk, write-through-read-back-by-index, `i16`/`i8`/`u16` + whole-array decay, a
+`--freestanding` byte-buffer walk, and the narrow-scalar refusal) and by the
+differential + value-oracle fuzzer in `fuzz_narrow.rs`.
 
 A `ptr<T>` was already a pointer-sized scalar in the value model (`resolve_native_type`
 maps it to `NativeType::I64`), so **no eligibility change was needed** for `ptr<T>`

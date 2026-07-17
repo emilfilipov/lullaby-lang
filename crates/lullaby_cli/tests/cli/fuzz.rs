@@ -2191,3 +2191,8 @@ mod fuzz_closure;
 // The static-buffer arena fuzzers (freestanding tier §5: scoping, overflow, and
 // four-tier agreement) live in their own file for the same reason.
 mod fuzz_arena;
+
+// The packed narrow array element fuzzers (walking an `array<i32>`/`array<u8>`/…
+// through raw pointers, where a wrong stride is silent corruption) live in their
+// own file for the same reason.
+mod fuzz_narrow;

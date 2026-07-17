@@ -1,0 +1,12 @@
+# The NEGATIVE boundary of packed narrow array elements: a narrow SCALAR is still
+# a normalized 8-byte cell, so `addr_of` of one is refused (`L0339`). A 4-byte
+# store through its address would leave the cell's upper half stale.
+#
+# Native-only: this exists to pin the SKIP, so there is no interpreter answer to
+# agree with. Compare `narrow_array_write_through.lby`, where the same `i32`
+# spelling IS addressable because an array's elements are packed.
+fn main -> i64
+    let x i32 = to_i32(5)
+    unsafe
+        let p ptr<i32> = addr_of(x)
+        to_i64(ptr_read(p))

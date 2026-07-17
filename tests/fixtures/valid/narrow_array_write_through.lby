@@ -1,0 +1,16 @@
+# WRITE through a narrow walk, read back BY INDEX. This is the test that a wrong
+# stride cannot survive: the pointer walk and the array's own element indexing
+# must name the same storage. If `ptr_offset` strided 8 over 4-byte elements,
+# the writes would land on every other element (and past the end) and the
+# index reads would see zeros.
+#
+# main = 0 + 7 + 14 + 21 = 42.
+fn main -> i64
+    let buf array<i32> = [to_i32(0), to_i32(0), to_i32(0), to_i32(0)]
+    unsafe
+        let p ptr<i32> = addr_of(buf[0])
+        let i i64 = 0
+        while i < 4
+            ptr_write(ptr_offset(p, i), to_i32(i * 7))
+            i = i + 1
+    to_i64(buf[0]) + to_i64(buf[1]) + to_i64(buf[2]) + to_i64(buf[3])
