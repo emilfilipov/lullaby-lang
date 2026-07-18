@@ -66,6 +66,42 @@ pub(crate) fn emit_deep_copy(
     ))
 }
 
+/// Preserve Lullaby value semantics for a value BOUND (`let g = …`) or ASSIGNED
+/// (`g = …`, `o.field = …`) from a mutable-aggregate RHS. The RHS value (an `i32`
+/// pointer for an aggregate) is already on top of the stack.
+///
+/// A struct/array/enum/`list`/`map` is a value type: binding or assigning it must
+/// produce an INDEPENDENT copy, exactly as the three interpreters clone the value
+/// and as the call boundary already deep-copies a mutable-aggregate argument
+/// ([`emit_deep_copy`]). Without this, `let g = f` would bind `f`'s linear-memory
+/// pointer and a later `g.a = …` would mutate `f` too (a real cross-tier
+/// miscompile).
+///
+/// The copy is emitted ONLY when the RHS is an ALIAS into existing storage — a
+/// variable / field / index read of a mutable aggregate. A FRESH RHS (a struct/
+/// enum construction, an array literal, or a call result — all of which already
+/// allocate their own record) is left untouched, so no redundant allocation is
+/// emitted and those existing emissions stay byte-identical. This mirrors the
+/// interpreters, which clone only when reading an lvalue and bind a freshly
+/// constructed value directly. A scalar or immutable `string` is never copied.
+pub(crate) fn maybe_copy_bound_value(
+    ctx: &mut LowerCtx,
+    value: &IrExpr,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let is_alias = matches!(
+        value.kind,
+        IrExprKind::Variable(_)
+            | IrExprKind::Local { .. }
+            | IrExprKind::Field { .. }
+            | IrExprKind::Index { .. }
+    );
+    if is_alias && is_mutable_aggregate(&value.ty, ctx.structs, ctx.enums) {
+        emit_deep_copy(ctx, &value.ty, out)?;
+    }
+    Ok(())
+}
+
 /// Deep-copy a struct: the source pointer is on the stack. Allocate a fresh run of
 /// one 8-byte slot per field, copy each field (deep-copying nested mutable
 /// aggregate fields), and leave the fresh pointer on the stack.
