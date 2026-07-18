@@ -748,6 +748,11 @@ pub(crate) fn lower_struct_construction(
             .ok_or_else(|| format!("struct `{name}` field has unsupported type"))?;
         get_local(out, ptr); // base pointer
         lower_expr(ctx, arg, out)?; // field value
+        // Value semantics: a field built from an aggregate LVALUE (`Outer(q, …)`)
+        // must store an INDEPENDENT copy, not `q`'s pointer, so a later mutation of
+        // `q` is not observable through the field. A freshly constructed operand
+        // already owns its record and is stored directly (no redundant copy).
+        maybe_copy_bound_value(ctx, arg, out)?;
         emit_store_at(slot_ty, slot as i32 * SLOT_SIZE, out);
     }
     get_local(out, ptr);
@@ -828,6 +833,10 @@ pub(crate) fn lower_enum_construction(
             .ok_or_else(|| format!("enum variant `{variant}` payload has unsupported type"))?;
         get_local(out, ptr); // base pointer
         lower_expr(ctx, arg, out)?; // payload value
+        // Value semantics: a payload built from an aggregate LVALUE (`some(f)`)
+        // stores an INDEPENDENT copy, so mutating `f` afterward is not observable
+        // through the payload; a freshly constructed operand is stored directly.
+        maybe_copy_bound_value(ctx, arg, out)?;
         emit_store_at(slot_ty, ENUM_PAYLOAD_BASE + slot as i32 * SLOT_SIZE, out);
     }
     get_local(out, ptr);
@@ -861,6 +870,10 @@ pub(crate) fn lower_array_literal(
     for (i, element) in elements.iter().enumerate() {
         get_local(out, ptr);
         lower_expr(ctx, element, out)?;
+        // Value semantics: an element built from an aggregate LVALUE (`[f]`) stores
+        // an INDEPENDENT copy, so mutating `f` afterward is not observable through
+        // the element; a freshly constructed element is stored directly.
+        maybe_copy_bound_value(ctx, element, out)?;
         emit_store_at(slot_ty, LEN_HEADER + i as i32 * SLOT_SIZE, out);
     }
     get_local(out, ptr);

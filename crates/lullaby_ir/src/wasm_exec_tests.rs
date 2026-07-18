@@ -384,3 +384,129 @@ fn main -> i64
 ";
     assert_parity(source, 106);
 }
+
+// -- Construction from an lvalue operand must value-copy, not alias -----------
+// A literal/construction built from an aggregate LVALUE aliases that operand
+// unless each such operand is deep-copied at the store. A freshly constructed
+// operand already owns its record and must NOT be copied (parity would still
+// hold, but the redundant copy would be wasteful and change bytes).
+
+#[test]
+fn array_literal_with_struct_element_copies_the_operand() {
+    // `[f]` must snapshot `f`; mutating `f` afterward must not change `g[0]`.
+    let source = "\
+struct P
+    a i64
+    b i64
+
+fn main -> i64
+    let f P = P(1, 2)
+    let g array<P> = [f]
+    f.a = 99
+    return g[0].a + g[0].b
+";
+    assert_parity(source, 3);
+}
+
+#[test]
+fn struct_construction_with_struct_field_copies_the_operand() {
+    // `Outer(q, 2)` must snapshot `q`; mutating `q` afterward must not change
+    // `o.inner`.
+    let source = "\
+struct Inner
+    v i64
+
+struct Outer
+    inner Inner
+    tag i64
+
+fn main -> i64
+    let q Inner = Inner(1)
+    let o Outer = Outer(q, 2)
+    q.v = 99
+    return o.inner.v + o.tag
+";
+    assert_parity(source, 3);
+}
+
+#[test]
+fn enum_construction_with_struct_payload_copies_the_operand() {
+    // `some(f)` (an `option<struct>`) must snapshot `f`; mutating `f` afterward
+    // must not change the payload observed through `match`.
+    let source = "\
+struct P
+    a i64
+    b i64
+
+fn main -> i64
+    let f P = P(1, 2)
+    let e option<P> = some(f)
+    f.a = 99
+    match e
+        some(p) -> p.a + p.b
+        none -> 0
+";
+    assert_parity(source, 3);
+}
+
+#[test]
+fn list_push_of_struct_copies_the_operand() {
+    // `push(xs, f)` on a `list<struct>` must snapshot `f`; mutating `f` afterward
+    // must not change the stored element.
+    let source = "\
+struct P
+    a i64
+    b i64
+
+fn main -> i64
+    let xs list<P> = list_new()
+    let f P = P(1, 2)
+    let ys list<P> = push(xs, f)
+    f.a = 99
+    let g P = get(ys, 0)
+    return g.a + g.b
+";
+    assert_parity(source, 3);
+}
+
+#[test]
+fn map_set_of_struct_copies_the_operand() {
+    // `map_set(m, k, f)` on a `map<i64, struct>` must snapshot `f`; mutating `f`
+    // afterward must not change the stored value (map_set already deep-copies —
+    // regression guard confirming the whole value-copy class is covered).
+    let source = "\
+struct P
+    a i64
+    b i64
+
+fn main -> i64
+    let m map<i64, P> = map_new()
+    let f P = P(1, 2)
+    let m2 map<i64, P> = map_set(m, 7, f)
+    f.a = 99
+    match map_get(m2, 7)
+        some(p) -> p.a + p.b
+        none -> 0
+";
+    assert_parity(source, 3);
+}
+
+#[test]
+fn nested_construction_operand_binds_directly_and_is_correct() {
+    // A construction operand that is itself a FRESH construction (not an lvalue)
+    // owns its record; confirm nested construction still yields the right value.
+    let source = "\
+struct Inner
+    v i64
+
+struct Outer
+    inner Inner
+    tag i64
+
+fn main -> i64
+    let o Outer = Outer(Inner(5), 2)
+    o.inner.v = 40
+    return o.inner.v + o.tag
+";
+    assert_parity(source, 42);
+}
