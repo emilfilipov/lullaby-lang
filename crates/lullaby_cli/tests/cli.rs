@@ -1228,6 +1228,110 @@ pub(crate) fn native_elf_x86_64_links_and_runs_under_docker() {
     );
 }
 
+/// End-to-end **direct-ELF** verification: emit a freestanding Linux x86-64
+/// `ET_EXEC` executable *without any linker* (`--freestanding`, no `ld.lld`
+/// step — that is the whole point of the direct-ELF path) and run it under a
+/// native `linux/amd64` Docker container, asserting the process exit code
+/// equals the interpreter's `run` result mod 256. This proves the directly-laid
+/// ELF image (headers, `PT_LOAD` segments, internally-resolved relocations, and
+/// the freestanding `exit`-syscall entry) actually loads and executes on Linux —
+/// not merely that the bytes parse. It is the ELF analog of
+/// `native_freestanding_direct_pe_runs`. Gated on Docker + `linux/amd64`;
+/// skipped gracefully otherwise, and it reports what it executed so a silent
+/// no-op skip is impossible.
+///
+/// Two fixtures are exercised: a purely-scalar program (single `R+X` `PT_LOAD`,
+/// exit 37) and a heap/string program (`R+X` + `R` rodata + `R+W` bss segments),
+/// so both the minimal and the multi-segment layouts are run, not just emitted.
+#[test]
+pub(crate) fn native_freestanding_direct_elf_runs_under_docker() {
+    let scratch = ScratchDir::new("native_freestanding_direct_elf_runs");
+    if !docker_amd64_available() {
+        eprintln!("Docker linux/amd64 unavailable; skipping direct-ELF run");
+        return;
+    }
+
+    // Emit `fixture` as a direct ELF (no linker) and run it under linux/amd64,
+    // returning the container exit code. Also asserts the CLI took the direct-ELF
+    // path (not the object + linker fallback).
+    let run_direct = |label: &str, fixture: &std::path::Path, expected: i32| {
+        let dir = scratch.join(label);
+        std::fs::create_dir_all(&dir).expect("create work dir");
+        let exe = dir.join("prog");
+        let emit = lullaby()
+            .args([
+                "native",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--freestanding",
+                "-o",
+                exe.to_str().expect("exe path"),
+                fixture.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("emit direct ELF");
+        assert!(emit.status.success(), "{}", stderr(&emit));
+        assert!(
+            stdout(&emit).contains("direct ELF, no linker"),
+            "must take the direct-ELF path (no linker): {}",
+            stdout(&emit)
+        );
+        let mount = format!("{}:/w", dir.display());
+        let run_exe = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--platform",
+                "linux/amd64",
+                "-v",
+                &mount,
+                "busybox",
+                "sh",
+                "-c",
+                "cp /w/prog /prog && chmod +x /prog && /prog",
+            ])
+            .output()
+            .expect("docker run amd64");
+        let code = run_exe.status.code().expect("container exit code");
+        assert_eq!(
+            code,
+            expected,
+            "direct-ELF {label} exit {code} must equal interpreter result mod 256 ({expected}); docker stderr: {}",
+            String::from_utf8_lossy(&run_exe.stderr)
+        );
+        eprintln!("direct-ELF {label}: ran under linux/amd64, exit {code} == {expected}");
+    };
+
+    // Confirm the expected exit codes against the interpreter, then run the
+    // directly-emitted ELF and require the process exit code to match.
+    let interp_result = |fixture: &std::path::Path| -> i32 {
+        let run = lullaby()
+            .args(["run", fixture.to_str().expect("fixture path")])
+            .output()
+            .expect("run interpreter");
+        assert!(run.status.success(), "{}", stderr(&run));
+        let value: i64 = stdout(&run)
+            .lines()
+            .filter_map(|line| line.trim().parse::<i64>().ok())
+            .next_back()
+            .expect("interpreter prints an integer result");
+        value.rem_euclid(256) as i32
+    };
+
+    // Scalar core: no strings, no heap — a single R+X PT_LOAD. Returns 37.
+    let scalar =
+        workspace_root().join("tests/fixtures/valid/no_runtime/freestanding_scalar_core.lby");
+    run_direct("scalar", &scalar, interp_result(&scalar));
+
+    // Heap/string program: exercises the R (rodata) + R+W (bss) segments too. A
+    // freestanding *build* (the binary gate) may still use the built-in heap/
+    // string helpers, which link no C runtime.
+    let heap_src = scratch.join("heap.lby");
+    std::fs::write(&heap_src, "fn main -> i64\n    len(\"hello world\")\n")
+        .expect("write heap fixture");
+    run_direct("heap", &heap_src, interp_result(&heap_src));
+}
+
 /// An unknown `--target` triple is rejected with `L0347` and no object is
 /// produced.
 #[test]

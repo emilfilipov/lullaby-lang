@@ -943,3 +943,10 @@ pub(crate) use dwarf::*;
 #[path = "pe_image.rs"]
 mod pe_image;
 pub(crate) use pe_image::*;
+
+// Direct ELF64 (`ET_EXEC`) executable writer — the Linux analog of `pe_image`.
+// Lays a linker-free runnable ELF around the same neutral Linux object model the
+// relocatable-ELF path builds, for freestanding-eligible programs.
+#[path = "elf_image.rs"]
+mod elf_image;
+pub(crate) use elf_image::*;
