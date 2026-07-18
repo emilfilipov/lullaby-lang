@@ -1265,6 +1265,9 @@ fn lower_stmt(
             let vty = value_val_type(ty, ctx.structs, ctx.enums)
                 .ok_or_else(|| format!("`let {name}` has an unsupported type `{}`", ty.name))?;
             lower_expr(ctx, value, out)?;
+            // Value semantics: an aggregate lvalue RHS is deep-copied so `let g = f`
+            // binds an independent record, not `f`'s pointer (see `maybe_copy_bound_value`).
+            maybe_copy_bound_value(ctx, value, out)?;
             let index = ctx.add_local(vty);
             ctx.locals.insert(name.clone(), Local { index, ty: vty });
             ctx.local_ir_types.insert(name.clone(), ty.clone());
@@ -1368,6 +1371,8 @@ fn lower_local_assign(
     match op {
         lullaby_parser::AssignOp::Replace => {
             lower_expr(ctx, value, out)?;
+            // Value semantics: `g = f` copies the aggregate, matching `let g = f`.
+            maybe_copy_bound_value(ctx, value, out)?;
         }
         other => {
             // Compound assignment: local = local <op> value. A fixed-width local
@@ -1450,6 +1455,11 @@ fn lower_path_assign(
         lullaby_parser::AssignOp::Replace => {
             get_local(out, addr);
             lower_expr(ctx, value, out)?;
+            // Value semantics: assigning an aggregate lvalue into a field/element
+            // slot (`o.inner = q`) stores an INDEPENDENT copy, not `q`'s pointer, so
+            // a later mutation of `q` is not observable through `o.inner`. The target
+            // slot address stays on the stack below the copied value for the store.
+            maybe_copy_bound_value(ctx, value, out)?;
             emit_store(slot_ty, out);
         }
         other => {
@@ -1902,3 +1912,7 @@ pub(crate) use lowering_mem::*;
 #[cfg(test)]
 #[path = "wasm_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "wasm_exec_tests.rs"]
+mod exec_tests;
