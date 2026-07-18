@@ -107,10 +107,20 @@ User-defined generic types (`struct Stack<T>`, `enum Opt<T>`) do not parse today
   **A2 native array operations are now complete**: construct, copy, pass, return,
   `[i]`, `len`, `addr_of`, iterate, whole-field bind — all inline and by-value.
 - **WASM:** fixed-extent array struct fields are already at observable parity via
-  WASM's pointer-per-field model (no inline mechanism needed — measured); a separate
-  WASM struct/array **value-copy** miscompile (`let g = f` aliased) was found and is
-  being fixed under a new wasmi execution-parity harness (owner-approved). Full
-  const-fn evaluation stays post-1.0.
+  WASM's pointer-per-field model (no inline mechanism needed — measured). A
+  **WASM value-copy miscompile class is now closed** (`9a8f046`): `let`/assign/
+  field-store and struct/enum/array **construction** all deep-copy an lvalue
+  aggregate operand (keyed on one rule — copy iff the stored source is an lvalue —
+  at every store site; a freshly-constructed whole record still binds directly, but
+  its operands are copied). Found via a **new `wasmi` execution-parity harness**
+  (owner-approved, dev-dependency, pure-Rust in-process) that runs the emitted module
+  and asserts WASM == the IR interpreter — WASM was previously verified structurally
+  only (emitted bytes), never executed. The harness caught the original bug and, on
+  review, three surviving construction sites (the class is closed under an independent
+  31-site store enumeration). Full const-fn evaluation stays post-1.0.
+- **WASM execution testing: NEW GATE.** `crates/lullaby_ir/src/wasm_exec_tests.rs`
+  (via `wasmi`) is now a standing execution-parity gate — the WASM analogue of the
+  native compile-and-run tests. WASM correctness is gated, not just structural.
 
 ### A3. FFI completeness — **DECIDED: callbacks in 1.0**
 Base FFI ships; deferred today (L0424): callbacks (fn pointers), struct-by-value,
