@@ -1178,6 +1178,9 @@ pub fn emit_aarch64_program(
         // Direct PE emission is a Windows/COFF-only path; the AArch64 ELF keeps
         // the object-file + cross-linker workflow.
         pe_image: None,
+        // Direct ELF emission targets x86-64 only (its own REL32 model); the
+        // AArch64 ELF keeps the object-file + cross-linker workflow.
+        elf_image: None,
     })
 }
 

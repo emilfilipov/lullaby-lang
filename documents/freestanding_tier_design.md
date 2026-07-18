@@ -39,7 +39,8 @@ reconciles with the existing `ptr<T>` / `unsafe` / raw-memory surface in
 `execution_tiers_and_1_0_scope.md`, and the *already delivered* native-backend
 freestanding machinery in [native_backend_contract.md](native_backend_contract.md)
 (the `--freestanding` flag, `L0426`, the raw-byte `asm` statement, the direct-PE
-writer, the ELF/Mach-O/AArch64 freestanding `_start` stubs) and
+writer, the direct-ELF `ET_EXEC` writer, the ELF/Mach-O/AArch64 freestanding
+`_start` stubs) and
 [linker_and_binary_output_plan.md](linker_and_binary_output_plan.md). It is
 stylistically consistent with [concurrency_model_design.md](concurrency_model_design.md):
 every meaningful surface-syntax choice is an explicit **OWNER DECISION NEEDED**
@@ -1242,17 +1243,26 @@ section ".multiboot" static header MultibootHeader = multiboot_header()
 
 ### 9.3 Direct-ELF and flat-binary emission
 
-- **Direct-ELF (executable, not relocatable):** the delivered path emits a
-  *relocatable* ELF object (`ET_REL`, linked by `rust-lld`) plus a freestanding
-  `_start` for hosted Linux exit. The kernel tier needs a **directly written
-  executable/loadable ELF** (`ET_EXEC` or `ET_DYN`) with author-controlled program
-  headers and entry — the ELF analogue of the delivered direct-PE writer
-  (`write_pe_executable`). Recommendation: extend the direct-image writer that already
-  produces PE32+ in-house to also lay a **fixed-base ELF executable** around the same
-  `.text`/`.rodata`/`.bss` (the neutral `ObjectModel` already carries all three),
-  resolving every intra-image reference at emit time (exactly as the PE writer does),
-  with the entry at the `entry fn` symbol and no interpreter/`PT_INTERP`. This keeps
-  the compile-speed moat (no external linker) on the ELF kernel path too.
+- **Direct-ELF (executable, not relocatable) — DELIVERED (2026-07-18).** In
+  addition to the *relocatable* ELF object (`ET_REL`, linked by `rust-lld`), the
+  backend now lays a **directly written `ET_EXEC` executable** in-house — the ELF
+  analogue of the delivered direct-PE writer (`write_pe_executable`), exactly the
+  recommended extension of the direct-image technique. `crates/lullaby_ir/src/elf_image.rs::write_elf_executable`
+  reuses the same neutral Linux `ObjectModel` (`.text`/`.rodata`/`.bss`, same
+  `_start` entry stub) and lays a **fixed-base `ET_EXEC`** with page-aligned
+  `PT_LOAD` segments (`R+X` text incl. headers, `R` rodata, `R+W` bss), resolving
+  every intra-image reference at emit time (all references are PC-relative, so no
+  `PT_DYNAMIC`/`PT_INTERP` and no load-time fixup) — keeping the no-external-linker
+  compile-speed moat on the ELF path too. Chosen `ET_EXEC` over static-PIE (`ET_DYN`)
+  precisely because the code is already position-independent, so self-relocation
+  buys nothing. Selected by `lullaby native --target x86_64-unknown-linux-gnu
+  --freestanding` (gated on `--freestanding`, the no-C-runtime output contract);
+  populated as `NativeProgram.elf_image`, with the same clean skip-to-linker
+  fallback as direct-PE. **Execution-verified** under a `linux/amd64` Docker
+  container (no linker), exit code matching the interpreter. See
+  [native_backend_contract.md](native_backend_contract.md) "Direct ELF Executable
+  Emission". Still future: author-controlled program headers / custom entry symbol
+  (§9.1) and `ET_DYN`/loadable variants for a bootloader.
 - **Flat binary:** for boot sectors / early stages that run before ELF is parsed, emit
   a **raw flat binary** — the `.text`+`.rodata`+`.bss`(zeroed) laid out contiguously
   at a fixed load address (`--load-addr`), no headers at all, entry at offset 0. This

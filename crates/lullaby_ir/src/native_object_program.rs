@@ -58,6 +58,15 @@ pub struct NativeProgram {
     /// library objects, and the ELF/Mach-O/AArch64 targets, which keep the
     /// object-file + linker path. See `pe_image::write_pe_executable`.
     pub pe_image: Option<Vec<u8>>,
+    /// A directly-emitted, runnable `ET_EXEC` x86-64 ELF executable, present only
+    /// when the program is **freestanding-eligible** on an ELF/Linux target (a
+    /// `main` and no C-runtime import). The Linux analog of [`Self::pe_image`]:
+    /// Lullaby lays the ELF image around the same `.text` the relocatable-ELF
+    /// path emits, so the CLI can write a runnable Linux binary without invoking
+    /// `ld.lld`. `None` for non-ELF targets, library objects, and programs that
+    /// need the C runtime, which keep the object-file + external-linker path. See
+    /// `elf_image::write_elf_executable`.
+    pub elf_image: Option<Vec<u8>>,
 }
 
 /// The C runtime import library that provides the standard C library symbols
@@ -451,6 +460,20 @@ pub fn emit_native_program_for_target(
         } else {
             None
         };
+        // The Linux analog: an ELF/Linux target with a `main` and no C-runtime
+        // import gets a directly-emitted, runnable `ET_EXEC` image around the same
+        // `.text` the relocatable-ELF object carries, so the CLI can write a
+        // runnable binary without `ld.lld`. Guarded identically to `pe_image` but
+        // on the ELF format. The aarch64 ELF path returns early above, so this is
+        // always x86-64.
+        let elf_image = if matches!(target.object_format, NativeObjectFormat::Elf)
+            && has_main
+            && import_libs.is_empty()
+        {
+            write_elf_executable(&lowered, &strings, entry_stub)
+        } else {
+            None
+        };
         return Ok(NativeProgram {
             target,
             bytes,
@@ -459,6 +482,7 @@ pub fn emit_native_program_for_target(
             skipped,
             import_libs,
             pe_image,
+            elf_image,
         });
     }
 }

@@ -161,6 +161,66 @@ pub(crate) fn native_file(
         return Err(format_reports(&[report], mode, Some(&compiled.source)));
     }
 
+    // Direct ELF fast path — the Linux analog of the direct-PE fast path below.
+    // A freestanding ELF/Linux build with a `main` and no C-runtime import gets a
+    // runnable `ET_EXEC` image laid directly around the `.text`, skipping the
+    // external linker (`ld.lld`) exactly as direct-PE skips `rust-lld` on Windows.
+    // Gated on `--freestanding` (the explicit no-C-runtime output contract) so the
+    // default ELF build keeps the relocatable-object + cross-linker workflow (the
+    // only path this Windows host can otherwise verify). Like the PE path it is
+    // disabled under `--debug`: a debug build keeps the object + linker path so its
+    // DWARF source-line info is produced; the direct image carries none. The
+    // aarch64 ELF target never reaches the body — `elf_image` is `None` for it (it
+    // has its own object builder), so the `if let` guard falls through cleanly.
+    let is_elf = matches!(target.object_format, NativeObjectFormat::Elf);
+    if is_elf
+        && freestanding
+        && !debug
+        && let Some(image) = program.elf_image.as_ref()
+    {
+        let exe = output.unwrap_or_else(|| compiled.path.with_extension(""));
+        if let Err(error) = fs::write(&exe, image) {
+            return Err(format_reports(
+                &[write_failure_report(&exe, error)],
+                mode,
+                None,
+            ));
+        }
+        // Mark the emitted file executable when the host is Unix. On the Windows
+        // build host this is a no-op (NTFS carries no POSIX exec bit); the Docker
+        // verification `chmod +x`s the copied binary itself, and a native Linux
+        // build wants the bit set so the produced ELF runs directly.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = fs::metadata(&exe) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o755);
+                let _ = fs::set_permissions(&exe, perms);
+            }
+        }
+        if mode == OutputMode::Json {
+            println!("{{\"status\":\"ok\",\"diagnostics\":[]}}");
+            return Ok(());
+        }
+        println!(
+            "target: {} ({})",
+            target.triple,
+            object_format_label(&target)
+        );
+        println!("freestanding (no-std): no C runtime linked; process exit via the `exit` syscall");
+        println!("native exe: {} (direct ELF, no linker)", exe.display());
+        if mode == OutputMode::Verbose {
+            for name in &program.compiled {
+                println!("compiled {name}");
+            }
+            for skip in &program.skipped {
+                println!("skipped {}: {}", skip.name, skip.reason);
+            }
+        }
+        return Ok(());
+    }
+
     // The object-file extension and the link step are target-specific. Windows
     // COFF objects (`.obj`) can be linked into a runnable `.exe` on this host;
     // the ELF (`.o`) and Mach-O (`.o`) objects cannot be linked or run here (no
