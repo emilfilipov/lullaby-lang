@@ -92,12 +92,15 @@ fn float_lit(class: Class, value: i64, half: bool) -> String {
 
 /// Generate one closure program for `seed`.
 ///
-/// The closure is always a direct `let` literal. It is invoked either **directly**
-/// (`f(args)`) or, in the higher-order mode, by passing it as a NON-ESCAPING
-/// argument to a generated `apply_hof` helper that calls it (`apply_hof(f, args)` —
-/// closures stage 3a). Both are supported native shapes, so every generated program
-/// is expected to COMPILE natively, not skip. That matters: a generator that mostly
-/// produced skipping programs would still pass while proving nothing about codegen.
+/// The closure is created either by a direct `let` literal (direct/HOF modes) or by a
+/// `make_closure` FACTORY that returns it (factory mode). It is invoked **directly**
+/// (`f(args)`), by passing it as a NON-ESCAPING argument to a generated `apply_hof`
+/// helper that calls it (`apply_hof(f, args)` — closures stage 3a), or — in factory
+/// mode — as a call-returned indirect callable bound to the factory result (arena
+/// stage-4 increment a: `let f = make_closure(caps)` then `f(args)`). All three are
+/// supported native shapes, so every generated program is expected to COMPILE
+/// natively, not skip. That matters: a generator that mostly produced skipping
+/// programs would still pass while proving nothing about codegen.
 ///
 /// The higher-order mode adds a second, independent ABI boundary the direct mode
 /// cannot reach: the closure pointer is passed as an ordinary argument to
@@ -118,6 +121,15 @@ fn gen_closure_program(seed: u64) -> String {
     // Chosen for a substantial fraction of programs so the HOF ABI is exercised
     // heavily while the direct-call ABI stays covered too.
     let hof = rng.chance(2);
+    // Factory mode (arena stage-4 increment a): instead of creating the closure with a
+    // local literal, hoist it into a `make_closure` FACTORY that takes the captured
+    // values as parameters and RETURNS the closure, then bind `f` to the factory call.
+    // This exercises the returned-closure path — a `fn(...)` return admitted as a block
+    // pointer, and `f` as a call-returned indirect callable invoked through the same
+    // ABI. Mutually exclusive with `hof` (combining a call-returned closure with a HOF
+    // sink is a separate, unsupported escape); chosen for a substantial fraction of the
+    // non-HOF programs so both the direct-literal and the factory paths stay covered.
+    let factory = !hof && rng.chance(2);
     // Float width for this program: exercise f32 sometimes, f64 mostly (f64 is the
     // common shape and has the richer arithmetic surface).
     let fclass = if rng.chance(4) {
@@ -236,11 +248,32 @@ fn gen_closure_program(seed: u64) -> String {
         }
     };
 
-    let decl = format!(
-        "    let f fn({}) -> {ret_ty} = fn {} -> {body}\n",
-        sig_types.join(", "),
-        params.join(" ")
-    );
+    // The closure literal itself — bound to `f` directly (direct/HOF modes) or
+    // returned from the factory (factory mode). Its captures are the `k`/`w` locals
+    // (direct/HOF) or the factory's parameters of the same names (factory).
+    let closure_literal = format!("fn {} -> {body}", params.join(" "));
+
+    // In factory mode the captures become the factory's PARAMETERS and `f` is bound to
+    // the factory call, so `main` declares no `k`/`w` locals — the preamble moves into
+    // the factory signature/arguments. Otherwise `f` is a direct local literal.
+    let (main_preamble, decl) = if factory {
+        (
+            String::new(),
+            format!(
+                "    let f fn({}) -> {ret_ty} = make_closure({})\n",
+                sig_types.join(", "),
+                factory_cap_args(needs_int, needs_float, icap, fclass, fcap_v),
+            ),
+        )
+    } else {
+        (
+            preamble.clone(),
+            format!(
+                "    let f fn({}) -> {ret_ty} = {closure_literal}\n",
+                sig_types.join(", "),
+            ),
+        )
+    };
 
     // Call sites. An integer-returning closure is read once; a bool-returning one is
     // sampled at three argument vectors and counted, so the exit code carries several
@@ -284,10 +317,15 @@ fn gen_closure_program(seed: u64) -> String {
         )
     };
 
-    // The higher-order helper `apply_hof(f, p0, p1, …) -> RET = f(p0, p1, …)`. Its
-    // fn parameter `f` is used call-only, so it is a native higher-order parameter;
-    // it forwards its scalar parameters (interleaved classes, counts past the
-    // register file) into the indirect closure call.
+    // The prepended helper depends on the mode:
+    //
+    // - HOF: `apply_hof(f, p0, …) -> RET = f(p0, …)`, whose call-only fn parameter `f`
+    //   is a native higher-order parameter forwarding its scalars into the indirect
+    //   closure call.
+    // - Factory: `make_closure(caps) -> fn(SIG) -> RET` whose body is the closure
+    //   literal, returning it. This is the returned-closure path under test — a
+    //   `fn(...)` return admitted as a block pointer, invoked at each `f(args)` call
+    //   site as a call-returned indirect callable.
     let helper = if hof {
         format!(
             "fn apply_hof f fn({}) -> {ret_ty} {} -> {ret_ty}\n    f({})\n",
@@ -295,11 +333,49 @@ fn gen_closure_program(seed: u64) -> String {
             params.join(" "),
             names.join(", "),
         )
+    } else if factory {
+        format!(
+            "fn make_closure {} -> fn({}) -> {ret_ty}\n    {closure_literal}\n",
+            factory_cap_params(needs_int, needs_float, fclass),
+            sig_types.join(", "),
+        )
     } else {
         String::new()
     };
 
-    format!("{helper}fn main -> i64\n{preamble}{decl}{tail}")
+    format!("{helper}fn main -> i64\n{main_preamble}{decl}{tail}")
+}
+
+/// The factory's capture PARAMETER list (`k i64 w f64`), one per capture class the
+/// body reads. Mirrors the `k`/`w` capture locals the direct mode declares in `main`.
+fn factory_cap_params(needs_int: bool, needs_float: bool, fclass: Class) -> String {
+    let mut params = Vec::new();
+    if needs_int {
+        params.push("k i64".to_string());
+    }
+    if needs_float {
+        params.push(format!("w {}", fclass.type_name()));
+    }
+    params.join(" ")
+}
+
+/// The factory-call ARGUMENTS (`icap, wlit`) supplying the captured values, in the same
+/// order and classes as [`factory_cap_params`].
+fn factory_cap_args(
+    needs_int: bool,
+    needs_float: bool,
+    icap: i64,
+    fclass: Class,
+    fcap_v: i64,
+) -> String {
+    let mut args = Vec::new();
+    if needs_int {
+        args.push(format!("{icap}"));
+    }
+    if needs_float {
+        args.push(float_lit(fclass, fcap_v, true));
+    }
+    args.join(", ")
 }
 
 #[test]
@@ -345,13 +421,16 @@ fn fuzz_closure_native_matches_interpreter_when_linkable() {
     let mut ran = 0u64;
     let mut compiled = 0u64;
     let mut hof_ran = 0u64;
+    let mut factory_ran = 0u64;
     for i in 0..PROGRAMS {
         let seed = base_seed.wrapping_add(i.wrapping_mul(0xA076_1D64_78BD_642F));
         let source = gen_closure_program(seed);
         // A higher-order program routes its calls through the generated `apply_hof`
-        // helper; a direct program does not. Detecting it lets the batch prove the
-        // HOF ABI was actually exercised end-to-end, not merely generated.
+        // helper; a factory program obtains the closure from a `make_closure` factory
+        // (the returned-closure path); a direct program does neither. Detecting each
+        // lets the batch prove those ABIs were actually exercised end-to-end.
         let is_hof = source.contains("apply_hof");
+        let is_factory = source.contains("make_closure");
 
         let (ast, ir, bc) = run_interpreters(&source);
         assert!(
@@ -372,6 +451,9 @@ fn fuzz_closure_native_matches_interpreter_when_linkable() {
         if is_hof {
             hof_ran += 1;
         }
+        if is_factory {
+            factory_ran += 1;
+        }
         assert_eq!(
             exit, expected as i32,
             "NATIVE MISCOMPILE on closure #{i} (seed {seed:#x}):\n{source}\n\
@@ -380,12 +462,12 @@ fn fuzz_closure_native_matches_interpreter_when_linkable() {
     }
     // Report the counts so a run can be audited: this oracle is only meaningful if it
     // actually executed real binaries. Every generated program is a supported native
-    // closure shape (direct OR higher-order), so on a Windows host this prints the
-    // full count — if it ever prints fewer, the generator has drifted into producing
-    // skipping programs and is no longer testing codegen.
+    // closure shape (direct, higher-order, OR factory-returned), so on a Windows host
+    // this prints the full count — if it ever prints fewer, the generator has drifted
+    // into producing skipping programs and is no longer testing codegen.
     eprintln!(
         "closure native fuzz: ran {ran}/{PROGRAMS} real exes ({compiled} compiled natively, \
-         {hof_ran} higher-order)"
+         {hof_ran} higher-order, {factory_ran} factory-returned)"
     );
     // The higher-order path must have been exercised by a non-trivial batch, or the
     // stage-3a ABI (closure-pointer argument + indirect call through a fn parameter)
@@ -393,5 +475,13 @@ fn fuzz_closure_native_matches_interpreter_when_linkable() {
     assert!(
         hof_ran >= PROGRAMS / 8,
         "expected a substantial higher-order batch, ran only {hof_ran}/{ran}"
+    );
+    // The returned-closure path (arena stage-4 increment a) must likewise have run a
+    // non-trivial native batch, or the factory-returns-a-closure / call-returned-invoke
+    // ABI would be silently untested. A drift toward skipping factory programs (a
+    // regression in the returned-closure eligibility) would drop this below the floor.
+    assert!(
+        factory_ran >= PROGRAMS / 8,
+        "expected a substantial factory-returned batch, ran only {factory_ran}/{ran}"
     );
 }

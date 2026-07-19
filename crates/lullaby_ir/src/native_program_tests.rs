@@ -5307,16 +5307,44 @@ fn native_closure_hof_onward_pass_skips() {
     ));
 }
 
-/// A returned/escaping closure (built by a factory and returned) is not in the
-/// slice and skips cleanly.
+/// A returned closure built by a FACTORY and invoked by the caller COMPILES (arena
+/// stage-4 increment a): the `fn(i64) -> i64` return is admitted as an `I64` block
+/// pointer, and `f` — a call-returned callable local — is invoked through the closure
+/// indirect ABI. Both `make`, `main`, and the synthesized body `__closure_0` compile.
+/// (This asserted a skip before returned closures were unblocked.)
 #[test]
-fn native_closure_returned_skips() {
-    assert_main_skips(concat!(
+fn native_closure_returned_compiles() {
+    let program = emit_native_program(&module_for(concat!(
         "fn make base i64 -> fn(i64) -> i64\n",
         "    fn x i64 -> x + base\n",
         "fn main -> i64\n",
         "    let f fn(i64) -> i64 = make(10)\n",
         "    f(5)\n",
+    )))
+    .expect("a returned-closure factory + invoke compiles");
+    assert!(
+        program.compiled.contains(&"main".to_string())
+            && program.compiled.contains(&"make".to_string())
+            && program.compiled.contains(&"__closure_0".to_string()),
+        "the factory, its caller, and the synthesized body must all compile: {:?} \
+         (skipped {:?})",
+        program.compiled,
+        program.skipped
+    );
+}
+
+/// A factory that returns a fn PARAMETER (aliasing a caller's env) still SKIPS — it is
+/// not a locally-created literal, so `returns_only_local_closure_literals` refuses it.
+/// The refusal boundary of the increment above.
+#[test]
+fn native_closure_returned_fn_parameter_skips() {
+    assert_main_skips(concat!(
+        "fn pick f fn(i64) -> i64 -> fn(i64) -> i64\n",
+        "    return f\n",
+        "fn main -> i64\n",
+        "    let base fn(i64) -> i64 = fn x i64 -> x + 1\n",
+        "    let g fn(i64) -> i64 = pick(base)\n",
+        "    g(5)\n",
     ));
 }
 
