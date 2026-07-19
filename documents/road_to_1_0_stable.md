@@ -178,9 +178,19 @@ What a bounds-fail / unwrap-on-`none` / divide-by-zero does in the safe tier.
   escape-construction probes + the positional-XMM/spill ABI matrix; FFI callbacks
   (shared indirect-call ABI) unaffected; AArch64/WASM still skip HOF cleanly. x86-64
   native only.
-- **Deferred (stage 3b+):** returned/escaping/stored closures, heap/aggregate captures,
-  mutable-capture rebind, onward-passed (multi-level) HOF chains. Escaping closures
-  depend on the memory model (where captures live) — sequenced with the arena work.
+- **Stage 3b (returned/escaping closures): SHIPPED** (`15b67a7`, via arena stage-4a).
+  A factory returning a scalar-capture closure literal, and a caller **invoking** a
+  call-returned closure (`let g = make_adder(5); g(3)`), now compile natively. The
+  factory stays **off-arena** (criterion 1b refuses a `fn` return → no reclamation →
+  the returned block stays live → no dangling), so it is sound with **no promotion** —
+  reviewed PASS against a dangling hunt (the off-arena guard is load-bearing: disabling
+  it segfaults) and an aliasing hunt (a returned `fn` **parameter** stays refused,
+  defended in depth). Only a fresh flat scalar-capture literal return lowers; a returned
+  param / heap capture / stored / re-returned closure skips cleanly (`L0339`).
+- **Still deferred (stage 3c+):** heap/aggregate captures, mutable-capture rebind,
+  onward-passed (multi-level) HOF chains, stored (not returned) closures, and **arena
+  reclamation of the factory's scratch** — that last is stage-4b (mark-advance promotion
+  of the returned block into the caller's region), the next and final arena increment.
 
 ### B2. Concrete stdlib contents — **PLANNED**
 The API-stability *posture* is decided (freeze a small core, version the rest) but
