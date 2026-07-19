@@ -132,12 +132,16 @@ pub(crate) fn native_signature_eligibility(
     structs: &[IrStructDef],
     enums: &[IrEnumDef],
 ) -> Result<(), String> {
-    // Does the return type consume a hidden first integer-register argument? A VOID
-    // return is not an unsupported return type — it is the ABSENCE of one, taking no
-    // hidden pointer — so it answers `false` without the type resolver, which would
-    // (rightly, for a parameter) reject `void` as outside the native stack subset.
-    let returns_aggregate = !function.return_type.is_void()
-        && native_signature_type_is_aggregate(&function.return_type, structs, enums).map_err(
+    // Refuse a non-native RETURN type (arity no longer gates — every effective argument
+    // past the fourth spills to the stack). A VOID return skips the resolver (which
+    // would rightly reject `void` as a parameter type). A `fn(...)` RETURN (a factory
+    // returning a closure) is admitted as a scalar pointer word by
+    // `native_fn_return_eligibility` — the tight gate (which, with
+    // `arena_eligible_functions`, holds the factory off the arena).
+    if function.return_type.is_function() {
+        native_fn_return_eligibility(function)?;
+    } else if !function.return_type.is_void() {
+        native_signature_type_is_aggregate(&function.return_type, structs, enums).map_err(
             |reason| {
                 format!(
                     "return type `{}` is not in the native subset: {reason}",
@@ -145,6 +149,7 @@ pub(crate) fn native_signature_eligibility(
                 )
             },
         )?;
+    }
 
     // A `fn(...)`-typed parameter is native-eligible ONLY as a **non-escaping
     // higher-order parameter**: an all-native-scalar fn signature used call-only in
@@ -175,15 +180,8 @@ pub(crate) fn native_signature_eligibility(
         })?;
     }
 
-    // The hidden return pointer (if any) plus each parameter fill the four Win64
-    // register slots (`rcx`/`rdx`/`r8`/`r9`, with floats positionally in
-    // `xmm0..3`); the 5th+ effective argument is passed on the stack above the
-    // callee's shadow space (see the stack-argument ABI). `main`'s scalar `i64`
-    // return path is unaffected (no hidden pointer). There is therefore no
-    // fixed arity cap; every effective argument beyond the fourth spills to the
-    // stack. `returns_aggregate` is referenced here to document the effective
-    // count even though it no longer gates eligibility.
-    let _effective_args = function.params.len() + usize::from(returns_aggregate);
+    // No fixed arity cap: the 5th+ effective argument (hidden return pointer plus each
+    // parameter) spills to the stack, so eligibility is entirely the type checks above.
     Ok(())
 }
 
@@ -688,9 +686,13 @@ pub(crate) fn compute_native_signature(
             &param.name,
         )?);
     }
-    // The return-only resolver so a `void` return yields `NativeType::Void` instead
-    // of being rejected; the params above keep the resolver that still refuses it.
-    let ret = resolve_return_native_type(&function.return_type, structs, enums, array_lengths)?;
+    // A `fn(...)` RETURN (a returned closure) is an `I64` block-pointer word (eligibility
+    // already checked); otherwise the return-only resolver maps `void` to `Void`.
+    let ret = if function.return_type.is_function() {
+        NativeType::I64
+    } else {
+        resolve_return_native_type(&function.return_type, structs, enums, array_lengths)?
+    };
     Ok(NativeSignature { params, ret })
 }
 
@@ -1459,6 +1461,14 @@ pub(crate) fn arena_eligible_functions(
         let Some(function) = module.functions.iter().find(|f| &f.name == name) else {
             continue;
         };
+        // (1b) A function that RETURNS a closure (a `fn(...)`, admitted as `I64` so it
+        // passes criterion 1) must NEVER arena: the returned block outlives the call, so
+        // a return-edge rewind would reclaim a live block (use-after-free). Callers are
+        // kept off it by the retention summary (R1); this keeps the FACTORY itself off.
+        // (Increment b instead PROMOTES the block and lifts this.)
+        if function.return_type.is_function() {
+            continue;
+        }
         // (2) Actually uses the heap.
         if !body_touches_heap(&function.instructions, &heap_aggs) {
             continue;

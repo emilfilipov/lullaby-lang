@@ -2447,6 +2447,10 @@ pub(crate) fn native_closures_direct_pe_run_parity() {
         "native_hof_noncapture",
         "native_hof_multi_call",
         "native_hof_float_arg",
+        // Closures stage 4 (increment a): a FACTORY returns a closure and the caller
+        // invokes the call-returned closure (`let g = make(2.0) … g(3.0)`). The factory
+        // stays off the arena, so the returned block is not reclaimed.
+        "native_closure_factory_bound",
     ];
     for name in fixtures {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));
@@ -2526,10 +2530,11 @@ pub(crate) fn native_closures_direct_pe_run_parity() {
 /// floats. What remains deferred:
 ///
 /// - a heap capture (`string`; `list`/`map`/aggregate resolve the same way),
-/// - a returned/escaping closure,
 /// - a closure whose body calls a user/`extern` function,
 /// - a mutable/rebound closure local,
-/// - a closure bound from a factory result rather than a direct literal,
+/// - a call-returned closure passed ONWARD to a higher-order sink or itself returned
+///   (`run_closures_returned` — a single factory-then-invoke DOES compile now; see
+///   `native_closure_factory_bound` in the run-parity test),
 /// - a higher-order callee that is NOT call-only — it reads its fn parameter as a
 ///   value (`native_hof_leaky_skip`) or passes it onward (`native_hof_onward_skip`,
 ///   the documented single-level frontier of closures stage 3a).
@@ -2543,12 +2548,17 @@ pub(crate) fn native_closure_deferred_shapes_skip() {
     // (fixture, interpreter result)
     let skips = [
         ("native_closure_string_capture", 42_i64),
+        // `run_closures_returned` still skips even though returned closures now compile:
+        // it passes a call-returned closure (`add100`) to a higher-order sink
+        // (`apply(add100, 3)`) and reassigns a captured variable — escapes this
+        // increment does not admit (a call-returned callable is call-only, not a HOF
+        // argument). The single-factory-then-invoke shape it also contains DOES compile;
+        // that path is pinned by `native_closure_factory_bound` in the run-parity test.
         ("run_closures_returned", 134),
         // The same escape hatches, re-pinned with FLOAT-capturing closures.
         ("native_closure_float_hof", 61),
         ("native_closure_float_body_call", 62),
         ("native_closure_float_rebind", 63),
-        ("native_closure_factory_bound", 64),
         // Closures stage 3a refusal boundaries: a callee whose fn parameter escapes
         // (read as a value, or passed onward) is not a higher-order parameter, so
         // both it and the caller demote cleanly and still run on the interpreters.

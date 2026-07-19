@@ -1612,6 +1612,14 @@ mod suite25;
 #[path = "cli/closure_conditional.rs"]
 mod closure_conditional;
 
+// -- Native returned-closure support (arena stage-4 increment a): four-tier parity
+//    for a factory returning a closure and a caller invoking a call-returned closure
+//    (capture/param/return in int and float, multi-invoke, multi-return-edge), the
+//    off-arena no-dangling pin, and the returned-param / heap-capture / stored-closure
+//    refusal boundary.
+#[path = "cli/returned_closure.rs"]
+mod returned_closure;
+
 // -- The explicit `region` block (arena increment I1): four-tier value-neutral
 //    parity for scratch work, nested blocks, a block inside a loop+function, and
 //    the escaping-store channel a future native reclamation must never reclaim.

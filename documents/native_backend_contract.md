@@ -1426,9 +1426,14 @@ completes the **scalar** subset: float captures, float parameters and returns, a
 any parameter count (positions past the register file spill to the stack). **Stage
 3a** adds **non-escaping higher-order functions** — a closure passed as an argument
 to another Lullaby function that *calls* it (`apply(f, x)`) — see the "Non-escaping
-higher-order functions (stage 3a)" subsection below. The remaining heap/escape work
-(a heap capture, a returned/escaping closure, an onward-passed or stored closure) is
-deliberately NOT here — see "Deferred" below.
+higher-order functions (stage 3a)" subsection below. **Stage 4 (increment a)** adds
+**returned closures** — a factory returning a locally-created literal closure, and a
+caller invoking the call-returned closure (`let g = make_adder(5) … g(3)`) — see the
+"Returned closures" subsection below; the factory stays off the arena so the returned
+block is never reclaimed. The remaining heap/escape work (a heap capture, an
+onward-passed or stored closure, a returned fn parameter or call-returned closure, and
+the arena PROMOTION that would let a factory reclaim — increment b) is deliberately NOT
+here — see "Deferred" below.
 
 ### A closure body is a single expression (not a backend limitation)
 
@@ -1613,6 +1618,64 @@ float-returning user call is not yet native), so a float-HOF whose callee return
 `f64` still skips for that reason — a float closure argument whose callee returns an
 integer cell (`native_hof_float_arg.lby`) compiles and runs.
 
+### Returned closures (arena stage-4, increment a — the escaping-closure unblock)
+
+A function that **returns a closure** — a factory `fn make_adder n i64 -> fn(i64) ->
+i64 … fn x -> x + n` — and a caller that **invokes a call-returned closure** —
+`let g fn(i64) -> i64 = make_adder(5) … g(3)` — now lower natively. This is the
+first *escaping*-closure shape the backend admits: the returned block genuinely
+outlives the factory call.
+
+**What lowers vs skips (the returned-closure boundary).** A `fn(...)` RETURN is
+admitted as a single **`I64` block-pointer word** (`rax`) — analogous to a `fn(...)`
+PARAMETER — gated tightly by two conditions in `native_signature_eligibility`:
+
+1. the returned fn signature is **all native scalars** (`native_fn_call_sig`); and
+2. **every return edge is a locally-created closure LITERAL** — a direct `return fn x
+   -> …` (or a tail expression), or a local bound to one (`let f = fn x -> …; f`),
+   across every `return`/tail/branch edge (`returns_only_local_closure_literals`).
+
+A returned **fn PARAMETER** (it aliases a caller's env) and a returned **call-returned
+closure** (`return g` where `g = factory()`) are refused — they are not fresh local
+literals. A **heap/aggregate capture** returned closure is refused (condition 1: its
+fn signature is not all-scalar, and its literal has no `ClosureLayout` downstream). A
+**stored** closure (aliased into another local, into a struct/array/global, or
+reassigned) is refused by the existing `closure_local_ok` / `collect_native_locals`
+default-deny. Every refusal is a clean `L0339` skip; the interpreters (which already
+run returned closures) compute the answer.
+
+**The invoke plumbing (how a call-returned fn becomes an indirect callable).** A
+`fn`-typed local bound to a factory **call** (not a literal) is recorded in a new
+`call_returned_callables` map (`collect_native_locals`), its call signature read from
+the binding's declared `fn(...)` type. The factory-call result — a block pointer in
+`rax` — is stored into the local's slot by the ordinary `let` lowering. A call `g(args)`
+through it is then dispatched by the **same** shared machinery as a closure-local or
+HOF-parameter call: `is_indirect_callable` recognizes the third map, and
+`indirect_callable_sig` resolves its signature, so `lower_closure_call` emits the
+identical ABI — env pointer in `rcx`, arguments shifted to effective positions 1..,
+`mov rax,[rcx]; call rax`. No second indirect-call path is introduced. A function with
+a call-returned callable is excluded from register promotion for the same reason a
+closure-using one is (the block pointer must stay addressable in its frame slot). Its
+call-only escape check is `call_returned_callable_ok` (strict — a *returned*
+call-returned closure re-escapes and is refused; that is increment b's promotion job).
+
+**Soundness — the factory stays off the arena, so the returned block is never
+reclaimed (increment a touches no reclamation).** A factory returns a `fn`/heap value,
+so `arena_eligible_functions` refuses it (a dedicated criterion — `return_type
+.is_function()` — added because the `fn`-return is admitted as an `I64`, which would
+otherwise pass criterion 1). Its return edge therefore **never rewinds the bump
+pointer**, and the `[code_ptr][captures…]` block stays live on the growing heap for
+the caller to invoke — value-neutral and leak-free-of-danger (a leaked-but-valid block
+matches the interpreters, which never reclaim in the safe tier). The retention summary
+(`native_object_retain.rs`, R1) independently keeps *callers* off the arena over the
+factory call (a `fn` return is retaining), so a caller's rewind cannot reclaim the
+block either. `native_returned_closure_survives_heap_churn` pins this: a factory
+capture read back after the caller allocates heavily reads correctly — a
+reclaimed/dangling block would fault (proven by injection: removing the off-arena
+criterion turns it into a `0xC0000005`). Increment b will instead **promote** the block
+into the caller's region (mark-advance) and lift the off-arena restriction; this
+increment deliberately does not.
+
 ### Reclamation soundness
 
 A scalar-only closure object is a plain heap block with the standard RC header, so
@@ -1642,16 +1705,20 @@ closure allocated per iteration.
 
 ### Deferred (skips cleanly to the interpreters, `L0339`)
 
-A `string`/`list`/`map`/aggregate capture; a **returned/escaping** closure; a
-closure **stored** into an aggregate/global or passed to a builtin higher-order
+A `string`/`list`/`map`/aggregate capture; a closure **stored** into an
+aggregate/global, aliased into another local, or passed to a builtin higher-order
 (`sort_by`, `list_map`); a higher-order callee that is **not call-only** (it reads
 its fn parameter as a value or **passes it onward** — the single-level frontier of
-stage 3a); a mutable/rebound closure local; a closure bound from a non-literal (a
-factory result); and a closure body that touches the heap or calls a user/`extern`
-function. Each is default-denied at classification, eligibility, or synthesis time,
-so the enclosing function is recorded skipped and runs on the interpreters — never
-miscompiled. (A **non-escaping** higher-order argument to a call-only callee —
-`apply(f, x)` — is no longer deferred; see the stage-3a subsection above.)
+stage 3a); a mutable/rebound closure local; a **returned fn PARAMETER** (it aliases a
+caller's env) or a **returned call-returned closure** (`return g` where `g =
+factory()` — increment b's promotion territory); and a closure body that touches the
+heap or calls a user/`extern` function. Each is default-denied at classification,
+eligibility, or synthesis time, so the enclosing function is recorded skipped and runs
+on the interpreters — never miscompiled. (A **non-escaping** higher-order argument to
+a call-only callee — `apply(f, x)` — is no longer deferred; see the stage-3a
+subsection above. A **returned locally-created literal** closure and a **call-returned
+closure invoked** by the caller are likewise no longer deferred; see the
+returned-closures subsection above.)
 
 Also refused, for consistency rather than capability: a body containing an inline
 conditional (see the note above — it is broken on the IR/bytecode engines today, so
@@ -1690,6 +1757,7 @@ that is itself wrong):
 | `native_hof_noncapture.lby` | non-capturing closure passed to a higher-order callee | `36` |
 | `native_hof_multi_call.lby` | capturing closure invoked THREE times inside the callee, fed back | `30` |
 | `native_hof_float_arg.lby` | FLOAT closure passed as a HOF argument (callee returns i64) | `1` |
+| `native_closure_factory_bound.lby` | a FACTORY returns a closure; the caller invokes the call-returned closure (stage 4) | `64` |
 
 **These fixtures are proven non-vacuous by bug injection.** Injecting the
 sequential-XMM bug (the body reading `xmm{pos-1}` instead of `xmm{pos}`) makes
@@ -1702,33 +1770,51 @@ sees the right value and passes. Only interleaved/multi-float shapes break that
 coincidence, which is why the fixture set includes them.
 
 `native_closure_deferred_shapes_skip` pins each escape hatch — a `string` capture
-(`native_closure_string_capture.lby`), a returned closure (`run_closures_returned.lby`),
-the stage-3a refusal boundaries (a callee that reads its fn parameter as a value,
-`native_hof_leaky_skip.lby`, and one that passes it **onward**,
+(`native_closure_string_capture.lby`), a call-returned closure passed ONWARD to a HOF
+sink plus a reassigned capture (`run_closures_returned.lby` — note a plain
+factory-then-invoke now COMPILES, pinned as `native_closure_factory_bound.lby` in the
+run-parity table above; this fixture skips for the onward-pass/rebind, not for the
+return), the stage-3a refusal boundaries (a callee that reads its fn parameter as a
+value, `native_hof_leaky_skip.lby`, and one that passes it **onward**,
 `native_hof_onward_skip.lby`), and, re-pinned with FLOAT-capturing closures so scalar
 completeness cannot have quietly admitted them, `native_closure_float_hof.lby` (which
 also needs a float-returning user call, an orthogonally deferred feature),
-`native_closure_float_body_call.lby`, `native_closure_float_rebind.lby`, and
-`native_closure_factory_bound.lby`. Each fails native compilation with `L0339` (listing
-`skipped main`) yet still runs correctly on the interpreters — proving each is a clean
-demotion, not a miscompile.
+`native_closure_float_body_call.lby`, and `native_closure_float_rebind.lby`. Each fails
+native compilation with `L0339` (listing `skipped main`) yet still runs correctly on
+the interpreters — proving each is a clean demotion, not a miscompile. The
+returned-closure boundary itself (a returned fn parameter, a heap-capturing returned
+closure, a stored/aliased closure) is pinned separately in
+`crates/lullaby_cli/tests/cli/returned_closure.rs`.
 
 **Differential fuzzing** (`crates/lullaby_cli/tests/cli/fuzz_closure.rs`, a submodule
 of `fuzz.rs`) generates closure shapes across the subset — float captures, `f32`/`f64`,
 interleaved integer/float parameter classes, parameter counts past the register file,
-and a genuinely mixed capture block — and, for a substantial fraction of programs,
-routes every call through a generated `apply_hof(f, …)` helper so the **stage-3a HOF
-ABI** (closure-pointer argument + indirect call through a fn parameter, both with the
-same positional-XMM and stack-spill hazards) is exercised too.
+and a genuinely mixed capture block — and routes a substantial fraction of programs
+through either a generated `apply_hof(f, …)` helper (the **stage-3a HOF ABI**) or a
+generated `make_closure(caps)` **FACTORY** that returns the closure (the **stage-4
+returned-closure ABI**: a `fn(...)` return + a call-returned indirect invoke), so both
+escape/indirect ABIs are exercised with the same positional-XMM and stack-spill hazards.
 `fuzz_closure_interpreters_agree` cross-checks 600 programs on all three engines
 (establishing the oracle's ground truth), and
 `fuzz_closure_native_matches_interpreter_when_linkable` compiles and RUNS 128 real
 `.exe`s against it, reporting the counts so a silent skip cannot hide a regression (all
-128 compile natively; the run also asserts a non-trivial higher-order batch — a recent
-run reported `128/128 real exes (128 compiled natively, 68 higher-order)` — so the HOF
-path cannot be silently untested). The fuzzer is likewise proven to have teeth: the
-sequential-XMM injection fails it at program #9 and the spill-offset injection at
-program #1.
+128 compile natively; the run also asserts non-trivial higher-order AND factory batches
+— a recent run reported `128/128 real exes (128 compiled natively, 68 higher-order, 32
+factory-returned)` — so neither indirect path can be silently untested). The fuzzer is
+likewise proven to have teeth: the sequential-XMM injection fails it at program #9, the
+spill-offset injection at program #1, and forcing returned closures to skip
+(`returns_only_local_closure_literals → false`) fails it at the first factory program.
+
+**Returned-closure four-tier parity** (`crates/lullaby_cli/tests/cli/returned_closure.rs`)
+pins the increment against a real `.exe` exit code vs the three interpreters: the adder
+factory, a non-capturing and a multi-capture returned closure, the local-literal return
+shape, a float factory (positional-XMM, threshold-counted), multi-invoke, multi-return-edge,
+the off-arena no-dangling stress (`native_returned_closure_survives_heap_churn`), and the
+refusal boundary (a returned fn parameter, a heap-capturing returned closure, and a
+stored/aliased closure each skip cleanly while the interpreters answer). Its teeth are
+proven by injection: removing the off-arena criterion turns the no-dangle pin into a
+`0xC0000005`, dropping the invoke recognition makes the factory ineligible, and a wrong
+env pointer makes the multi-capture read garbage.
 
 Unit tests in `native_program_tests` assert the compiled/skip boundary (`__closure_0`
 compiled, the indirect `call rax` present, the direct-PE image produced) and pin the

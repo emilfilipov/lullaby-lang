@@ -73,8 +73,10 @@ impl<'a> NativeCtx<'a> {
             closure_locals: HashMap::new(),
             // A synthesized closure body is a scalar leaf: it takes no fn-typed
             // parameters (a nested closure passed to it would be rejected earlier), so
-            // it never calls through a higher-order parameter.
+            // it never calls through a higher-order parameter, and its heap-free,
+            // user-call-free body can bind no call-returned callable local.
             fn_param_callables: HashMap::new(),
+            call_returned_callables: HashMap::new(),
             closure_layouts,
             closure_env: Some(closure_env),
         }
@@ -101,6 +103,7 @@ pub(crate) fn collect_native_locals(
     next_slot: &mut i32,
     closure_layouts: &HashMap<usize, ClosureLayout>,
     closure_locals: &mut HashMap<String, usize>,
+    call_returned_callables: &mut HashMap<String, ClosureCallSig>,
 ) -> Result<(), String> {
     for instruction in body {
         match instruction {
@@ -108,29 +111,51 @@ pub(crate) fn collect_native_locals(
                 name, ty, value, ..
             } => {
                 if !locals.contains_key(name) {
-                    // A closure-bound local (`let f fn(...) = fn x -> …`) is a single
-                    // pointer word to the closure's `[code_ptr][captures…]` heap
-                    // block. Its declared `fn(...)` type is not resolvable by
-                    // `resolve_native_type` (that path rejects function types so a
-                    // closure-as-value elsewhere skips), so classify it here from the
-                    // initializer: a DIRECT `Closure { id }` literal with a native
-                    // layout is a supported pointer word; anything else (a closure
-                    // returned from a factory call, an unsupported closure shape) is
-                    // rejected so the function skips cleanly.
+                    // A `fn(...)`-typed local is a single pointer word to a closure's
+                    // `[code_ptr][captures…]` heap block. Its declared `fn(...)` type is
+                    // not resolvable by `resolve_native_type` (that path rejects function
+                    // types so a closure-as-value elsewhere skips), so classify it here
+                    // from the initializer:
+                    //
+                    // - a DIRECT `Closure { id }` literal with a native layout is a
+                    //   closure-literal local (recorded in `closure_locals`); or
+                    // - a factory CALL (`let g fn(...) = make_adder(5)`) is a
+                    //   call-returned callable local (recorded in `call_returned_callables`
+                    //   with the native call signature read from its declared `fn(...)`
+                    //   type). The call result — a block pointer in `rax` — is stored into
+                    //   the slot by the ordinary `let` lowering, and `g(args)` invokes it
+                    //   through the identical closure indirect-call ABI.
+                    //
+                    // Anything else (a first-class fn value, an alias) is rejected so the
+                    // function skips cleanly.
                     if ty.is_function() {
-                        let BytecodeExprKind::Closure { id } = &value.kind else {
-                            return Err(format!(
-                                "closure local `{name}` is not bound to a direct closure literal; \
-                                 a factory-bound or otherwise indirect closure is deferred"
-                            ));
-                        };
-                        if !closure_layouts.contains_key(id) {
-                            return Err(format!(
-                                "closure #{id} bound to `{name}` is not in the native closure \
-                                 subset (a non-scalar capture, parameter, or return type)"
-                            ));
+                        match &value.kind {
+                            BytecodeExprKind::Closure { id } => {
+                                if !closure_layouts.contains_key(id) {
+                                    return Err(format!(
+                                        "closure #{id} bound to `{name}` is not in the native \
+                                         closure subset (a non-scalar capture, parameter, or \
+                                         return type)"
+                                    ));
+                                }
+                                closure_locals.insert(name.clone(), *id);
+                            }
+                            BytecodeExprKind::Call { .. } => {
+                                let Some(sig) = native_fn_call_sig(ty) else {
+                                    return Err(format!(
+                                        "call-returned callable local `{name}` has a \
+                                         non-native-scalar `fn(...)` signature; deferred"
+                                    ));
+                                };
+                                call_returned_callables.insert(name.clone(), sig);
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "fn-typed local `{name}` is not a direct closure literal or a \
+                                     factory call; a first-class or aliased fn value is deferred"
+                                ));
+                            }
                         }
-                        closure_locals.insert(name.clone(), *id);
                         *next_slot += 8;
                         locals.insert(
                             name.clone(),
@@ -188,6 +213,7 @@ pub(crate) fn collect_native_locals(
                     next_slot,
                     closure_layouts,
                     closure_locals,
+                    call_returned_callables,
                 )?;
             }
             BytecodeInstruction::If {
@@ -205,6 +231,7 @@ pub(crate) fn collect_native_locals(
                         next_slot,
                         closure_layouts,
                         closure_locals,
+                        call_returned_callables,
                     )?;
                 }
                 collect_native_locals(
@@ -216,6 +243,7 @@ pub(crate) fn collect_native_locals(
                     next_slot,
                     closure_layouts,
                     closure_locals,
+                    call_returned_callables,
                 )?;
             }
             BytecodeInstruction::While { body, .. }
@@ -234,6 +262,7 @@ pub(crate) fn collect_native_locals(
                     next_slot,
                     closure_layouts,
                     closure_locals,
+                    call_returned_callables,
                 )?;
             }
             BytecodeInstruction::Match {
@@ -297,6 +326,7 @@ pub(crate) fn collect_native_locals(
                         next_slot,
                         closure_layouts,
                         closure_locals,
+                        call_returned_callables,
                     )?;
                 }
             }
