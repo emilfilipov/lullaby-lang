@@ -245,6 +245,30 @@ explicit/drop-to-metal when needed.
    the differential fuzzer.
 2. **Loop sub-regions** — per-iteration reset.
 3. **Explicit `region` block** — lexer/parser/AST/semantics + IR + native.
+   **Frontend + value-neutral execution DELIVERED (increment I1):** the bare
+   `region` + indented-block surface parses to a `RegionBlock` AST node, formats
+   idempotently, and type-checks its body in a **lexically scoped** block — a
+   binding declared inside is dead after dedent (referencing one afterward is the
+   same `L0306` a post-loop read raises, so block-local values are sound with no
+   escape analysis). It lowers **value-neutrally** to its own scoped IR/bytecode
+   node (`RegionBlock`) — deliberately NOT flattened like `unsafe` — so every tier
+   (AST/IR/bytecode interpreters, native, WASM) runs its body in a fresh nested
+   scope and a block-local shadow gets its own slot; NO tier reclaims, so native ==
+   interpreters. (Flattening it collapses the scope before slot planning and makes a
+   shadowing inner `let` alias the outer binding on the IR/bytecode/native tiers — a
+   wrong value now, a use-after-free once reclamation lands; that regression is
+   pinned by `suite25`'s `native_region_block_shadow_keeps_outer`.) **Deferred to a
+   follow-up:** native bulk-reclamation of the block's sub-region (saving
+   `__lullaby_heap_next` at entry, rewinding at dedent). Reclamation must reclaim
+   only when the block provably **confines** its heap — nothing stored into a
+   binding that outlives the block (the existing `native_object_confine.rs`
+   predicate answers this) — and never a value that escapes. The two blockers that
+   scoped it out of I1: a durable reclaim boundary requires a `BytecodeInstruction`
+   node that forces exhaustive-match arms across the arena eligibility/confinement
+   modules a parallel design pass owns, and the headline server-loop case
+   (reclaiming across calls in a NON-leaf function) needs interprocedural retention
+   analysis. The value-neutral fixtures in `suite26.rs` (esp. the escaping-store
+   channel) pin the floor that reclamation must preserve.
 4. **Escape/promotion** — auto-copy on escape; `ref` for shared/dynamic.
 5. **Freestanding static-buffer arenas** — folds into the `no-runtime` tier work.
 

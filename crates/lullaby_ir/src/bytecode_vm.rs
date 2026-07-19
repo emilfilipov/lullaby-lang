@@ -403,6 +403,17 @@ impl VmCompiler {
                     self.emit(VmOp::PushVoid);
                 }
             }
+            // A region block is a run-once nested scope: compile the body under a
+            // fresh scope (so a block-local shadow gets its own VM slot, matching the
+            // AST interpreter), then fall through. Value-neutral — no reclamation.
+            // `break`/`continue` inside it are compiled against the enclosing loop, so
+            // it is NOT pushed onto `self.loops`.
+            IrStmt::RegionBlock { body, .. } => {
+                self.compile_scoped_block(body, false)?;
+                if tail {
+                    self.emit(VmOp::PushVoid);
+                }
+            }
             IrStmt::Break(_) => {
                 let site = self.emit(VmOp::Jump(0));
                 self.loops.last_mut().ok_or(())?.break_sites.push(site);
@@ -606,6 +617,7 @@ pub(crate) fn statement_span(statement: &IrStmt) -> Span {
         | IrStmt::While { span, .. }
         | IrStmt::For { span, .. }
         | IrStmt::Loop { span, .. }
+        | IrStmt::RegionBlock { span, .. }
         | IrStmt::Asm { span, .. }
         | IrStmt::Throw { span, .. }
         | IrStmt::Try { span, .. }
@@ -1020,6 +1032,13 @@ impl<'a> Lowerer<'a> {
                 Stmt::Unsafe { body, .. } => {
                     lowered.extend(self.lower_block(body, scope)?);
                 }
+                // The explicit `region` block is NOT flattened — it lowers to its own
+                // `IrStmt::RegionBlock` node (via `lower_statement`) so every tier
+                // runs the body in a fresh nested scope and a block-local shadow gets
+                // its own slot. Flattening it (like `unsafe`) collapses the scope
+                // before slot planning and makes a shadowing inner `let` alias the
+                // outer binding on the IR/bytecode/native tiers — a wrong value now
+                // and a use-after-free once native reclamation lands.
                 other => {
                     let stmt = self.lower_statement(other, scope)?;
                     self.drain_try_prelude_into(&mut lowered);
@@ -1482,15 +1501,29 @@ impl<'a> Lowerer<'a> {
                 let mut lowered = self.lower_block(body, scope)?;
                 match lowered.len() {
                     1 => Ok(lowered.remove(0)),
-                    // An empty or multi-statement unsafe body cannot collapse to
-                    // one IR statement; represent it as a always-false guard-free
-                    // block via an `if false` is overkill, so surface it as a
-                    // lowering error to be handled by the flattening path.
+                    // An empty or multi-statement unsafe body cannot collapse to one
+                    // IR statement; it is inlined by `lower_block`/
+                    // `lower_function_body`/`lower_block_value` instead. Reaching here
+                    // with any other length means a caller lowered it as a single
+                    // statement, which those flattening paths prevent, so surface it
+                    // as a lowering error.
                     _ => Err(IrLoweringError::new(
                         "unsafe block must be lowered by lower_block".to_string(),
                         Some(*span),
                     )),
                 }
+            }
+            // The explicit `region` block lowers to its own scoped IR node. Its body
+            // is lowered under a **cloned** type scope so a block-local binding does
+            // not leak its type into the enclosing scope (matching the semantic
+            // lexical scoping), and — crucially — the `IrStmt::RegionBlock` node is
+            // preserved through to `BytecodeInstruction::RegionBlock`, so the native
+            // scope-renamer descends into it and gives a shadowing inner `let` its own
+            // slot. Value-neutral: no tier reclaims yet.
+            Stmt::RegionBlock { body, span } => {
+                let mut region_scope = scope.clone();
+                let body = self.lower_block(body, &mut region_scope)?;
+                Ok(IrStmt::RegionBlock { body, span: *span })
             }
         }
     }
