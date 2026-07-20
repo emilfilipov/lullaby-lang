@@ -1,0 +1,118 @@
+# Lullaby — the finish-line plan to 1.0-stable (2026-07-20)
+
+The execution plan from here to technical 1.0-stable. Grounded in
+`1_0_stable_assessment.md` (the judgment) and `road_to_1_0_stable.md` (the
+tracking). Stops **before** branding/packaging (Phase 8), per standing owner
+instruction.
+
+## The core insight that orders everything
+
+There are **no known open miscompiles** — every defect discovered this cycle was
+fixed. So "fix all existing and discovered issues" resolves to three buckets, in
+priority order:
+
+1. **Stability debt (the real 1.0-stable gate):** undiscovered miscompiles. The
+   review defect-rate stayed near 1-in-2/1-in-3 and *every* FAIL was real, so
+   more surely exist. **Attacking this is the highest-leverage work and comes
+   first.** Success = an adversarial sweep of the whole surface comes up empty.
+2. **Completion debt (the "100%"/spanning-set axis):** the narrow remaining
+   features. All are additive; none is a spanning-set blocker.
+3. **Coverage debt (native-codegen deferrals):** dozens of shapes that *skip
+   cleanly to the interpreters* (correct-or-refuse). These are perf/parity, not
+   correctness — lowest urgency, and most are explicitly post-1.0.
+
+The trap to avoid: treating the long feature/coverage list as "the work" and
+declaring stable on a green feature checklist. **Feature-complete ≠ stable.**
+
+## Phase 0 — Hygiene (small, parallel, no decisions) — START NOW
+
+Clears the known infrastructure debt so later phases run clean.
+- **P0.1 — Split `native_object_eligibility.rs`** (6 lines over the ~1500 cap;
+  already chipped). Behavior-preserving.
+- **P0.2 — TCP fixture TOCTOU** (`cli.rs`/`suite2.rs` probe-and-release): the one
+  acknowledged fixture race. Redesign so the Lullaby-server program binds `:0` and
+  reports its port back over streamed child stdout — closes the last harness race.
+- **P0.3 — Test-runner robustness (roadmap B3 funded follow-up):** `lullaby test`
+  aborts on a stack-overflowing test and hangs on a non-terminating one. Add
+  subprocess isolation + a per-test timeout so one bad test can't kill/hang the run.
+
+## Phase 1 — Hardening (THE 1.0-stable gate) — the priority
+
+Drive the defect-discovery rate toward zero. Expect this phase to *find real
+bugs* — that is success, not failure; each found bug is fixed and its shape folded
+into the permanent fuzzers.
+
+- **P1.1 — Broaden the differential fuzzers over the newest/thinnest subsystems.**
+  One fuzzer-strengthening lane per area, each generating random programs and
+  asserting all tiers agree (native == interpreters == WASM where applicable):
+  arena call-graphs (deeper graphs, mixed retain/non-retain, recursion); asm
+  operands (random reg/clobber/width combos vs a golden oracle); the value-copy
+  class (WASM + native, all aggregate shapes); escaping/returned closures; native
+  string/map/enum/generic heap matrix; const-sized arrays + fixed-array struct
+  fields.
+- **P1.2 — Fold every reviewer-hand-invented shape into the permanent fuzzers.**
+  This cycle's reviews repeatedly caught bugs by constructing a shape the fuzzer
+  didn't generate. Sweep the review transcripts / test suites and ensure each such
+  shape is now *generated*, not just pinned once. Makes the fuzzers monotonically
+  stronger.
+- **P1.3 — Close the execution-verification gaps** (retire "verified by reading"):
+  a Linux execution job that runs the full native-ELF suite under `linux/amd64`
+  Docker (already used for direct-ELF + the syscall — extend to the whole suite),
+  and AArch64 under QEMU. The `wasmi` gate already covers WASM; extend its coverage.
+- **P1.4 — The cross-subsystem adversarial sweep (the exit test).** Dispatch
+  reviewer-agents to hunt cross-tier divergences / UAFs across the *whole* surface,
+  untied to any new feature — every backend pair, the memory model, the freestanding
+  tier, FFI, generics, actors. **Exit criterion for Phase 1 (and the stable gate):
+  N consecutive sweep lanes find nothing real.**
+
+## Phase 2 — Completions (the spanning-set "100%")
+
+Each design→build→adversarial-review, serialized where files collide.
+- **P2.1 — Closures stage 3c:** heap/aggregate captures, mutable-capture rebind,
+  multi-level HOF chains. (Heap captures now have a home — the arena/RC model is
+  complete — so this is unblocked.)
+- **P2.2 — FFI fn-pointer returns** (completes A3's 1.0 scope; struct-by-value +
+  deep marshalling stay post-1.0 by decision).
+- **P2.3 — Actor back-pressure** (bounded mailboxes; scheduler change) and
+  **P2.4 — actor stage-6 native/WASM codegen** (actors are AST-tier-only today —
+  the larger piece; assess scope first).
+- **P2.5 — Interrupt/naked function attributes** (kernel IDT; small syntax — flag
+  to owner).
+- **P2.6 — Native-codegen coverage worth closing for real programs:** prioritize
+  only shapes that block *expressing* a program natively (most deferrals just run
+  on the interpreter). Candidates: `parse_f64`/`to_string(f64)` (dtoa), deeper heap
+  nesting if a real program needs it. Defer the rest as documented perf gaps.
+- **Post-1.0 (do NOT pursue for 1.0):** full const-fn eval, deep FFI marshalling,
+  mnemonic-template `asm` (the byte form is the escape hatch), a `volatile`/`repr`
+  pointer qualifier.
+
+## Phase 3 — Parked owner decisions (need the owner; surfaced, not decided by me)
+
+- **P3.1 — `test_*` vs `test "name"` block syntax.** A user-facing surface choice.
+- **P3.2 — Unify `ptr_i64` with `ptr<T>`.** The P0 (nested box laundering)
+  strengthened this: the two-model split is where several laundering routes lived.
+  Unifying could retire an entire bug class — worth a design pass to scope, then an
+  owner decision. Highest-value of the parked items for *stability*.
+
+## Phase 4 — Declare 1.0-stable
+
+Gate (all four): Phase 1 exit met (defect rate demonstrably decayed — the empty
+sweep); Phase 2 spanning-set complete; Phase 3 decisions resolved; docs/roadmap
+reconciled and `1_0_stable_assessment.md` refreshed to "stable demonstrated." Then
+**stop** for the owner to open the branding/packaging phase — do not proceed into
+Phase 8.
+
+## Sequencing & cadence
+
+- Phase 0 + Phase 1 start immediately and run in parallel (hygiene is disjoint;
+  hardening is the priority). Phase 2 completions interleave as review capacity
+  and file-ownership allow, but **hardening is weighted over features** — a found
+  miscompile preempts a new primitive.
+- Every lane keeps the session's discipline: design-before-build in
+  correctness-critical code, adversarial review with proven teeth, real exit codes,
+  no merge on an unverified claim.
+- The parked decisions (Phase 3) are surfaced to the owner early so they don't
+  block the endgame.
+
+**Bottom line:** the distance to 1.0-stable is mostly Phase 1 (prove it doesn't
+miscompile), not Phase 2 (add the last features). Weight the effort accordingly.
