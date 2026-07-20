@@ -1,5 +1,6 @@
 use lullaby_lexer::{Diagnostic, Keyword, Span, Token, TokenKind};
 
+pub mod asm_register;
 mod ast;
 mod expr_parser;
 mod format;
@@ -1148,11 +1149,23 @@ impl<'a> Parser<'a> {
 
     /// Parse an `asm` statement: the `asm` keyword followed by a comma-separated
     /// list of integer byte literals on the same line, e.g.
-    /// `asm 72, 199, 192, 42, 0, 0, 0`. The bytes are emitted verbatim into the
-    /// current function's `.text` by the native backend. The parser only checks
-    /// the shape (at least one integer literal, comma-separated); semantics
-    /// validates each byte is in `0..=255` and that the statement is inside an
-    /// `unsafe` block.
+    /// `asm 72, 199, 192, 42, 0, 0, 0`, optionally followed by an indented
+    /// operand block binding Lullaby values to registers:
+    ///
+    /// ```text
+    /// asm 15, 5
+    ///     in rax = nr
+    ///     in rdi = fd
+    ///     out rax = result
+    ///     clobber rcx
+    ///     clobber r11
+    /// ```
+    ///
+    /// The bytes are emitted verbatim into the current function's `.text` by the
+    /// native backend. The parser only checks the shape (at least one integer
+    /// literal, comma-separated, plus well-formed clause lines); semantics
+    /// validates each byte is in `0..=255`, that the statement is inside an
+    /// `unsafe` block, and the operand/clobber register law.
     fn parse_asm(&mut self) -> Option<Stmt> {
         let span = self.previous().span;
         let mut bytes = Vec::new();
@@ -1165,7 +1178,108 @@ impl<'a> Parser<'a> {
             break;
         }
         self.expect_newline("expected newline after asm statement");
-        Some(Stmt::Asm { bytes, span })
+
+        let mut operands = Vec::new();
+        let mut clobbers = Vec::new();
+        // An indented block after the byte line carries operand/clobber clauses.
+        // Its absence keeps a raw-byte `asm` byte-identical to the legacy form.
+        if self.at(TokenKindRef::Indent) {
+            self.expect(TokenKindRef::Indent, "expected indented asm operand block")?;
+            while !self.at(TokenKindRef::Dedent) && !self.at(TokenKindRef::Eof) {
+                self.parse_asm_clause(&mut operands, &mut clobbers)?;
+            }
+            self.expect(TokenKindRef::Dedent, "expected asm operand block dedent")?;
+        }
+
+        Some(Stmt::Asm {
+            bytes,
+            operands,
+            clobbers,
+            span,
+        })
+    }
+
+    /// Parse one clause line of an `asm` operand block: `in <reg> = <expr>`,
+    /// `out <reg> = <lvalue>`, or `clobber <reg|mem|cc>`. `in` is the existing
+    /// keyword; `out` and `clobber` are contextual words (identifiers) recognized
+    /// only as the first token of an operand-block line, so they remain usable as
+    /// ordinary identifiers everywhere else.
+    fn parse_asm_clause(
+        &mut self,
+        operands: &mut Vec<AsmOperand>,
+        clobbers: &mut Vec<AsmClobber>,
+    ) -> Option<()> {
+        let span = self.peek().span;
+        if self.eat_keyword(Keyword::In).is_some() {
+            let reg = self.parse_asm_reg()?;
+            if !self.eat_symbol("=") {
+                self.error(
+                    "L0205",
+                    "expected `=` after asm `in` register",
+                    self.peek().span,
+                );
+                return None;
+            }
+            let value = self.parse_expr_line(span)?;
+            self.expect_newline("expected newline after asm `in` clause");
+            operands.push(AsmOperand::In { reg, value, span });
+            return Some(());
+        }
+        if self.eat_contextual_word("out") {
+            let reg = self.parse_asm_reg()?;
+            if !self.eat_symbol("=") {
+                self.error(
+                    "L0205",
+                    "expected `=` after asm `out` register",
+                    self.peek().span,
+                );
+                return None;
+            }
+            let place = self.parse_expr_line(span)?;
+            self.expect_newline("expected newline after asm `out` clause");
+            operands.push(AsmOperand::Out { reg, place, span });
+            return Some(());
+        }
+        if self.eat_contextual_word("clobber") {
+            // `mem` / `cc` are the two reserved barrier markers; anything else is a
+            // register name validated later in semantics.
+            if self.eat_contextual_word("mem") {
+                clobbers.push(AsmClobber::Mem(span));
+            } else if self.eat_contextual_word("cc") {
+                clobbers.push(AsmClobber::Cc(span));
+            } else {
+                let reg = self.parse_asm_reg()?;
+                clobbers.push(AsmClobber::Reg(reg));
+            }
+            self.expect_newline("expected newline after asm `clobber` clause");
+            return Some(());
+        }
+        self.error(
+            "L0206",
+            "expected `in`, `out`, or `clobber` in asm operand block",
+            self.peek().span,
+        );
+        None
+    }
+
+    /// Parse a register name (an identifier) into an [`AsmReg`]. The name is not
+    /// validated here — semantics checks it against the register table.
+    fn parse_asm_reg(&mut self) -> Option<AsmReg> {
+        let span = self.peek().span;
+        let name = self.expect_identifier("expected a register name in asm operand block")?;
+        Some(AsmReg { name, span })
+    }
+
+    /// Consume the next token iff it is an identifier equal to `word`. Used for
+    /// the contextual `out`/`clobber`/`mem`/`cc` words in an asm operand block,
+    /// which are plain identifiers rather than reserved keywords.
+    fn eat_contextual_word(&mut self, word: &str) -> bool {
+        if matches!(&self.peek().kind, TokenKind::Identifier(name) if name == word) {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     /// Parse a `try` / `catch NAME` block.

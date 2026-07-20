@@ -221,8 +221,30 @@ impl Inliner {
                 body: self.inline_block(body),
                 span: *span,
             },
-            IrStmt::Asm { bytes, span } => IrStmt::Asm {
+            // Inline any calls inside the operand input expressions (an asm can
+            // never itself be inlined — it is a statement, not an expression
+            // body). Registers and clobbers pass through unchanged.
+            IrStmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => IrStmt::Asm {
                 bytes: bytes.clone(),
+                operands: operands
+                    .iter()
+                    .map(|operand| match operand {
+                        IrAsmOperand::In { reg, value } => IrAsmOperand::In {
+                            reg: reg.clone(),
+                            value: self.inline_expr(value),
+                        },
+                        IrAsmOperand::Out { reg, place } => IrAsmOperand::Out {
+                            reg: reg.clone(),
+                            place: self.inline_expr(place),
+                        },
+                    })
+                    .collect(),
+                clobbers: clobbers.clone(),
                 span: *span,
             },
             IrStmt::Throw { value, span } => IrStmt::Throw {

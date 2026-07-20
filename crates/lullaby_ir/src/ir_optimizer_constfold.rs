@@ -127,9 +127,18 @@ impl ConstantFolder {
                 body: self.fold_block(body),
                 span: *span,
             },
-            // Inline assembly is opaque bytes; folding leaves it unchanged.
-            IrStmt::Asm { bytes, span } => IrStmt::Asm {
+            // Inline assembly is opaque; folding leaves the bytes and operand
+            // clauses unchanged (an operand input is left as its runtime
+            // expression — never constant-folded into the register load).
+            IrStmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => IrStmt::Asm {
                 bytes: bytes.clone(),
+                operands: operands.clone(),
+                clobbers: clobbers.clone(),
                 span: *span,
             },
             IrStmt::Throw { value, span } => IrStmt::Throw {

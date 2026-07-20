@@ -218,11 +218,18 @@ impl CommonSubexpressionEliminator {
                 IrStmt::RegionBlock { body, span: *span }
             }
             // Inline assembly is an opaque barrier: clear any available
-            // expressions and pass the bytes through unchanged.
-            IrStmt::Asm { bytes, span } => {
+            // expressions and pass the bytes/operands/clobbers through unchanged.
+            IrStmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => {
                 available.clear();
                 IrStmt::Asm {
                     bytes: bytes.clone(),
+                    operands: operands.clone(),
+                    clobbers: clobbers.clone(),
                     span: *span,
                 }
             }

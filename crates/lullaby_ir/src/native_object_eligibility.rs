@@ -354,8 +354,17 @@ fn stmt_param_read_only(stmt: &BytecodeInstruction, param: &str) -> bool {
         | BytecodeInstruction::Throw { value: expr, .. } => expr_param_read_only(expr, param),
         BytecodeInstruction::Return(None)
         | BytecodeInstruction::Break(_)
-        | BytecodeInstruction::Continue(_)
-        | BytecodeInstruction::Asm { .. } => true,
+        | BytecodeInstruction::Continue(_) => true,
+        // An asm `out <reg> = <param>` writes the parameter, so it is read-only
+        // for `param` only when no `out` operand targets it. (`in` operands read
+        // their expressions, which never mutate the bound parameter.)
+        BytecodeInstruction::Asm { operands, .. } => operands.iter().all(|operand| {
+            !matches!(
+                operand,
+                crate::BcAsmOperand::Out { place, .. }
+                    if matches!(&place.kind, BytecodeExprKind::Variable(n) if n == param)
+            )
+        }),
         BytecodeInstruction::If {
             branches,
             else_body,
@@ -760,9 +769,13 @@ fn instruction_has_call(instruction: &BytecodeInstruction) -> bool {
         BytecodeInstruction::Match {
             scrutinee, arms, ..
         } => expr_has_call(scrutinee) || arms.iter().any(|arm| body_has_call(&arm.body)),
-        BytecodeInstruction::Throw { .. }
-        | BytecodeInstruction::Try { .. }
-        | BytecodeInstruction::Asm { .. } => false,
+        BytecodeInstruction::Throw { .. } | BytecodeInstruction::Try { .. } => false,
+        // An asm `in <reg> = <expr>` evaluates `<expr>` during marshalling; a call
+        // inside it needs the 32-byte Win64 shadow space reserved, so the function
+        // "has a call" whenever an input operand does.
+        BytecodeInstruction::Asm { operands, .. } => operands.iter().any(|operand| {
+            matches!(operand, crate::BcAsmOperand::In { value, .. } if expr_has_call(value))
+        }),
     }
 }
 
@@ -1034,8 +1047,17 @@ fn collect_type_refs_in_instruction(inst: &BytecodeInstruction, out: &mut Vec<Ty
         | BytecodeInstruction::Throw { value: v, .. } => collect_type_refs_in_expr(v, out),
         BytecodeInstruction::Return(None)
         | BytecodeInstruction::Break(_)
-        | BytecodeInstruction::Continue(_)
-        | BytecodeInstruction::Asm { .. } => {}
+        | BytecodeInstruction::Continue(_) => {}
+        // Collect the types referenced by asm operand expressions, so a generic
+        // instantiation used only inside an asm clause is still monomorphized.
+        BytecodeInstruction::Asm { operands, .. } => {
+            for operand in operands {
+                match operand {
+                    crate::BcAsmOperand::In { value, .. } => collect_type_refs_in_expr(value, out),
+                    crate::BcAsmOperand::Out { place, .. } => collect_type_refs_in_expr(place, out),
+                }
+            }
+        }
         BytecodeInstruction::If {
             branches,
             else_body,
@@ -1184,8 +1206,15 @@ fn instruction_touches_heap(
         | BytecodeInstruction::Throw { value, .. } => expr_touches_heap(value, heap_aggs),
         BytecodeInstruction::Return(None)
         | BytecodeInstruction::Break(_)
-        | BytecodeInstruction::Continue(_)
-        | BytecodeInstruction::Asm { .. } => false,
+        | BytecodeInstruction::Continue(_) => false,
+        // An asm `in <reg> = <expr>` evaluates its expression; if that allocates,
+        // the asm touches the heap (conservative arena-confinement input).
+        BytecodeInstruction::Asm { operands, .. } => operands.iter().any(|operand| {
+            matches!(
+                operand,
+                crate::BcAsmOperand::In { value, .. } if expr_touches_heap(value, heap_aggs)
+            )
+        }),
         BytecodeInstruction::If {
             branches,
             else_body,

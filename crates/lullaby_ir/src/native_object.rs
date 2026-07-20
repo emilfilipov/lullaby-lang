@@ -384,6 +384,12 @@ pub(crate) struct NativeCtx<'a> {
     /// frame slot holding the env pointer (block base) and each captured name's byte
     /// offset within the env block. `None` for an ordinary top-level function body.
     closure_env: Option<ClosureEnv>,
+    /// Base frame slot of the inline-`asm` operand scratch region: one 8-byte word
+    /// per callee-saved register an `asm` saves and per input operand it stages
+    /// (see `max_asm_scratch_words`). `0` for a function with no operand `asm`,
+    /// which reserves nothing and stays byte-identical. Word `w` is at
+    /// `[rbp - (asm_scratch_base + 8*(w+1))]`.
+    asm_scratch_base: i32,
 }
 
 /// The native signature of a compiled function: the layout of each parameter and
@@ -692,6 +698,20 @@ impl<'a> NativeCtx<'a> {
             0
         };
 
+        // Inline-`asm` operand scratch: one frame word per callee-saved register an
+        // `asm` saves and per input operand it stages (rbp-relative, so the
+        // marshalling never touches rsp — see `native_object_asm.rs`). A function
+        // with no operand `asm` reserves nothing and stays byte-identical. One guard
+        // word of headroom, mirroring the enum-scrutinee scratch region.
+        let asm_scratch_words = max_asm_scratch_words(&function.instructions);
+        let asm_scratch_base = if asm_scratch_words > 0 {
+            let base = next_slot;
+            next_slot += (asm_scratch_words + 1) * 8;
+            base
+        } else {
+            0
+        };
+
         let has_call = body_has_call(&function.instructions);
         // Reserve local slots plus (if calling) 32 bytes of shadow space, plus an
         // outgoing stack-argument area for any call passing more than four
@@ -765,6 +785,7 @@ impl<'a> NativeCtx<'a> {
             call_returned_callables,
             closure_layouts,
             closure_env: None,
+            asm_scratch_base,
         })
     }
 

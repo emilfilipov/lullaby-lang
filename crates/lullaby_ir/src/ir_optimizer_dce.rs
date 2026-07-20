@@ -113,9 +113,16 @@ impl DeadCodeEliminator {
                 span: *span,
             },
             // Inline assembly has an observable machine-code effect; it is never
-            // dead. Preserve it verbatim.
-            IrStmt::Asm { bytes, span } => IrStmt::Asm {
+            // dead. Preserve it (bytes, operands, clobbers) verbatim.
+            IrStmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => IrStmt::Asm {
                 bytes: bytes.clone(),
+                operands: operands.clone(),
+                clobbers: clobbers.clone(),
                 span: *span,
             },
             IrStmt::Throw { value, span } => IrStmt::Throw {

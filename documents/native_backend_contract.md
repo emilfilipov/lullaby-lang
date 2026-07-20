@@ -1015,9 +1015,9 @@ Rules:
 
 Deferred beyond this increment: the sub-`i64` integer widths and `bool`/`char`/`byte` as export parameter/return types (the extern-call direction already marshals them; widening the export gate to match is a follow-up), pointer/struct export types, callbacks (a Lullaby function value handed to C as a function pointer), string/buffer marshalling across the boundary, and non-Windows C ABIs.
 
-## Inline Assembly (raw byte emission) (DELIVERED, first increment)
+## Inline Assembly (raw byte emission + operand binding) (DELIVERED)
 
-The native backend can emit raw x86-64 machine-code bytes verbatim into a function's `.text`. This is the first inline-assembly increment: a trusted, native-only escape hatch, gated by `unsafe`.
+The native backend can emit raw x86-64 machine-code bytes verbatim into a function's `.text`, optionally marshalling Lullaby values into/out of explicitly-named registers via an operand block. A trusted, native-only escape hatch, gated by `unsafe`. (Raw bytes shipped first; operand binding — the "Operand binding" subsection below — is the second increment.)
 
 ### The `asm` surface
 
@@ -1042,14 +1042,32 @@ The seven bytes above are `48 C7 C0 2A 00 00 00` = `mov rax, 42`. Because the Wi
 - **Native-only.** Like `extern`, the AST, IR, and bytecode interpreters cannot execute raw machine code, so any `asm` statement is rejected at runtime with diagnostic **`L0425`** ("cannot execute an `asm` (inline assembly) statement on an interpreter; compile with `lullaby native` to emit and link the machine code"). It runs only after native codegen + linking.
 - **Codegen.** `emit_native_program` copies the `asm` bytes verbatim into the function's `.text` at the statement's position. When `asm` is a function's last statement, the emitter emits it followed by the normal Win64 epilogue (restore `rsp`/`rbp`, `ret`) so `rax` is returned intact rather than clobbered by the fallthrough `xor eax,eax`; the programmer must therefore not emit their own `ret`. A non-tail `asm` is emitted inline between the surrounding statements.
 
+### Operand binding (DELIVERED)
+
+An `asm` byte line may be followed by an **indented operand block** that marshals Lullaby values into and out of explicitly-named 64-bit registers and declares clobbers. There is still no assembler — the bytes stay verbatim; the block only adds value marshalling and ABI-correct clobber handling. The register law (a fixed x86-64 GPR table with 64/32/16/8-bit names, encodings, and the callee-saved classification) lives once in `crates/lullaby_parser/src/asm_register.rs`, shared by semantics and the backend. Full surface, worked cases, and the width/shape diagnostics: `freestanding_tier_design.md` §3.1.
+
+- **Marshalling sequence** (`crates/lullaby_ir/src/native_object_asm.rs`, `lower_native_asm`), for inputs `I`, outputs `O`, and the callee-saved registers `CS` the `asm` *touches* via any `in`/`out`/`clobber`:
+  1. **Save** each register in `CS` into a reserved frame scratch slot.
+  2. **Stage** every input: evaluate its expression into `rax`, spill to a scratch slot. All inputs are staged **before** any register is loaded, so a later input's evaluation cannot clobber an earlier input's register.
+  3. **Load** each staged input from its scratch slot into its target register.
+  4. Emit the machine-code **bytes** verbatim.
+  5. **Write** each output: `mov [rbp - localslot], <reg>`, read **before** the clobber restore so an output in a callee-saved register is captured first.
+  6. **Restore** each register in `CS` from its scratch slot.
+- **All slots are `rbp`-relative frame words** reserved by `NativeCtx::plan` (`max_asm_scratch_words`), never `rsp` pushes — so the marshalling never perturbs stack alignment, and a `call` inside an input expression stays 16-byte-aligned. `body_has_call`/`max_outgoing_stack_words` account for a call inside an `in` expression so the shadow/outgoing-arg area is sized correctly. A function with no operand `asm` reserves zero asm-scratch words and is byte-identical.
+- **The two soundness invariants** (a wrong move here is silent corruption):
+  - **Register-promotion exclusion.** A function containing `asm` is never register-promoted (`instr_reg_promotable` has no `Asm` arm; `native_object_regalloc.rs`), so every local stays frame-resident and `out <reg> = local` / `in <reg> = local` address authoritative `[rbp - slot]` cells. The exclusion is **deliberate and pinned** — removing it would let a syscall wrapper promote a local into `rbx`, so `clobber rbx` or an `out rax = result` (whose result the planner moved to `rbx`) would corrupt it. `lower_native_asm` additionally refuses (rather than miscompiles) if an output local is ever seen promoted.
+  - **Callee-saved preservation.** A non-promoting function otherwise saves no callee-saved registers, so an `asm` that touches one would return it corrupted to the caller. Steps 1/6 preserve every callee-saved register the `asm` touches, using the **union** of the Win64 and SysV callee-saved sets — `rbx`, `rsi`, `rdi`, `r12`–`r15` — so preservation is correct on either target (`rsi`/`rdi` are callee-saved on Win64 but caller-saved on SysV; preserving a caller-saved register unnecessarily is harmless, under-preserving a callee-saved one corrupts the caller). `rsp`/`rbp` may not be bound or clobbered (`L0443`).
+- **Shape/width diagnostics.** Unknown register, `rsp`/`rbp` bound/clobbered, `out` to a non-lvalue, a register bound twice in one direction, or an operand register also clobbered → **`L0443`** (semantics). A sub-width operand register or a non-64-bit value → **`L0461`** (this release marshals 64-bit operands only).
+
 ### Testing
 
 - The native-only fixture `tests/fixtures/native_only/asm_mov.lby` (`main`'s `unsafe` `asm` emits `mov rax, 42`) lives outside `tests/fixtures/valid/` because it cannot run on the interpreters (it would break the cross-backend parity harness). `asm_emits_raw_bytes_when_linkable` in `crates/lullaby_cli/tests/cli.rs` checks it, asserts `L0425` on every interpreter backend, and — when `rust-lld` + `kernel32.lib` are available — native-links and runs it, asserting exit code `42`; it skips the link+run gracefully otherwise.
 - `asm_bytes_are_emitted_verbatim_into_text` in `crates/lullaby_ir/src/native_object.rs` asserts the exact `mov rax, 42` byte pattern appears in the emitted object. Semantics/runtime unit tests cover the `unsafe` gate, the byte-range check, and the interpreter `L0425` rejection.
+- **Operand binding** is tested at three levels: byte-level codegen (`crates/lullaby_ir/src/native_object_asm_tests.rs` — the callee-saved save/restore straddling the body, the caller-saved-clobber negative control, and the register-promotion-exclusion pins, all with inject-the-bug teeth); semantics (`crates/lullaby_semantics/src/semantics_asm_tests.rs` — the `L0443`/`L0461` cases and the valid syscall shape); and end-to-end against real binaries (`crates/lullaby_cli/tests/cli/suite27.rs` — a pure-register round-trip `.exe`, a callee-saved clobber-preservation `.exe` whose caller keeps a promoted value in `rbx`, the interpreters' `L0425` refusal, and a real Linux `write`+`exit` **syscall** program linked and run under `linux/amd64` Docker asserting stdout `H` and exit `42`). The formatter round-trip is pinned by `formats_asm_operand_block`.
 
 ### Deferred inline-assembly work
 
-Deferred beyond this increment: no register/clobber modeling, no operand substitution (no way to reference Lullaby locals/values from the bytes), no assembly-text parsing (bytes only, not mnemonics), no verification that the bytes form valid instructions or preserve the frame, no relocation of the bytes, and non-Windows/non-x86-64 targets.
+Register/clobber modeling and operand binding are now **delivered** (see "Operand binding" above). Still deferred: sub-width (32/16/8-bit) operand marshalling (`L0461` today), `inout` sugar (write `in <reg>` + `out <reg>` on one register instead), aggregate/float operands, `out` targets other than a bare local, register-class allocation (the author names the architectural register), no assembly-text parsing (bytes only, not mnemonics), no verification that the bytes form valid instructions, no relocation of the bytes, and non-x86-64 targets (the AArch64 backend records `asm` as a skipped function).
 
 ## Freestanding / no-std mode (`--freestanding`) (DELIVERED, first increment)
 
