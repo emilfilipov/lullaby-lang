@@ -35,8 +35,29 @@ building) · **CONFIRMED GAP** (verified missing in the current compiler).
 > (no load-time fixup), clean `None` fallback to the object+`ld.lld` path for anything
 > outside the freestanding-linkable subset. **Execution-verified** under `linux/amd64`
 > Docker with no linker (37, 11), reviewed PASS. So the freestanding **output** side
-> now runs linker-free on both Windows (PE) and Linux (ELF); the remaining kernel
-> long-pole is the **CPU-control** side (inline `asm` operands, interrupt/naked).
+> now runs linker-free on both Windows (PE) and Linux (ELF).
+>
+> **Inline `asm` operand binding SHIPPED** (`ade219e`, owner-chose Option 1 — bytes +
+> operand block, explicit registers, no assembler): `asm <bytes>` gains an indented
+> `in <reg> = <expr>` / `out <reg> = <lvalue>` / `clobber <reg|mem|cc>` block, so a
+> Lullaby value marshals into/out of an architectural register around the verbatim
+> bytes. Two soundness invariants, both pinned with inject-the-bug teeth: the
+> **register-promotion exclusion** (a function containing `asm` is never promoted, so
+> a bound local stays frame-resident — reviewed against a promoting-caller attack) and
+> **callee-saved clobber save/restore** (Win64∪SysV union preserved around the block,
+> via `rbp`-relative reserved slots so a `call` in an input expr stays 16-aligned).
+> Native-only (`L0425` on interpreters), `unsafe`-gated; new `L0443` (operand shape) /
+> `L0461` (width). 64-bit operands this release (sub-width honestly refused, not
+> half-extended). **A Linux `write`+`exit` syscall driven entirely through operand
+> `asm` runs under Docker** (`stdout="H"`, exit 42), reviewed PASS.
+>
+> **The kernel-capability tripod is COMPLETE**: **output** (direct-ELF, linker-free),
+> **memory** (the safe-tier arena, runtime-free reclamation), and **control** (inline
+> `asm` operands — syscalls/control-registers/MSRs over program values), on top of the
+> already-shipped freestanding raw pointers, MMIO, port I/O, and static-buffer arenas.
+> Lullaby can now express a kernel. Remaining kernel niceties (not blockers):
+> interrupt/naked function attributes for the IDT, and a mnemonic-template `asm` (needs
+> an encoder — deferred, a clean superset of the shipped byte form).
 
 Actors, the freestanding/kernel tier, arena stages 3–5 (explicit `region` blocks,
 escape/promotion, static-buffer arenas), native-aggregate expansion + the native
