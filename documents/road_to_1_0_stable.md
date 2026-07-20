@@ -395,8 +395,17 @@ contains the `ptr<ptr_i64>`/`int_to_ptr` laundering routes). The arena currently
 
 **Stage-4b SHIPPED (`c356b2f`) — the arena memory model is now COMPLETE.** The promoting `emit_arena_reset` copies the returned closure survivor to the mark, sets `heap_next = mark+size`, returns `rax = mark`, and preserves the I2 `alloc_mode` restore — so a closure-returning factory becomes arena-eligible and reclaims its per-call scratch while the returned closure is promoted into the caller's region. Classified `non_retaining` via a **purely-local** R1/R2 carve-out (never gated on arena status → no summary↔eligibility cycle). Reviewed PASS against a 15-program cross-call-UAF construction hunt (all held) + three injection teeth (plain reset → `0xC0000005`; wrong size → corruption; non-fresh survivor → refused at 5 independent layers). Bounded-heap proof: a 20 000-iteration factory reclaims its scratch (would otherwise exhaust the heap). A self-caught edge — an unseeded `heap_next=0` making the first-allocation copy a null write — is fixed by an idempotent prologue seed. Deferred beyond 1.0-relevance: string/deep-aggregate/loop-edge promotion, recursion relaxation. **The safe-tier arena-first memory model — implicit function + loop regions, cross-call reclamation, explicit `region` blocks, and escape promotion — is fully realized.** (Follow-up: `native_object_eligibility.rs` is 6 lines over the ~1500 cap — a behavior-preserving split, non-blocking.)
 
-## Delivery progress (updated 2026-07-16)
+## Delivery progress (updated 2026-07-20)
 
+- **Phase 1 hardening underway — the interpreter oracle is now deep-recursion-valid**
+  (`9268169`+`ab7c272`). Sweep #1 came up clean on the codegen surface; its one
+  oracle-integrity finding is fixed: all three interpreters evaluate on a 2 GiB-stack
+  thread under a uniform `INTERPRETER_RECURSION_LIMIT = 20000` → a clean **non-catchable**
+  `L0466` (fault-class, not `try`/`catch`-recoverable). The differential fuzzers were
+  blind past ~200 frames; `fuzz_recursion.rs` now generates deep recursion (tiers agree
+  at 9000 frames) so the blind spot cannot reopen. Bonus O(depth²)→O(depth) traceback
+  fix. P0.1 `native_object_eligibility.rs` split landed (`6455bc3`). Live log:
+  `finish_line_plan.md`.
 - **Freestanding `no-runtime` tier — stage 1 SHIPPED** (main `f6186d3`). Module-level
   `no-runtime` directive + semantic gate: **L0441** rejects every heap/runtime path
   (heap types nesting-aware, actors/spawn/tell/await/async, closures, alloc/dealloc,

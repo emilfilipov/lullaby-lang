@@ -80,12 +80,17 @@ into the permanent fuzzers.
   native + WASM: **zero native/WASM miscompiles, zero use-after-frees/segfaults.**
   The first empty-with-real-breadth result — the first data point toward the defect
   rate decaying. Two items surfaced, neither a codegen miscompile:
-  - **Finding 1 (MEDIUM, oracle-integrity — fix in flight):** the three interpreters
-    stack-overflow the *host process* on deep recursion (AST ~200 / IR ~300 /
-    bytecode ~1000) at *different* depths, while native handles 20000+. So a valid
-    recursive program crashes the reference tier, AND the differential fuzzers are
-    blind to recursion deeper than ~200. Fixing it (large-stack interpreter eval +
-    a deep-recursion fuzzer shape) hardens the primary oracle itself.
+  - **Finding 1 (MEDIUM, oracle-integrity — FIXED `9268169`+`ab7c272`):** the three
+    interpreters stack-overflowed the *host process* on deep recursion at *different*
+    depths, blinding the differential fuzzers past ~200 frames. Fixed: all three
+    interpreters now evaluate on a 2 GiB-stack thread and share a uniform
+    `INTERPRETER_RECURSION_LIMIT = 20000` → a clean **non-catchable** `L0466`
+    (a fault like a bounds/div-by-zero, not a `try`/`catch`-recoverable error — a
+    settled semantic, consistent with A5). Verified transparent (900 fixture×backend
+    comparisons, 0 value changes). Bonus: fixed an O(depth²) traceback rebuild
+    (a 50k-deep error took 87s → O(depth)). Oracle **permanently hardened**:
+    `fuzz_recursion.rs` now generates deep recursion (agreeing at 9000 frames), so
+    the blind spot cannot reopen.
   - **Finding 2 (LOW, documented limitation — noted, not a defect):** the fixed
     ~1 MiB bump heap. Non-arena code that leaks (e.g. a promoting factory in a loop
     under a *non-arena* caller) traps cleanly with `ud2` at ~100k iterations where
