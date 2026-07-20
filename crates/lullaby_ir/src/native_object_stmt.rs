@@ -31,6 +31,10 @@ pub(crate) use simd::*;
 mod reduce;
 pub(crate) use reduce::*;
 
+#[path = "native_object_asm.rs"]
+mod asm;
+pub(crate) use asm::*;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_native_function(
     function: &BytecodeFunction,
@@ -300,8 +304,14 @@ pub(crate) fn lower_native_function(
     if tail_is_asm {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
-        if let BytecodeInstruction::Asm { bytes, .. } = &tail[0] {
-            code.extend_from_slice(bytes);
+        if let BytecodeInstruction::Asm {
+            bytes,
+            operands,
+            clobbers,
+            ..
+        } = &tail[0]
+        {
+            lower_native_asm(&mut ctx, bytes, operands, clobbers, &mut code)?;
         }
         // A tail `asm` carries no closure survivor expression; a promoting factory
         // never has one (`returns_promotable_closure` excludes a tail `asm`), so a
@@ -1182,10 +1192,12 @@ pub(crate) fn lower_native_stmt(
         // beyond the 0..=255 range check already done in semantics. A block that
         // leaves a value in `rax` (e.g. `mov rax, imm32`) returns it, since the
         // Win64 epilogue returns `rax`.
-        BytecodeInstruction::Asm { bytes, .. } => {
-            code.extend_from_slice(bytes);
-            Ok(())
-        }
+        BytecodeInstruction::Asm {
+            bytes,
+            operands,
+            clobbers,
+            ..
+        } => lower_native_asm(ctx, bytes, operands, clobbers, code),
         BytecodeInstruction::Throw { .. } | BytecodeInstruction::Try { .. } => {
             Err("throw/try is not in the native subset".to_string())
         }

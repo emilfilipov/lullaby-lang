@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use lullaby_diagnostics::{Span, TraceFrame};
 use lullaby_parser::{
-    AssignOp, BinaryOp, Expr, ExprKind, Function, MatchArm, MatchPattern, Place, Program, Stmt,
-    TypeRef, UnaryOp, function_type, generic_type,
+    AsmClobber, AsmOperand, AsmReg, AssignOp, BinaryOp, Expr, ExprKind, Function, MatchArm,
+    MatchPattern, Place, Program, Stmt, TypeRef, UnaryOp, function_type, generic_type,
 };
 use lullaby_runtime::{
     ArenaState, ArithOp, Closure, EnumValue, Future, IntKind, MEMORY_ORDER_VARIANTS, OverflowMode,
@@ -235,6 +235,62 @@ pub struct IrExternSignature {
     pub return_type: TypeRef,
 }
 
+/// A resolved architectural register for inline-`asm` operand marshalling. The
+/// 4-bit `code` is the register's encoding (identical for all sub-register
+/// widths); `callee_saved` records whether its parent 64-bit register is
+/// callee-saved under either ABI (the union), so the native marshaller knows to
+/// preserve it. Resolved from the validated register name at IR lowering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrAsmReg {
+    pub code: u8,
+    pub name: String,
+    pub callee_saved: bool,
+}
+
+/// An inline-`asm` clobber at IR/bytecode level: a register the body destroys,
+/// or the reserved `mem`/`cc` barrier markers (no-ops today).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrAsmClobber {
+    Reg(IrAsmReg),
+    Mem,
+    Cc,
+}
+
+/// An inline-`asm` operand binding carrying an [`IrExpr`] (the pre-serialization
+/// IR form). `In` loads `value` into `reg` before the bytes; `Out` stores `reg`
+/// into the local `place` after the bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum IrAsmOperand {
+    In { reg: IrAsmReg, value: IrExpr },
+    Out { reg: IrAsmReg, place: IrExpr },
+}
+
+/// An inline-`asm` operand binding carrying a [`BytecodeExpr`] (the serialized
+/// bytecode form the native backend consumes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BcAsmOperand {
+    In { reg: IrAsmReg, value: BytecodeExpr },
+    Out { reg: IrAsmReg, place: BytecodeExpr },
+}
+
+/// Resolve a parsed [`AsmReg`] to its [`IrAsmReg`] (encoding + callee-saved
+/// flag). Semantics has already validated the name, so a missing entry here is
+/// impossible in a well-typed program; it is surfaced as a lowering error rather
+/// than a panic to keep the correct-or-refuse posture.
+pub(crate) fn lower_asm_reg(reg: &AsmReg) -> Result<IrAsmReg, IrLoweringError> {
+    match lullaby_parser::asm_register::lookup_register(&reg.name) {
+        Some(info) => Ok(IrAsmReg {
+            code: info.code,
+            name: reg.name.clone(),
+            callee_saved: info.is_callee_saved_union(),
+        }),
+        None => Err(IrLoweringError::new(
+            format!("unknown asm register `{}`", reg.name),
+            Some(reg.span),
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IrStmt {
     Let {
@@ -291,10 +347,13 @@ pub enum IrStmt {
         span: Span,
     },
     /// Inline assembly: raw x86-64 machine-code bytes emitted verbatim by the
-    /// native backend. Native-only; the IR and bytecode interpreters reject it
-    /// at runtime with `L0425`. Each byte is validated in `0..=255` by semantics.
+    /// native backend, optionally marshalling operands into/out of registers.
+    /// Native-only; the IR and bytecode interpreters reject it at runtime with
+    /// `L0425`. Each byte is validated in `0..=255` by semantics.
     Asm {
         bytes: Vec<u8>,
+        operands: Vec<IrAsmOperand>,
+        clobbers: Vec<IrAsmClobber>,
         span: Span,
     },
     Throw {
@@ -1459,10 +1518,12 @@ pub enum BytecodeInstruction {
         span: Span,
     },
     /// Inline assembly: raw x86-64 machine-code bytes emitted verbatim by the
-    /// native backend. Native-only; the bytecode VM rejects it at runtime with
-    /// `L0425`.
+    /// native backend, optionally marshalling operands into/out of registers.
+    /// Native-only; the bytecode VM rejects it at runtime with `L0425`.
     Asm {
         bytes: Vec<u8>,
+        operands: Vec<BcAsmOperand>,
+        clobbers: Vec<IrAsmClobber>,
         span: Span,
     },
     Throw {
@@ -2244,8 +2305,27 @@ fn lower_bytecode_instruction(statement: &IrStmt) -> BytecodeInstruction {
             body: lower_bytecode_block(body),
             span: *span,
         },
-        IrStmt::Asm { bytes, span } => BytecodeInstruction::Asm {
+        IrStmt::Asm {
+            bytes,
+            operands,
+            clobbers,
+            span,
+        } => BytecodeInstruction::Asm {
             bytes: bytes.clone(),
+            operands: operands
+                .iter()
+                .map(|operand| match operand {
+                    IrAsmOperand::In { reg, value } => BcAsmOperand::In {
+                        reg: reg.clone(),
+                        value: lower_bytecode_expr(value),
+                    },
+                    IrAsmOperand::Out { reg, place } => BcAsmOperand::Out {
+                        reg: reg.clone(),
+                        place: lower_bytecode_expr(place),
+                    },
+                })
+                .collect(),
+            clobbers: clobbers.clone(),
             span: *span,
         },
         IrStmt::Throw { value, span } => BytecodeInstruction::Throw {
@@ -2440,8 +2520,27 @@ fn bytecode_instruction_to_ir(instruction: &BytecodeInstruction) -> IrStmt {
             body: bytecode_block_to_ir(body),
             span: *span,
         },
-        BytecodeInstruction::Asm { bytes, span } => IrStmt::Asm {
+        BytecodeInstruction::Asm {
+            bytes,
+            operands,
+            clobbers,
+            span,
+        } => IrStmt::Asm {
             bytes: bytes.clone(),
+            operands: operands
+                .iter()
+                .map(|operand| match operand {
+                    BcAsmOperand::In { reg, value } => IrAsmOperand::In {
+                        reg: reg.clone(),
+                        value: bytecode_expr_to_ir(value),
+                    },
+                    BcAsmOperand::Out { reg, place } => IrAsmOperand::Out {
+                        reg: reg.clone(),
+                        place: bytecode_expr_to_ir(place),
+                    },
+                })
+                .collect(),
+            clobbers: clobbers.clone(),
             span: *span,
         },
         BytecodeInstruction::Throw { value, span } => IrStmt::Throw {

@@ -19,9 +19,9 @@
 //! formatting a commented file is idempotent.
 
 use crate::{
-    ActorDecl, AliasDecl, AssignOp, BinaryOp, ConstDecl, EnumDecl, Expr, ExprKind, Function,
-    IfBranch, ImplDecl, MatchArm, MatchPattern, MethodSig, Param, Place, Program, RegionDecl, Stmt,
-    StructDecl, TraitDecl, TypeParam, UnaryOp,
+    ActorDecl, AliasDecl, AsmClobber, AsmOperand, AssignOp, BinaryOp, ConstDecl, EnumDecl, Expr,
+    ExprKind, Function, IfBranch, ImplDecl, MatchArm, MatchPattern, MethodSig, Param, Place,
+    Program, RegionDecl, Stmt, StructDecl, TraitDecl, TypeParam, UnaryOp,
 };
 use lullaby_lexer::Comment;
 
@@ -668,13 +668,40 @@ fn render_stmt(emitter: &mut Emitter, stmt: &Stmt, depth: usize, following: usiz
             emitter.emit_line(depth, span.line, "unsafe");
             render_block(emitter, body, depth + 1, following);
         }
-        Stmt::Asm { bytes, span } => {
+        Stmt::Asm {
+            bytes,
+            operands,
+            clobbers,
+            span,
+        } => {
             let rendered = bytes
                 .iter()
                 .map(|byte| byte.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             emitter.emit_line(depth, span.line, &format!("asm {rendered}"));
+            // The operand block renders one clause per indented line. Order is
+            // preserved verbatim (operands then clobbers) so a format round-trip
+            // is idempotent.
+            for operand in operands {
+                let text = match operand {
+                    AsmOperand::In { reg, value, .. } => {
+                        format!("in {} = {}", reg.name, render_expr(value))
+                    }
+                    AsmOperand::Out { reg, place, .. } => {
+                        format!("out {} = {}", reg.name, render_expr(place))
+                    }
+                };
+                emitter.emit_line(depth + 1, operand.span().line, &text);
+            }
+            for clobber in clobbers {
+                let (text, line) = match clobber {
+                    AsmClobber::Reg(reg) => (format!("clobber {}", reg.name), reg.span.line),
+                    AsmClobber::Mem(span) => ("clobber mem".to_string(), span.line),
+                    AsmClobber::Cc(span) => ("clobber cc".to_string(), span.line),
+                };
+                emitter.emit_line(depth + 1, line, &text);
+            }
         }
         Stmt::Region(decl) => emitter.emit_line(depth, decl.span.line, &render_region(decl)),
         Stmt::RegionBlock { body, span } => {
@@ -1447,6 +1474,44 @@ mod tests {
     fn idempotent_named_struct() {
         // struct declarations, struct literals, field access.
         assert_fixture_idempotent("run_named_struct");
+    }
+
+    #[test]
+    fn formats_asm_operand_block() {
+        // An `asm` operand block renders one clause per line, indented under the
+        // byte line, in source order (operands then clobbers), and round-trips
+        // idempotently.
+        let source = concat!(
+            "fn sys_write fd i64 buf ptr<i64> len i64 -> i64\n",
+            "    let ret i64 = 0\n",
+            "    unsafe\n",
+            "        asm 15, 5\n",
+            "            in rax = 1\n",
+            "            in rdi = fd\n",
+            "            out rax = ret\n",
+            "            clobber rcx\n",
+            "            clobber mem\n",
+            "    ret\n",
+        );
+        let f1 = fmt(source);
+        for line in [
+            "        asm 15, 5\n",
+            "            in rax = 1\n",
+            "            in rdi = fd\n",
+            "            out rax = ret\n",
+            "            clobber rcx\n",
+            "            clobber mem\n",
+        ] {
+            assert!(f1.contains(line), "missing `{}` in:\n{f1}", line.trim_end());
+        }
+        // Idempotent: formatting the formatted output reproduces it exactly.
+        let tokens = lex(&f1).expect("re-lex asm block");
+        let program = parse(&tokens).expect("re-parse asm block");
+        assert_eq!(
+            f1,
+            format_program(&program),
+            "asm operand block must format idempotently"
+        );
     }
 
     #[test]

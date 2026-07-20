@@ -81,6 +81,9 @@ impl<'a> NativeCtx<'a> {
             call_returned_callables: HashMap::new(),
             closure_layouts,
             closure_env: Some(closure_env),
+            // A closure literal is a single-expression body (`fn PARAMS -> EXPR`),
+            // so it can never contain an `asm` statement — no asm scratch is needed.
+            asm_scratch_base: 0,
         }
     }
 

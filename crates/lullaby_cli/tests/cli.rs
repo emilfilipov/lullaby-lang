@@ -1626,6 +1626,12 @@ mod returned_closure;
 #[path = "cli/suite26.rs"]
 mod suite26;
 
+// Inline-`asm` operand binding end-to-end: a pure-register round-trip exe, the
+// callee-saved clobber-preservation test (with inject-the-bug teeth documented),
+// and the interpreters' `L0425` refusal.
+#[path = "cli/suite27.rs"]
+mod suite27;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

@@ -3402,11 +3402,21 @@ impl<'a> Checker<'a> {
     }
 
     /// Validate an `asm` inline-assembly statement: it must sit inside an
-    /// `unsafe` block (inline machine code is inherently unsafe) and every byte
-    /// literal must be in `0..=255`. The statement is native-only, so this is the
-    /// only place its shape is checked; the interpreters reject it at runtime with
-    /// `L0425`, and the native backend emits the bytes verbatim.
-    pub(crate) fn check_asm(&mut self, bytes: &[i64], span: Span, function: &Function) {
+    /// `unsafe` block (inline machine code is inherently unsafe), every byte
+    /// literal must be in `0..=255`, and — when present — the operand/clobber
+    /// clauses must obey the register law. The statement is native-only, so this
+    /// is the only place its shape is checked; the interpreters reject it at
+    /// runtime with `L0425`, and the native backend emits the bytes verbatim and
+    /// marshals the operands.
+    pub(crate) fn check_asm(
+        &mut self,
+        bytes: &[i64],
+        operands: &[AsmOperand],
+        clobbers: &[AsmClobber],
+        span: Span,
+        scope: &Scope,
+        function: &Function,
+    ) {
         if self.unsafe_depth == 0 {
             self.diagnostics.push(SemanticDiagnostic::at(
                 "L0330",
@@ -3432,6 +3442,182 @@ impl<'a> Checker<'a> {
                     span,
                 ));
             }
+        }
+        self.check_asm_operands(operands, clobbers, scope, function);
+    }
+
+    /// Validate the operand and clobber clauses of an `asm` statement against the
+    /// x86-64 register law. Emits `L0443` for a bad operand *shape* (unknown or
+    /// frame register, `out` to a non-lvalue, a register bound twice, or an
+    /// `in`/`out` register also declared as a clobber) and `L0461` for a
+    /// register/value *width* mismatch.
+    fn check_asm_operands(
+        &mut self,
+        operands: &[AsmOperand],
+        clobbers: &[AsmClobber],
+        scope: &Scope,
+        function: &Function,
+    ) {
+        use lullaby_parser::asm_register::{RegWidth, lookup_register, reg64_name};
+
+        // Track which architectural registers (by 4-bit encoding) an operand
+        // binds and which are clobbered, so a double bind or a bind-and-clobber
+        // of the same register is caught regardless of sub-register spelling. A
+        // register may have at most one `in` AND at most one `out` — the same
+        // register carrying both is the syscall-style read+write pattern (`in rax`
+        // = number, `out rax` = result) and is allowed; two `in`s or two `out`s to
+        // one register is the ambiguous case that is refused.
+        let mut bound_in: Vec<u8> = Vec::new();
+        let mut bound_out: Vec<u8> = Vec::new();
+        let mut clobbered: Vec<u8> = Vec::new();
+
+        let fname = || Some(function.name.clone());
+
+        for clobber in clobbers {
+            if let AsmClobber::Reg(reg) = clobber {
+                match lookup_register(&reg.name) {
+                    None => self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0443",
+                        format!("unknown register `{}` in asm `clobber` clause", reg.name),
+                        fname(),
+                        reg.span,
+                    )),
+                    Some(info) if info.is_frame_register() => {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0443",
+                            format!(
+                                "register `{}` (the stack/base pointer) cannot be clobbered; the \
+                                 frame depends on it",
+                                reg.name
+                            ),
+                            fname(),
+                            reg.span,
+                        ));
+                    }
+                    Some(info) => clobbered.push(info.code),
+                }
+            }
+        }
+
+        for operand in operands {
+            let reg = operand.reg();
+            let info = match lookup_register(&reg.name) {
+                None => {
+                    self.diagnostics.push(SemanticDiagnostic::at(
+                        "L0443",
+                        format!("unknown register `{}` in asm operand", reg.name),
+                        fname(),
+                        reg.span,
+                    ));
+                    continue;
+                }
+                Some(info) => info,
+            };
+            if info.is_frame_register() {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0443",
+                    format!(
+                        "register `{}` (the stack/base pointer) cannot be bound as an asm operand",
+                        reg.name
+                    ),
+                    fname(),
+                    reg.span,
+                ));
+                continue;
+            }
+            // A register may have at most one `in` and one `out` (an `in`+`out`
+            // pair on one register is the read+write pattern and is allowed).
+            let same_dir = match operand {
+                AsmOperand::In { .. } => &mut bound_in,
+                AsmOperand::Out { .. } => &mut bound_out,
+            };
+            if same_dir.contains(&info.code) {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0443",
+                    format!(
+                        "register `{}` is bound by more than one asm operand of the same direction",
+                        reg64_name(info.code)
+                    ),
+                    fname(),
+                    reg.span,
+                ));
+            } else {
+                same_dir.push(info.code);
+            }
+            // A bound register may not also be declared clobbered.
+            if clobbered.contains(&info.code) {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0443",
+                    format!(
+                        "register `{}` is bound as an asm operand and also declared clobbered",
+                        reg64_name(info.code)
+                    ),
+                    fname(),
+                    reg.span,
+                ));
+            }
+
+            // Width law: operand bindings are 64-bit only in this release. A
+            // sub-width register (or a value whose type is not a 64-bit scalar)
+            // is refused rather than marshalled with a half-defined extension.
+            if info.width != RegWidth::W64 {
+                self.diagnostics.push(SemanticDiagnostic::at(
+                    "L0461",
+                    format!(
+                        "asm operand register `{}` is {}-bit; operand bindings must use a 64-bit \
+                         register (`{}`)",
+                        reg.name,
+                        info.width.bits(),
+                        reg64_name(info.code)
+                    ),
+                    fname(),
+                    reg.span,
+                ));
+            }
+
+            match operand {
+                AsmOperand::In { value, .. } => {
+                    if let Some(ty) = self.check_expr(value, scope, function) {
+                        self.check_asm_value_width(&ty, value.span, function);
+                    }
+                }
+                AsmOperand::Out { place, span, .. } => {
+                    // The `out` target must be a bare local binding: its value is
+                    // written straight into the local's frame slot.
+                    if !matches!(place.kind, ExprKind::Variable(_)) {
+                        self.diagnostics.push(SemanticDiagnostic::at(
+                            "L0443",
+                            "asm `out` target must be a local variable".to_string(),
+                            fname(),
+                            *span,
+                        ));
+                    }
+                    if let Some(ty) = self.check_expr(place, scope, function) {
+                        self.check_asm_value_width(&ty, place.span, function);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The value bound to (or read from) an asm operand register must be a 64-bit
+    /// scalar — an `i64`/`u64`/`isize`/`usize` or a raw pointer. Anything else
+    /// (a narrow integer, `bool`/`char`, a `string`, or an aggregate) does not
+    /// match the 64-bit register width and is refused with `L0461`.
+    fn check_asm_value_width(&mut self, ty: &TypeRef, span: Span, function: &Function) {
+        let name = ty.name.as_str();
+        let is_64bit_scalar =
+            matches!(name, "i64" | "u64" | "isize" | "usize" | "ptr") || name.starts_with("ptr<");
+        if !is_64bit_scalar {
+            self.diagnostics.push(SemanticDiagnostic::at(
+                "L0461",
+                format!(
+                    "asm operand value has type `{name}`, which is not a 64-bit scalar; operand \
+                     bindings require an `i64`/`u64`/`isize`/`usize` or a raw pointer"
+                ),
+                Some(function.name.clone()),
+                span,
+            ));
         }
     }
 

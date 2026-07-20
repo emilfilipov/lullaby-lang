@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    AssignOp, BinaryOp, CombinatorOp, EnumVariant, Expr, ExprKind, Function, INFERRED_RETURN,
-    MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt, StructField,
-    SupervisionPolicy, TypeParam, TypeRef, UnaryOp, function_type, generic_type,
+    AsmClobber, AsmOperand, AssignOp, BinaryOp, CombinatorOp, EnumVariant, Expr, ExprKind,
+    Function, INFERRED_RETURN, MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt,
+    StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, function_type, generic_type,
 };
 
 mod semantics_actor_ownership;
@@ -2683,8 +2683,13 @@ impl<'a> Checker<'a> {
                 self.check_block(body, &mut region_scope, function);
                 None
             }
-            Stmt::Asm { bytes, span } => {
-                self.check_asm(bytes, *span, function);
+            Stmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => {
+                self.check_asm(bytes, operands, clobbers, *span, scope, function);
                 // Inline assembly is trusted to leave the return value in `rax`
                 // (the native epilogue returns `rax`), so — like `throw` — a
                 // trailing `asm` satisfies the function's final-value requirement.
@@ -4265,3 +4270,10 @@ fn free_call_target(expr: &Expr) -> Option<&str> {
 #[cfg(test)]
 #[path = "semantics_tests.rs"]
 mod tests;
+
+// Inline-`asm` operand/clobber validation (the `L0443` shape law and the `L0461`
+// width law) lives in its own file so the large `semantics_tests.rs` does not
+// grow further.
+#[cfg(test)]
+#[path = "semantics_asm_tests.rs"]
+mod semantics_asm_tests;

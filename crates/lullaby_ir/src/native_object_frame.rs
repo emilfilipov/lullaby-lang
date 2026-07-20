@@ -365,6 +365,23 @@ pub(crate) fn max_outgoing_stack_words(
                 }
                 h
             }
+            // An asm `in <reg> = <expr>` evaluates `<expr>` as an ordinary
+            // expression during marshalling, so a call inside it spills its 5th+
+            // arguments into the same outgoing area and must be counted here.
+            BytecodeInstruction::Asm { operands, .. } => {
+                let mut h = 0;
+                for operand in operands {
+                    if let crate::BcAsmOperand::In { value, .. } = operand {
+                        h = h.max(expr_words(
+                            value,
+                            signatures,
+                            closure_locals,
+                            fn_param_callables,
+                        ));
+                    }
+                }
+                h
+            }
             _ => 0,
         };
         max = max.max(here);

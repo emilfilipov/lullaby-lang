@@ -46,6 +46,7 @@
 //! clean skip is strictly safer.
 
 use super::*;
+use crate::BcAsmOperand;
 use std::collections::HashSet;
 
 /// One lexical scope's worth of renaming state.
@@ -300,10 +301,36 @@ impl<'a> Renamer<'a> {
                     span: *span,
                 }
             }
-            BytecodeInstruction::Asm { bytes, span } => BytecodeInstruction::Asm {
-                bytes: bytes.clone(),
-                span: *span,
-            },
+            // The scope renamer rewrites variable references to their slot-unique
+            // names, so it MUST descend into the operand input expressions and the
+            // `out` target place — a shadowed local named by an asm operand would
+            // otherwise reference the wrong binding.
+            BytecodeInstruction::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => {
+                let mut renamed = Vec::with_capacity(operands.len());
+                for operand in operands {
+                    renamed.push(match operand {
+                        BcAsmOperand::In { reg, value } => BcAsmOperand::In {
+                            reg: reg.clone(),
+                            value: self.rewrite_expr(value)?,
+                        },
+                        BcAsmOperand::Out { reg, place } => BcAsmOperand::Out {
+                            reg: reg.clone(),
+                            place: self.rewrite_expr(place)?,
+                        },
+                    });
+                }
+                BytecodeInstruction::Asm {
+                    bytes: bytes.clone(),
+                    operands: renamed,
+                    clobbers: clobbers.clone(),
+                    span: *span,
+                }
+            }
             BytecodeInstruction::Throw { value, span } => BytecodeInstruction::Throw {
                 value: self.rewrite_expr(value)?,
                 span: *span,

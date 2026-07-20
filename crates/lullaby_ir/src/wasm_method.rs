@@ -59,7 +59,7 @@
 //! name rewrites), so existing non-method WASM snapshots are unaffected.
 
 use super::*;
-use crate::{IrIfBranch, IrMatchArm, IrParam, IrPlace};
+use crate::{IrAsmOperand, IrIfBranch, IrMatchArm, IrParam, IrPlace};
 use lullaby_semantics::substitute_type;
 use std::collections::{HashMap, HashSet};
 
@@ -345,8 +345,27 @@ impl<'a> MethodExpander<'a> {
                 body: self.transform_stmts(body, subst),
                 span: *span,
             },
-            IrStmt::Asm { bytes, span } => IrStmt::Asm {
+            IrStmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => IrStmt::Asm {
                 bytes: bytes.clone(),
+                operands: operands
+                    .iter()
+                    .map(|operand| match operand {
+                        IrAsmOperand::In { reg, value } => IrAsmOperand::In {
+                            reg: reg.clone(),
+                            value: self.transform_expr(value, subst),
+                        },
+                        IrAsmOperand::Out { reg, place } => IrAsmOperand::Out {
+                            reg: reg.clone(),
+                            place: self.transform_expr(place, subst),
+                        },
+                    })
+                    .collect(),
+                clobbers: clobbers.clone(),
                 span: *span,
             },
             IrStmt::Throw { value, span } => IrStmt::Throw {

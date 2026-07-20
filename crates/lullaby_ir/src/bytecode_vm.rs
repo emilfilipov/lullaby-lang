@@ -1401,12 +1401,45 @@ impl<'a> Lowerer<'a> {
                 Ok(IrStmt::Loop { body, span: *span })
             }
             // Inline assembly lowers straight through to an `IrStmt::Asm` carrying
-            // the raw bytes. Semantics has already validated each byte is 0..=255,
-            // so the `as u8` truncation is exact.
-            Stmt::Asm { bytes, span } => Ok(IrStmt::Asm {
-                bytes: bytes.iter().map(|byte| *byte as u8).collect(),
-                span: *span,
-            }),
+            // the raw bytes and the resolved operand/clobber clauses. Semantics has
+            // already validated each byte is 0..=255 (so the `as u8` truncation is
+            // exact) and every register name, so `lower_asm_reg` only fails on an
+            // impossible unresolved name, which it surfaces as a lowering error
+            // rather than panicking.
+            Stmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => {
+                let mut ir_operands = Vec::with_capacity(operands.len());
+                for operand in operands {
+                    ir_operands.push(match operand {
+                        AsmOperand::In { reg, value, .. } => IrAsmOperand::In {
+                            reg: lower_asm_reg(reg)?,
+                            value: self.lower_expr(value, scope)?,
+                        },
+                        AsmOperand::Out { reg, place, .. } => IrAsmOperand::Out {
+                            reg: lower_asm_reg(reg)?,
+                            place: self.lower_expr(place, scope)?,
+                        },
+                    });
+                }
+                let mut ir_clobbers = Vec::with_capacity(clobbers.len());
+                for clobber in clobbers {
+                    ir_clobbers.push(match clobber {
+                        AsmClobber::Reg(reg) => IrAsmClobber::Reg(lower_asm_reg(reg)?),
+                        AsmClobber::Mem(_) => IrAsmClobber::Mem,
+                        AsmClobber::Cc(_) => IrAsmClobber::Cc,
+                    });
+                }
+                Ok(IrStmt::Asm {
+                    bytes: bytes.iter().map(|byte| *byte as u8).collect(),
+                    operands: ir_operands,
+                    clobbers: ir_clobbers,
+                    span: *span,
+                })
+            }
             // A *static-buffer arena* (`region N in buf`, freestanding tier §5) is
             // not a metadata region: it has no `size=`/`kind=` to publish, and its
             // storage is the caller's buffer. It lowers to its own `arena_region`

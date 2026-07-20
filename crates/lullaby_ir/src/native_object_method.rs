@@ -47,6 +47,7 @@
 //! to the interpreters (`L0339`) rather than miscompiling.
 
 use super::*;
+use crate::BcAsmOperand;
 
 use std::collections::{HashMap, HashSet};
 
@@ -340,8 +341,27 @@ impl<'a> MethodExpander<'a> {
                 body: self.transform_instructions(body, subst),
                 span: *span,
             },
-            BytecodeInstruction::Asm { bytes, span } => BytecodeInstruction::Asm {
+            BytecodeInstruction::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => BytecodeInstruction::Asm {
                 bytes: bytes.clone(),
+                operands: operands
+                    .iter()
+                    .map(|operand| match operand {
+                        BcAsmOperand::In { reg, value } => BcAsmOperand::In {
+                            reg: reg.clone(),
+                            value: self.transform_expr(value, subst),
+                        },
+                        BcAsmOperand::Out { reg, place } => BcAsmOperand::Out {
+                            reg: reg.clone(),
+                            place: self.transform_expr(place, subst),
+                        },
+                    })
+                    .collect(),
+                clobbers: clobbers.clone(),
                 span: *span,
             },
             BytecodeInstruction::Throw { value, span } => BytecodeInstruction::Throw {

@@ -302,75 +302,93 @@ existing assembler/`rust-lld` path avoids Lullaby owning a full x86-64 assembler
 the delivered raw-byte `asm_bytes` remains as the final escape for an instruction the
 template layer can't yet encode.
 
-### 3.1 Proposed `asm` surface (indentation-only adaptation of Option A)
+### 3.1 `asm` surface with operand binding — DELIVERED (owner-chosen "bytes + operand block")
 
-Because `#` is the comment character and there are no braces or colons, the operand
-bindings are an **indentation block of clauses**, not a `: : :`-delimited string tail:
+> **DELIVERED.** The owner chose **Option 1**: the raw-byte `asm` extended with an
+> **operand block**, rather than the template-string form Option A above once
+> sketched. There is no assembler and no template mini-language — the body stays
+> verbatim bytes; the language models only **operands and clobbers**, which is the
+> part that needs language integration. This is the CPU-control kernel primitive
+> (syscalls, control-register access, privileged instructions over program values).
+
+The `asm` statement is the verbatim byte list (unchanged) optionally followed by an
+**indented operand block** — one clause per line:
 
 ```lby
-no-runtime
-
-# Disable interrupts (no operands, but clobbers "memory" ordering).
-fn disable_interrupts
+# Linux write(1, buf, len) then exit(code), entirely through operand asm.
+fn write_and_exit p ptr<i64> len i64 code i64
     unsafe
-        asm "cli"
-            clobber mem
-
-# Read a model-specific register: ecx = msr index in, edx:eax out -> u64.
-fn read_msr index u32 -> u64
-    unsafe
-        let mut hi u32 = 0u32
-        let mut lo u32 = 0u32
-        asm "rdmsr"
-            in  ecx = index
-            out eax = lo
-            out edx = hi
-            clobber mem
-        (to_u64(hi) << 32) | to_u64(lo)
-
-# Write a byte to an I/O port (see also the port intrinsics in §4).
-fn outb port u16, value byte
-    unsafe
-        asm "out dx, al"
-            in dx = port
-            in al = value
-            clobber mem
+        asm 15, 5                 # the `syscall` instruction (0F 05)
+            in rax = 1            # __NR_write
+            in rdi = 1            # fd = stdout
+            in rsi = p            # buffer pointer
+            in rdx = len          # byte count
+            clobber rcx           # syscall clobbers rcx and r11
+            clobber r11
+        asm 15, 5
+            in rax = 60           # __NR_exit
+            in rdi = code
+            clobber rcx
+            clobber r11
 ```
 
-- **`asm "<template>"`** — the mnemonic/template string is a normal Lullaby string
-  literal. It may contain positional/named placeholders resolved from the operand
-  block (`asm "mov {dst}, {src}"` with `out reg = dst` / `in reg = src`), matching
-  Rust's `{name}` scheme; for register-fixed instructions (`rdmsr`, `out dx, al`) the
-  template names the architectural registers directly and the operand block *binds*
-  them to Lullaby values.
-- **Operand clauses** (each on its own indented line under the `asm`):
-  - `in <reg-or-name> = <expr>` — load `expr` into the operand before the block.
-  - `out <reg-or-name> = <lvalue>` — store the operand into the Lullaby lvalue after.
-  - `inout <reg-or-name> = <lvalue>` — read-modify-write.
-  - `clobber <reg|mem|cc>` — declares a register / memory / condition-code clobber so
-    the compiler does not assume those survive the block. `clobber mem` is a compiler
-    barrier (ordering fence) around the asm.
-  - Constraint spelling: a fixed register name (`eax`, `dx`) pins the operand; a
-    class name (`reg`, `reg32`) lets the compiler choose. **OWNER DECISION** on
-    whether 1.0 ships *only* fixed-register operands (simplest: the author names the
-    register, the compiler just moves values in/out and honours clobbers) or also the
-    register-class allocator form (`reg`). **Recommend fixed-register-only for the
-    first increment** — it covers essentially all kernel instructions (which use
-    architectural registers anyway), needs no register allocator integration, and the
-    `reg` class form is a clean later addition.
-- **`asm_bytes <b0>, <b1>, …`** — the delivered raw-byte statement, renamed for
-  clarity (or kept as `asm` with a numeric argument list distinguished from the
-  string form). Retained as the lowest-level escape: an instruction the template
-  layer cannot yet encode can always be emitted as bytes. `L0425` (shape) and the
-  interpreter-rejection behavior are unchanged.
-- **`unsafe` + interpreter behavior:** `asm`/`asm_bytes` remain `unsafe`-only
-  (`L0330`) and remain **native-only** — the interpreters cannot execute machine code
-  and reject any `asm` with `L0425` (delivered). New operand/clobber *shape* errors
-  (unknown register, `out` to a non-lvalue, malformed template placeholder) are a
-  check-time proposed **`L0443`**.
+- **Byte body** — the `asm N, N, …` line is the verbatim machine code, exactly as the
+  delivered raw-byte form. No mnemonics, no assembler.
+- **Operand clauses** (each on its own line, indented **under** the `asm` byte line):
+  - `in <reg> = <expr>` — evaluate `expr` and load it into `reg` **before** the bytes.
+  - `out <reg> = <local>` — store `reg`'s value into the local `<local>` **after** the
+    bytes. The target is a plain local binding (an lvalue), written straight into its
+    frame slot.
+  - `clobber <reg | mem | cc>` — declare a register (or the reserved `mem`/`cc`
+    barriers) the body destroys. `mem`/`cc` are accepted and reserved; they are
+    documented **no-ops** today because no reordering optimizer runs across an `asm`.
+  - `in`/`out`/`clobber` are contextual words recognized only as the first token of an
+    operand-block line — never reserved keywords (`in` is the existing `for … in`/
+    `region … in` keyword; `out`/`clobber` stay ordinary identifiers everywhere else).
+  - A register may carry at most one `in` and one `out`; **`in <reg>` + `out <reg>` on
+    one register is the read+write pattern** (a syscall's `rax` = number then result).
+- **Width law (64-bit only, this release).** An `in`/`out` register must be a 64-bit
+  GPR (`rax`..`r15`) and the bound value a 64-bit scalar — `i64`/`u64`/`isize`/`usize`
+  or a raw pointer. A sub-width register or a narrower value is refused with `L0461`
+  rather than marshalled with a half-defined extension. Sub-width register *names*
+  remain valid in a `clobber` (which only marks the parent 64-bit register destroyed).
+- **`unsafe` + interpreter behavior:** `asm` (with or without operands) is `unsafe`-only
+  (`L0330`) and **native-only** — the interpreters cannot execute machine code and
+  reject any `asm` with `L0425`. Operand/clobber *shape* errors (unknown register,
+  `rsp`/`rbp` bound or clobbered, `out` to a non-lvalue, a register bound twice in one
+  direction, an operand register also clobbered) are check-time **`L0443`**; a
+  register/value width mismatch is **`L0461`**.
 - **Divergence:** a trailing `asm` that leaves the return value in the ABI return
-  register is treated as divergent-like and satisfies a non-void function's
-  final-value requirement (delivered behavior, kept).
+  register satisfies a non-void function's final-value requirement (delivered).
+
+#### Three worked cases
+
+1. **Linux `syscall` wrapper (SysV):** number in `rax`, args in `rdi`/`rsi`/`rdx`,
+   result out `rax`, `rcx`/`r11` clobbered by the `syscall` instruction. Proven
+   end-to-end by a `write(1, buf, 1)` + `exit(42)` program compiled to an x86-64
+   Linux ELF and run under `linux/amd64` Docker (stdout `H`, exit `42`).
+2. **Pure-register move:** `mov rax, rcx` (`48 89 C8`) with `in rcx = x` / `out rax = y`
+   copies an input register to an output register, so `y == x` — run as a real `.exe`.
+3. **Callee-saved clobber:** a caller keeps a hot local in the callee-saved `rbx`
+   (register promotion) and calls a function whose `asm` clobbers `rbx`; the marshaller
+   saves/restores `rbx` around the body so the caller's value survives.
+
+#### The two soundness invariants
+
+- **Register-promotion exclusion.** A function containing `asm` is **never**
+  register-promoted (`instr_reg_promotable` has no `Asm` arm — the exclusion is
+  deliberate, and pinned by a regression test). Every local therefore stays
+  frame-resident, which is what lets `out <reg> = local` write `[rbp - slot]`
+  authoritatively and `in <reg> = local` read it — no promoted local can be clobbered.
+- **Callee-saved preservation.** A non-promoting function otherwise saves no
+  callee-saved registers, so an `asm` that *touches* one (via any `in`/`out`/`clobber`)
+  would return it corrupted to the caller. The marshaller saves and restores every
+  callee-saved register the `asm` touches, using the **union** of the Win64 and SysV
+  callee-saved sets (`rbx`, `rsi`, `rdi`, `r12`–`r15`) so preservation is correct on
+  either target. `rsp`/`rbp` may not be bound or clobbered at all (`L0443`).
+
+The verbatim-byte statement remains the lowest-level escape for any instruction; the
+operand block simply adds value marshalling and ABI-correct clobber handling on top.
 
 ### 3.2 Why not Option B (per-line native assembler)
 

@@ -748,12 +748,24 @@ pub enum Stmt {
         span: Span,
     },
     /// Inline assembly: raw x86-64 machine-code bytes emitted verbatim into the
-    /// current function's `.text` at this point. Native-only and inherently
-    /// `unsafe`. Each byte is an `i64` value in `0..=255`; semantics validates
-    /// the range and requires an enclosing `unsafe` block, and only the native
-    /// backend can emit it (the interpreters reject it with `L0425`).
+    /// current function's `.text` at this point, optionally marshalling Lullaby
+    /// values into/out of explicitly-named architectural registers.
+    ///
+    /// `bytes` is the verbatim machine-code body (each an `i64` in `0..=255`).
+    /// `operands` binds Lullaby values to registers: an `in` clause loads an
+    /// expression's value into a register before the bytes run; an `out` clause
+    /// stores a register's value into a local after the bytes run. `clobbers`
+    /// declares registers (or `mem`/`cc`) the body destroys, so the native
+    /// backend preserves any callee-saved register touched.
+    ///
+    /// Native-only and inherently `unsafe`. Semantics validates the byte range,
+    /// requires an enclosing `unsafe` block, and validates the operand/clobber
+    /// shape; only the native backend can emit it (the interpreters reject it
+    /// with `L0425`).
     Asm {
         bytes: Vec<i64>,
+        operands: Vec<AsmOperand>,
+        clobbers: Vec<AsmClobber>,
         span: Span,
     },
     Region(RegionDecl),
@@ -786,6 +798,66 @@ pub enum Stmt {
         catch_body: Vec<Stmt>,
         span: Span,
     },
+}
+
+/// A spelled architectural register in an inline-`asm` operand or clobber
+/// clause (`rax`, `rdi`, `dx`, …). The name is validated against
+/// [`crate::asm_register::lookup_register`] in semantics; the parser only
+/// captures the identifier and its span.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsmReg {
+    pub name: String,
+    pub span: Span,
+}
+
+/// One operand-binding clause of an inline-`asm` statement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AsmOperand {
+    /// `in <reg> = <expr>` — evaluate `value` and load it into `reg` before the
+    /// machine-code bytes run.
+    In {
+        reg: AsmReg,
+        value: Expr,
+        span: Span,
+    },
+    /// `out <reg> = <place>` — store `reg`'s value into the local `place` (an
+    /// lvalue) after the machine-code bytes run.
+    Out {
+        reg: AsmReg,
+        place: Expr,
+        span: Span,
+    },
+}
+
+impl AsmOperand {
+    /// The register this clause binds.
+    pub fn reg(&self) -> &AsmReg {
+        match self {
+            AsmOperand::In { reg, .. } | AsmOperand::Out { reg, .. } => reg,
+        }
+    }
+
+    /// The clause's source span.
+    pub fn span(&self) -> Span {
+        match self {
+            AsmOperand::In { span, .. } | AsmOperand::Out { span, .. } => *span,
+        }
+    }
+}
+
+/// One clobber clause of an inline-`asm` statement: a register the body
+/// destroys, or the `mem`/`cc` barrier markers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AsmClobber {
+    /// `clobber <reg>` — the named register is destroyed by the body.
+    Reg(AsmReg),
+    /// `clobber mem` — the body touches memory the compiler cannot see. A
+    /// reserved reordering barrier; no reordering optimizer exists yet, so this
+    /// is a documented no-op today.
+    Mem(Span),
+    /// `clobber cc` — the body destroys the condition flags. A reserved barrier;
+    /// a documented no-op today.
+    Cc(Span),
 }
 
 /// One step in an assignment target path: a struct field or an array index.

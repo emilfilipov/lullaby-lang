@@ -1485,6 +1485,15 @@ mod native_object_void_tests;
 #[path = "native_object_portio_tests.rs"]
 mod native_object_portio_tests;
 
+// Inline-`asm` operand marshalling (register in/out binding + callee-saved
+// clobber preservation) and the register-promotion exclusion pin. Own file for
+// the size-cap reason. These assert the emitted BYTES (the clobber save/restore
+// straddling the asm body) and the promotion guard; the run-it-and-check-the-exit
+// -code proofs live in `crates/lullaby_cli/tests/cli/suite27.rs`.
+#[cfg(test)]
+#[path = "native_object_asm_tests.rs"]
+mod native_object_asm_tests;
+
 // The interim heap-box builtins (`alloc`/`dealloc`): the one-cell lowering, the
 // clean skips (including `dealloc`'s deliberate one), the `alloc`-box pointer
 // identity/arithmetic gate, and the arena exclusion. Own file for the size-cap

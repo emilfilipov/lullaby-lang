@@ -190,11 +190,21 @@ impl CopyPropagator {
                 aliases.clear();
                 IrStmt::RegionBlock { body, span: *span }
             }
-            // Inline assembly is opaque: clear aliases and pass the bytes through.
-            IrStmt::Asm { bytes, span } => {
+            // Inline assembly is opaque: clear aliases (it may write registers
+            // backing outputs) and pass the bytes/operands/clobbers through. The
+            // operand input expressions are left verbatim rather than propagated
+            // into — never removing the original binding an asm operand reads.
+            IrStmt::Asm {
+                bytes,
+                operands,
+                clobbers,
+                span,
+            } => {
                 aliases.clear();
                 IrStmt::Asm {
                     bytes: bytes.clone(),
+                    operands: operands.clone(),
+                    clobbers: clobbers.clone(),
                     span: *span,
                 }
             }
