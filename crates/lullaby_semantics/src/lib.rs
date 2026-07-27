@@ -4,7 +4,8 @@ use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AsmClobber, AsmOperand, AssignOp, BinaryOp, CombinatorOp, EnumVariant, Expr, ExprKind,
     Function, INFERRED_RETURN, MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt,
-    StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, function_type, generic_type,
+    StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs, function_type,
+    generic_type,
 };
 
 mod semantics_actor_ownership;
@@ -2886,11 +2887,16 @@ impl<'a> Checker<'a> {
                     self.walk_lifetimes(body, &mut freed.clone(), function);
                     self.walk_lifetimes(catch_body, &mut freed.clone(), function);
                 }
-                Stmt::Return(None)
-                | Stmt::Break(_)
-                | Stmt::Continue(_)
-                | Stmt::Region(_)
-                | Stmt::Asm { .. } => {}
+                // An `asm` operand clause reads (or writes through) an ordinary
+                // expression, so a use of a freed box there is a use-after-free
+                // exactly as it is anywhere else. Skipping the operands let
+                // `dealloc(p)` followed by `in rcx = ptr_read(p)` pass `check`.
+                Stmt::Asm { operands, .. } => {
+                    for expr in asm_operand_exprs(operands) {
+                        self.check_freed_uses(expr, freed, function);
+                    }
+                }
+                Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
             }
         }
     }

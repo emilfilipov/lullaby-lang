@@ -739,6 +739,57 @@ fn loop_invariant_motion_keeps_loop_variable_dependency_in_place() {
     assert!(matches!(value.kind, IrExprKind::Binary { .. }));
 }
 
+/// An inline-`asm` statement's `out <reg> = <lvalue>` clause WRITES that lvalue
+/// after the machine code runs, so a binding it targets is mutated by the loop
+/// body and nothing reading it is loop-invariant.
+///
+/// LICM's `collect_mutated_names` used to match `IrStmt::Asm { .. } => {}`
+/// alongside the genuinely childless statements, so the write was invisible: the
+/// `y + 1` below looked invariant and was hoisted out of the loop, computing it
+/// once against `y`'s PRE-loop value — a miscompile. `asm` is native-only and the
+/// native backend does not run the IR optimizer, so this is pinned at the IR
+/// level, which is where the defect lives.
+///
+/// INJECT-THE-BUG TEETH (verified): restoring the empty `IrStmt::Asm { .. }` arm
+/// in `collect_mutated_names` makes `hoisted_loop_invariants` become 1 and the
+/// loop body's first statement stop being the `asm`.
+#[test]
+fn loop_invariant_motion_respects_an_asm_out_operand_write() {
+    let source = concat!(
+        "fn main -> i64\n",
+        "    let y i64 = 0\n",
+        "    let total i64 = 0\n",
+        "    for i from 1 to 3\n",
+        "        unsafe\n",
+        "            asm 72, 199, 192, 5, 0, 0, 0\n",
+        "                out rax = y\n",
+        "        let derived i64 = y + 1\n",
+        "        total += derived\n",
+        "    total\n",
+    );
+    let module = lower_source(source);
+    let (optimized, report) = optimize(&module, &OptimizationConfig::loop_invariant_motion());
+
+    assert_eq!(
+        report.hoisted_loop_invariants, 0,
+        "`y + 1` is not loop-invariant: the `asm` writes `y` every iteration"
+    );
+    let IrStmt::For { body, .. } = &optimized.functions[0].body[2] else {
+        panic!("expected the for loop");
+    };
+    assert!(
+        matches!(body[0], IrStmt::Asm { .. }),
+        "the `asm` must stay first in the loop body"
+    );
+    let IrStmt::Let { value, .. } = &body[1] else {
+        panic!("expected the derived binding to remain in the loop body");
+    };
+    assert!(
+        matches!(value.kind, IrExprKind::Binary { .. }),
+        "`y + 1` must be computed in the loop, not replaced by a hoisted temp"
+    );
+}
+
 #[test]
 fn loop_invariant_motion_does_not_hoist_potential_runtime_failure() {
     let source = "fn main -> i64\n    while false\n        let value i64 = 1 / 0\n    42\n";

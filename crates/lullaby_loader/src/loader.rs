@@ -21,7 +21,7 @@ use lullaby_diagnostics::{DiagnosticPhase, DiagnosticReport, Span};
 use lullaby_lexer::{lex, validate_source_path};
 use lullaby_parser::{
     AliasDecl, EnumDecl, Expr, ExprKind, Function, MatchArm, Program, Stmt, StructDecl, TypeRef,
-    parse,
+    asm_operand_exprs, parse,
 };
 
 /// An in-memory override of on-disk source: `overlay_key(path) -> source text`.
@@ -636,7 +636,17 @@ fn collect_stmt_references(stmt: &Stmt, out: &mut Vec<(String, Span)>) {
         }
         Stmt::Assign { value, .. } => collect_expr_references(value, out),
         Stmt::Return(Some(expr)) => collect_expr_references(expr, out),
-        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Asm { .. } => {}
+        // An `asm` operand clause is an ordinary expression and may call a
+        // function or name a struct, so it participates in module dependency and
+        // visibility analysis like any other expression. Skipping it let a call to
+        // a *private* function in another package hide inside `in <reg> = f(x)`
+        // and evade `L0392`.
+        Stmt::Asm { operands, .. } => {
+            for expr in asm_operand_exprs(operands) {
+                collect_expr_references(expr, out);
+            }
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::Expr(expr) => collect_expr_references(expr, out),
         Stmt::If {
             branches,

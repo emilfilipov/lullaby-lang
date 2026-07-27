@@ -314,6 +314,11 @@ fn collect_type_refs_in_stmt(stmt: &IrStmt, module: &IrModule, out: &mut Vec<Typ
         IrStmt::Return(Some(v)) | IrStmt::Expr(v) | IrStmt::Throw { value: v, .. } => {
             collect_type_refs_in_expr(v, module, out);
         }
+        // `asm` DELIBERATELY does not descend into its operands: inline assembly
+        // is native-only and `wasm::lower_stmt` rejects `IrStmt::Asm` outright, so
+        // a function containing one is demoted to the interpreters and never
+        // reaches WASM codegen. Collecting generic instantiations for a body that
+        // will not be emitted would only manufacture dead type work.
         IrStmt::Return(None) | IrStmt::Break(_) | IrStmt::Continue(_) | IrStmt::Asm { .. } => {}
         IrStmt::If {
             branches,

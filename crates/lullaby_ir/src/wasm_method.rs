@@ -528,6 +528,9 @@ fn stmt_contains_closure(stmt: &IrStmt) -> bool {
                 })
         }
         IrStmt::Return(value) => value.as_ref().is_some_and(expr_contains_closure),
+        // `asm` DELIBERATELY does not descend into its operands: this drives WASM
+        // closure emission, and `wasm::lower_stmt` rejects `IrStmt::Asm` outright,
+        // so a body containing one never reaches WASM codegen at all.
         IrStmt::Break(_) | IrStmt::Continue(_) | IrStmt::Asm { .. } => false,
         IrStmt::If {
             branches,

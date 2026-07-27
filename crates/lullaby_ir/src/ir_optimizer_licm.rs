@@ -142,6 +142,13 @@ impl LoopInvariantMover {
             // A region block is treated as an opaque passthrough, exactly like
             // `if`/`try`/`match`: LICM does not hoist across or into it (conservative,
             // and it preserves the region's scope boundary intact for slot planning).
+            //
+            // `asm` is in the same bucket, and DELIBERATELY does not descend into
+            // its operands: an operand's evaluation is ordered against the
+            // machine-code bytes, so hoisting a subexpression out of one would
+            // change when it runs relative to the assembly. Keeping the statement
+            // verbatim is the only correct treatment. (Its `out` writes ARE
+            // reported to the invariance analysis by `collect_mutated_names`.)
             IrStmt::Let { .. }
             | IrStmt::Assign { .. }
             | IrStmt::Return(_)
@@ -306,6 +313,10 @@ fn collect_declared_names(statements: &[IrStmt], names: &mut HashSet<String>) {
                 names.insert(name.clone());
                 collect_declared_names(body, names);
             }
+            // DELIBERATELY does not descend into `asm` operands: this collects
+            // names DECLARED in the loop body, and an operand clause only reads or
+            // writes bindings that already exist — it declares nothing. (Its
+            // writes are handled by `collect_mutated_names` below.)
             IrStmt::Assign { .. }
             | IrStmt::Return(_)
             | IrStmt::Break(_)
@@ -353,14 +364,41 @@ fn collect_mutated_names(statements: &[IrStmt], names: &mut HashSet<String>) {
                 names.insert(name.clone());
                 collect_mutated_names(body, names);
             }
+            // An `asm` statement's `out <reg> = <lvalue>` clause WRITES that
+            // lvalue's root binding after the machine code runs, so the binding is
+            // mutated by the loop body. Missing it would let an expression reading
+            // that binding look loop-invariant and be hoisted out of the loop — a
+            // miscompile. Registers/clobbers name no IR binding, and an `in`
+            // clause only reads.
+            IrStmt::Asm { operands, .. } => {
+                for operand in operands {
+                    if let IrAsmOperand::Out { place, .. } = operand
+                        && let Some(root) = expr_root_name(place)
+                    {
+                        names.insert(root);
+                    }
+                }
+            }
             IrStmt::Let { .. }
             | IrStmt::Return(_)
             | IrStmt::Break(_)
             | IrStmt::Continue(_)
             | IrStmt::Throw { .. }
-            | IrStmt::Asm { .. }
             | IrStmt::Expr(_) => {}
         }
+    }
+}
+
+/// The root binding name an lvalue expression writes through (`y`, `s.f`, `a[i]`
+/// all root at their leftmost variable). `None` for anything that is not rooted
+/// at a named binding.
+fn expr_root_name(expr: &IrExpr) -> Option<String> {
+    match &expr.kind {
+        IrExprKind::Variable(name) => Some(name.clone()),
+        IrExprKind::Local { name, .. } => Some(name.clone()),
+        IrExprKind::Field { target, .. } => expr_root_name(target),
+        IrExprKind::Index { target, .. } => expr_root_name(target),
+        _ => None,
     }
 }
 
