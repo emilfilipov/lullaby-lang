@@ -373,7 +373,7 @@ fn write_and_exit p ptr<i64> len i64 code i64
    (register promotion) and calls a function whose `asm` clobbers `rbx`; the marshaller
    saves/restores `rbx` around the body so the caller's value survives.
 
-#### The two soundness invariants
+#### The three soundness invariants
 
 - **Register-promotion exclusion.** A function containing `asm` is **never**
   register-promoted (`instr_reg_promotable` has no `Asm` arm — the exclusion is
@@ -386,6 +386,20 @@ fn write_and_exit p ptr<i64> len i64 code i64
   callee-saved register the `asm` touches, using the **union** of the Win64 and SysV
   callee-saved sets (`rbx`, `rsi`, `rdi`, `r12`–`r15`) so preservation is correct on
   either target. `rsp`/`rbp` may not be bound or clobbered at all (`L0443`).
+- **Operand expressions are ordinary expressions.** The machine-code bytes are opaque,
+  but an `in <reg> = <expr>` value and an `out <reg> = <lvalue>` target are normal
+  expression trees, so **every pass that walks a function body's expressions must walk
+  these too**. Six passes did not — they matched `Stmt::Asm { .. } => {}` next to the
+  genuinely childless `Break`/`Continue`/`Return(None)` — which made an operand a blind
+  spot for the whole semantic layer: a `no-runtime` module smuggled a real heap
+  allocation (`len(to_string(x))`) past this gate's `L0441` and into a runnable
+  freestanding binary, a use-after-free walked past `L0350`, a use-after-send past
+  `L0357`, a private cross-package call past the loader's `L0392`, and constant folding
+  / const-sized-array erasure never reached the operand at all. The class is closed by
+  `AsmOperand::expr` + `asm_operand_exprs` (and their `IrAsmOperand` counterparts),
+  which every descending pass now uses; the passes that deliberately do **not** descend
+  carry a comment saying why. Negative fixtures live in
+  `crates/lullaby_semantics/src/semantics_asm_tests.rs` and `suite27`.
 
 The verbatim-byte statement remains the lowest-level escape for any instruction; the
 operand block simply adds value marshalling and ABI-correct clobber handling on top.

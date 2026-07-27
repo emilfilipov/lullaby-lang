@@ -1,0 +1,13 @@
+# The same cross-package private use as `project_private_cross`, but hidden
+# inside an inline-`asm` operand clause. The loader's reference collector skipped
+# `Stmt::Asm` entirely, so this smuggled `hidden_helper` past L0392. -> L0392
+
+import libp
+
+fn main -> i64
+    let y i64 = 0
+    unsafe
+        asm 72, 137, 200
+            in rcx = hidden_helper(41)
+            out rax = y
+    y

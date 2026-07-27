@@ -183,6 +183,11 @@ impl LayoutBuilder {
                         self.walk_child_scope_seeded(&arm.body, depth + 1, &seeds);
                     }
                 }
+                // `asm` DELIBERATELY does not descend into its operands here: this
+                // walk records the frame's SCOPE structure (which statements
+                // declare locals and open child scopes), and an operand clause
+                // declares no binding and opens no scope — it only reads or writes
+                // bindings the enclosing scope already laid out.
                 IrStmt::Assign { .. }
                 | IrStmt::Return(_)
                 | IrStmt::Break(_)

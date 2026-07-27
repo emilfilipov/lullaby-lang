@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet};
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     BinaryOp, ConstDecl, Expr, ExprKind, MatchPattern, Place, Program, Stmt, TypeRef, UnaryOp,
+    asm_operand_exprs_mut,
 };
 
 use super::SemanticDiagnostic;
@@ -604,10 +605,18 @@ impl Folder<'_> {
                 catch_scope.insert(catch_name.clone());
                 self.fold_stmts(catch_body, &mut catch_scope);
             }
-            // A region declaration carries only literal numeric fields, and an
-            // `asm` statement carries only literal bytes: neither can reference a
-            // constant.
-            Stmt::Region(_) | Stmt::Asm { .. } => {}
+            // An `asm` statement's machine-code bytes are literals, but its
+            // operand block is not: `in <reg> = <expr>` may name a constant, and
+            // folding runs before the type checker and IR lowering, so an
+            // unfolded reference fails later as "unknown variable" (`L0501`).
+            Stmt::Asm { operands, .. } => {
+                for expr in asm_operand_exprs_mut(operands) {
+                    self.fold_expr(expr, local);
+                }
+            }
+            // A region declaration carries only literal numeric fields, so it can
+            // never reference a constant.
+            Stmt::Region(_) => {}
         }
     }
 

@@ -31,7 +31,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lullaby_parser::{AssignOp, Expr, ExprKind, Place, Stmt, TypeRef};
+use lullaby_parser::{AssignOp, Expr, ExprKind, Place, Stmt, TypeRef, asm_operand_exprs};
 
 use super::{Checker, SemanticDiagnostic, split_named_type};
 
@@ -332,11 +332,15 @@ impl<'a> Checker<'a> {
                     body_moved.extend(catch_moved);
                     *moved = body_moved;
                 }
-                Stmt::Return(None)
-                | Stmt::Break(_)
-                | Stmt::Continue(_)
-                | Stmt::Region(_)
-                | Stmt::Asm { .. } => {}
+                // An `asm` operand clause reads (or writes) an ordinary lvalue
+                // expression, so a use of an already-moved binding there is a
+                // use-after-move exactly as it is anywhere else.
+                Stmt::Asm { operands, .. } => {
+                    for expr in asm_operand_exprs(operands) {
+                        self.check_uses_and_sends(expr, moved, types, fn_name);
+                    }
+                }
+                Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
             }
         }
     }

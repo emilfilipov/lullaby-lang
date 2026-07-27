@@ -289,3 +289,87 @@ fn asm_operands_rejected_by_interpreters_with_l0425() {
         );
     }
 }
+
+/// OPERAND VISIBILITY, end-to-end: the demonstrated smuggle. A `no-runtime`
+/// module built a real heap `string` inside an `asm` operand; `check` exited 0
+/// and `native` emitted a runnable no-C-runtime direct PE, breaking hard rule #1
+/// of the freestanding tier (no hidden allocation). Both the diagnostic and the
+/// absence of an artifact are pinned — a rejected program must produce no exe.
+#[test]
+fn no_runtime_heap_smuggle_through_an_asm_operand_is_rejected_end_to_end() {
+    let source = concat!(
+        "no-runtime\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let y i64 = 0\n",
+        "    unsafe\n",
+        "        asm 72, 137, 200\n",
+        "            in rcx = len(to_string(12345))\n",
+        "            out rax = y\n",
+        "    y\n",
+    );
+    let dir = ScratchDir::new("asm_no_runtime_smuggle");
+    let src = dir.join("smuggle.lby");
+    let exe = dir.join("smuggle.exe");
+    std::fs::write(&src, source).expect("write source");
+
+    let checked = lullaby()
+        .args(["check", src.to_str().expect("src path")])
+        .output()
+        .expect("run check");
+    assert!(
+        !checked.status.success(),
+        "a heap allocation inside an asm operand must not pass `check` in a \
+         `no-runtime` module:\n{}{}",
+        stdout(&checked),
+        stderr(&checked)
+    );
+    assert!(
+        stderr(&checked).contains("L0441"),
+        "the freestanding-tier gate must fire (L0441):\n{}",
+        stderr(&checked)
+    );
+
+    let emitted = lullaby()
+        .args([
+            "native",
+            "-o",
+            exe.to_str().expect("exe path"),
+            src.to_str().expect("src path"),
+        ])
+        .output()
+        .expect("run native");
+    assert!(
+        !emitted.status.success(),
+        "`native` must refuse the rejected program:\n{}{}",
+        stdout(&emitted),
+        stderr(&emitted)
+    );
+    assert!(
+        !exe.is_file(),
+        "no freestanding binary may be produced for an L0441-rejected program"
+    );
+}
+
+/// OPERAND VISIBILITY, loader half: the module reference collector skipped
+/// `Stmt::Asm`, so a call to a *private* function in another package hid inside
+/// `in <reg> = f(x)` and evaded the `L0392` visibility check — the same code the
+/// identical call raises when written as an ordinary statement
+/// (`rejects_cross_package_private_use_with_l0392` in `cli.rs`). The semantic
+/// half of this class is pinned in
+/// `crates/lullaby_semantics/src/semantics_asm_tests.rs`.
+#[test]
+fn rejects_cross_package_private_use_from_an_asm_operand_with_l0392() {
+    let project = workspace_root().join("tests/fixtures/invalid/project_private_cross_asm/app");
+    let output = lullaby()
+        .args(["check", project.to_str().expect("project path")])
+        .output()
+        .expect("run cli");
+    assert!(
+        !output.status.success(),
+        "a private cross-package call inside an asm operand must be REJECTED: {output:?}"
+    );
+    let stderr = stderr(&output);
+    assert!(stderr.contains("L0392 [loader error]"), "{stderr}");
+    assert!(stderr.contains("hidden_helper"), "{stderr}");
+}

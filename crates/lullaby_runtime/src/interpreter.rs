@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 
 use lullaby_diagnostics::Span;
-use lullaby_parser::{ActorDecl, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt};
+use lullaby_parser::{
+    ActorDecl, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt, asm_operand_exprs,
+};
 
 use crate::*;
 
@@ -99,11 +101,14 @@ fn collect_closures_in_stmt<'a>(
             collect_closures_in_expr(value, table);
         }
         Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_closures_in_expr(expr, table),
-        Stmt::Return(None)
-        | Stmt::Break(_)
-        | Stmt::Continue(_)
-        | Stmt::Asm { .. }
-        | Stmt::Region(_) => {}
+        // An `asm` operand clause carries an ordinary expression, which may hold a
+        // closure literal that needs an entry in the closure table like any other.
+        Stmt::Asm { operands, .. } => {
+            for expr in asm_operand_exprs(operands) {
+                collect_closures_in_expr(expr, table);
+            }
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
         Stmt::If {
             branches,
             else_body,
@@ -1333,6 +1338,12 @@ fn stmt_mentions_var(stmt: &Stmt, name: &str) -> bool {
             body.iter().any(|s| stmt_mentions_var(s, name))
                 || catch_body.iter().any(|s| stmt_mentions_var(s, name))
         }
-        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) | Stmt::Asm { .. } => false,
+        // This walk must OVER-approximate: answering "no" when the variable is in
+        // fact read enables a destructive move. An `asm` operand clause reads an
+        // ordinary expression, so it counts as a mention.
+        Stmt::Asm { operands, .. } => {
+            asm_operand_exprs(operands).any(|expr| expr_mentions_var(expr, name))
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => false,
     }
 }

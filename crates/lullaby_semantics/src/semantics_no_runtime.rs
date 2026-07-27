@@ -18,6 +18,13 @@
 //!   (this catches string building such as `a + b` and collection builders such
 //!   as `list_new()` / `to_string(x)` even without a type annotation).
 //!
+//! The expression scan covers **every** expression in a function body, including
+//! the operand clauses of an inline-`asm` statement. Those are ordinary
+//! expressions, and skipping them (as this pass once did, by matching
+//! `Stmt::Asm { .. }` alongside `Break`/`Continue`) let `in rcx =
+//! len(to_string(12345))` build a real heap string inside a freestanding binary
+//! — a direct breach of hard rule #1. See [`lullaby_parser::AsmOperand::expr`].
+//!
 //! What stays **allowed** in `no-runtime` is the safe-arena-kernel core: scalars,
 //! fixed `array<T>`, structs/enums over allowed fields, `option`/`result`,
 //! control flow, functions, and the raw hardware surface (`unsafe` blocks, raw
@@ -27,16 +34,17 @@
 //! exactly like any other program, and composes with the native `--freestanding`
 //! output path unchanged.
 //!
-//! Static-buffer-backed arenas, inline `asm` operand binding, MMIO/port-IO,
-//! interrupt/`naked`/`entry` functions, the pluggable panic handler, and
+//! Interrupt/`naked`/`entry` functions, the pluggable panic handler, and
 //! direct-ELF/flat-binary output are **later freestanding-tier stages** and are
 //! intentionally not built here; stage 1 is the gate plus the allowed/rejected
-//! boundary.
+//! boundary. (Static-buffer-backed arenas, inline `asm` operand binding, and
+//! MMIO/port-IO have since been delivered — see
+//! `documents/freestanding_tier_design.md`.)
 
 use std::collections::HashSet;
 
 use lullaby_diagnostics::Span;
-use lullaby_parser::{Expr, ExprKind, Function, Program, Stmt, TypeRef};
+use lullaby_parser::{Expr, ExprKind, Function, Program, Stmt, TypeRef, asm_operand_exprs};
 
 use crate::{ExpressionType, SemanticDiagnostic};
 
@@ -194,7 +202,18 @@ impl NoRuntimeChecker<'_> {
                 self.check_expr(value, function);
             }
             Stmt::Return(Some(value)) => self.check_expr(value, function),
-            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Asm { .. } => {}
+            // An `asm` statement is opaque machine code, but its operand block is
+            // NOT: `in <reg> = <expr>` / `out <reg> = <lvalue>` carry ordinary
+            // expressions that must face the same gate as any other expression.
+            // Skipping them let a `no-runtime` module smuggle a real heap
+            // allocation (`len(to_string(x))`) past `L0441` and into a
+            // freestanding binary.
+            Stmt::Asm { operands, .. } => {
+                for expr in asm_operand_exprs(operands) {
+                    self.check_expr(expr, function);
+                }
+            }
+            Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) => {}
             Stmt::Expr(expr) => self.check_expr(expr, function),
             Stmt::If {
                 branches,

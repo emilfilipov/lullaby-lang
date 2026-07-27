@@ -265,6 +265,46 @@ pub enum IrAsmOperand {
     Out { reg: IrAsmReg, place: IrExpr },
 }
 
+impl IrAsmOperand {
+    /// The clause's sub-expression: the `in` clause's input **value**, or the
+    /// `out` clause's destination **lvalue**.
+    ///
+    /// Both are ordinary [`IrExpr`] trees, so **every pass that walks a function
+    /// body's expressions must walk these too**. Grouping `IrStmt::Asm` with
+    /// genuinely childless statements (`Break`/`Continue`/`Return(None)`) makes
+    /// operand expressions invisible to that pass — the IR-side form of the
+    /// soundness hole documented on [`lullaby_parser::AsmOperand::expr`].
+    pub fn expr(&self) -> &IrExpr {
+        match self {
+            IrAsmOperand::In { value, .. } => value,
+            IrAsmOperand::Out { place, .. } => place,
+        }
+    }
+
+    /// The clause's sub-expression, mutably. See [`IrAsmOperand::expr`].
+    pub fn expr_mut(&mut self) -> &mut IrExpr {
+        match self {
+            IrAsmOperand::In { value, .. } => value,
+            IrAsmOperand::Out { place, .. } => place,
+        }
+    }
+}
+
+/// Every sub-expression carried by an [`IrStmt::Asm`]'s operand block, in source
+/// order. The IR-side counterpart of [`lullaby_parser::asm_operand_exprs`], and
+/// the sanctioned way for an IR-walking pass to reach into an `asm`.
+pub fn ir_asm_operand_exprs(operands: &[IrAsmOperand]) -> impl Iterator<Item = &IrExpr> {
+    operands.iter().map(IrAsmOperand::expr)
+}
+
+/// Every sub-expression carried by an [`IrStmt::Asm`]'s operand block, mutably.
+/// See [`ir_asm_operand_exprs`].
+pub fn ir_asm_operand_exprs_mut(
+    operands: &mut [IrAsmOperand],
+) -> impl Iterator<Item = &mut IrExpr> {
+    operands.iter_mut().map(IrAsmOperand::expr_mut)
+}
+
 /// An inline-`asm` operand binding carrying a [`BytecodeExpr`] (the serialized
 /// bytecode form the native backend consumes).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -957,7 +997,14 @@ fn resolve_stmt_slots(stmt: &mut IrStmt, scopes: &mut Vec<Vec<String>>) {
                 scopes.pop();
             }
         }
-        IrStmt::Break(_) | IrStmt::Continue(_) | IrStmt::Asm { .. } => {}
+        // An `asm` operand clause reads/writes ordinary locals, so its expressions
+        // are slot-resolved like every other expression in the body.
+        IrStmt::Asm { operands, .. } => {
+            for expr in ir_asm_operand_exprs_mut(operands) {
+                resolve_expr_slots(expr, scopes);
+            }
+        }
+        IrStmt::Break(_) | IrStmt::Continue(_) => {}
     }
 }
 
@@ -1155,7 +1202,14 @@ fn collect_memory_operations_from_block(
                     collect_memory_operations_from_block(function, &arm.body, operations);
                 }
             }
-            IrStmt::Return(None) | IrStmt::Break(_) | IrStmt::Continue(_) | IrStmt::Asm { .. } => {}
+            // An `asm` operand clause can call a memory builtin (`alloc`,
+            // `ptr_read`, …), so it is scanned like any other expression.
+            IrStmt::Asm { operands, .. } => {
+                for expr in ir_asm_operand_exprs(operands) {
+                    collect_memory_operations_from_expr(function, expr, operations);
+                }
+            }
+            IrStmt::Return(None) | IrStmt::Break(_) | IrStmt::Continue(_) => {}
         }
     }
 }

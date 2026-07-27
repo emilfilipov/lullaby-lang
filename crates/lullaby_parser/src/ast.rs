@@ -843,6 +843,49 @@ impl AsmOperand {
             AsmOperand::In { span, .. } | AsmOperand::Out { span, .. } => *span,
         }
     }
+
+    /// The clause's sub-expression: the `in` clause's input **value**, or the
+    /// `out` clause's destination **lvalue**.
+    ///
+    /// Both are ordinary [`Expr`] trees that can contain calls, indexing, and
+    /// field access, so **every pass that walks a function body's expressions
+    /// must walk these too**. Grouping `Stmt::Asm` with genuinely childless
+    /// statements (`Break`/`Continue`/`Return(None)`) makes operand expressions
+    /// invisible to that pass — a real soundness hole: it once let a `no-runtime`
+    /// module smuggle `to_string(...)` (a heap allocation) past the `L0441`
+    /// freestanding gate and a use-after-free past `L0350`. Reach for
+    /// [`asm_operand_exprs`] / [`asm_operand_exprs_mut`] instead of
+    /// re-implementing the walk.
+    pub fn expr(&self) -> &Expr {
+        match self {
+            AsmOperand::In { value, .. } => value,
+            AsmOperand::Out { place, .. } => place,
+        }
+    }
+
+    /// The clause's sub-expression, mutably. See [`AsmOperand::expr`].
+    pub fn expr_mut(&mut self) -> &mut Expr {
+        match self {
+            AsmOperand::In { value, .. } => value,
+            AsmOperand::Out { place, .. } => place,
+        }
+    }
+}
+
+/// Every sub-expression carried by an inline-`asm` statement's operand block, in
+/// source order.
+///
+/// This is the single sanctioned way for an AST-walking pass to reach into a
+/// [`Stmt::Asm`]. Use it (rather than an empty `Stmt::Asm { .. } => {}` arm)
+/// wherever the pass descends into expressions — see [`AsmOperand::expr`] for why.
+pub fn asm_operand_exprs(operands: &[AsmOperand]) -> impl Iterator<Item = &Expr> {
+    operands.iter().map(AsmOperand::expr)
+}
+
+/// Every sub-expression carried by an inline-`asm` statement's operand block,
+/// mutably. See [`asm_operand_exprs`].
+pub fn asm_operand_exprs_mut(operands: &mut [AsmOperand]) -> impl Iterator<Item = &mut Expr> {
+    operands.iter_mut().map(AsmOperand::expr_mut)
 }
 
 /// One clobber clause of an inline-`asm` statement: a register the body

@@ -37,7 +37,8 @@ use std::collections::HashMap;
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    Expr, ExprKind, Function, Program, Stmt, TypeRef, function_type, generic_type,
+    Expr, ExprKind, Function, Program, Stmt, TypeRef, asm_operand_exprs_mut, function_type,
+    generic_type,
 };
 
 use super::SemanticDiagnostic;
@@ -400,7 +401,15 @@ fn walk_stmt_types(
             walk_block_types(body, mode, diagnostics, span);
             walk_block_types(catch_body, mode, diagnostics, span);
         }
-        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Asm { .. } | Stmt::Region(_) => {}
+        // The machine-code bytes are opaque, but an `asm` operand clause carries
+        // an ordinary expression, which may spell an `array<T, N>` type (a closure
+        // parameter annotation) exactly like any other expression.
+        Stmt::Asm { operands, .. } => {
+            for expr in asm_operand_exprs_mut(operands) {
+                walk_expr_types(expr, mode, diagnostics, span);
+            }
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
     }
 }
 
@@ -653,7 +662,17 @@ fn check_and_expand_stmt(
             check_and_expand_body(body, return_type, owner, sigs, diagnostics);
             check_and_expand_body(catch_body, return_type, owner, sigs, diagnostics);
         }
-        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Asm { .. } | Stmt::Region(_) => {}
+        // An `asm` operand clause is an ordinary expression: it can hold an array
+        // construction (nested inside a call argument, say), so it gets the same
+        // extent check and fill expansion as everything else. There is no extent
+        // context to pair it with, so `expected` is `None`, exactly as for an
+        // assignment right-hand side.
+        Stmt::Asm { operands, .. } => {
+            for expr in asm_operand_exprs_mut(operands) {
+                check_and_expand_expr(expr, None, owner, sigs, diagnostics);
+            }
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
     }
 }
 
