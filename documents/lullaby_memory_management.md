@@ -537,7 +537,35 @@ spawn/`await` and raw-pointer/`alloc`/`extern` channels still keep a factory ret
 non-promotable `fn`-returning function (a returned parameter, a heap-capturing,
 above-cap, or call-returned closure) stays **off the arena** — its returned block is
 simply never reclaimed, which is sound with no promotion. Deferred: `string`,
-deep-aggregate, and loop-edge promotion. See
+deep-aggregate, and loop-edge promotion.
+
+**Flatness is an explicit gate, not an assumption — read this before widening closure
+captures.** The memmove above is sound *only* because every survivor word is an
+immediate value. A capture word that instead holds a **pointer** breaks it twice over:
+the memmove copies the address without relocating its pointee, and the following
+`heap_next = markF + size` then reclaims that pointee, which the copied word still
+addresses — a silent use-after-free with no diagnostic anywhere. So the promotion gate
+(`returns_promotable_closure`, `crates/lullaby_ir/src/native_object_promote.rs`)
+**matches every capture class exhaustively** and admits only the 8-byte non-pointer
+scalars (`i64` cells, `f64`, `f32`); `string`, `list`, `map`, heap-struct, fat-array,
+narrow, and multi-word classes are each refused by name, with no `_` arm, so a class
+added tomorrow fails to compile rather than being admitted by default. The survivor size
+is the **summed** capture words (`promoted_survivor_words`), never a capture count, and
+the same function feeds both the admission decision and the byte count the reset emits,
+so the two can never disagree.
+
+This matters because the constraint is invisible from the widening side. Teaching
+`native_closure_scalar` about `string` — a natural, self-contained-looking change — is
+exactly what would have converted this reset into a use-after-free before the gate
+existed: verified by injection, a `string`-capturing factory was admitted as promoting
+with a 16-byte `[code_ptr][string_ptr]` survivor, and nothing in `emit_arena_reset`,
+`arena_eligible_functions`, or `function_is_locally_retaining` objected. (The R2
+carve-out compounds it: it treats a promotable factory's literals as *not* a capture
+channel because "a fresh flat closure has no way to hand a heap pointer to a third
+party", which stops being true the moment a capture can be a pointer.) With the gate the
+same factory is simply kept off the arena — sound stage-4a, no promotion — and promoting
+a widened class becomes a deliberate edit in `native_object_promote.rs`, next to the
+reasoning it has to satisfy. See
 [native_backend_contract.md](native_backend_contract.md) for the exact promoting-reset
 instruction sequence, the soundness induction, and the injection-verified teeth.
 
