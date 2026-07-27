@@ -490,7 +490,16 @@ The current native increment reclaims uniquely-owned, borrow-only `string` and
 dynamic iteration drops each owned temporary exactly once. Early exits that span
 multiple scopes (`return`, `throw`, `?`) and additional heap types (per-iteration
 `list`/`map` values, heap-payload enums, cross-call fresh temporaries) are not yet
-dropped natively; those paths leak safely until their increments land. See
+dropped natively. Those paths leak *memory-safely* — never a use-after-free — but
+the leak is not harmless: a long-running loop accumulates blocks until the fixed
+native heap's exhaustion guard traps (`0xC000001D`), which is a correct-or-refuse
+violation wherever the interpreters complete the same program. Two closure shapes
+are known-residual on exactly this footing: a **factory-returned** closure local
+(`let g = make(i)`) in a loop of an arena-denied function — `call_returned_callables`
+has no drop path — and a closure literal declared one level deeper (inside an `if`
+under the loop), which the default-deny correctly refuses and therefore never
+reclaims. Both predate the loop-body closure drop and are queued as its next
+increment. See
 [native_backend_contract.md](native_backend_contract.md) for the exact per-edge
 drop contract and its verification.
 

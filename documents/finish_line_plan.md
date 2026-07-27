@@ -164,6 +164,19 @@ into the permanent fuzzers.
     pinned. **Add a negative fixture documenting it as intended** so the suite records
     the accepted edge.
 
+## Phase 1 — queued residual (found by review, proven pre-existing)
+
+- **Closure-loop reclamation is NARROWED, NOT CLOSED** (Phase-0 reviewer, 2026-07-23).
+  Two shapes still compile natively and trap `0xC000001D` while all three interpreters
+  answer correctly — both proven pre-existing (identical on the emulated base), so not
+  regressions, but the correct-or-refuse violation class must NOT be marked closed:
+  1. a **factory-returned** closure local (`let g = make(i)`) in a loop of an
+     arena-**denied** function — `call_returned_callables` has no drop path at all;
+  2. a closure literal declared one level deeper (**inside an `if` under the loop**) —
+     correctly refused by the default-deny, therefore never reclaimed.
+  Next increment after the current wave; same teeth discipline (≥100k iterations so the
+  fixture provably traps without the fix).
+
 ## Phase 2 — Completions (the spanning-set "100%")
 
 Each design→build→adversarial-review, serialized where files collide.
