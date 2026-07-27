@@ -569,6 +569,43 @@ reasoning it has to satisfy. See
 [native_backend_contract.md](native_backend_contract.md) for the exact promoting-reset
 instruction sequence, the soundness induction, and the injection-verified teeth.
 
+**Per-iteration closure-block reclaim — the two exclusive paths.** A closure literal
+evaluated inside a loop allocates one `[code_ptr][captures…]` block per iteration, and
+exactly one mechanism reclaims it, chosen by whether the *enclosing* function got an
+arena region:
+
+* **Arena-eligible enclosing function** — the loop gets a per-iteration **sub-region**
+  and the bump-pointer rewind at each iteration edge reclaims the block in bulk. No RC
+  drop is emitted (`__lullaby_rc_free` is a no-op while arena mode is set, so one would
+  be dead code).
+* **Arena-DENIED enclosing function** (it calls a recursive function, passes the closure
+  to a higher-order sink, or otherwise fails a criterion) — the loop body emits an
+  `__lullaby_rc_dec` drop for the closure local at the fallthrough back-edge *and* the
+  `break`/`continue` early-exit edges, returning the block to the free list. The drop
+  applies **only** to a local declared directly in the loop body, bound by a fresh
+  closure **literal**, and used afterwards solely as a direct-call callee or a
+  higher-order-sink argument — the same unique-ownership + borrow-only shape the
+  `string` drop requires. Anything else gets no drop and leaks safely.
+
+Keeping the RC drop off the arena path is load-bearing, not merely an optimization: a
+survivor a promoting factory **relocated** to its region mark carries no RC header of
+its own (`emit_arena_reset` copies payload words only), so an `rc_dec` on such a block
+would decrement whatever word precedes the mark. Because the drop is emitted only in
+non-arena functions and only for literal-bound locals, no drop glue can ever reach a
+relocated block.
+
+**A call that returns a closure is a heap touch.** For the arena analysis, a `Call`
+whose static type is `fn(...)` counts as touching the heap even when every argument is
+a scalar — the callee allocated a block and handed it back. Without that, a
+`let g = make(i)` factory loop's enclosing function fails the "actually uses the heap"
+criterion, gets no region and no loop sub-region, and accumulates one promoted survivor
+per iteration until the allocator's exhaustion guard traps. For the same shape the
+retention summary treats a `fn`-typed local bound by a call to a **promotable factory**
+as a known target rather than an unknown indirect one: every value it can hold is a
+fresh flat scalar-capture closure literal whose body — like every natively lowered
+closure — is heap-free and calls no user or `extern` function, so calling it cannot
+stash a pointer past the call.
+
 ### Cycles
 
 Non-cycle-collecting RC leaks reference cycles (`a → b → a`). Lullaby mitigates

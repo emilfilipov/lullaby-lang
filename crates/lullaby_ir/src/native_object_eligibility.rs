@@ -837,7 +837,18 @@ pub(crate) fn expr_touches_heap(
         BytecodeExprKind::Binary { left, right, .. } => {
             expr_touches_heap(left, heap_aggs) || expr_touches_heap(right, heap_aggs)
         }
-        BytecodeExprKind::Call { args, .. } => args.iter().any(|a| expr_touches_heap(a, heap_aggs)),
+        // A call whose STATIC TYPE is a `fn(...)` returns a closure — i.e. a
+        // `[code_ptr][captures…]` heap block the callee allocated and handed back.
+        // Its `fn` type is not a `type_is_heap` type and its ARGUMENTS may be pure
+        // scalars, so without this arm a `let g = make(i)` factory call is invisible
+        // to the escape analysis: `body_touches_heap` stays false, the caller fails
+        // arena criterion 2, gets no function region and no per-iteration loop
+        // sub-region, and a factory-calling loop accumulates one promoted survivor
+        // per iteration until the heap-exhaustion guard traps. Treating such a call
+        // as heap-touching is what earns that loop its sub-region.
+        BytecodeExprKind::Call { args, .. } => {
+            expr.ty.is_function() || args.iter().any(|a| expr_touches_heap(a, heap_aggs))
+        }
         BytecodeExprKind::Field { target, .. } => expr_touches_heap(target, heap_aggs),
     }
 }
@@ -1131,6 +1142,10 @@ pub(crate) fn arena_eligible_functions(
     // pre-poisoned; one reverse-topological sweep, no fixpoint. See
     // `native_object_retain.rs`.
     let summary = retaining_summary(module, &heap_aggs, closure_layouts);
+    // The module's promotable closure factories — a `fn`-typed local bound by a call to
+    // one holds a known native closure, not an unknown indirect target (see
+    // `fn_typed_binding_names`).
+    let promotable_factories = promotable_factory_names(module, closure_layouts);
     let module_fns: std::collections::HashSet<&str> =
         module.functions.iter().map(|f| f.name.as_str()).collect();
     let extern_fns: std::collections::HashSet<&str> =
@@ -1171,7 +1186,13 @@ pub(crate) fn arena_eligible_functions(
         // closure) call, or a module callee that is (or transitively reaches) retaining
         // keeps the function off the arena (default-deny). This subsumes the old leaf
         // test — a leaf calls only builtins, which are always non-retaining.
-        if !all_callees_non_retaining(function, &module_fns, &extern_fns, &summary) {
+        if !all_callees_non_retaining(
+            function,
+            &module_fns,
+            &extern_fns,
+            &summary,
+            &promotable_factories,
+        ) {
             continue;
         }
         // (4) No UNBOUNDED heap loop — every heap-touching loop confines its

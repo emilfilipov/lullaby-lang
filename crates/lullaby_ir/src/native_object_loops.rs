@@ -607,6 +607,29 @@ pub(crate) fn collect_loop_body_drops(
             continue;
         };
         let slot = local.slot;
+        // A CLOSURE local (`let f fn(i64) -> i64 = fn x i64 -> x + n`) declared
+        // directly in this loop body, bound by a fresh literal and confined to the
+        // iteration (only ever a direct-call callee or a higher-order-sink argument —
+        // `loop_droppable_closures`, computed in `NativeCtx::plan`). Its
+        // `[code_ptr][captures…]` block is a fresh `__lullaby_alloc` allocation with a
+        // real RC header and refcount 1, uniquely owned by this iteration, so an
+        // `rc_dec` at the iteration edges returns it to the free list — the same drop
+        // shape as a `string` local.
+        //
+        // Restricted to a NON-ARENA function on purpose. In an arena function the
+        // per-iteration sub-region rewind already reclaims the block (and
+        // `__lullaby_rc_free` is a no-op there, so the drop would be dead code), and
+        // more importantly a block a promoting factory RELOCATED to its region mark
+        // has no RC header of its own — `emit_arena_reset` copies only the payload
+        // words — so an `rc_dec` reading `[ptr - 8]` would read whatever preceded the
+        // mark. Keeping the drop off the arena path means no drop glue ever reads a
+        // relocated block's header, which is exactly the invariant the promoting reset
+        // relies on. The defect this closes is a leak in arena-DENIED functions, so
+        // the restriction costs nothing.
+        if !ctx.is_arena && ctx.loop_droppable_closures.contains(name.as_str()) {
+            drops.push((idx, slot, RC_DEC_SYMBOL));
+            continue;
+        }
         // A `struct` local with `string` field(s): the recursive drop-glue for a
         // heap-field aggregate. Each owned string field is reclaimed by an `rc_dec`
         // (one per field) at the iteration edges — the same drop shape as a plain
@@ -1252,5 +1275,127 @@ fn stmt_rebinds_var(stmt: &BytecodeInstruction, name: &str) -> bool {
         | BytecodeInstruction::Expr(_)
         | BytecodeInstruction::Asm { .. }
         | BytecodeInstruction::Throw { .. } => false,
+    }
+}
+
+/// The closure-literal locals of `function` that a loop body may DROP at its
+/// iteration edges: each is declared **directly** in some loop body (`while` / `loop`
+/// / `for`), bound by a fresh `Closure { id }` literal, and used after its `let` only
+/// as a direct-call callee or a higher-order-sink argument
+/// ([`closure_local_confined_to_iteration`]) — so the block it allocates is uniquely
+/// owned by the iteration and dead at every iteration edge.
+///
+/// Computed once in `NativeCtx::plan` (where the module's `hof_index` is in scope) and
+/// consulted by [`collect_loop_body_drops`]. DEFAULT-DENY on every axis: a name is
+/// admitted only if EVERY declaration of it in the function is a qualifying loop-body
+/// declaration, so a closure local declared once in a loop and once outside — which
+/// shares the one frame slot the name is planned to — is never dropped.
+pub(crate) fn loop_droppable_closure_locals(
+    function: &BytecodeFunction,
+    closure_locals: &HashMap<String, usize>,
+    hof_index: &HashMap<String, Vec<HofParam>>,
+) -> std::collections::HashSet<String> {
+    let mut admitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut refused: std::collections::HashSet<String> = std::collections::HashSet::new();
+    scan_droppable_closures(
+        &function.instructions,
+        false,
+        closure_locals,
+        hof_index,
+        &mut admitted,
+        &mut refused,
+    );
+    admitted.retain(|n| !refused.contains(n));
+    admitted
+}
+
+/// Walk `body`, recording each closure-literal local declaration as admitted or
+/// refused. `in_loop_body` is `true` exactly when `body` IS the statement list of a
+/// loop, so a declaration nested inside an `if`/`match`/`try` under the loop is
+/// refused (its `let` is not a direct child of the body the drop is emitted for).
+fn scan_droppable_closures(
+    body: &[BytecodeInstruction],
+    in_loop_body: bool,
+    closure_locals: &HashMap<String, usize>,
+    hof_index: &HashMap<String, Vec<HofParam>>,
+    admitted: &mut std::collections::HashSet<String>,
+    refused: &mut std::collections::HashSet<String>,
+) {
+    for (idx, stmt) in body.iter().enumerate() {
+        if let BytecodeInstruction::Let { name, value, .. } = stmt
+            && closure_locals.contains_key(name)
+        {
+            let ok = in_loop_body
+                && matches!(value.kind, BytecodeExprKind::Closure { .. })
+                && closure_local_confined_to_iteration(&body[idx + 1..], name, hof_index);
+            if ok {
+                admitted.insert(name.clone());
+            } else {
+                refused.insert(name.clone());
+            }
+        }
+        // Recurse, marking only a LOOP's own statement list as a loop body.
+        match stmt {
+            BytecodeInstruction::While { body: b, .. }
+            | BytecodeInstruction::For { body: b, .. }
+            | BytecodeInstruction::Loop { body: b, .. } => {
+                scan_droppable_closures(b, true, closure_locals, hof_index, admitted, refused)
+            }
+            BytecodeInstruction::RegionBlock { body: b, .. } => {
+                scan_droppable_closures(b, false, closure_locals, hof_index, admitted, refused)
+            }
+            BytecodeInstruction::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    scan_droppable_closures(
+                        &branch.body,
+                        false,
+                        closure_locals,
+                        hof_index,
+                        admitted,
+                        refused,
+                    );
+                }
+                scan_droppable_closures(
+                    else_body,
+                    false,
+                    closure_locals,
+                    hof_index,
+                    admitted,
+                    refused,
+                );
+            }
+            BytecodeInstruction::Match { arms, .. } => {
+                for arm in arms {
+                    scan_droppable_closures(
+                        &arm.body,
+                        false,
+                        closure_locals,
+                        hof_index,
+                        admitted,
+                        refused,
+                    );
+                }
+            }
+            BytecodeInstruction::Try {
+                body: b,
+                catch_body,
+                ..
+            } => {
+                scan_droppable_closures(b, false, closure_locals, hof_index, admitted, refused);
+                scan_droppable_closures(
+                    catch_body,
+                    false,
+                    closure_locals,
+                    hof_index,
+                    admitted,
+                    refused,
+                );
+            }
+            _ => {}
+        }
     }
 }

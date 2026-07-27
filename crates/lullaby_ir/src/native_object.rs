@@ -357,6 +357,15 @@ pub(crate) struct NativeCtx<'a> {
     /// heap block. Populated by `collect_native_locals` from a `let` whose value is
     /// a `Closure { id }` literal.
     closure_locals: HashMap<String, usize>,
+    /// The subset of `closure_locals` a loop body may DROP at its iteration edges: a
+    /// closure local declared directly in a loop body, bound by a fresh literal, and
+    /// used afterwards only as a direct-call callee or a higher-order-sink argument
+    /// (see `loop_droppable_closure_locals`). Read by `collect_loop_body_drops`, which
+    /// emits an `__lullaby_rc_dec` for each at the fallthrough and early-exit edges —
+    /// **only in a non-arena function**, where nothing else reclaims the per-iteration
+    /// closure block. Empty for every function with no such local, keeping existing
+    /// codegen byte-identical.
+    loop_droppable_closures: std::collections::HashSet<String>,
     /// Call-only `fn(...)`-typed **parameters** of this function (the callee side of a
     /// non-escaping higher-order call): parameter name -> its native call signature
     /// (parameter + return scalar classes). The parameter's frame slot holds a
@@ -780,6 +789,11 @@ impl<'a> NativeCtx<'a> {
                 ));
                 aggs
             },
+            loop_droppable_closures: loop_droppable_closure_locals(
+                function,
+                &closure_locals,
+                hof_index,
+            ),
             closure_locals,
             fn_param_callables,
             call_returned_callables,

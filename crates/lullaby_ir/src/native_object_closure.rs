@@ -386,6 +386,22 @@ pub(crate) fn call_returned_callable_ok(function: &BytecodeFunction, name: &str)
     body_closure_use_ok(&function.instructions, name, &HashMap::new(), false)
 }
 
+/// Whether every use of the closure-literal local `name` in `rest` — the statements
+/// that FOLLOW its `let` inside the same loop body — keeps it confined to the
+/// iteration: it is only the callee of a direct call `name(args)` or a bare argument
+/// at a **higher-order sink** (`apply(name, x)`). Checked with
+/// `allow_return_escape = false`, so a bare `return name` / bare `name` value read is
+/// refused — those would let the block outlive the iteration edge at which the
+/// loop-body drop frees it (see `collect_loop_body_drops`). Default-deny: anything
+/// else (a store, a reassignment, a non-sink argument position) fails.
+pub(crate) fn closure_local_confined_to_iteration(
+    rest: &[BytecodeInstruction],
+    name: &str,
+    hof_index: &HashMap<String, Vec<HofParam>>,
+) -> bool {
+    body_closure_use_ok(rest, name, hof_index, false)
+}
+
 fn body_closure_use_ok(
     body: &[BytecodeInstruction],
     name: &str,
