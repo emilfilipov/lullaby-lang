@@ -834,12 +834,18 @@ impl<'a> NativeCtx<'a> {
 
     /// The survivor block size in BYTES to PROMOTE at a return edge whose value is
     /// `expr`, when this function is a promoting closure factory — or `None` when
-    /// `expr` does not resolve to a closure literal whose flat scalar-capture layout is
-    /// known. The block is `1 + captures` words (a code pointer plus one raw word per
-    /// scalar capture); the promoting reset relocates exactly these words to the region
-    /// mark and sets `heap_next = mark + size`. `expr` is a direct `Closure { id }`
-    /// literal or a local bound to one (`closure_locals`), matching the return edges
+    /// `expr` does not resolve to a closure literal with a **promotable** layout. The
+    /// block is a code pointer plus one raw word per capture; the promoting reset
+    /// relocates exactly these words to the region mark and sets
+    /// `heap_next = mark + size`. `expr` is a direct `Closure { id }` literal or a
+    /// local bound to one (`closure_locals`), matching the return edges
     /// `returns_promotable_closure` admits.
+    ///
+    /// The size comes from [`promoted_survivor_words`] — the same function the
+    /// admission gate uses — so the bytes moved here can never disagree with what was
+    /// sanctioned. That also makes this `None` (a hard emit error, `L0339`) rather than
+    /// a wrong size for any layout carrying a pointer word or a non-8-byte capture
+    /// class, even if such a layout somehow reached a promoting return edge.
     fn promoted_survivor_bytes(&self, expr: &BytecodeExpr) -> Option<i32> {
         let id = match &expr.kind {
             BytecodeExprKind::Closure { id } => *id,
@@ -847,7 +853,7 @@ impl<'a> NativeCtx<'a> {
             _ => return None,
         };
         let layout = self.closure_layouts.get(&id)?;
-        let words = 1 + layout.captures.len();
+        let words = promoted_survivor_words(layout)?;
         Some((words as i32) * 8)
     }
 }
@@ -1002,6 +1008,10 @@ pub(crate) use arena::*;
 #[path = "native_object_closure.rs"]
 mod closure;
 pub(crate) use closure::*;
+
+#[path = "native_object_promote.rs"]
+mod promote;
+pub(crate) use promote::*;
 
 #[path = "native_object_closure_ctx.rs"]
 mod closure_ctx;

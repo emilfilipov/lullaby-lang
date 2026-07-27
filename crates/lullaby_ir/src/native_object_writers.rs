@@ -1508,3 +1508,10 @@ mod native_object_heapbox_tests;
 #[cfg(test)]
 #[path = "native_object_retain_tests.rs"]
 mod native_object_retain_tests;
+
+// The arena stage-4b promotion gate: which capture classes may appear in a relocated
+// survivor block, and the summed-word size the reset moves. Own file for the size-cap
+// reason.
+#[cfg(test)]
+#[path = "native_object_promote_tests.rs"]
+mod native_object_promote_tests;

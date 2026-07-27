@@ -1708,11 +1708,41 @@ small enough to relocate (≤ 8 words, `1 + captures`) is now **arena-eligible a
 promoting**: `arena_eligible_functions` criterion 1b admits it (in place of refusing
 every `fn` return), and its return-edge reset PROMOTES the survivor.
 
+**The flatness gate (`native_object_promote.rs` — read this before widening closure
+captures).** "Flat, scalar-capture" is an **explicit, default-deny admission test**, not
+a property inherited from whatever `native_closure_scalar` happens to accept.
+`promoted_capture_words` matches the capture class **exhaustively, with no `_` arm** and
+admits only the immediate 8-byte scalars — `NativeType::I64` (integer cells), `F64`,
+`F32` — refusing every other class by name for one of two reasons:
+
+* **pointer-carrying** (`String`, `HeapStruct`, `List`, `Map`, `FatArray`) — one word
+  wide, so a *count*-based check would wave them through, but the word is an ADDRESS.
+  Step 2 below copies the address without relocating its pointee and step 4 then
+  reclaims that pointee, which the copied word still addresses: a silent
+  use-after-free, no diagnostic, on every tier-native run.
+* **not a single 8-byte value word** (`Void`, `Narrow`, `Struct`, `Array`, `Enum`) — the
+  env stores one raw word per capture, so these have no promotable representation at
+  all.
+
+`promoted_survivor_words` then **sums** those words (`1` for the code pointer plus each
+capture's words — never `captures.len()`) and applies `MAX_PROMOTED_CLOSURE_WORDS`
+inclusively to the sum. Both the admission side (`returns_promotable_closure`) and the
+emit side (`NativeCtx::promoted_survivor_bytes`) call that one function, so the bytes the
+reset moves can never exceed what the gate sanctioned. Because the match is exhaustive, a
+class added to `NativeType` is a **compile error** here, and a class newly admitted by
+`native_closure_scalar` is refused at runtime-of-the-compiler — the factory falls back to
+stage-4a (off the arena, block never reclaimed, sound), never to a UAF. Verified by
+injection: with `native_closure_scalar` temporarily taught `string`, the pre-gate
+count-based check admitted a `string`-capturing factory as promoting with a 16-byte
+`[code_ptr][string_ptr]` survivor and `arena_eligible_functions` put it on the arena;
+with the gate the same factory yields an empty arena set. Promoting a widened class is
+therefore a deliberate edit *in this file*, beside the reasoning it must satisfy.
+
 **The promoting reset (`emit_arena_reset`, exact instruction order).** On a return edge
 `lower_return_value` runs first, leaving the survivor's `[code_ptr][captures…]` block
 **payload pointer in `rax`**; then the reset (with a per-return-**site** survivor
-`size = 8·(1 + captures)`, a compile-time immediate from the returned closure's
-`ClosureLayout`):
+`size = 8·(1 + Σ capture words)`, a compile-time immediate from the returned closure's
+`ClosureLayout` via `promoted_survivor_words`):
 
 1. `mov r10, [rbp - mark]` — `r10 = markF`, the relocation dest.
 2. for `k` in `0 .. size/8`: `mov rdx, [rax + 8k]` ; `mov [r10 + 8k], rdx` — copy each
