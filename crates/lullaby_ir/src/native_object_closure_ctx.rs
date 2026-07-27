@@ -73,6 +73,8 @@ impl<'a> NativeCtx<'a> {
             arena_buffers: HashMap::new(),
             heap_aggregates: std::collections::HashSet::new(),
             closure_locals: HashMap::new(),
+            // No closure locals ⇒ no loop-body-droppable closure locals either.
+            loop_droppable_closures: std::collections::HashSet::new(),
             // A synthesized closure body is a scalar leaf: it takes no fn-typed
             // parameters (a nested closure passed to it would be rejected earlier), so
             // it never calls through a higher-order parameter, and its heap-free,

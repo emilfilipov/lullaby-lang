@@ -475,3 +475,109 @@ fn main -> i64
     // g(10,5) = 2*10 + 3*5 = 35 > 30 every iteration → total = 8000.
     assert_four_tiers("promote_float", source, 8000);
 }
+
+// -- Per-iteration closure-block reclamation: the LOOP-BOUNDEDNESS pins ---------
+//
+// Each fixture below is sized so it CANNOT pass without the reclamation it names:
+// the native heap region is 1 MiB and a scalar-capture closure block costs
+// 16 (RC header) + 8 (code ptr) + 8 (capture) = 32 bytes, so ≥ 32 768 unreclaimed
+// blocks exhaust it and the allocator's guard traps (`0xC000001D`). Every fixture
+// runs ≥ 100 000 iterations — a ~3.2 MB leak, > 3× the region — so a regression in
+// either reclaim path turns the test from "native == interpreters" into a crash,
+// never into a silently-passing weaker claim.
+//
+// This sizing is the lesson of `native_promoting_factory_reclaims_scratch_bounded_heap`
+// above: at 20 000 iterations its 16-byte survivors total only ~320 KB, so it passed
+// with AND without the loop reclamation it appeared to prove. Do not size a
+// bounded-heap fixture below the region.
+
+/// **Arena-DENIED creator, closure literal per iteration.** `main` calls the recursive
+/// `fib`, so the retention summary pre-poisons that callee and `main` is refused the
+/// arena (criterion 3) — no function region, no per-iteration sub-region. The only
+/// thing that can reclaim the closure block allocated on each of the 100 000
+/// iterations is the loop-body RC drop (`__lullaby_rc_dec` on the fallthrough and
+/// early-exit edges). Without it the 3.2 MB of blocks exhaust the 1 MiB region and the
+/// exe traps instead of agreeing with the interpreters.
+#[test]
+fn native_loop_closure_dropped_in_arena_denied_function() {
+    let source = "\
+fn fib k i64 -> i64
+    if k < 2
+        return k
+    fib(k - 1) + fib(k - 2)
+fn main -> i64
+    let n i64 = 2
+    let total i64 = 0
+    for i from 0 to 100000
+        let add_n fn(i64) -> i64 = fn x i64 -> x + n
+        total = total + add_n(1)
+    total % 7 + fib(5)
+";
+    assert_native_matches_interp("loop_closure_drop_denied", source);
+}
+
+/// The same leak through the shipped stage-3a **higher-order sink**: the closure is
+/// passed to `apply(add_n, 1)` rather than called directly. Passing it to a HOF makes
+/// `apply` an indirect-call (retaining) callee, which independently denies `main` the
+/// arena — so this is a DOCUMENTED-SUPPORTED shape that reaches the same RC path. The
+/// drop's use predicate must therefore accept a higher-order-sink argument, not only a
+/// direct-call callee.
+#[test]
+fn native_loop_closure_dropped_through_hof_sink() {
+    let source = "\
+fn apply f fn(i64) -> i64 v i64 -> i64
+    f(v)
+fn main -> i64
+    let n i64 = 2
+    let total i64 = 0
+    for i from 0 to 100000
+        let add_n fn(i64) -> i64 = fn x i64 -> x + n
+        total = total + apply(add_n, 1)
+    total % 7
+";
+    assert_native_matches_interp("loop_closure_drop_hof", source);
+}
+
+/// **Arena-ELIGIBLE creator — the no-double-free control.** Identical loop shape, but
+/// `main`'s only callee is the literal-bound closure itself, so `main` IS arena and its
+/// loop gets a per-iteration sub-region. The RC drop is deliberately NOT emitted here
+/// (see `collect_loop_body_drops`): the sub-region rewind reclaims the block, and
+/// `__lullaby_rc_free` is a no-op in arena mode anyway. Agreement with the
+/// interpreters at 100 000 iterations pins that the arena path still reclaims and that
+/// adding the RC drop to the denied path did not introduce a second free here.
+#[test]
+fn native_loop_closure_arena_eligible_still_bounded() {
+    let source = "\
+fn main -> i64
+    let n i64 = 2
+    let total i64 = 0
+    for i from 0 to 100000
+        let add_n fn(i64) -> i64 = fn x i64 -> x + n
+        total = total + add_n(1)
+    total % 7
+";
+    assert_native_matches_interp("loop_closure_arena_ok", source);
+}
+
+/// **A call that RETURNS a closure is a heap touch.** `main`'s loop binds the result of
+/// a promoting factory 200 000 times. The factory promotes a 16-byte survivor into the
+/// caller's region on every call, so 3.2 MB accumulates unless `main` itself is an
+/// arena region whose loop sub-region rewinds at each iteration edge. Two things must
+/// hold for that: `expr_touches_heap` must see a `fn`-typed CALL as heap-touching
+/// (else `main` fails arena criterion 2), and the retention summary must not treat
+/// `g`, bound by a promotable-factory call, as an unknown indirect target (else `main`
+/// fails criterion 3). Removing either makes this trap.
+#[test]
+fn native_factory_call_loop_is_heap_bounded() {
+    let source = "\
+fn make a i64 -> fn(i64) -> i64
+    fn x i64 -> x + a
+fn main -> i64
+    let total i64 = 0
+    for i from 0 to 200000
+        let g fn(i64) -> i64 = make(i)
+        total = total + g(1)
+    total % 7
+";
+    assert_native_matches_interp("factory_loop_bounded", source);
+}

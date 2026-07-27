@@ -114,8 +114,9 @@ pub(crate) fn retaining_summary(
     // module-function callee edges (the only cross-function R4 dependency).
     let mut local_retaining: HashMap<&str, bool> = HashMap::new();
     let mut callees: HashMap<&str, Vec<&str>> = HashMap::new();
+    let promotable_factories = promotable_factory_names(module, closure_layouts);
     for f in &module.functions {
-        let fn_typed = fn_typed_binding_names(f);
+        let fn_typed = fn_typed_binding_names(f, &promotable_factories);
         let calls = analyze_calls(&f.instructions, &module_fns, &extern_fns, &fn_typed);
         let local =
             function_is_locally_retaining(f, module, heap_aggs, &async_fns, closure_layouts)
@@ -197,8 +198,9 @@ pub(crate) fn all_callees_non_retaining(
     module_fns: &HashSet<&str>,
     extern_fns: &HashSet<&str>,
     summary: &HashMap<String, bool>,
+    promotable_factories: &HashSet<String>,
 ) -> bool {
-    let fn_typed = fn_typed_binding_names(function);
+    let fn_typed = fn_typed_binding_names(function, promotable_factories);
     !body_has_retaining_callee(
         &function.instructions,
         module_fns,
@@ -432,30 +434,99 @@ fn expr_has_pointer(expr: &BytecodeExpr) -> bool {
 /// `body_calls_user` leaf test also ignored a closure-local call), which the
 /// closure-per-iteration arena reclaim (`native_closure_reclaim`) depends on: denying it
 /// the arena would leak a closure block each iteration and exhaust the heap.
-fn fn_typed_binding_names(f: &BytecodeFunction) -> HashSet<String> {
+///
+/// A `let g fn(...) = make(i)` bound by a **call to a promotable closure factory** of
+/// this module (`promotable_factories`, [`promotable_factory_names`]) is excluded for
+/// the SAME reason. Every return edge of such a factory is a fresh, flat,
+/// scalar-capture closure LITERAL with a resolved [`ClosureLayout`]
+/// ([`returns_promotable_closure`]), so the only values `g` can hold are exactly the
+/// same kind of known native closure the literal case admits — and native emission is
+/// whole-module, so every one of those bodies has been lowered under the Stage-2 rules
+/// (heap-free, calls no user/`extern` function) or the module would not have compiled
+/// natively at all. Calling `g` therefore cannot stash a heap pointer past the call.
+/// Without this exclusion a factory-calling loop's enclosing function is denied the
+/// arena, gets no per-iteration sub-region, and accumulates one promoted survivor per
+/// iteration until the allocator's exhaustion guard traps. Default-deny is preserved:
+/// a `fn`-typed local bound by anything else (a non-promotable factory call, a call
+/// through a `fn` parameter, a field/index read) stays an unknown indirect target — and
+/// so does a factory-bound local that is ever REASSIGNED ([`assigned_names`]), since
+/// `g = f` can rebind it to a caller-supplied `fn` parameter whose target is unknown.
+/// (`g = f` is expressible and runs on the interpreters, so the guard is not
+/// hypothetical; a natively compiled function is separately refused by
+/// `call_returned_callable_ok`, but this summary also covers functions that never
+/// reach native lowering.)
+fn fn_typed_binding_names(
+    f: &BytecodeFunction,
+    promotable_factories: &HashSet<String>,
+) -> HashSet<String> {
     let mut names = HashSet::new();
     for p in &f.params {
         if p.ty.is_function() {
             names.insert(p.name.clone());
         }
     }
-    collect_fn_typed_lets(&f.instructions, &mut names);
+    let mut assigned = HashSet::new();
+    assigned_names(&f.instructions, &mut assigned);
+    collect_fn_typed_lets(&f.instructions, promotable_factories, &assigned, &mut names);
     names
 }
 
-fn collect_fn_typed_lets(body: &[BytecodeInstruction], out: &mut HashSet<String>) {
+/// Every name that is the target of an `Assign` anywhere in `body` (including nested
+/// statement bodies). Used to refuse the promotable-factory exclusion for a `fn`-typed
+/// local that is rebound after its `let`.
+fn assigned_names(body: &[BytecodeInstruction], out: &mut HashSet<String>) {
+    for instruction in body {
+        if let BytecodeInstruction::Assign { name, .. } = instruction {
+            out.insert(name.clone());
+        }
+        fold_instruction_bodies(instruction, &mut |b| assigned_names(b, out));
+    }
+}
+
+/// The names of every module function that is a **promotable closure factory** — the
+/// factories whose call result is a known native closure, so binding one to a `fn`-typed
+/// local does not make a call through that local an unknown indirect target (see
+/// [`fn_typed_binding_names`]).
+pub(crate) fn promotable_factory_names(
+    module: &BytecodeModule,
+    closure_layouts: &HashMap<usize, ClosureLayout>,
+) -> HashSet<String> {
+    module
+        .functions
+        .iter()
+        .filter(|f| returns_promotable_closure(f, closure_layouts))
+        .map(|f| f.name.clone())
+        .collect()
+}
+
+fn collect_fn_typed_lets(
+    body: &[BytecodeInstruction],
+    promotable_factories: &HashSet<String>,
+    assigned: &HashSet<String>,
+    out: &mut HashSet<String>,
+) {
     for instruction in body {
         if let BytecodeInstruction::Let {
             name, ty, value, ..
         } = instruction
             && ty.is_function()
-            // A closure LITERAL binding is a known non-escaping target (excluded); any
-            // other fn-typed binding is an unknown indirect target (denied).
+            // A closure LITERAL binding, or a NEVER-REASSIGNED local bound by a call to
+            // a promotable closure factory of this module, is a known non-escaping
+            // target (excluded); any other fn-typed binding is an unknown indirect
+            // target (denied).
             && !matches!(value.kind, BytecodeExprKind::Closure { .. })
+            && !matches!(
+                &value.kind,
+                BytecodeExprKind::Call { name: callee, .. }
+                    if promotable_factories.contains(callee.as_str())
+                        && !assigned.contains(name.as_str())
+            )
         {
             out.insert(name.clone());
         }
-        fold_instruction_bodies(instruction, &mut |body| collect_fn_typed_lets(body, out));
+        fold_instruction_bodies(instruction, &mut |body| {
+            collect_fn_typed_lets(body, promotable_factories, assigned, out)
+        });
     }
 }
 
