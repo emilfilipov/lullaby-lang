@@ -164,6 +164,30 @@ into the permanent fuzzers.
     pinned. **Add a negative fixture documenting it as intended** so the suite records
     the accepted edge.
 
+## Wave status (2026-07-23) — RESUME HERE
+
+**Merged + integrated-gate-verified on main `0e66e2b`** (`cargo test --all` exit 0: CLI
+609, `lullaby_ir` 531, semantics 308, 53 actor tests, 0 failures; clippy `-D warnings` 0;
+fmt 0): the asm-operand class fix (`cefff8a`), the promotion flatness gate (`5a37349`),
+and the closure-loop leak fixes (`b3af6c1`).
+
+**Five lanes were killed mid-flight by a session limit.** All work is preserved as a WIP
+commit on each branch; NOTHING is lost. Each needs *resuming*, then its adversarial
+review, before merge. Resume by sending the branch's agent a message (its transcript is
+intact) or re-dispatching against the committed WIP.
+
+| Branch (worktree) | Task | Base | WIP size | State when killed |
+|---|---|---|---|---|
+| `agent-ad2d699021451a1d6` | `no-runtime` import contagion + cross-module span misattribution | `cefff8a` | 20 files, +1197 | waiting on its final suite; new `crates/lullaby_parser/src/origins.rs` |
+| `agent-a9c31bd061eba8075` | `interrupt fn` / `naked fn` (§6 design) | `cefff8a` | 50 files, +2756 | strengthening a CLI assertion to a positive `compiled <name>` check |
+| `agent-ad7ac0ea16b3f6ac7` | actor back-pressure + `try_tell` + `spawn bound N` | `0e66e2b` | 17 files, +1148 | writing docs §2.1/§2.2/§2.5 |
+| `agent-a2e9b7e1bc51809f1` | multi-level HOF pass-onward | `0e66e2b` | 11 files, +470 | writing the escape probes |
+| (sweep #3, no worktree) | silent-skip construct×walker hunt | — | none | barely started; re-dispatch fresh |
+
+**Two lanes are based on `cefff8a`** (pre-Phase-0) — rebase them onto current main before
+review, as was done for Phase 0 (expect a `repository_map.md` conflict; resolve by
+grafting both sides' entries, then verify both survive).
+
 ## Phase 1 — queued residual (found by review, proven pre-existing)
 
 - **Closure-loop reclamation is NARROWED, NOT CLOSED** (Phase-0 reviewer, 2026-07-23).
