@@ -126,6 +126,7 @@ pub(crate) fn native_signature_eligibility(
     function: &BytecodeFunction,
     structs: &[IrStructDef],
     enums: &[IrEnumDef],
+    hof_index: &HashMap<String, Vec<HofParam>>,
 ) -> Result<(), String> {
     // Refuse a non-native RETURN type (arity no longer gates — every effective argument
     // past the fourth spills to the stack). A VOID return skips the resolver (which
@@ -147,20 +148,23 @@ pub(crate) fn native_signature_eligibility(
     }
 
     // A `fn(...)`-typed parameter is native-eligible ONLY as a **non-escaping
-    // higher-order parameter**: an all-native-scalar fn signature used call-only in
-    // the body (see `hof_params`). Such a parameter is a single pointer word to a
-    // closure env block a caller passes in; it is invoked through the block and never
-    // escapes, so a caller's capture environment stays valid for the whole call. A fn
-    // parameter that is stored, returned, reassigned, passed onward, or has a
-    // non-scalar signature is refused here so the function skips cleanly (`L0339`)
-    // rather than risking a dangling capture.
-    let hof = hof_params(function);
+    // higher-order sink**: an all-native-scalar fn signature whose every use in the
+    // body is a direct call or a bare pass onward to another function's sink position
+    // (see `build_hof_index`, which resolves that mutually recursive property across
+    // the whole module). Such a parameter is a single pointer word to a closure env
+    // block a caller passes in; every use is dynamically nested inside the creating
+    // call, so the creator's capture environment stays valid for the whole chain. A fn
+    // parameter that is stored, returned, reassigned, read as a value, passed to a
+    // NON-sink position, or has a non-scalar signature is refused here so the function
+    // skips cleanly (`L0339`) rather than risking a dangling capture.
+    let hof = hof_params_of(hof_index, &function.name);
     for param in &function.params {
         if param.ty.is_function() {
             if !hof.iter().any(|h| h.name == param.name) {
                 return Err(format!(
-                    "fn-typed parameter `{}` is not a call-only native-scalar higher-order \
-                     parameter; a stored/returned/onward-passed fn value is deferred",
+                    "fn-typed parameter `{}` is not a non-escaping native-scalar higher-order \
+                     sink; a stored/returned/reassigned/bare-read fn value, or one passed to a \
+                     non-sink position, is deferred",
                     param.name
                 ));
             }

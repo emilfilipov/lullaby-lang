@@ -371,9 +371,10 @@ pub(crate) struct NativeCtx<'a> {
     /// (parameter + return scalar classes). The parameter's frame slot holds a
     /// closure `[code_ptr][captures…]` block pointer a caller passed in; a `Call`
     /// whose callee name is here is an indirect closure-style call through it (env
-    /// pointer in `rcx`, code pointer at word 0). Populated by `plan` from
-    /// [`hof_params`]. Empty for a function with no higher-order parameters, which
-    /// keeps every existing function's codegen byte-identical.
+    /// pointer in `rcx`, code pointer at word 0). Populated by `plan` from this
+    /// function's entry in the module-wide sink index ([`build_hof_index`]). Empty for
+    /// a function with no higher-order parameters, which keeps every existing
+    /// function's codegen byte-identical.
     fn_param_callables: HashMap<String, ClosureCallSig>,
     /// Call-returned callable locals of this function: local name -> its native call
     /// signature. A `let g fn(...) = make_adder(5)` binds `g` to a closure block a
@@ -444,16 +445,20 @@ impl<'a> NativeCtx<'a> {
         let mut call_returned_callables: HashMap<String, ClosureCallSig> = HashMap::new();
         let mut next_slot: i32 = 0;
 
-        // Call-only fn-typed parameters of THIS function (the callee side of a
-        // non-escaping higher-order call): each holds a closure env-block pointer
-        // passed in by a caller, and is invoked through it. Their scalar-classes drive
-        // the indirect-call ABI. A fn parameter NOT in this set (not call-only, or a
-        // non-scalar signature) is refused below, so the function skips cleanly rather
-        // than treating a possibly-escaping fn value as a plain pointer word.
-        let fn_param_callables: HashMap<String, ClosureCallSig> = hof_params(function)
-            .into_iter()
-            .map(|h| (h.name, h.sig))
-            .collect();
+        // Non-escaping fn-typed SINK parameters of THIS function (the callee side of a
+        // higher-order call): each holds a closure env-block pointer passed in by a
+        // caller, and is invoked through it — or handed onward to a further sink. Their
+        // scalar classes drive the indirect-call ABI. Read from the module-wide sweep
+        // (`build_hof_index`) rather than recomputed, so the caller's escape check and
+        // the callee's lowering always agree about which positions are sinks. A fn
+        // parameter NOT in this set (escaping, or a non-scalar signature) is refused
+        // below, so the function skips cleanly rather than treating a possibly-escaping
+        // fn value as a plain pointer word.
+        let fn_param_callables: HashMap<String, ClosureCallSig> =
+            hof_params_of(hof_index, &function.name)
+                .iter()
+                .map(|h| (h.name.clone(), h.sig.clone()))
+                .collect();
 
         // Return classification: an aggregate return is written through a hidden
         // pointer passed in the first integer-argument register (Win64 `rcx`),
@@ -490,8 +495,9 @@ impl<'a> NativeCtx<'a> {
             let native = if param.ty.is_function() {
                 if !fn_param_callables.contains_key(&param.name) {
                     return Err(format!(
-                        "fn-typed parameter `{}` is not a call-only native-scalar higher-order \
-                         parameter; a stored/returned/onward-passed fn value is deferred",
+                        "fn-typed parameter `{}` is not a non-escaping native-scalar \
+                         higher-order sink; a stored/returned/reassigned/bare-read fn value, \
+                         or one passed to a non-sink position, is deferred",
                         param.name
                     ));
                 }

@@ -1,0 +1,11 @@
+fn mid f fn(i64) -> i64 v i64 -> i64
+    let saved fn(i64) -> i64 = f
+    saved(v)
+
+fn outer f fn(i64) -> i64 v i64 -> i64
+    mid(f, v)
+
+fn main -> i64
+    let n i64 = 6
+    let c fn(i64) -> i64 = fn x i64 -> x + n
+    outer(c, 30)
