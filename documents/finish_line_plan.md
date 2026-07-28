@@ -188,6 +188,41 @@ intact) or re-dispatching against the committed WIP.
 review, as was done for Phase 0 (expect a `repository_map.md` conflict; resolve by
 grafting both sides' entries, then verify both survive).
 
+## Sweep #3 (2026-07-24) — SIX FINDINGS, one new root-cause shape
+
+Aimed at the *pattern* rather than a subsystem, and it paid: after sweep #2 hardened
+`Stmt::Asm`, **every AST/IR/bytecode enum VARIANT now descends correctly** — the
+productive axis was a different shape entirely.
+
+**The new shape: a child-bearing struct FIELD silently dropped by `..`.**
+`Stmt::Assign`'s `path: Vec<Place>`, where `Place::Index(Expr)` carries a whole
+expression tree. Walkers destructuring `Stmt::Assign { name, value, .. }` never see it.
+Four passes drop it (`walk_lifetimes`, both `semantics_array_extent` walkers,
+`loader::collect_stmt_references`, `ir_optimizer_copyprop`/`_cse`); four correctly walk it
+(`semantics_no_runtime`, `semantics_actor_ownership`, `semantics_consts`,
+`semantics_checker_calls`). A second family: `semantics_aliases.rs`'s
+`other => other.clone()`, which never enters expressions at all.
+
+| # | Sev | Finding | Root cause | Status |
+|---|---|---|---|---|
+| 1 | **HIGH** | `--optimize full` returns a **wrong value** (99 vs 1) on ir+bytecode: a call in an assign-target index never clears copyprop's aliases, so a read is rewritten to a stale source. CSE has the byte-identical shape (latent). | `ir_optimizer_copyprop.rs:88`, `ir_optimizer_cse.rs:113` | fix lane dispatched |
+| 2 | **HIGH** | **`L0392` cross-package privacy evaded** — a private cross-package fn called from an assign-target index compiles (`check` ok) and really executes. | `loader.rs:637` | queued behind loader-branch merge (file collision) |
+| 3 | MED-HIGH | **`L0350` UAF not detected** through an assign-path index (the hoisted-variable form IS caught). | `semantics/lib.rs:2821` | fix lane dispatched |
+| 4 | MED | **`L0463` skipped + real AST-vs-all divergence**: `a[len([0; n])] = 99` → AST runs and prints 99; ir/bytecode/native/wasm hit `L0501`. Also falsifies the "not reached in practice" comment at `bytecode_vm.rs:1868`. | `semantics_array_extent.rs:618` | fix lane dispatched |
+| 5 | MED-LOW | Type alias never resolved in a **closure parameter** — valid program falsely rejected (`L0327`/`L0301`). `semantics_array_extent.rs:437` descends for exactly this reason; the two passes disagree. | `semantics_aliases.rs:316` | queued behind loader-branch merge |
+| 6 | MED-LOW | Alias resolution reaches a `match` only in `Stmt::Expr` position; as a `let` RHS the same code is rejected `L0303`. | `semantics_aliases.rs:414` | queued behind loader-branch merge |
+
+**Swept clean:** all 13 `Stmt::Asm` operand walkers (no regression of sweep #2), IR-optimizer
+`IrStmt` *variant* coverage (exhaustive, no wildcards), `native_object_confine.rs`
+(exhaustive, default-deny holds), native array-length inference (attacked two ways; caught
+downstream by a hard layout check — fail-safe, though the fail-safety is defence-in-depth
+rather than the inference being right), the `ExprKind`-exhaustive semantic passes, and OOB
+array *store* parity. **Observation (not a finding):** `lullaby_lsp/analysis.rs:275` omits
+`ForEach`/`If`/`Try`-catch bodies — editor-feature gap, no correctness impact.
+
+**Next sweep starts here:** the variant axis is exhausted; hunt *fields* — every
+child-bearing field reachable behind a `..`, and every `other => other.clone()` catch-all.
+
 ## Phase 1 — queued residual (found by review, proven pre-existing)
 
 - **Closure-loop reclamation is NARROWED, NOT CLOSED** (Phase-0 reviewer, 2026-07-23).
