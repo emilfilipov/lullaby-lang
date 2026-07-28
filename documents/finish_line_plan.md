@@ -222,6 +222,15 @@ array *store* parity. **Observation (not a finding):** `lullaby_lsp/analysis.rs:
 
 **Next sweep starts here:** the variant axis is exhausted; hunt *fields* — every
 child-bearing field reachable behind a `..`, and every `other => other.clone()` catch-all.
+**Add a third axis (found by the loader review, 2026-07-24): KEY UNIQUENESS.** A
+`(function, span)` lookup key in `semantics_no_runtime.rs:541` collides because impl-method
+names are NOT unique across modules — `L0398` forbids method-vs-free-function collisions but
+permits `Card::label` and `Coin::label`. Two same-named methods at the same line/column in
+different files collide; `find` returns the first, so a heap type is never seen and **a
+`to_string` executes inside a `--freestanding` no-CRT binary** (verified: exit 9). Pre-existing,
+now being fixed. Generalize the lesson: **any map keyed by a display name in a flat merged
+program is a candidate hole** — audit every such key for a uniqueness guarantee that actually
+holds, rather than one that looks plausible.
 
 ## Phase 1 — queued residual (found by review, proven pre-existing)
 
