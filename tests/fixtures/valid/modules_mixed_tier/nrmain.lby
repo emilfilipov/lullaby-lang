@@ -1,0 +1,8 @@
+# A freestanding entry importing the freestanding `nrlib`: both modules are in
+# the tier and both stay inside the allowed subset, so this compiles and runs.
+# double(16) + double(5) = 32 + 10 = 42.
+no-runtime
+import nrlib
+
+fn main -> i64
+    double(16) + double(5)

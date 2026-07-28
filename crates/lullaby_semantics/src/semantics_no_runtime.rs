@@ -44,7 +44,10 @@
 use std::collections::HashSet;
 
 use lullaby_diagnostics::Span;
-use lullaby_parser::{Expr, ExprKind, Function, Program, Stmt, TypeRef, asm_operand_exprs};
+use lullaby_parser::{
+    Expr, ExprKind, Function, ModuleOrigins, Program, Stmt, TypeRef, asm_operand_exprs,
+    decl_origin_key, impl_origin_key, trait_origin_key,
+};
 
 use crate::{ExpressionType, SemanticDiagnostic};
 
@@ -64,25 +67,65 @@ const FORBIDDEN_TYPE_CTORS: [&str; 8] = [
 /// they are rejected by name.
 const FORBIDDEN_BUILTINS: [&str; 4] = ["alloc", "dealloc", "share", "shared_get"];
 
-/// Enforce the freestanding-tier rules over a `no-runtime` `program`, appending an
-/// `L0441` for every violation to `diagnostics`. `expression_types` is the checker's
-/// recorded per-expression type table, consulted to catch any value whose type is
-/// a heap/runtime type regardless of whether it was written with an annotation.
+/// Which declarations of a program the freestanding-tier gate applies to.
 ///
-/// A no-op for a program without the `no-runtime` directive, so a module that does
-/// not opt in is completely unaffected.
+/// The tier is a **module** property, and a multi-file build is merged into one
+/// flat [`Program`] before this pass runs — so a single program-wide bool cannot
+/// express a mixed-tier build. `whole` is the single-file (and all-modules-
+/// freestanding) answer; `origins` is the per-declaration answer the loader
+/// computed before the merge flattened module identity away.
+struct TierScope<'a> {
+    /// Every declaration in the unit is freestanding.
+    whole: bool,
+    /// Per-declaration attribution for a merged multi-module program. Empty for
+    /// a single-file program.
+    origins: &'a ModuleOrigins,
+}
+
+impl TierScope<'_> {
+    /// True when the gate applies to at least one declaration — the cheap test
+    /// that keeps this pass a complete no-op for an ordinary hosted program.
+    fn applies_anywhere(&self) -> bool {
+        self.whole || self.origins.has_freestanding()
+    }
+
+    /// True when the declaration identified by `key` is in the freestanding
+    /// tier and must therefore face the gate.
+    fn covers(&self, key: &str) -> bool {
+        self.whole || self.origins.is_freestanding(key)
+    }
+}
+
+/// Enforce the freestanding-tier rules over the `no-runtime` declarations of
+/// `program`, appending an `L0441` for every violation to `diagnostics`.
+/// `expression_types` is the checker's recorded per-expression type table,
+/// consulted to catch any value whose type is a heap/runtime type regardless of
+/// whether it was written with an annotation.
+///
+/// **The gate is per module, not per program.** A declaration faces it when its
+/// own module carries the `no-runtime` directive, or when a `no-runtime` module
+/// transitively imports the module that declares it (see
+/// `lullaby_loader::loader::freestanding_modules`). A hosted module that merely
+/// *imports* a freestanding library is not itself freestanding and is completely
+/// unaffected — a program with no freestanding declaration at all short-circuits
+/// out immediately.
 pub(crate) fn enforce(
     program: &Program,
     expression_types: &[ExpressionType],
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
-    if !program.is_no_runtime {
+    let tier = TierScope {
+        whole: program.is_no_runtime,
+        origins: &program.origins,
+    };
+    if !tier.applies_anywhere() {
         return;
     }
     let mut checker = NoRuntimeChecker {
         expression_types,
         diagnostics,
         reported: HashSet::new(),
+        tier,
     };
     checker.run(program);
 }
@@ -90,26 +133,44 @@ pub(crate) fn enforce(
 struct NoRuntimeChecker<'a> {
     expression_types: &'a [ExpressionType],
     diagnostics: &'a mut Vec<SemanticDiagnostic>,
-    /// `(line, column)` positions already reported, so a violation surfaced
-    /// through more than one path (a `list<i64>` annotation whose initializer is
-    /// also `list`-typed, say) is reported once. `Span` is not `Hash`, so its
-    /// coordinates are the key.
-    reported: HashSet<(usize, usize)>,
+    /// Positions already reported, so a violation surfaced through more than one
+    /// path (a `list<i64>` annotation whose initializer is also `list`-typed,
+    /// say) is reported once. `Span` is not `Hash`, so its coordinates are the
+    /// key — qualified by the enclosing declaration name, because in a merged
+    /// multi-file program two different files hold different code at the same
+    /// `(line, column)` and a bare coordinate key would swallow the second one.
+    reported: HashSet<(String, usize, usize)>,
+    tier: TierScope<'a>,
 }
 
 impl NoRuntimeChecker<'_> {
     fn run(&mut self, program: &Program) {
+        // Every loop below is guarded by `tier.covers(...)`: a declaration is
+        // checked only when its own origin module is in the freestanding tier.
+        // For a single-file `no-runtime` program (and for a build where every
+        // merged module carries the directive) that guard is unconditionally
+        // true, so the single-file behavior is unchanged.
+
         // Declaration signatures: an unavailable type in a parameter, return,
         // field, payload, alias target, or constant type.
         for function in &program.functions {
+            if !self.tier.covers(&decl_origin_key(&function.name)) {
+                continue;
+            }
             self.check_function_signature(function);
         }
         for decl in &program.structs {
+            if !self.tier.covers(&decl_origin_key(&decl.name)) {
+                continue;
+            }
             for field in &decl.fields {
                 self.reject_type(&field.ty, "field", decl.span, Some(&decl.name));
             }
         }
         for decl in &program.enums {
+            if !self.tier.covers(&decl_origin_key(&decl.name)) {
+                continue;
+            }
             for variant in &decl.variants {
                 for payload in &variant.payload {
                     self.reject_type(payload, "enum payload", decl.span, Some(&decl.name));
@@ -117,12 +178,21 @@ impl NoRuntimeChecker<'_> {
             }
         }
         for decl in &program.aliases {
+            if !self.tier.covers(&decl_origin_key(&decl.name)) {
+                continue;
+            }
             self.reject_type(&decl.target, "alias target", decl.span, None);
         }
         for decl in &program.consts {
+            if !self.tier.covers(&decl_origin_key(&decl.name)) {
+                continue;
+            }
             self.reject_type(&decl.ty, "constant", decl.span, None);
         }
         for decl in &program.traits {
+            if !self.tier.covers(&trait_origin_key(&decl.name)) {
+                continue;
+            }
             for method in &decl.methods {
                 for param in &method.params {
                     self.reject_type(&param.ty, "parameter", method.span, Some(&decl.name));
@@ -131,6 +201,12 @@ impl NoRuntimeChecker<'_> {
             }
         }
         for decl in &program.impls {
+            if !self
+                .tier
+                .covers(&impl_origin_key(&decl.trait_name, &decl.type_name))
+            {
+                continue;
+            }
             for method in &decl.methods {
                 self.check_function_signature(method);
             }
@@ -139,6 +215,9 @@ impl NoRuntimeChecker<'_> {
         // Actors are a runtime construct: reject each declaration outright. Their
         // handler/init bodies are not walked — the whole actor is unavailable.
         for decl in &program.actors {
+            if !self.tier.covers(&decl_origin_key(&decl.name)) {
+                continue;
+            }
             self.report(
                 decl.span,
                 Some(&decl.name),
@@ -152,12 +231,21 @@ impl NoRuntimeChecker<'_> {
         // Function bodies: constructs (spawn/tell/await/closure/host-allocator
         // builtins) and any value whose type is a heap/runtime type.
         for function in &program.functions {
+            if !self.tier.covers(&decl_origin_key(&function.name)) {
+                continue;
+            }
             let name = function.name.clone();
             for stmt in &function.body {
                 self.check_stmt(stmt, &name);
             }
         }
         for decl in &program.impls {
+            if !self
+                .tier
+                .covers(&impl_origin_key(&decl.trait_name, &decl.type_name))
+            {
+                continue;
+            }
             for method in &decl.methods {
                 let name = method.name.clone();
                 for stmt in &method.body {
@@ -352,7 +440,7 @@ impl NoRuntimeChecker<'_> {
                 // A non-construct expression. If its recorded value type is a
                 // heap/runtime type, reject it here (the outermost such node) and
                 // do not descend — otherwise walk its children.
-                if let Some(ctor) = self.forbidden_value_type(expr.span) {
+                if let Some(ctor) = self.forbidden_value_type(function, expr.span) {
                     self.report_value(expr.span, function, &ctor);
                     return;
                 }
@@ -438,12 +526,19 @@ impl NoRuntimeChecker<'_> {
         }
     }
 
-    /// The recorded value type at `span`, if it names a heap/runtime constructor.
-    fn forbidden_value_type(&self, span: Span) -> Option<String> {
+    /// The recorded value type of `function`'s expression at `span`, if it names
+    /// a heap/runtime constructor.
+    ///
+    /// The lookup is qualified by the enclosing function, not by span alone. In a
+    /// program merged from several modules a span is only a `(line, column)` pair
+    /// with no file attached, so two modules routinely record *different* types
+    /// at the same coordinates; matching on the span alone would answer with
+    /// whichever module happened to be merged first.
+    fn forbidden_value_type(&self, function: &str, span: Span) -> Option<String> {
         let ty = self
             .expression_types
             .iter()
-            .find(|entry| entry.span == span)
+            .find(|entry| entry.span == span && entry.function == function)
             .map(|entry| &entry.ty)?;
         forbidden_ctor(ty)
     }
@@ -476,9 +571,16 @@ impl NoRuntimeChecker<'_> {
     }
 
     fn report(&mut self, span: Span, function: Option<&str>, message: String) {
-        // De-duplicate by source position so a violation reachable through more
-        // than one path is reported once.
-        if !self.reported.insert((span.line, span.column)) {
+        // De-duplicate by enclosing declaration + source position so a violation
+        // reachable through more than one path is reported once, while two
+        // modules that happen to violate at the same `(line, column)` are still
+        // both reported.
+        let key = (
+            function.unwrap_or_default().to_string(),
+            span.line,
+            span.column,
+        );
+        if !self.reported.insert(key) {
             return;
         }
         self.diagnostics.push(SemanticDiagnostic::at(
@@ -549,4 +651,96 @@ fn split_top_level(inner: &str) -> Vec<String> {
         args.push(tail.to_string());
     }
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use lullaby_lexer::lex;
+    use lullaby_parser::{ModuleOrigins, decl_origin_key, parse};
+
+    use crate::{SemanticDiagnostic, validate};
+
+    /// Parse `source` as one flat program and attach the origin table a
+    /// multi-module merge would have produced, marking `freestanding` as coming
+    /// from a `no-runtime` module and everything else from a hosted one. This is
+    /// exactly the shape `lullaby_loader::loader::merge` hands to `validate`.
+    fn diags_with_tiers(source: &str, freestanding: &[&str]) -> Vec<SemanticDiagnostic> {
+        let tokens = lex(source).expect("lex");
+        let mut program = parse(&tokens).expect("parse");
+        let mut origins = ModuleOrigins::new();
+        for function in &program.functions {
+            let is_freestanding = freestanding.contains(&function.name.as_str());
+            let path = if is_freestanding {
+                "nr.lby"
+            } else {
+                "host.lby"
+            };
+            origins.record(decl_origin_key(&function.name), path, is_freestanding);
+        }
+        program.origins = origins;
+        validate(&program).err().unwrap_or_default()
+    }
+
+    const MIXED: &str = concat!(
+        "fn hosted n i64 -> i64\n",
+        "    len(to_string(n))\n",
+        "fn bare n i64 -> i64\n",
+        "    len(to_string(n))\n",
+        "fn main -> i64\n",
+        "    hosted(1) + bare(2)\n",
+    );
+
+    /// The gate fires for the declaration whose module carries the directive and
+    /// leaves the hosted one alone — the whole point of per-module attribution.
+    /// Both functions are byte-identical, so only the tier can distinguish them.
+    #[test]
+    fn the_gate_is_per_declaration_not_per_program() {
+        let diagnostics = diags_with_tiers(MIXED, &["bare"]);
+        let l0441: Vec<_> = diagnostics.iter().filter(|d| d.code == "L0441").collect();
+        assert_eq!(
+            l0441.len(),
+            1,
+            "exactly the freestanding declaration is gated, got {l0441:?}"
+        );
+        assert_eq!(l0441[0].function.as_deref(), Some("bare"));
+    }
+
+    /// With no freestanding declaration at all the pass is a complete no-op,
+    /// even though the program is a merged multi-module one.
+    #[test]
+    fn a_merged_program_with_no_freestanding_module_is_untouched() {
+        let diagnostics = diags_with_tiers(MIXED, &[]);
+        assert!(
+            !diagnostics.iter().any(|d| d.code == "L0441"),
+            "no module carries the directive, so nothing is gated: {diagnostics:?}"
+        );
+    }
+
+    /// A single-file `no-runtime` program has no origin table; the whole-program
+    /// flag still gates every declaration, unchanged.
+    #[test]
+    fn a_single_file_directive_still_gates_the_whole_program() {
+        let source = concat!(
+            "no-runtime\n",
+            "fn hosted n i64 -> i64\n",
+            "    len(to_string(n))\n",
+            "fn bare n i64 -> i64\n",
+            "    len(to_string(n))\n",
+            "fn main -> i64\n",
+            "    hosted(1) + bare(2)\n",
+        );
+        let tokens = lex(source).expect("lex");
+        let program = parse(&tokens).expect("parse");
+        assert!(program.origins.is_empty());
+        let diagnostics = validate(&program).err().unwrap_or_default();
+        let gated: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == "L0441")
+            .filter_map(|d| d.function.as_deref())
+            .collect();
+        assert!(
+            gated.contains(&"hosted") && gated.contains(&"bare"),
+            "{gated:?}"
+        );
+    }
 }

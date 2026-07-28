@@ -1,0 +1,10 @@
+# A freestanding module importing a hosted helper that allocates. The tier
+# travels DOWN the import edge: `heaplib` is compiled into this freestanding
+# unit, so its hidden `to_string` heap allocation is exactly the thing the tier
+# forbids and must be rejected with `L0441` — reported against `heaplib.lby`,
+# the file the span belongs to.
+no-runtime
+import heaplib
+
+fn main -> i64
+    digits(1234)

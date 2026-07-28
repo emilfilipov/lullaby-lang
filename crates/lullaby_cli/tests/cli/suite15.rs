@@ -17,6 +17,13 @@
 //! compiles under `lullaby native --freestanding` (the directive is the semantic
 //! gate; `--freestanding` is the orthogonal no-CRT output contract).
 //!
+//! The tier is a **module** property and the loader carries it per declaration
+//! across its flat multi-file merge, so it travels down `import` edges (a
+//! `no-runtime` module's imports are gated too) and never up (a hosted module
+//! that imports a freestanding library keeps the whole safe tier) — see the
+//! per-module section at the end of this file and
+//! `documents/freestanding_tier_design.md` §1.0.1.
+//!
 //! The later freestanding stages (static-buffer arenas, inline-asm operand
 //! binding, MMIO/port-IO, interrupt/`naked`/`entry` functions, the pluggable
 //! panic handler, and direct-ELF/flat-binary output) are out of scope here.
@@ -1694,5 +1701,210 @@ fn arena_region_used_after_block_is_rejected() {
     assert_check_rejected_with(
         "tests/fixtures/invalid/no_runtime/arena_region_used_after_block.lby",
         "L0445",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Per-module tier attribution across `import` (freestanding tier, §1).
+//
+// The loader merges every module into one flat program before semantics runs.
+// The `no-runtime` directive is a MODULE property, so the merge has to carry
+// each declaration's origin module along with it — otherwise the tier gate
+// degenerates into a single program-wide flag, which was wrong in both
+// directions:
+//
+//   * it made the directive CONTAGIOUS UPWARD — any hosted program that merely
+//     imported a freestanding module was itself rejected, told its own file was
+//     a `no-runtime` module when it contained no such directive; and
+//   * it left cross-module diagnostics attributed to the entry file, naming a
+//     line number that belongs to a different file entirely.
+//
+// The rule is: the gate applies to the module that CARRIES the directive and to
+// everything that module transitively imports. It never travels up to an
+// importer. See `documents/freestanding_tier_design.md` §1.0.1.
+// ---------------------------------------------------------------------------
+
+/// A **hosted** module that imports a freestanding one is NOT itself
+/// freestanding: it keeps the whole safe tier.
+///
+/// This is the fixture with teeth for the contagion defect. Before the
+/// per-module fix it failed — `host.lby` (which contains no `no-runtime`
+/// directive anywhere) was rejected with `L0441 ... host.lby:4:20 in `main`: a
+/// value of type `string` is unavailable in a `no-runtime` module`, a diagnostic
+/// whose own text is false about the file it names. It must simply compile.
+#[test]
+fn a_hosted_module_may_import_a_freestanding_one() {
+    let path = workspace_root().join("tests/fixtures/valid/modules_mixed_tier/host.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        output.status.success(),
+        "a hosted module that imports a `no-runtime` library is not itself \
+         freestanding and must type-check: {errors}"
+    );
+    assert!(
+        !errors.contains("L0441"),
+        "the freestanding gate must not fire on a module that carries no \
+         `no-runtime` directive. stderr: {errors}"
+    );
+}
+
+/// ...and it *runs*, with the safe-tier value it asked for. `check` accepting is
+/// not enough — the heap string has to actually be built and measured.
+/// `to_string(double(21))` is `"42"`, so `len` is 2, on every interpreter.
+#[test]
+fn a_hosted_importer_of_a_freestanding_module_runs() {
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend("tests/fixtures/valid/modules_mixed_tier/host.lby", backend);
+        assert!(
+            output.status.success(),
+            "[{backend}] the hosted importer should run: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output).trim(),
+            "2",
+            "[{backend}] len(to_string(double(21))) is len(\"42\") = 2"
+        );
+    }
+}
+
+/// The allowed-subset positive still holds when BOTH modules are freestanding:
+/// two `no-runtime` files that stay inside the tier's core compile and run.
+/// `double(16) + double(5)` = 42.
+#[test]
+fn a_freestanding_module_may_import_a_freestanding_module() {
+    for backend in ["ast", "ir", "bytecode"] {
+        let output = run_backend(
+            "tests/fixtures/valid/modules_mixed_tier/nrmain.lby",
+            backend,
+        );
+        assert!(
+            output.status.success(),
+            "[{backend}] an all-freestanding multi-module program should run: {}",
+            stderr(&output)
+        );
+        assert_eq!(stdout(&output).trim(), "42", "[{backend}] 32 + 10 = 42");
+    }
+}
+
+/// **The soundness direction, pinned.** A `no-runtime` module that imports a
+/// heap-using helper is still rejected: the tier travels DOWN the import edge,
+/// so the helper is compiled into the freestanding unit and its hidden
+/// `to_string` allocation is exactly what hard rule #1 forbids.
+///
+/// The type-based gate cannot catch this at the call site — `digits` returns
+/// `i64` — so if the import edge stopped carrying the tier, a real heap
+/// allocation would land in a freestanding binary silently. This test is the
+/// guard against "fixing" contagion by simply narrowing the gate to the entry
+/// module.
+#[test]
+fn a_freestanding_module_importing_a_heap_helper_is_still_rejected() {
+    assert_no_runtime_rejected(
+        "tests/fixtures/invalid/modules_no_runtime_heap/nr_imports_heap.lby",
+    );
+}
+
+/// The same rejection must reach the run path on every interpreter, not just
+/// `check` — the gate is a compile-time property of the program, not of one
+/// command.
+#[test]
+fn a_freestanding_import_of_a_heap_helper_is_rejected_on_every_interpreter() {
+    assert_no_runtime_rejected_on_interpreters(
+        "tests/fixtures/invalid/modules_no_runtime_heap/nr_imports_heap.lby",
+    );
+}
+
+/// **Cross-module span attribution.** The rejection above is correct; the file
+/// it named was not.
+///
+/// Before the fix the diagnostic read `... nr_imports_heap.lby:2:9 in `digits``
+/// — but `digits` is declared in `heaplib.lby`, and line 2 of
+/// `nr_imports_heap.lby` is the `import heaplib` line, so the reader was sent to
+/// the wrong file at a line number belonging to a different one. A merged
+/// program's spans are bare `(line, column)` pairs; the loader's per-declaration
+/// origin table is what restores the file.
+#[test]
+fn a_cross_module_diagnostic_names_the_file_its_span_belongs_to() {
+    let path =
+        workspace_root().join("tests/fixtures/invalid/modules_no_runtime_heap/nr_imports_heap.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "the fixture must be rejected. stderr: {errors}"
+    );
+    assert!(
+        errors.contains("L0441"),
+        "expected the freestanding-tier diagnostic. stderr: {errors}"
+    );
+    // The violation is `heaplib.lby` line 2 column 9 — the `to_string(n)` call.
+    assert!(
+        errors.contains("heaplib.lby:2:9"),
+        "the diagnostic must name the IMPORTED file and its line/column \
+         (`heaplib.lby:2:9`), not the entry file. stderr: {errors}"
+    );
+    assert!(
+        !errors.contains("nr_imports_heap.lby:2:9"),
+        "the diagnostic must NOT be attributed to the entry file, whose line 2 \
+         is the `import` line. stderr: {errors}"
+    );
+}
+
+/// Verbose rendering shows the *imported* file's source line under the caret.
+/// The header now names `heaplib.lby`, so echoing the entry file's line 2
+/// beneath it would be a new inconsistency in place of the old one.
+#[test]
+fn a_cross_module_diagnostic_renders_the_imported_files_source_line() {
+    let path =
+        workspace_root().join("tests/fixtures/invalid/modules_no_runtime_heap/nr_imports_heap.lby");
+    let output = lullaby()
+        .args(["check", "--verbose", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        errors.contains("len(to_string(n))"),
+        "verbose output must quote `heaplib.lby` line 2, the line the span \
+         actually indexes. stderr: {errors}"
+    );
+    assert!(
+        !errors.contains("import heaplib"),
+        "verbose output must not quote the entry file's line 2. stderr: {errors}"
+    );
+}
+
+/// **The ambiguous case, decided conservatively and pinned.** A module imported
+/// by both a hosted and a freestanding module in one build cannot be compiled
+/// two ways, so the stricter tier wins: it is checked as freestanding and
+/// rejected. Being silently admitted into a freestanding binary is the outcome
+/// the two hard rules exist to prevent; a hard diagnostic that says "split the
+/// helper" is the acceptable one.
+#[test]
+fn a_module_shared_between_tiers_is_gated_conservatively() {
+    let path = workspace_root().join("tests/fixtures/invalid/modules_shared_tier/both.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "a helper reachable from a `no-runtime` module must be gated even when a \
+         hosted module also imports it. stderr: {errors}"
+    );
+    assert!(
+        errors.contains("L0441"),
+        "expected the freestanding-tier diagnostic. stderr: {errors}"
+    );
+    assert!(
+        errors.contains("shared_text.lby"),
+        "the diagnostic must name the shared helper's own file. stderr: {errors}"
     );
 }

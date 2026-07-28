@@ -3,12 +3,13 @@
 //! the module loader and the semantic validator, and hand back a
 //! [`CompiledSource`].
 
-use std::{fs, path::Path, path::PathBuf};
+use std::{collections::HashMap, fs, path::Path, path::PathBuf};
 
 use lullaby_diagnostics::{DiagnosticPhase, DiagnosticReport};
 use lullaby_ir::{OptimizationConfig, optimize};
-use lullaby_loader::{loader, manifest};
-use lullaby_semantics::{CheckedProgram, validate, validate_executable};
+use lullaby_loader::{loader, loader::ModuleSource, manifest};
+use lullaby_parser::{ModuleOrigins, Program, report_origin_key};
+use lullaby_semantics::{CheckedProgram, SemanticDiagnostic, validate, validate_executable};
 
 use crate::args::OptimizationMode;
 
@@ -105,6 +106,74 @@ fn resolve_target(path: &Path, source_mode: SourceMode) -> Result<BuildTarget, C
     }
 }
 
+/// Turns a [`SemanticDiagnostic`] into a [`DiagnosticReport`] that names the file
+/// its span actually belongs to.
+///
+/// The module loader merges every loaded module into one flat program, and a
+/// span is only a `(line, column)` pair — so attributing every semantic
+/// diagnostic to the entry file sends the reader to the wrong file at a line
+/// number that belongs to a different one. (Observed: a 5-line `no-runtime`
+/// entry that imports a heap-using helper reported the helper's `L0441` at
+/// `<entry>:2:9`, where line 2 of the entry is the `import` line itself.)
+///
+/// The loader's per-declaration origin table (`Program::origins`) is what
+/// survives the merge, so attribution is keyed on the diagnostic's enclosing
+/// declaration name. That makes the fix **general to every semantic
+/// diagnostic** that names its declaration, not specific to `L0441`. A
+/// diagnostic with no declaration name, or one whose name the table cannot
+/// attribute unambiguously, falls back to the entry file exactly as before.
+struct ModuleAttribution<'a> {
+    origins: &'a ModuleOrigins,
+    /// Origin path -> that module's source text, for the caret line.
+    sources: HashMap<String, &'a str>,
+    entry_path: String,
+}
+
+impl<'a> ModuleAttribution<'a> {
+    fn new(program: &'a Program, modules: &'a [ModuleSource], entry: &Path) -> Self {
+        Self {
+            origins: &program.origins,
+            sources: modules
+                .iter()
+                .map(|module| (module.path.display().to_string(), module.source.as_str()))
+                .collect(),
+            entry_path: entry.display().to_string(),
+        }
+    }
+
+    /// The source path a diagnostic belongs to, when that is a module other than
+    /// the entry file.
+    fn origin_path(&self, diagnostic: &SemanticDiagnostic) -> Option<&str> {
+        let function = diagnostic.function.as_deref()?;
+        let origin = self.origins.path_for(&report_origin_key(function))?;
+        (origin != self.entry_path).then_some(origin)
+    }
+
+    fn report(&self, diagnostic: SemanticDiagnostic) -> DiagnosticReport {
+        let origin = self.origin_path(&diagnostic);
+        let mut report = DiagnosticReport::new(
+            diagnostic.code,
+            DiagnosticPhase::Semantic,
+            diagnostic.message,
+        )
+        .with_source_path(origin.unwrap_or(&self.entry_path));
+        if let Some(span) = diagnostic.span {
+            report = report.with_span(span);
+            // Verbose rendering is handed the *entry* file's text, which this
+            // span does not index, so carry the correct line on the report.
+            if let Some(text) = origin.and_then(|origin| self.sources.get(origin))
+                && let Some(line) = text.lines().nth(span.line.saturating_sub(1))
+            {
+                report = report.with_source_line(line);
+            }
+        }
+        if let Some(function) = diagnostic.function {
+            report = report.with_function(function);
+        }
+        report
+    }
+}
+
 pub(crate) fn compile(
     path: &Path,
     source_mode: SourceMode,
@@ -140,6 +209,7 @@ pub(crate) fn compile(
     let path = &report_path;
     let program = loaded.program;
     let source = loaded.entry_source;
+    let modules = loaded.modules;
 
     let checked = match match source_mode {
         SourceMode::Library => validate(&program),
@@ -147,24 +217,11 @@ pub(crate) fn compile(
     } {
         Ok(checked) => checked,
         Err(diagnostics) => {
+            let attribution = ModuleAttribution::new(&program, &modules, path);
             return Err(CompileFailure::with_source(
                 diagnostics
                     .into_iter()
-                    .map(|diagnostic| {
-                        let mut report = DiagnosticReport::new(
-                            diagnostic.code,
-                            DiagnosticPhase::Semantic,
-                            diagnostic.message,
-                        )
-                        .with_source_path(path.display().to_string());
-                        if let Some(span) = diagnostic.span {
-                            report = report.with_span(span);
-                        }
-                        if let Some(function) = diagnostic.function {
-                            report = report.with_function(function);
-                        }
-                        report
-                    })
+                    .map(|diagnostic| attribution.report(diagnostic))
                     .collect(),
                 source,
             ));

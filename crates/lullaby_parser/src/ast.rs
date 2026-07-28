@@ -1,6 +1,8 @@
 use lullaby_lexer::Span;
 use serde::{Deserialize, Serialize};
 
+use crate::origins::ModuleOrigins;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -36,15 +38,30 @@ pub struct Program {
     /// artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<ActorDecl>,
-    /// True when the module opens with the `no-runtime` freestanding-tier
-    /// directive (the first non-comment line). It marks every declaration in the
-    /// compilation unit as freestanding: semantic analysis rejects any construct
-    /// that requires the safe-tier runtime (growable heap allocation, actors/
-    /// `spawn`/`tell`, heap closures, `rc`/`ref` handles) with `L0441`. A module
-    /// without the directive is completely unaffected. Serde-defaulted to `false`
+    /// True when *every* declaration in this compilation unit is freestanding —
+    /// for a single parsed file, that the module opens with the `no-runtime`
+    /// directive (the first non-comment line); for a program merged from several
+    /// modules, that every merged module carries it. Semantic analysis rejects
+    /// any construct that requires the safe-tier runtime (growable heap
+    /// allocation, actors/`spawn`/`tell`, heap closures, `rc`/`ref` handles) with
+    /// `L0441`. A module without the directive is completely unaffected.
+    ///
+    /// This flag is deliberately *not* the whole tier story for a multi-module
+    /// build: a mixed-tier program (a hosted program importing a freestanding
+    /// library, or the reverse) leaves it `false` and carries the real,
+    /// per-declaration answer in [`Program::origins`]. Serde-defaulted to `false`
     /// so existing single-file artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_no_runtime: bool,
+    /// Per-declaration origin attribution for a program the module loader merged
+    /// from several files: which file each declaration was declared in, and
+    /// whether that file's module is in the freestanding (`no-runtime`) tier.
+    ///
+    /// Empty for a single-file program — nothing was merged, so nothing needs
+    /// attributing. Serde-defaulted and skipped when empty so existing
+    /// single-file artifacts and AST snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "ModuleOrigins::is_empty")]
+    pub origins: ModuleOrigins,
 }
 
 /// What a supervisor does when a supervised child's fallible handler returns
@@ -379,7 +396,7 @@ pub struct Function {
 }
 
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 

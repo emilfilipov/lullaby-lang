@@ -266,6 +266,11 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
             // The freestanding-tier directive is a whole-module property; alias
             // resolution preserves it so the tier gate still fires downstream.
             is_no_runtime: program.is_no_runtime,
+            // Alias resolution rewrites type spellings only — it neither renames
+            // nor moves a declaration — so the per-declaration origin/tier table
+            // carries over verbatim. Dropping it here would silently disable the
+            // per-module tier gate and cross-module diagnostic attribution.
+            origins: program.origins.clone(),
         },
         diagnostics,
     )

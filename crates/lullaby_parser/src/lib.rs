@@ -5,9 +5,14 @@ mod ast;
 mod expr_parser;
 mod format;
 mod number_literal;
+mod origins;
 
 pub use ast::*;
 pub use format::{format_program, format_program_with_comments};
+pub use origins::{
+    DeclOrigin, ModuleOrigins, decl_origin_key, impl_origin_key, report_origin_key,
+    trait_origin_key,
+};
 
 use expr_parser::ExprParser;
 use number_literal::normalize_number_literal;
@@ -262,6 +267,9 @@ impl<'a> Parser<'a> {
             consts,
             actors,
             is_no_runtime,
+            // A single parsed file was not merged from anything, so there is
+            // nothing to attribute; only the module loader fills this in.
+            origins: ModuleOrigins::new(),
         }
     }
 
