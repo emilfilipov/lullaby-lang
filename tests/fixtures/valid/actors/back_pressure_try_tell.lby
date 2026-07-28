@@ -1,0 +1,21 @@
+# Stage-5b back-pressure: `try_tell` sheds instead of blocking.
+#
+# The sink is bounded to 2. The first two `try_tell`s enqueue and answer `true`;
+# the third finds the mailbox at capacity, drops the message, and answers
+# `false`. Two properties are pinned by the output order:
+#
+#   - `try_tell` never pumps — no `sink` line appears before `after`, unlike the
+#     blocking `tell` in `back_pressure_pump.lby`.
+#   - the shed message is genuinely not delivered — the drain prints `sink 1` and
+#     `sink 2` and nothing else; `take(3)` never runs.
+actor Sink
+    on take n i64
+        println("sink " + to_string(n))
+
+fn main -> i64
+    let s Actor<Sink> = spawn Sink() bound 2
+    println(to_string(try_tell s.take(1)))
+    println(to_string(try_tell s.take(2)))
+    println(to_string(try_tell s.take(3)))
+    println("after")
+    0

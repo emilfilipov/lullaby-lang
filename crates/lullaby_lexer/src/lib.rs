@@ -91,6 +91,12 @@ pub enum Keyword {
     /// `tell` — a fire-and-forget message send `tell handle.handler(args)` that
     /// enqueues onto an actor's mailbox and returns `void`.
     Tell,
+    /// `try_tell` — the non-blocking, load-shedding variant of `tell`. It has
+    /// exactly `tell`'s syntax (`try_tell handle.handler(args)`) but evaluates to
+    /// `bool`: `true` when the message was enqueued, `false` when the target's
+    /// mailbox was already at capacity and the message was therefore dropped.
+    /// Unlike `tell` it never blocks on a full mailbox.
+    TryTell,
     /// `ask` — a request-reply message send `ask handle.handler(args)` that
     /// enqueues a request carrying a one-shot reply slot and evaluates to a
     /// `Future<R>` (`R` is the handler's `-> R` reply type); `await` resolves the
@@ -604,6 +610,7 @@ fn keyword(text: &str) -> Option<Keyword> {
         "asm" => Keyword::Asm,
         "actor" => Keyword::Actor,
         "tell" => Keyword::Tell,
+        "try_tell" => Keyword::TryTell,
         "ask" => Keyword::Ask,
         "join_all" => Keyword::JoinAll,
         "select" => Keyword::Select,

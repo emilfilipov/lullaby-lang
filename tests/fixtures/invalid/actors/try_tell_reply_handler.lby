@@ -1,0 +1,15 @@
+# `try_tell` targets a reply (`ask`) handler declared `-> T`. `try_tell` is the
+# load-shedding variant of `tell`, so it addresses the same fire-and-forget
+# handlers: a shed *request* would strand a reply nobody could ever await.
+# -> L0352
+actor Bank
+    state
+        balance i64
+
+    on balance_of -> i64
+        balance
+
+fn main -> i64
+    let b Actor<Bank> = spawn Bank()
+    let sent bool = try_tell b.balance_of()
+    0

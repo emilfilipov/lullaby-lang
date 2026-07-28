@@ -1,0 +1,11 @@
+# `spawn ... bound 0` names a mailbox that could never accept a message, so every
+# send to it would be an immediate `L0365` back-pressure deadlock. Rejected at
+# parse time rather than shipped as a program that cannot run.
+actor Sink
+    on take n i64
+        println("sink " + to_string(n))
+
+fn main -> i64
+    let s Actor<Sink> = spawn Sink() bound 0
+    tell s.take(1)
+    0

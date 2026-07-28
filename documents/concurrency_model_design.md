@@ -429,23 +429,126 @@ native/WASM cleanly skip a program that declares actors
 
 ### Deferred (the rest of stage 5)
 
-**Back-pressure / bounded mailbox** (`try_tell` or a `spawn ... bound N` clause
-with block-until-space semantics and a deterministic full-mailbox deadlock
-diagnostic) is **not** delivered here. It genuinely needs the `tell` path to
-cooperate with the scheduler (pumping deliverable messages to free mailbox space,
-with a deterministic deadlock when none can), which touches the hot path shared
-by every actor turn — larger than a clean combinator increment. The intended
-design: a per-instance mailbox capacity, a `tell` to a full mailbox that pumps
-the target's deliverable messages until space frees (block-until-space, composing
-with the deterministic run-to-completion scheduler and leaving `tell`'s `void`
-result unchanged), and a deterministic back-pressure deadlock diagnostic (mirror
-of `L0356`) when the target is busy and nothing can free a slot. Native/WASM
-actor codegen (stage 6) and eager `shared<T>` reclamation (stage 8) remain
-deferred as before.
+**Back-pressure / bounded mailbox** was **not** delivered with the combinators —
+it needs the `tell` path itself to cooperate with the scheduler, which touches
+the hot path shared by every actor turn and is larger than a clean combinator
+increment. It has since landed; see "Stage 5b delivery" below. Native/WASM actor
+codegen (stage 6) and eager `shared<T>` reclamation (stage 8) remain deferred as
+before.
+
+## Stage 5b delivery — mailbox back-pressure (`bound N` / blocking `tell` / `try_tell`)
+
+The other half of stage 5. Actor mailboxes are now **bounded**, a full mailbox
+**blocks the sender until space frees** (cooperatively, by pumping the
+scheduler), and a send that can never complete is the deterministic
+back-pressure deadlock **`L0365`** rather than a hang or an unbounded queue. As
+with every earlier stage this is live on the **AST interpreter only**.
+
+### Delivered surface
+
+- **Bounded by default.** Every actor's mailbox holds at most **1024** pending
+  messages. Unbounded mailboxes are a memory-safety hazard — a fast producer can
+  grow the queue without limit — and memory safety is the pillar, so bounded is
+  the default rather than an opt-in (§2.5 option A, as recommended).
+- **`spawn NAME(args) bound N`** — a per-spawn capacity override. `N` is a
+  positive integer **literal**, not an expression: a mailbox capacity is a static
+  property of the spawn site, exactly like the `supervise` policy. `bound 0` is a
+  parse error (a zero-capacity mailbox could never accept a message). The clause
+  is independent of `supervise POLICY` and may be written in either order;
+  `lullaby fmt` normalizes to `spawn NAME(args) bound N supervise POLICY`.
+- **`tell` blocks until space frees.** A `tell`/`ask` to a full mailbox does not
+  fail and does not grow the queue: it runs deliverable messages until the
+  target's occupancy drops below its capacity, then enqueues. `tell` still yields
+  `void` and `ask` still yields `Future<R>`; nothing about their types changed.
+- **`try_tell TARGET.HANDLER(args) -> bool`** — the load-shedding escape hatch.
+  Same syntax and same target handlers as `tell` (a `try_tell` to a reply handler
+  is the same `L0352` send-form mismatch), but it never pumps: `true` when the
+  message was enqueued, `false` when the mailbox was at capacity (or the target
+  had been stopped) and the message was therefore dropped. Because it never
+  pumps, `try_tell` can never raise `L0365`.
+
+### Topology: per-actor accounting over the one global FIFO
+
+The physical delivery structure is **unchanged** — one global
+`VecDeque<ActorMessage>`, drained by the same `run_one_deliverable` scan for the
+earliest message whose target is not mid-turn. What is new is a per-actor
+`capacity` and a per-actor `pending` occupancy counter, checked at the two
+enqueue sites and released at the two dequeue sites (delivery, and a supervision
+`stop`'s purge).
+
+This is deliberate, not a shortcut. On a deterministic single thread, physically
+per-actor queues drained by "lowest global sequence among deliverable heads" is
+*exactly* the existing global scan, so counters buy the thing §2.5 actually
+wants — **per-target** pressure — with **zero change to delivery order**. That
+is why the whole stage 1–5 test corpus asserts byte-identical output before and
+after: several of those tests (the chained inter-actor `ask` ordering, both
+`select` fixtures, and the two in-flight supervision fixtures) depend on the
+global pump order, and a naive per-actor round-robin would have broken them.
+
+### Why the pump stays deterministic
+
+Blocking is implemented as **cooperative pumping**: while the target is at
+capacity, the sender runs `run_one_deliverable` — the *same* pump `await`,
+`join_all` and `select` already drive — and re-checks. Re-entering the scheduler
+from the middle of an expression is not new either: `await` has always run other
+actors' turns nested on the Rust call stack. So a pumping `tell` introduces no
+new ordering freedom. One thread, run-to-completion turns, and the earliest
+deliverable message always chosen ⇒ the sequence of turns, every side effect,
+and every deadlock verdict are identical on every run (pinned by a
+byte-identical-across-5-runs test, as for stages 4 and 5).
+
+The pump is observable, which is the point: with a bound of 2, a producer's third
+`tell` runs the consumer's first message *before* the producer's own next line.
+That interleaving is the proof back-pressure is real and not merely accounted.
+
+### `L0365` — back-pressure deadlock
+
+When nothing is deliverable and the target is still full, no future turn can ever
+free a slot (the queue only shrinks by dispatch), so the send can never complete.
+That is reported as a clean, deterministic **`L0365`**, naming the actor, its
+capacity, and its occupancy — never a hang, and never a silently unbounded queue.
+The canonical shape is a send to an actor that is itself mid-turn: only that
+actor can drain its own mailbox, and it is blocked sending.
+
+`L0365` is the back-pressure sibling of `L0356` (the request-cycle `await`
+deadlock) and is phrased the same way. It is the only *new* diagnostic in this
+stage.
+
+### Interaction with the earlier stages
+
+- **`ask` replies are never bounded.** Only the *request* enqueue is. A handler's
+  reply is written straight into the future's one-shot reply slot by
+  `dispatch_message`, never onto the asker's mailbox, so a full mailbox can never
+  lose, delay, or deadlock a reply. Pinned by a fixture that drives both the
+  asker and the replier to exactly their capacity and asserts every reply
+  arrives.
+- **Supervision `stop`** purges the target's queued messages, so it releases
+  their occupancy too — the counter returns to zero. Reply slots are still marked
+  `Unavailable` (`L0359`), unchanged.
+- **Supervision `restart`** deliberately preserves the mailbox, so it preserves
+  the occupancy with it: those messages still hold memory and will still be
+  delivered to the fresh actor, so they must still count against the capacity.
+- **Combinators** (`join_all`/`select`) only consume futures and pump through the
+  same `run_one_deliverable`; they never enqueue, so they are untouched. A
+  `select` pump may now nest inside a `tell` pump, exactly as `await` already
+  nests inside one.
+- **`tell` inside `init`, or inside a drain-phase handler turn**, is bounded and
+  pumps like any other send. There is no unbounded phase.
+
+### Tiers
+
+No new tier plumbing. `bound N` is a field on the existing `spawn` node and
+`try_tell` is a form of the existing send node, so the IR/bytecode backends
+reject a bounded actor program through the existing **`L0355`** gate, native/WASM
+cleanly skip it (**`L0339`**/**`L0338`**), and a `no-runtime` module rejects it
+with **`L0441`** — all unchanged.
 
 The rest of this document is the original design proposal (the full model); the
 above is the slice that is live today. **Where §2.6/§2.7 describe panic-based
-supervision, they are superseded by "Stage 4 delivery" above.**
+supervision, they are superseded by "Stage 4 delivery" above. Where §2.5 proposes
+credit-based back-pressure, and where §2.1/§2.2 describe physically per-actor
+queues on a worker pool, they are annotated in place against what stage 5b
+actually delivered.**
 
 Canonical language rules: see [core_language_rules.md](core_language_rules.md).
 The decided direction and its rationale are fixed in
@@ -739,6 +842,16 @@ fn main -> i64
 
 ### 2.1 Mailbox / queue model
 
+> **Native-tier (stage 6) target.** The physically-per-actor queues described
+> here are what the *native* runtime scheduler will be built as, once actors are
+> compiled rather than interpreted. The **AST tier delivered today** implements
+> the same semantics as a single global FIFO plus per-actor capacity counters
+> (see "Stage 5b delivery" above), which is **observationally equivalent for a
+> deterministic single thread**: per-actor queues drained by "lowest global
+> sequence among deliverable heads" is exactly that global scan. This note
+> reconciles a real doc/code divergence — §2.1's model is the target, not a
+> description of the current runtime.
+
 - Each actor owns exactly one **mailbox**: a FIFO queue of pending messages.
   `tell` and `ask` enqueue; the actor's turn loop dequeues one at a time.
 - Message ordering: **per-sender FIFO is guaranteed** (messages from actor A to
@@ -751,6 +864,15 @@ fn main -> i64
   carry a one-shot reply address (the `Future`'s fulfillment slot).
 
 ### 2.2 Scheduling on a thread pool
+
+> **Native-tier (stage 6) target.** The worker pool described here is likewise
+> the native runtime's design, not the delivered one. The AST tier runs a
+> **single-threaded, cooperative, run-to-completion** scheduler — which is what
+> makes every actor test assert exact output instead of "results, never
+> interleaving". The invariants below that matter for semantics (an actor runs on
+> at most one worker at a time; one turn runs to completion) already hold there,
+> trivially. Fairness, work-stealing, and the blocking-I/O pool are stage-6
+> concerns with no AST-tier analogue.
 
 - A fixed-size **worker pool** (default: number of hardware threads) runs a
   work-stealing loop. Each ready actor (mailbox non-empty, not currently
@@ -848,6 +970,27 @@ process). Default: **bounded mailboxes with credit-based back-pressure.**
 
 **Recommendation: Option A**, bounded with `try_tell` escape hatch. Memory
 safety is the moat; an unbounded queue quietly violates it.
+
+> **DELIVERED (stage 5b) — option A, with cooperative pumping in place of
+> credits.** Option A was taken: mailboxes are bounded (default **1024**,
+> overridable per spawn with `bound N`), and `try_tell -> bool` is the
+> load-shedding variant. Two details of the sketch above changed in delivery:
+>
+> - **No credit protocol.** Credits exist to let a *distributed* or *multi-
+>   threaded* sender learn about remote capacity without shared state. On the
+>   single-threaded deterministic scheduler the sender can read the target's
+>   occupancy directly, so back-pressure is a **per-actor occupancy counter**
+>   checked at the enqueue sites — the cheapest implementation of the same
+>   semantics. Credits become relevant again at stage 6, with real workers.
+> - **"Suspends the sending turn" is realized as cooperative pumping.** The
+>   sender runs deliverable messages (the same pump `await` drives) until a slot
+>   frees, rather than parking a suspended continuation. Same observable
+>   behavior — the send waits, other actors make progress, no OS thread blocks —
+>   with no new suspension machinery, and it stays deterministic because the pump
+>   is the existing one. When nothing is deliverable and the target is still
+>   full, the send can never complete: `L0365`.
+>
+> See "Stage 5b delivery" above for the full delivered surface.
 
 ### 2.6 Actor lifecycle: spawn, stop, failure
 

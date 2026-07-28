@@ -100,6 +100,53 @@ impl SupervisionPolicy {
     }
 }
 
+/// Which of the three message-send forms an [`ExprKind::Tell`] node carries.
+///
+/// All three share one AST node — and therefore one set of backend-deferral
+/// arms — because they differ only in what the send *evaluates to* and in what
+/// happens when the target's mailbox is full:
+///
+/// | form | full mailbox | result |
+/// |---|---|---|
+/// | `tell` | pumps the scheduler until a slot frees (`L0365` if it can never) | `void` |
+/// | `try_tell` | sheds the message immediately | `bool` (`true` = enqueued) |
+/// | `ask` | pumps, exactly like `tell` | `Future<R>` |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendKind {
+    /// `tell TARGET.HANDLER(args)` — fire-and-forget, yields `void`. Valid only
+    /// for a handler declared without a `-> T` reply type. A send to a full
+    /// mailbox blocks until space frees, cooperatively pumping the scheduler.
+    Tell,
+    /// `try_tell TARGET.HANDLER(args)` — the non-blocking, load-shedding variant
+    /// of `tell`. Yields `bool`: `true` when the message was enqueued, `false`
+    /// when the target's mailbox was already at capacity (or the target has been
+    /// stopped) and the message was therefore dropped. It never pumps the
+    /// scheduler, so it can never raise the back-pressure deadlock `L0365`.
+    TryTell,
+    /// `ask TARGET.HANDLER(args)` — request-reply, yields `Future<R>` where `R`
+    /// is the handler's `-> R` reply type. Valid only for a handler declared
+    /// *with* a reply type; `await` resolves the future to the reply value.
+    Ask,
+}
+
+impl SendKind {
+    /// The source spelling of this send form — the verb it is written with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tell => "tell",
+            Self::TryTell => "try_tell",
+            Self::Ask => "ask",
+        }
+    }
+
+    /// True for the request-reply form, the one that yields a `Future<R>` and
+    /// therefore requires a handler with a declared reply type.
+    pub fn is_ask(self) -> bool {
+        matches!(self, Self::Ask)
+    }
+}
+
 /// A `Future<T>` combinator (actor stage 5): the two ways to wait on a
 /// *collection* of pending `ask` replies at once rather than `await`ing them one
 /// by one. Both operate on a `list<Future<T>>` and run only on the AST
@@ -381,6 +428,13 @@ pub struct Function {
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// serde `default` for [`ExprKind::Tell`]'s send-form discriminant: an artifact
+/// written before `try_tell` existed carries no `kind`, and the fire-and-forget
+/// `tell` is the form that node originally meant.
+fn send_kind_tell() -> SendKind {
+    SendKind::Tell
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1090,6 +1144,12 @@ pub enum ExprKind {
     /// `None` (no clause) means the child is **unsupervised**: an `err` reply is
     /// then just an ordinary value the asker matches on, exactly as for any
     /// other `result`-returning code.
+    ///
+    /// The optional `bound N` clause overrides the actor's **mailbox capacity**
+    /// (how many messages may be pending for it at once) for this instance;
+    /// without it the actor gets the default capacity of 1024. Both clauses may
+    /// appear, in either order; `fmt` renders them canonically as
+    /// `spawn NAME(args) bound N supervise POLICY`.
     Spawn {
         actor: String,
         args: Vec<Expr>,
@@ -1098,33 +1158,36 @@ pub enum ExprKind {
         /// single-file artifacts and AST snapshots stay valid.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supervise: Option<SupervisionPolicy>,
+        /// The mailbox capacity from a `bound N` clause, or `None` for the
+        /// default (1024). Always at least 1: a zero-capacity mailbox could
+        /// never accept a message, so the parser rejects `bound 0`.
+        /// Serde-defaulted to `None` so existing single-file artifacts and AST
+        /// snapshots stay valid.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<usize>,
     },
     /// A message send to the actor addressed by `target` (an `Actor<T>` handle).
-    /// This one node carries both message-send forms, distinguished by `is_ask`:
-    ///
-    /// - `is_ask == false` — `tell TARGET.HANDLER(args)`: a fire-and-forget send
-    ///   that enqueues onto the target's mailbox and returns `void` immediately.
-    ///   Valid only for a handler declared without a `-> T` reply type.
-    /// - `is_ask == true` — `ask TARGET.HANDLER(args)`: a request-reply send that
-    ///   enqueues a message carrying a one-shot reply slot and evaluates to
-    ///   `Future<R>`, where `R` is the handler's `-> R` reply type. Valid only for
-    ///   a handler declared *with* a reply type. `await` resolves the `Future<R>`
-    ///   to the reply value.
+    /// This one node carries all three message-send forms — `tell`, `try_tell`,
+    /// and `ask` — distinguished by `kind`; see [`SendKind`] for what each yields
+    /// and how each behaves against a full mailbox.
     ///
     /// `args` are the handler arguments (the target is `target`, not part of
-    /// `args`). Both forms run only on the AST interpreter; the IR/bytecode
+    /// `args`). Every form runs only on the AST interpreter; the IR/bytecode
     /// backends reject an actor program (`L0355`) and native/WASM cleanly skip it
-    /// (`L0339`/`L0338`). The two forms share one variant so the existing
-    /// backend-deferral arms (which match `Tell { .. }`) cover `ask` unchanged.
+    /// (`L0339`/`L0338`). The forms share one variant so the existing
+    /// backend-deferral arms (which match `Tell { .. }`) cover all of them
+    /// unchanged.
     Tell {
         target: Box<Expr>,
         handler: String,
         args: Vec<Expr>,
-        /// `true` for `ask` (request-reply, yields `Future<R>`), `false` for
-        /// `tell` (fire-and-forget, yields `void`). Serde-defaulted to `false` so
-        /// existing single-file artifacts and AST snapshots stay valid.
-        #[serde(default, skip_serializing_if = "is_false")]
-        is_ask: bool,
+        /// Which send form this is. Serde-defaulted to [`SendKind::Tell`] so an
+        /// artifact or AST snapshot written before `try_tell` existed still
+        /// loads. It is always *written*, unlike the optional clauses above:
+        /// silently defaulting a missing discriminant would turn an `ask` into a
+        /// `tell`, which is a change of meaning rather than a lost nicety.
+        #[serde(default = "send_kind_tell")]
+        kind: SendKind,
     },
     /// A `Future<T>` combinator over a collection of pending `ask` replies:
     /// `join_all EXPR` (wait for all, yield `list<T>`) or `select EXPR` (wait for

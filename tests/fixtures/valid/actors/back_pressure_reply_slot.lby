@@ -1,0 +1,45 @@
+# Stage-5b back-pressure: a full mailbox can never lose, delay, or deadlock an
+# `ask` **reply**. Only the request is bounded — the handler's reply is written
+# straight into the future's one-shot reply slot, never onto the asker's mailbox
+# — so an actor sitting at exactly its capacity still receives every reply it is
+# waiting on.
+#
+# Both actors are driven to exactly their bound of 2:
+#
+#   - `Coord` is at 2/2 (the `compute` request plus a queued `noop`) at the
+#     moment its turn starts awaiting a reply from `Worker`.
+#   - `Worker` is at 2/2 (main's `square(5)` plus `Coord`'s `square(6)`).
+#
+# Every reply still arrives: `36` (Coord's), then `25` (main's direct ask), then
+# the queued `noop` runs during the graceful drain.
+actor Worker
+    on square n i64 -> i64
+        n * n
+
+actor Coord
+    state
+        w Actor<Worker>
+
+    init worker Actor<Worker>
+        w = worker
+
+    on noop
+        println("noop")
+
+    on compute n i64 -> i64
+        await ask w.square(n)
+
+fn main -> i64
+    let w Actor<Worker> = spawn Worker() bound 2
+    let c Actor<Coord> = spawn Coord(w) bound 2
+
+    # Fill Coord's mailbox to exactly its capacity.
+    let answer Future<i64> = ask c.compute(6)
+    tell c.noop()
+
+    # ...and take one of Worker's two slots directly.
+    let direct Future<i64> = ask w.square(5)
+
+    println(to_string(await answer))
+    println(to_string(await direct))
+    0

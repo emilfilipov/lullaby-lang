@@ -58,6 +58,18 @@
 //! is deliverable and the awaited slot can never fill. That is reported as a clean,
 //! deterministic runtime error (`L0356`) rather than hanging.
 //!
+//! **Back-pressure (stage 5b).** Mailboxes are **bounded**: each actor carries a
+//! capacity (`DEFAULT_MAILBOX_CAPACITY`, or the `spawn ... bound N` override) and
+//! an occupancy counter of how many of its messages are currently queued. The
+//! queue itself stays one global `VecDeque` — on a deterministic single thread,
+//! per-actor queues drained by "lowest global sequence among deliverable heads"
+//! *is* this scan, so counters buy per-target pressure with zero change to
+//! delivery order. `tell`/`ask` to a full mailbox **block until space frees**,
+//! cooperatively pumping `run_one_deliverable` exactly as `await` does; when
+//! nothing is deliverable and the target is still full, no turn can ever free a
+//! slot and that is the deterministic back-pressure deadlock `L0365`. `try_tell`
+//! is the load-shedding escape hatch: it never pumps and answers `bool`.
+//!
 //! This is the AST-interpreter runtime; the IR/bytecode backends reject an actor
 //! program (`L0355`) and the native/WASM backends cleanly skip it, so actors run
 //! only here.
@@ -109,7 +121,25 @@ pub(crate) struct ActorInstance {
     /// `escalate` that terminated it). A stopped actor runs no further turns:
     /// `tell`s to it are dropped and `ask`s to it resolve to `L0359`.
     pub(crate) stopped: bool,
+    /// This actor's **mailbox capacity**: the most messages that may be pending
+    /// for it at once. [`DEFAULT_MAILBOX_CAPACITY`] unless the `spawn` carried a
+    /// `bound N` clause. Always at least 1 (the parser rejects `bound 0`).
+    pub(crate) capacity: usize,
+    /// How many messages targeting this actor are currently sitting on the global
+    /// mailbox — its **occupancy** against `capacity`. Incremented when a message
+    /// for this actor is enqueued, decremented when the scheduler dequeues one
+    /// for dispatch, and zeroed when a supervision `stop` purges the actor's
+    /// queued messages. A `restart` deliberately leaves it alone: a restart
+    /// preserves the mailbox, and those preserved messages still occupy memory
+    /// and will still be delivered.
+    pub(crate) pending: usize,
 }
+
+/// The mailbox capacity an actor gets when its `spawn` carries no `bound N`
+/// clause. Unbounded mailboxes are a memory-safety hazard — a fast producer can
+/// grow the queue without limit — so every actor is bounded by default, and the
+/// default is set high enough that ordinary programs never notice it.
+pub(crate) const DEFAULT_MAILBOX_CAPACITY: usize = 1024;
 
 /// A supervisory action to carry out on an actor: what a [`SupervisionPolicy`]
 /// resolves to once a failure has actually occurred. (`escalate` is a policy but
@@ -178,11 +208,15 @@ impl<'a> Runtime<'a> {
     /// (`current_actor`), or `None` when spawned from `main` — a root actor. Its
     /// `policy` comes from the `supervise` clause, and the evaluated `args` are
     /// retained so a `restart` can replay them into `init`.
+    ///
+    /// `bound` is the `bound N` clause's mailbox capacity, or `None` for
+    /// [`DEFAULT_MAILBOX_CAPACITY`].
     pub(crate) fn spawn_actor(
         &mut self,
         actor_name: &str,
         args: Vec<Value>,
         policy: Option<SupervisionPolicy>,
+        bound: Option<usize>,
     ) -> Result<Value, RuntimeError> {
         let decl: &'a ActorDecl = match self.actors.get(actor_name).copied() {
             Some(decl) => decl,
@@ -209,6 +243,8 @@ impl<'a> Runtime<'a> {
             policy,
             spawn_args: args.clone(),
             stopped: false,
+            capacity: bound.unwrap_or(DEFAULT_MAILBOX_CAPACITY),
+            pending: 0,
         });
 
         match &decl.init {
@@ -231,9 +267,89 @@ impl<'a> Runtime<'a> {
         Ok(Value::ActorRef(id))
     }
 
+    /// Resolve a message-send target to an actor id, rejecting a non-handle or a
+    /// dangling handle with the shared `L0401` guard. `verb` names the send form
+    /// for the diagnostic. Semantics has already proved the target is an
+    /// `Actor<T>`, so both arms are defensive.
+    fn send_target_id(&self, target: &Value, verb: &str) -> Result<usize, RuntimeError> {
+        let Value::ActorRef(actor_id) = target else {
+            return Err(RuntimeError::new(
+                "L0401",
+                format!("`{verb}` target is not an actor handle: `{target}`"),
+            ));
+        };
+        if *actor_id >= self.actor_instances.len() {
+            return Err(RuntimeError::new(
+                "L0401",
+                format!("`{verb}` to unknown actor handle `{actor_id}`"),
+            ));
+        }
+        Ok(*actor_id)
+    }
+
+    /// Enqueue a message on the global mailbox, charging it against its target's
+    /// [`ActorInstance::pending`] occupancy. Every enqueue goes through here so
+    /// the counter and the queue can never disagree.
+    fn enqueue_message(&mut self, message: ActorMessage) {
+        self.actor_instances[message.actor_id].pending += 1;
+        self.actor_mailbox.push_back(message);
+    }
+
+    /// **Back-pressure.** Block until `actor_id` has room in its mailbox, by
+    /// cooperatively pumping the scheduler: while the target is at capacity, run
+    /// the next deliverable message (freeing a slot whenever that message is one
+    /// of the target's own) and re-check. Returns once occupancy is below
+    /// capacity.
+    ///
+    /// **Why this stays deterministic.** The pump is the *same*
+    /// [`Runtime::run_one_deliverable`] `await`, `join_all` and `select` already
+    /// drive: one thread, run-to-completion turns, and the message chosen is
+    /// always the earliest queued deliverable one. Re-entering the scheduler from
+    /// the middle of an expression is likewise not new — `await_actor_future`
+    /// has always run other actors' turns nested on the Rust call stack. So a
+    /// pumping `tell` adds no new ordering freedom: the sequence of turns, and
+    /// therefore every side effect, is identical on every run.
+    ///
+    /// When nothing is deliverable and the target is still full, no future turn
+    /// can ever free a slot (the queue only shrinks by dispatch), so the send can
+    /// never complete: that is the deterministic back-pressure deadlock `L0365`,
+    /// reported rather than hung. The usual shape is a send to an actor that is
+    /// itself mid-turn — its own queued messages are not deliverable while it
+    /// runs, so only it could drain them, and it is blocked sending.
+    fn reserve_mailbox_capacity(
+        &mut self,
+        actor_id: usize,
+        verb: &str,
+    ) -> Result<(), RuntimeError> {
+        loop {
+            let instance = &self.actor_instances[actor_id];
+            if instance.pending < instance.capacity {
+                return Ok(());
+            }
+            if !self.run_one_deliverable()? {
+                let instance = &self.actor_instances[actor_id];
+                return Err(RuntimeError::new(
+                    "L0365",
+                    format!(
+                        "`{verb}` can never complete: actor `{}`'s mailbox is full ({} of {} messages pending) and no queued message is deliverable to free a slot — only that actor can drain its own mailbox, and it is mid-turn (or every queued message targets a busy actor) — this is a deterministic back-pressure deadlock",
+                        instance.actor_name, instance.pending, instance.capacity
+                    ),
+                ));
+            }
+        }
+    }
+
     /// `tell TARGET.HANDLER(args)`: enqueue a fire-and-forget message on the
     /// target actor's mailbox and return `void`. The message is processed later,
     /// during the graceful drain before `main` returns.
+    ///
+    /// **Back-pressure.** Mailboxes are bounded (see
+    /// [`DEFAULT_MAILBOX_CAPACITY`] and the `spawn ... bound N` clause). A `tell`
+    /// to a full mailbox does not fail and does not silently grow the queue: it
+    /// **blocks until space frees**, cooperatively pumping the scheduler through
+    /// [`Runtime::reserve_mailbox_capacity`], which is where the `L0365`
+    /// deadlock — and the determinism argument for the pump — lives. Use
+    /// `try_tell` to shed instead of blocking.
     ///
     /// A `tell` to a **stopped** actor is dropped: the message is not enqueued and
     /// the send still evaluates to `void`. That is what stopping means — the actor
@@ -247,28 +363,55 @@ impl<'a> Runtime<'a> {
         handler: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
-        let Value::ActorRef(actor_id) = target else {
-            return Err(RuntimeError::new(
-                "L0401",
-                format!("`tell` target is not an actor handle: `{target}`"),
-            ));
-        };
-        if actor_id >= self.actor_instances.len() {
-            return Err(RuntimeError::new(
-                "L0401",
-                format!("`tell` to unknown actor handle `{actor_id}`"),
-            ));
-        }
+        let actor_id = self.send_target_id(&target, "tell")?;
         if self.actor_instances[actor_id].stopped {
             return Ok(Value::Void);
         }
-        self.actor_mailbox.push_back(ActorMessage {
+        self.reserve_mailbox_capacity(actor_id, "tell")?;
+        // Pumping ran other actors' turns, one of which may have stopped the
+        // target through supervision. The drop rule applies at the moment of
+        // enqueue, not at the moment the send was written.
+        if self.actor_instances[actor_id].stopped {
+            return Ok(Value::Void);
+        }
+        self.enqueue_message(ActorMessage {
             actor_id,
             handler: handler.to_string(),
             args,
             reply_slot: None,
         });
         Ok(Value::Void)
+    }
+
+    /// `try_tell TARGET.HANDLER(args)`: the **load-shedding** variant of `tell`.
+    /// It has `tell`'s fire-and-forget semantics but never blocks: if the target's
+    /// mailbox is already at capacity the message is dropped and the send
+    /// evaluates to `false`; otherwise it is enqueued exactly as `tell` would and
+    /// the send evaluates to `true`.
+    ///
+    /// Because it never pumps, `try_tell` can never raise the back-pressure
+    /// deadlock `L0365` — that is the whole point of having it. A `try_tell` to a
+    /// **stopped** actor likewise yields `false`: the message was not enqueued,
+    /// and reporting `true` for a message that can never be delivered would be a
+    /// lie about the only thing this form promises to answer.
+    pub(crate) fn try_tell_actor(
+        &mut self,
+        target: Value,
+        handler: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let actor_id = self.send_target_id(&target, "try_tell")?;
+        let instance = &self.actor_instances[actor_id];
+        if instance.stopped || instance.pending >= instance.capacity {
+            return Ok(Value::Bool(false));
+        }
+        self.enqueue_message(ActorMessage {
+            actor_id,
+            handler: handler.to_string(),
+            args,
+            reply_slot: None,
+        });
+        Ok(Value::Bool(true))
     }
 
     /// `ask TARGET.HANDLER(args)`: enqueue a request-reply message on the target
@@ -281,31 +424,36 @@ impl<'a> Runtime<'a> {
     /// but its slot is [`ReplySlot::Unavailable`] from the start: the reply can
     /// never be produced, so `await`ing it reports `L0359` deterministically
     /// instead of waiting for a turn that will never run.
+    ///
+    /// **Back-pressure.** Only the *request* is bounded, exactly as for `tell`: a
+    /// request to a full mailbox blocks until space frees (see
+    /// [`Runtime::reserve_mailbox_capacity`], including its `L0365` deadlock).
+    /// The **reply** is never bounded — `dispatch_message` writes it straight
+    /// into the reply slot rather than onto the asker's mailbox — so a full
+    /// mailbox can never lose, delay, or deadlock a reply.
+    ///
+    /// The capacity is reserved *before* the reply slot is allocated: pumping may
+    /// itself run turns that `ask`, and allocating first would hand this request
+    /// a slot index from before those requests rather than after them.
     pub(crate) fn ask_actor(
         &mut self,
         target: Value,
         handler: &str,
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
-        let Value::ActorRef(actor_id) = target else {
-            return Err(RuntimeError::new(
-                "L0401",
-                format!("`ask` target is not an actor handle: `{target}`"),
-            ));
-        };
-        if actor_id >= self.actor_instances.len() {
-            return Err(RuntimeError::new(
-                "L0401",
-                format!("`ask` to unknown actor handle `{actor_id}`"),
-            ));
+        let actor_id = self.send_target_id(&target, "ask")?;
+        if !self.actor_instances[actor_id].stopped {
+            self.reserve_mailbox_capacity(actor_id, "ask")?;
         }
         let slot = self.actor_reply_slots.len();
+        // Re-read `stopped`: the actor may have been stopped by a turn the pump
+        // above ran, and a request to a stopped actor can never be answered.
         if self.actor_instances[actor_id].stopped {
             self.actor_reply_slots.push(ReplySlot::Unavailable);
             return Ok(Value::ActorFuture(slot));
         }
         self.actor_reply_slots.push(ReplySlot::Pending);
-        self.actor_mailbox.push_back(ActorMessage {
+        self.enqueue_message(ActorMessage {
             actor_id,
             handler: handler.to_string(),
             args,
@@ -516,6 +664,12 @@ impl<'a> Runtime<'a> {
     /// queued message can target one; the `stopped` guard here is the belt-and-
     /// braces half of that invariant, keeping a stopped actor unschedulable even
     /// if a message reached the queue by another path.
+    ///
+    /// This is also the only place a message *leaves* the queue by delivery, so it
+    /// is where the target's [`ActorInstance::pending`] occupancy is released —
+    /// at dequeue, before the turn runs, because the mailbox slot is free from
+    /// that moment on. (The other exit is a supervision `stop`'s purge; see
+    /// [`Runtime::stop_actor`].)
     fn run_one_deliverable(&mut self) -> Result<bool, RuntimeError> {
         let Some(index) = self.actor_mailbox.iter().position(|message| {
             !self.busy_actors.contains(&message.actor_id)
@@ -528,6 +682,15 @@ impl<'a> Runtime<'a> {
             .actor_mailbox
             .remove(index)
             .expect("deliverable index is valid");
+        let instance = &mut self.actor_instances[message.actor_id];
+        // Every queued message was charged to its target by `enqueue_message`, so
+        // this cannot underflow.
+        debug_assert!(
+            instance.pending > 0,
+            "dequeued a message for actor `{}` with zero pending occupancy",
+            instance.actor_name
+        );
+        instance.pending = instance.pending.saturating_sub(1);
         self.dispatch_message(message)?;
         Ok(true)
     }
@@ -706,6 +869,12 @@ impl<'a> Runtime<'a> {
     /// reply slot marked [`ReplySlot::Unavailable`] so the asker gets a
     /// deterministic `L0359` instead of waiting forever for a turn that will never
     /// run. Stopping is idempotent.
+    ///
+    /// The purge is the second way a message leaves the queue, so it releases the
+    /// actor's [`ActorInstance::pending`] occupancy too — every message charged to
+    /// this actor is being dropped here, so the counter goes to zero. Leaving it
+    /// stale would leave the scheduler believing a mailbox is full that holds
+    /// nothing.
     fn stop_actor(&mut self, id: usize) {
         if self.actor_instances[id].stopped {
             return;
@@ -714,16 +883,29 @@ impl<'a> Runtime<'a> {
         // Purge in queue order; the retained messages keep their relative order,
         // so the surviving actors' FIFO is untouched.
         let mut retained = VecDeque::with_capacity(self.actor_mailbox.len());
+        let mut purged = 0usize;
         for message in std::mem::take(&mut self.actor_mailbox) {
             if message.actor_id != id {
                 retained.push_back(message);
                 continue;
             }
+            purged += 1;
             if let Some(slot) = message.reply_slot {
                 self.actor_reply_slots[slot] = ReplySlot::Unavailable;
             }
         }
         self.actor_mailbox = retained;
+        let instance = &mut self.actor_instances[id];
+        instance.pending = instance.pending.saturating_sub(purged);
+        // Every message charged to this actor was just purged, so the occupancy
+        // must land exactly on zero. A non-zero remainder means an enqueue or a
+        // dequeue somewhere skipped the counter — the accounting is the whole
+        // basis of back-pressure, so assert it rather than let it drift.
+        debug_assert_eq!(
+            instance.pending, 0,
+            "mailbox occupancy for actor `{}` disagreed with the queue at stop",
+            instance.actor_name
+        );
     }
 
     /// `supervise restart`: give the actor a fresh start. Its `state` is discarded
@@ -738,7 +920,10 @@ impl<'a> Runtime<'a> {
     /// - **The mailbox.** Messages already queued for the actor are preserved and
     ///   are delivered, in order, to the restarted actor. The message that failed
     ///   is not among them: it was consumed by the turn that returned `err`, which
-    ///   is precisely why a restart cannot loop on a poison message.
+    ///   is precisely why a restart cannot loop on a poison message. Its
+    ///   [`ActorInstance::pending`] occupancy is preserved with it: those messages
+    ///   still hold memory and will still be delivered, so they must still count
+    ///   against the capacity (unlike a `stop`, which drops them).
     /// - **Supervision links.** Its supervisor and policy carry over, so a
     ///   restarted actor is still supervised.
     ///

@@ -2,6 +2,8 @@
 //! evaluation and place resolution. Split out of lib.rs as a separate impl block;
 //! sees the interpreter's types via `use super::*`.
 
+use lullaby_parser::SendKind;
+
 use super::*;
 
 impl<'a> Runtime<'a> {
@@ -441,33 +443,37 @@ impl<'a> Runtime<'a> {
                 actor,
                 args,
                 supervise,
+                bound,
             } => {
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval_expr(arg, env)?);
                 }
-                self.spawn_actor(actor, values, *supervise)
+                self.spawn_actor(actor, values, *supervise, *bound)
             }
-            // `tell`/`ask TARGET.HANDLER(args)`: evaluate the target handle and
-            // the arguments, then dispatch. `tell` enqueues a fire-and-forget
-            // message and returns `void`; `ask` enqueues a request carrying a
-            // reply slot and returns a `Future<R>` (`Value::ActorFuture`) that
-            // `await` resolves by driving the mailbox until the reply arrives.
+            // `tell`/`try_tell`/`ask TARGET.HANDLER(args)`: evaluate the target
+            // handle and the arguments, then dispatch on the send form. `tell`
+            // enqueues a fire-and-forget message and returns `void`, blocking
+            // (by cooperatively pumping the scheduler) while the target's mailbox
+            // is full; `try_tell` sheds instead of blocking and returns whether it
+            // enqueued; `ask` enqueues a request carrying a reply slot and returns
+            // a `Future<R>` (`Value::ActorFuture`) that `await` resolves by
+            // driving the mailbox until the reply arrives.
             ExprKind::Tell {
                 target,
                 handler,
                 args,
-                is_ask,
+                kind,
             } => {
                 let target = self.eval_expr(target, env)?;
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval_expr(arg, env)?);
                 }
-                if *is_ask {
-                    self.ask_actor(target, handler, values)
-                } else {
-                    self.tell_actor(target, handler, values)
+                match kind {
+                    SendKind::Tell => self.tell_actor(target, handler, values),
+                    SendKind::TryTell => self.try_tell_actor(target, handler, values),
+                    SendKind::Ask => self.ask_actor(target, handler, values),
                 }
             }
             // `join_all EXPR` / `select EXPR`: evaluate the operand to a

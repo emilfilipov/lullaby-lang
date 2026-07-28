@@ -4,8 +4,8 @@ use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AsmClobber, AsmOperand, AssignOp, BinaryOp, CombinatorOp, EnumVariant, Expr, ExprKind,
     Function, INFERRED_RETURN, MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt,
-    StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs, function_type,
-    generic_type,
+    SendKind, StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs,
+    function_type, generic_type,
 };
 
 mod semantics_actor_ownership;
@@ -905,39 +905,46 @@ impl<'a> Checker<'a> {
         Some(generic_type("Actor", &[TypeRef::new(actor)]))
     }
 
-    /// Type-check a message send. The one entry point serves both forms:
+    /// Type-check a message send. The one entry point serves all three forms:
     ///
-    /// - `tell TARGET.HANDLER(args)` (`is_ask == false`) — fire-and-forget,
+    /// - `tell TARGET.HANDLER(args)` ([`SendKind::Tell`]) — fire-and-forget,
     ///   produces `void`; the handler must be a `tell` handler (no `-> T`).
-    /// - `ask TARGET.HANDLER(args)` (`is_ask == true`) — request-reply, produces
+    /// - `try_tell TARGET.HANDLER(args)` ([`SendKind::TryTell`]) — the
+    ///   load-shedding variant of `tell`, produces `bool`; it targets the same
+    ///   fire-and-forget handlers `tell` does, so a `try_tell` to a reply handler
+    ///   is rejected exactly as a `tell` to one is.
+    /// - `ask TARGET.HANDLER(args)` ([`SendKind::Ask`]) — request-reply, produces
     ///   `Future<R>`; the handler must be a reply handler (declared `-> R`).
     ///
-    /// In both cases the target must be an `Actor<T>` handle, the handler must
+    /// In every case the target must be an `Actor<T>` handle, the handler must
     /// exist, and the arguments must match the handler's parameters in count,
-    /// type, and sendability (`L0352`/`L0353`). A mismatched send form (a `tell`
-    /// to a reply handler, or an `ask` to a fire-and-forget handler) is `L0352`.
+    /// type, and sendability (`L0352`/`L0353`). A mismatched send form (a
+    /// `tell`/`try_tell` to a reply handler, or an `ask` to a fire-and-forget
+    /// handler) is `L0352`.
     #[allow(clippy::too_many_arguments)]
     fn check_send(
         &mut self,
         target: &Expr,
         handler: &str,
         args: &[Expr],
-        is_ask: bool,
+        kind: SendKind,
         span: Span,
         scope: &Scope,
         function: &Function,
     ) -> Option<TypeRef> {
-        let verb = if is_ask { "ask" } else { "tell" };
-        // The result type on any early (error) exit: `void` for `tell`, and `None`
-        // for `ask` (its `Future<R>` is unknown, so callers/`await` should not see
-        // a bogus type).
-        let error_result = || {
-            if is_ask {
-                None
-            } else {
-                Some(TypeRef::new("void"))
-            }
+        let verb = kind.as_str();
+        // The type this send evaluates to when everything checks out and the
+        // handler kind matches: `void` for `tell`, `bool` for `try_tell`, and
+        // `Future<R>` (filled in below, where `R` is known) for `ask`.
+        let send_result = |reply: Option<TypeRef>| match kind {
+            SendKind::Tell => Some(TypeRef::new("void")),
+            SendKind::TryTell => Some(TypeRef::new("bool")),
+            SendKind::Ask => reply.as_ref().map(future_type),
         };
+        // The result type on any early (error) exit: the send form's own result
+        // type for the fire-and-forget forms, and `None` for `ask` (its
+        // `Future<R>` is unknown, so callers/`await` should not see a bogus type).
+        let error_result = || send_result(None);
 
         let target_type = self.check_expr(target, scope, function);
         let arg_types: Vec<Option<TypeRef>> = args
@@ -976,18 +983,18 @@ impl<'a> Checker<'a> {
             return error_result();
         };
         // Enforce that the send form matches the handler kind.
-        match (is_ask, &sig.reply_type) {
+        match (kind.is_ask(), &sig.reply_type) {
             (false, Some(reply)) => {
                 self.diagnostics.push(SemanticDiagnostic::at(
                     "L0352",
                     format!(
-                        "cannot `tell` handler `{handler}` of actor `{actor_name}`: it declares a reply type (`-> {}`), so it is an `ask` handler — send it with `ask` and `await` the reply",
+                        "cannot `{verb}` handler `{handler}` of actor `{actor_name}`: it declares a reply type (`-> {}`), so it is an `ask` handler — send it with `ask` and `await` the reply",
                         reply.name
                     ),
                     Some(function.name.clone()),
                     span,
                 ));
-                return Some(TypeRef::new("void"));
+                return error_result();
             }
             (true, None) => {
                 self.diagnostics.push(SemanticDiagnostic::at(
@@ -1033,14 +1040,12 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // `tell` yields `void`; `ask` yields `Future<R>` for the handler's reply
+        // `tell` yields `void`, `try_tell` yields `bool` (whether the message was
+        // enqueued or shed), and `ask` yields `Future<R>` for the handler's reply
         // type `R`. The reply value crosses the actor boundary back to the asker,
         // so `R`'s sendability is enforced at the handler declaration
         // (`validate_actors`); here we only need to surface the future type.
-        match sig.reply_type {
-            Some(reply) => Some(future_type(&reply)),
-            None => Some(TypeRef::new("void")),
-        }
+        send_result(sig.reply_type)
     }
 
     /// Type-check a `Future<T>` combinator (`join_all EXPR` / `select EXPR`). The
@@ -3371,13 +3376,18 @@ impl<'a> Checker<'a> {
                 actor,
                 args,
                 supervise,
+                // `bound N` is a runtime mailbox capacity, not a typing concern:
+                // the parser already guarantees it is a positive integer literal,
+                // and it neither changes `spawn`'s `Actor<T>` result type nor
+                // constrains its arguments.
+                bound: _,
             } => self.check_spawn(actor, args, *supervise, expr.span, scope, function),
             ExprKind::Tell {
                 target,
                 handler,
                 args,
-                is_ask,
-            } => self.check_send(target, handler, args, *is_ask, expr.span, scope, function),
+                kind,
+            } => self.check_send(target, handler, args, *kind, expr.span, scope, function),
             ExprKind::Field { target, field } => {
                 let target_type = self.check_expr(target, scope, function)?;
                 // An actor's `state` is private: an `Actor<T>` handle exposes no

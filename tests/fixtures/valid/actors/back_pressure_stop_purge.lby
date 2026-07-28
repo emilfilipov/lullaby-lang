@@ -1,0 +1,64 @@
+# Stage-5b back-pressure meets stage-4 supervision: a `stop` purges the target's
+# queued messages, and the purge must **release their mailbox occupancy** too.
+#
+# The tank is bounded to 3 and driven to exactly 3/3 (the doomed request plus two
+# queued notes). Running the request fails it, and `supervise stop` purges all
+# three, so the tank's occupancy must go back to zero rather than stay stale at
+# 2. Sends after the stop then behave: they are dropped (the tank runs no further
+# turns) rather than blocking against a phantom-full mailbox.
+#
+# The live sink, bounded to 3 as well, shows back-pressure still working
+# alongside: its fourth `tell` pumps, so `sink 1` prints before `after stop`.
+actor Tank
+    state
+        level i64
+        cap i64
+
+    init capacity i64
+        level = 0
+        cap = capacity
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > cap
+            return err("overflow")
+        level += amount
+        ok(level)
+
+    on note n i64
+        println("note " + to_string(n))
+
+actor Sink
+    on take n i64
+        println("sink " + to_string(n))
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let t Actor<Tank> = spawn Tank(10) bound 3 supervise stop
+    let s Actor<Sink> = spawn Sink() bound 3
+
+    # Fill the tank's mailbox to exactly its capacity.
+    let doomed Future<result<i64, string>> = ask t.deposit(99)
+    tell t.note(1)
+    tell t.note(2)
+
+    # Running the request fails the tank; the stop purges the two queued notes.
+    println(describe(await doomed))
+
+    # More sends than the capacity, to an actor whose occupancy must now read
+    # zero. They are dropped because it is stopped — never blocked, never L0365.
+    tell t.note(3)
+    tell t.note(4)
+    tell t.note(5)
+    tell t.note(6)
+
+    # The live sink still back-pressures normally: the fourth `tell` pumps.
+    tell s.take(1)
+    tell s.take(2)
+    tell s.take(3)
+    tell s.take(4)
+    println("after stop")
+    0
