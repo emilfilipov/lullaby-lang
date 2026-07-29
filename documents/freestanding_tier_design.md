@@ -1182,6 +1182,18 @@ decide that the text above did not, and the four places the text above was wrong
   rather than enumerating call shapes. Both routes now funnel through one helper,
   `semantics_isr::entry_misuse_diagnostic`, so they cannot drift apart in wording
   or — the thing that actually went wrong — in coverage.
+- **The tier gate is per MODULE, not per program.** A multi-file build is merged
+  into one flat program before semantic analysis runs, so the gate consults the
+  loader's per-declaration attribution (`Program::origins`) alongside the
+  whole-unit `is_no_runtime` flag — the same pair `semantics_no_runtime`'s
+  `TierScope` uses for `L0441`'s other half. Consulting only the flag is wrong in
+  *both* directions: it rejects a legitimate `interrupt fn` in a freestanding
+  module whenever the entry file happens to be hosted, and — the silent one —
+  accepts a hosted module's `interrupt fn` as soon as any other module in the
+  program opts into the tier, putting a hardware calling convention on a safe-tier
+  declaration. Both directions are pinned by
+  `tests/fixtures/valid/modules_freestanding_isr/` and
+  `tests/fixtures/invalid/interrupt_hosted_module/`.
 - **Neither kind is generic (`L0446`).** A generic function is monomorphized per
   instantiation; a hardware entry point is named once, by an IDT entry or a
   bootloader, and there is no call site to infer a type argument from.
@@ -1323,12 +1335,14 @@ grammar that exists nowhere. The surface is documented in
 Widening `formal_grammar.md` to the full declaration grammar is its own change.
 
 **Tests.** `crates/lullaby_ir/src/native_object_isr_tests.rs` (13 codegen pins),
-`crates/lullaby_cli/tests/cli/suite28.rs` (14 end-to-end: the `L0441` tier gate,
+`crates/lullaby_cli/tests/cli/suite28.rs` (15 end-to-end: the `L0441` tier gate
+**and its per-module scoping in both directions**,
 every `L0446` constraint, the not-callable rule in **both** its forms, `L0201`
-exclusivity, four-tier acceptance, and the formatter round-trip), one valid
-fixture and **15** invalid fixtures under `tests/fixtures/` — 13 in
-`invalid/no_runtime/` plus the two `*_outside_no_runtime.lby` at the level above
-(they carry no `no-runtime` directive, which is the point of them).
+exclusivity, four-tier acceptance, and the formatter round-trip), two valid
+fixtures (one single-file, one mixed-tier module pair) and **16** invalid fixtures
+under `tests/fixtures/` — 13 in `invalid/no_runtime/`, the two
+`*_outside_no_runtime.lby` at the level above (they carry no `no-runtime`
+directive, which is the point of them), and the `interrupt_hosted_module/` pair.
 
 **Still undelivered in this section:** nothing for `interrupt`/`naked`. The
 sibling prefix keywords §6 mentions in passing — `entry fn` (§9.1) and `panic fn`

@@ -1,0 +1,11 @@
+# A hosted entry file importing a freestanding module that declares an
+# `interrupt fn` and a `naked fn`. Both are legitimate — the tier is a MODULE
+# property and `kernel.lby` opts in — so this program must type-check and run,
+# returning 21.
+#
+# It lives in a subdirectory so the single-file cross-backend parity harness
+# (which reads only top-level `.lby` files) ignores it; `suite28.rs` drives it.
+import kernel
+
+fn main -> i64
+    kernel_answer()

@@ -1,0 +1,16 @@
+# The freestanding module of a mixed-tier build. Its `interrupt fn` is
+# legitimate: THIS module carries the `no-runtime` directive, which is what the
+# tier gate must consult — not the merged program's whole-unit flag, which is
+# false here because the entry file (`main.lby`) is hosted.
+no-runtime
+
+pub fn kernel_answer -> i64
+    21
+
+interrupt fn timer_isr frame ptr<i64>
+    unsafe
+        ptr_write(frame, 1)
+
+naked fn boot_entry
+    unsafe
+        asm 250, 244

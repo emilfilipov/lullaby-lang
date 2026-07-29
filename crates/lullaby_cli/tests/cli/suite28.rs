@@ -108,6 +108,49 @@ fn hardware_entry_points_require_the_no_runtime_tier() {
     );
 }
 
+#[test]
+fn the_tier_gate_is_per_module_not_per_program() {
+    // A multi-file build is merged into one flat `Program` before semantic
+    // analysis runs, so the tier gate must consult the loader's PER-DECLARATION
+    // attribution (`Program::origins`), not the merged unit's whole-program
+    // `is_no_runtime` flag. Consulting only the flag is wrong in both directions,
+    // and both are pinned here because each is a different failure:
+    //
+    //   * a legitimate `interrupt fn` in a freestanding module would be REJECTED
+    //     whenever the entry file happens to be hosted (a false `L0441`);
+    //   * a hosted module's `interrupt fn` would be ACCEPTED as soon as any other
+    //     module in the program opted into the tier — the silent one, and the
+    //     direction that would put a hardware calling convention into a safe-tier
+    //     declaration.
+    //
+    // This is a rebase regression guard: the freestanding gate became per-module
+    // on main while this feature was in flight, and git merged the two silently
+    // because they touch different lines.
+    let valid = workspace_root().join("tests/fixtures/valid/modules_freestanding_isr/main.lby");
+    let output = lullaby()
+        .args([
+            "run",
+            "--backend",
+            "ast",
+            valid.to_str().expect("fixture path"),
+        ])
+        .output()
+        .expect("run cli");
+    assert!(
+        output.status.success(),
+        "an `interrupt fn` in a FREESTANDING module must be accepted even when the \
+         entry file is hosted. stderr: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output).trim(), "21");
+
+    assert_rejected_with(
+        "tests/fixtures/invalid/interrupt_hosted_module/main.lby",
+        "L0441",
+        "freestanding-tier construct",
+    );
+}
+
 // -- `interrupt fn` signature constraints (`L0446`) --------------------------
 
 #[test]
