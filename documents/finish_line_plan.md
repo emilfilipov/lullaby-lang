@@ -164,7 +164,26 @@ into the permanent fuzzers.
     pinned. **Add a negative fixture documenting it as intended** so the suite records
     the accepted edge.
 
-## Wave status (2026-07-23) — RESUME HERE
+## Wave status (2026-07-24, weekly-limit stop) — RESUME HERE
+
+Six lanes were killed by a **weekly** quota limit. All work preserved as WIP commits on
+their branches; nothing lost. main is `473a10d`, clean, and every merged change is
+integrated-gate-verified. **Nothing below has merged — all six need finishing + review.**
+
+| Branch (`agent-…`) | Task | Base | WIP | State when killed |
+|---|---|---|---|---|
+| `ad2d699021451a1d6` | loader tier attribution — **fixing review FAIL** | `5c62173` | 27f/+1607 | **Blocker fix WORKED** — last words: *"The no-CRT binary is no longer produced."* Was starting the full gate pass. Still owes: the 2 doc/comment accuracy fixes + teeth proof. |
+| `a9c31bd061eba8075` | `interrupt`/`naked` — **fixing review FAIL** | `5c62173` | 52f/+3016 | Was rewriting the vacuous promotion test with a real control + fixing the tautological guard pins. Unclear whether the **L0446 fn-value bypass blocker** was fixed yet — verify first. |
+| `ad7ac0ea16b3f6ac7` | actor back-pressure — **fixing review FAIL** | `0e66e2b` | 23f/+1429 | Was running the CLI suite detached. Verify both blockers (reply-slot teeth fixture; `bound` literal forms) actually landed. |
+| `a2e9b7e1bc51809f1` | HOF pass-onward — **under review** | `0e66e2b` | 18f/+1332 | ⚠️ **The REVIEWER's last words were "Found a trap. Let me narrow it down."** — an unresolved potential finding. Re-dispatch the reviewer and have it re-derive; do NOT merge on the implementer's account. |
+| `a86120db5f2ae68d0` | optimizer assign-path miscompile (sweep #3 F1) | `5c62173` | 23f/+1069 | Was running the CLI test after a fixture sweep. |
+| `a92f1c48587129cea` | semantic assign-path gates (sweep #3 F3/F4) | `5c62173` | 13f/+535 | Implementation complete on disk; reviewer was dispatched and died immediately. Needs review from scratch (implementer filed no report). |
+
+**Resume order:** (1) re-dispatch the HOF reviewer — it found something; (2) finish the three
+FAIL round-trips; (3) review the two sweep-#3 fix lanes; (4) merge in D1 order, rebasing the
+four `5c62173`-based branches onto whatever main has become; (5) integrated gate.
+
+## Wave status (2026-07-23) — earlier stop
 
 **Merged + integrated-gate-verified on main `0e66e2b`** (`cargo test --all` exit 0: CLI
 609, `lullaby_ir` 531, semantics 308, 53 actor tests, 0 failures; clippy `-D warnings` 0;
