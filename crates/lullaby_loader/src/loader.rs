@@ -21,8 +21,8 @@ use lullaby_diagnostics::{DiagnosticPhase, DiagnosticReport, Span};
 use lullaby_lexer::{lex, validate_source_path};
 use lullaby_parser::{
     AliasDecl, EnumDecl, Expr, ExprKind, Function, MatchArm, ModuleOrigins, Program, Stmt,
-    StructDecl, TypeRef, asm_operand_exprs, decl_origin_key, impl_origin_key, parse,
-    report_origin_key, trait_origin_key,
+    StructDecl, TypeRef, asm_operand_exprs, assign_path_exprs, decl_origin_key, impl_origin_key,
+    parse, report_origin_key, trait_origin_key,
 };
 
 /// An in-memory override of on-disk source: `overlay_key(path) -> source text`.
@@ -635,7 +635,27 @@ fn collect_stmt_references(stmt: &Stmt, out: &mut Vec<(String, Span)>) {
             }
             collect_expr_references(value, out);
         }
-        Stmt::Assign { value, .. } => collect_expr_references(value, out),
+        // An assignment *target* carries expressions too: `a[i] = v` holds `i` in
+        // `path`, and a call there names a declaration exactly like one in the
+        // value. Dropping `path` let a call to a *private* function in another
+        // package hide inside `a[secret()] = 99` and evade `L0392`: `check`
+        // exited 0 and the private function really ran, while the hoisted
+        // `let i = secret()` form was correctly rejected. Every field is named so
+        // a future one cannot be skipped silently — see `Place::index_expr`. The
+        // root `name` is a local variable, not a top-level declaration, so it is
+        // deliberately not a reference.
+        Stmt::Assign {
+            name: _,
+            path,
+            op: _,
+            value,
+            span: _,
+        } => {
+            for expr in assign_path_exprs(path) {
+                collect_expr_references(expr, out);
+            }
+            collect_expr_references(value, out);
+        }
         Stmt::Return(Some(expr)) => collect_expr_references(expr, out),
         // An `asm` operand clause is an ordinary expression and may call a
         // function or name a struct, so it participates in module dependency and

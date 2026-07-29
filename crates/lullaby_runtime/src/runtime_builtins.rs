@@ -1140,12 +1140,15 @@ impl<'a> Runtime<'a> {
                     Ok(Control::Value(Value::Void))
                 }
             }
+            // Every field is named so a future one cannot be skipped silently:
+            // `path` is child-bearing (a `Place::Index` step holds a full `Expr`)
+            // and this arm must keep evaluating it — see `Place::index_expr`.
             Stmt::Assign {
                 name,
                 path,
                 op,
                 value,
-                ..
+                span: _,
             } => {
                 // A `match` RHS is evaluated on the real env (see the `let` case)
                 // so its arm effects survive; a diverted control (`return`/loop)

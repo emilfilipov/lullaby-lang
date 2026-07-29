@@ -46,7 +46,7 @@ use std::collections::HashSet;
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     Expr, ExprKind, Function, ModuleOrigins, Program, Stmt, TypeRef, asm_operand_exprs,
-    decl_origin_key, impl_origin_key, trait_origin_key,
+    assign_path_exprs, decl_origin_key, impl_origin_key, trait_origin_key,
 };
 
 use crate::{ExpressionType, SemanticDiagnostic};
@@ -322,12 +322,21 @@ impl NoRuntimeChecker<'_> {
     fn check_stmt(&mut self, stmt: &Stmt, function: DeclSite<'_>) {
         match stmt {
             Stmt::Let { value, .. } => self.check_expr(value, function),
-            Stmt::Assign { value, path, .. } => {
-                use lullaby_parser::Place;
-                for step in path {
-                    if let Place::Index(index) = step {
-                        self.check_expr(index, function);
-                    }
+            // The assignment target's indices face the same gate as the value:
+            // `a[to_string(x)…] = v` must not smuggle a heap allocation past
+            // `L0441` any more than `let s = to_string(x)` can. Every field is
+            // named so a future one cannot be skipped silently, and the walk goes
+            // through the shared accessor rather than re-implementing it — see
+            // `Place::index_expr`.
+            Stmt::Assign {
+                name: _,
+                path,
+                op: _,
+                value,
+                span: _,
+            } => {
+                for index in assign_path_exprs(path) {
+                    self.check_expr(index, function);
                 }
                 self.check_expr(value, function);
             }

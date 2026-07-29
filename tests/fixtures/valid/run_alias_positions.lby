@@ -1,0 +1,165 @@
+# Alias resolution must reach EVERY expression position that can carry a type
+# annotation or a nested statement body — not an enumerated few.
+#
+# The alias pass used to rebuild a handful of `Stmt` variants and fall through to
+# `other => other.clone()` for the rest, so it never entered expressions. Two
+# consequences, both pinned here:
+#
+#   * a closure parameter spelled with an alias (`fn x Num -> ...`) kept the
+#     unresolved spelling and the checker falsely REJECTED a valid program, while
+#     the identical closure spelled `fn x i64` compiled; and
+#   * a `match` was reached only through a hand-written `Stmt::Expr(Match)`
+#     special case, so identical arm bodies declaring `let x Num = v` were
+#     accepted as a bare statement and rejected (`L0303`) as a `let` RHS, an
+#     assignment RHS, a `return` operand, or when nested.
+#
+# Every position each form can occupy appears below. A `match` is a value-position
+# form only — the grammar admits it as a bare statement, a `let`/assignment RHS, a
+# `return` operand, and an inline arm value; it cannot sit inside a call-argument
+# list. Call-argument position is therefore exercised by the other annotation
+# carrier, the closure literal, which can appear in any expression position.
+#
+# The program is pure and deterministic, so the whole-directory backend-parity
+# harness in `crates/lullaby_ir/src/ir_lib_tests.rs` runs it across all five
+# backend variants (AST, IR, bytecode, and both optimized).
+
+alias Num = i64
+alias Nums = list<i64>
+
+enum P
+    Even
+    Odd
+
+fn parity n Num -> P
+    if n % 2 == 0
+        Even
+    else
+        Odd
+
+# The higher-order parameter is spelled `fn(i64) -> i64`, not `fn(Num) -> Num`:
+# `resolve_alias_type` descends into the `array`/`ptr`/`ref`/`rc` constructors and
+# resolves a bare alias name, but not into a *function*-type spelling. That is a
+# separate, pre-existing gap in which type spellings the resolver understands —
+# orthogonal to this fixture, which is about which expression *positions* the
+# resolver is invoked on. The closure literals below still spell their parameters
+# with the alias, which is the case that was falsely rejected.
+fn twice f fn(i64) -> i64 v Num -> Num
+    f(f(v))
+
+fn bump n Num -> Num
+    n + 1
+
+# `match` in RETURN position, with alias-typed locals in the arm bodies.
+fn from_return n Num -> Num
+    return match parity(n)
+        Even ->
+            let e Num = 10
+            e
+        Odd ->
+            let o Num = 20
+            o
+
+# `match` NESTED as another `match` arm's value, every arm alias-annotated.
+fn nested n Num -> Num
+    let outer Num = match parity(n)
+        Even ->
+            let inner Num = match parity(n + 1)
+                Even ->
+                    let a Num = 1
+                    a
+                Odd ->
+                    let b Num = 2
+                    b
+            inner
+        Odd ->
+            let c Num = 4
+            c
+    outer
+
+fn main -> i64
+    # 1. Closure parameters spelled with an alias, in CALL-ARGUMENT position.
+    #    This is the case that was falsely rejected.
+    let base Nums = list_new()
+    base = push(base, 1)
+    base = push(base, 2)
+    base = push(base, 3)
+    let doubled Nums = list_map(base, fn x Num -> x + x)
+    let total Num = list_reduce(doubled, 0, fn acc Num x Num -> acc + x)
+    println(to_string(total))
+
+    # 2. An alias-typed closure parameter inside a LOOP BODY (a nested block).
+    let looped Num = 0
+    for i from 0 to 1
+        looped = looped + twice(fn x Num -> x + 3, i)
+    println(to_string(looped))
+
+    # 3. An alias-typed call inside an ASSIGNMENT-TARGET INDEX — an expression
+    #    position reachable only through `Stmt::Assign`'s `path`.
+    #
+    #    The index deliberately holds a plain call rather than a closure literal:
+    #    a closure inside an assignment *target* is currently minted with a
+    #    duplicate id (`parse_assignment` seeds a sub-parser with
+    #    `closure_counter` but never reads the advanced value back, unlike the
+    #    other two sub-parser sites), so the next closure in the program
+    #    overwrites its body-table entry and the wrong body runs on every tier.
+    #    That is a separate parser defect, not an alias one; the alias-annotated
+    #    closure in an assignment-target index is covered by
+    #    `semantics_alias_position_tests.rs`, which checks diagnostics rather than
+    #    execution and so is unaffected by it.
+    let cells array<Num> = [0, 0, 0]
+    cells[bump(1)] = 7
+    println(to_string(cells[2]))
+
+    # 4. `match` as a bare STATEMENT: the one position that always worked. Kept
+    #    beside the rest so a regression cannot pass by proving only this case.
+    let from_stmt Num = 0
+    match parity(3)
+        Even ->
+            let a Num = 1
+            from_stmt = a
+        Odd ->
+            let b Num = 2
+            from_stmt = b
+    println(to_string(from_stmt))
+
+    # 5. `match` as a `let` RHS.
+    let from_let Num = match parity(4)
+        Even ->
+            let a Num = 100
+            a
+        Odd ->
+            let b Num = 200
+            b
+    println(to_string(from_let))
+
+    # 6. `match` as an ASSIGNMENT RHS.
+    let from_assign Num = 0
+    from_assign = match parity(5)
+        Even ->
+            let a Num = 1000
+            a
+        Odd ->
+            let b Num = 2000
+            b
+    println(to_string(from_assign))
+
+    # 7. `match` in RETURN position, and 8. `match` nested in a `match` arm.
+    println(to_string(from_return(3)))
+    println(to_string(nested(4)))
+
+    # 9. A `let`-bound `match` nested inside an `if` BODY, whose arm bodies bind
+    #    alias-typed locals from a call taking an alias-typed closure — three
+    #    levels the old special case could not reach.
+    let from_nested_block Num = 0
+    if total > 0
+        let picked Num = match parity(7)
+            Even ->
+                let a Num = twice(fn x Num -> x + 5, 0)
+                a
+            Odd ->
+                let b Num = twice(fn y Num -> y + 6, 0)
+                b
+        from_nested_block = picked
+    println(to_string(from_nested_block))
+
+    total + looped + cells[2] + from_stmt + from_let + from_assign + from_return(3) + nested(4) + from_nested_block

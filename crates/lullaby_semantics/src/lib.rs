@@ -4404,3 +4404,11 @@ mod semantics_asm_tests;
 #[cfg(test)]
 #[path = "semantics_assign_path_tests.rs"]
 mod semantics_assign_path_tests;
+
+// Which *positions* alias resolution reaches. The rewrite must enter every
+// expression position that can carry a type annotation (a closure parameter) or a
+// nested statement body (a `match` arm), not an enumerated few. Own file for the
+// same reason as the `asm` tests.
+#[cfg(test)]
+#[path = "semantics_alias_position_tests.rs"]
+mod semantics_alias_position_tests;

@@ -1,0 +1,12 @@
+# The same cross-package private use as `project_private_cross`, but hidden
+# inside an assignment-target index. The loader's reference collector destructured
+# `Stmt::Assign { value, .. }` and dropped `path`, so this smuggled
+# `hidden_helper` past L0392 — `check` exited 0 and the private function really
+# ran. The hoisted control lives in `../app_hoisted`. -> L0392
+
+import libp
+
+fn main -> i64
+    let a array<i64> = [0, 0, 0]
+    a[hidden_helper(0)] = 99
+    a[1]
