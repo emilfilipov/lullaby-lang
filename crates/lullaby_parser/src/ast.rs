@@ -393,6 +393,24 @@ pub struct Function {
     /// valid.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_export: bool,
+    /// The name of the module (source file stem) this function was parsed from,
+    /// stamped by the module loader when it merges several modules into one flat
+    /// program. `None` for a single-file program, which was merged from nothing.
+    ///
+    /// This is the **declaration-unique** half of a function's identity. A bare
+    /// name is not unique across a merged program: `L0398` keeps free-function
+    /// and trait-method namespaces disjoint, but two impls on *different* types
+    /// may each declare `label`, and if they sit in different files they can also
+    /// share a `(line, column)`. Anything that keys a side table on "the
+    /// enclosing function" — the checker's recorded expression types, and the
+    /// freestanding gate that reads them — must therefore key on
+    /// `(module, name, span)`, never on `(name, span)`. Keying on the bare name
+    /// let a heap allocation in one module's `label` be masked by another
+    /// module's same-named, same-positioned scalar expression, and reach a
+    /// `--freestanding` no-CRT binary. Serde-defaulted and skipped when absent so
+    /// existing single-file artifacts and AST snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.

@@ -1,0 +1,19 @@
+# Two impls on DIFFERENT types, in different files, each declaring `label` — a
+# shape `L0398` permits (it only keeps free-function and trait-method namespaces
+# disjoint). Both bodies sit at the same `(line, column)`, and a `Span` carries
+# no file, so `a.lby`'s scalar `pik(self.v)` and `b.lby`'s heap
+# `len(to_string(self.v))` collide in the checker's expression-type table.
+#
+# Keying that table on `(function name, span)` made the first match win: the gate
+# read `Card::label`'s `i64`, concluded there was no heap value, descended past
+# `Coin::label`'s `to_string`, and let a real heap string be built inside a
+# `--freestanding` no-CRT binary (observed: `check` exit 0, native binary exit 9).
+# The key must carry the origin module too.
+no-runtime
+import a
+import b
+
+fn main -> i64
+    let c Card = Card(3)
+    let k Coin = Coin(123456)
+    c.label() + k.label()

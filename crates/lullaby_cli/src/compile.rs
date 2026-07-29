@@ -116,16 +116,28 @@ fn resolve_target(path: &Path, source_mode: SourceMode) -> Result<BuildTarget, C
 /// entry that imports a heap-using helper reported the helper's `L0441` at
 /// `<entry>:2:9`, where line 2 of the entry is the `import` line itself.)
 ///
-/// The loader's per-declaration origin table (`Program::origins`) is what
-/// survives the merge, so attribution is keyed on the diagnostic's enclosing
-/// declaration name. That makes the fix **general to every semantic
-/// diagnostic** that names its declaration, not specific to `L0441`. A
-/// diagnostic with no declaration name, or one whose name the table cannot
-/// attribute unambiguously, falls back to the entry file exactly as before.
+/// Two channels resolve a diagnostic to a file, tried in that order:
+///
+/// 1. **`SemanticDiagnostic::module`** — the origin module, when the reporting
+///    pass tracked it exactly. `L0441` does. This is unambiguous by
+///    construction.
+/// 2. **The declaration's display name**, resolved through the loader's
+///    per-declaration origin table (`Program::origins`). This covers every other
+///    semantic diagnostic that names its declaration, but it is **not** total: a
+///    display name two modules both claim (two impls on different types may each
+///    declare `label`) is deliberately unresolvable, and a diagnostic that names
+///    no declaration at all (a `const` type, an alias target) has nothing to
+///    resolve.
+///
+/// When neither channel answers, the report falls back to the entry file exactly
+/// as before — i.e. it keeps the old, wrong-file behavior for those cases rather
+/// than guessing.
 struct ModuleAttribution<'a> {
     origins: &'a ModuleOrigins,
     /// Origin path -> that module's source text, for the caret line.
     sources: HashMap<String, &'a str>,
+    /// Module name -> that module's path, for the exact `module` channel.
+    module_paths: HashMap<&'a str, String>,
     entry_path: String,
 }
 
@@ -137,6 +149,10 @@ impl<'a> ModuleAttribution<'a> {
                 .iter()
                 .map(|module| (module.path.display().to_string(), module.source.as_str()))
                 .collect(),
+            module_paths: modules
+                .iter()
+                .map(|module| (module.name.as_str(), module.path.display().to_string()))
+                .collect(),
             entry_path: entry.display().to_string(),
         }
     }
@@ -144,8 +160,15 @@ impl<'a> ModuleAttribution<'a> {
     /// The source path a diagnostic belongs to, when that is a module other than
     /// the entry file.
     fn origin_path(&self, diagnostic: &SemanticDiagnostic) -> Option<&str> {
-        let function = diagnostic.function.as_deref()?;
-        let origin = self.origins.path_for(&report_origin_key(function))?;
+        // Prefer the exact module the reporting pass recorded; fall back to
+        // resolving the declaration's display name.
+        let origin = match diagnostic.module.as_deref() {
+            Some(module) => self.module_paths.get(module).map(String::as_str)?,
+            None => {
+                let function = diagnostic.function.as_deref()?;
+                self.origins.path_for(&report_origin_key(function))?
+            }
+        };
         (origin != self.entry_path).then_some(origin)
     }
 

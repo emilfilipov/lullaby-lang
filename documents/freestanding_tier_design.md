@@ -170,10 +170,29 @@ hits this is to split the helper. Pinned by
 `(line, column)` pair, so before the origin table existed every semantic
 diagnostic in a merged program was attributed to the *entry* file — a rejection in
 an imported module named the wrong file at a line number belonging to a different
-one. The CLI now resolves each semantic diagnostic's enclosing declaration through
-`Program::origins` and names that declaration's own file (and renders that file's
-source line under the caret). This is general to every semantic diagnostic, not
-specific to `L0441`.
+one. The CLI now names the declaration's own file and renders that file's source
+line under the caret, resolving it through two channels in order:
+
+1. **`SemanticDiagnostic::module`** — the origin module recorded by the reporting
+   pass. `L0441` records it (the gate walks `Function::module` anyway), so
+   freestanding-tier rejections are attributed **exactly**, including when the
+   declaration's name is shared.
+2. **The declaration's display name**, resolved through `Program::origins`.
+
+**This is not yet total, and the gap is deliberate rather than hidden.** Channel 2
+is a *display* name, so it cannot answer in two cases, and the report then falls
+back to the entry file with the old wrong-file behavior:
+
+- a name two modules both claim — two impls on different types may each declare
+  `label`, and naming either file would be a guess;
+- a diagnostic that names no declaration at all, e.g. a `const NAME string` type
+  error or an alias target in an imported module.
+
+Closing the remainder means giving every reporting site the same `module` channel
+`L0441` uses, which is a change across the whole checker rather than part of this
+one. IR-lowering and runtime diagnostics have the same shape and are likewise
+still entry-attributed (the runtime case additionally has no origin data at all on
+the pre-compiled `.lbc` path).
 
 ### 1.1 What is *unavailable* in `no-runtime`
 

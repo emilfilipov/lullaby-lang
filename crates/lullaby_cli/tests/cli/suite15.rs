@@ -1880,6 +1880,112 @@ fn a_cross_module_diagnostic_renders_the_imported_files_source_line() {
     );
 }
 
+/// **A heap allocation must not hide behind a same-named method in another
+/// file.** Two impls on *different* types may each declare `label` — `L0398`
+/// only keeps free-function and trait-method namespaces disjoint — and two such
+/// methods in different files can sit at the same `(line, column)`, because a
+/// `Span` carries no file.
+///
+/// Keying the checker's expression-type table on `(function name, span)` made
+/// the first match win. `a.lby`'s scalar `pik(self.v)` masked `b.lby`'s
+/// `len(to_string(self.v))`: the gate read `i64`, concluded there was no heap
+/// value, and descended past the violation. Measured before the fix: `check`
+/// exit **0**, all three interpreters returned **9**, and
+/// `native --freestanding` produced a direct PE with no CRT that **ran to exit
+/// 9** — `pik(3) + len(to_string(123456))`, a real heap string executing inside a
+/// no-C-runtime binary. The lookup key must carry the origin module.
+#[test]
+fn a_heap_value_cannot_hide_behind_a_same_named_method_in_another_module() {
+    let path =
+        workspace_root().join("tests/fixtures/invalid/modules_method_span_collision/main.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "a heap `to_string` in a freestanding unit must be rejected even when \
+         another module declares a same-named, same-positioned scalar method. \
+         stderr: {errors}"
+    );
+    assert!(
+        errors.contains("L0441"),
+        "expected the freestanding-tier diagnostic. stderr: {errors}"
+    );
+    assert!(
+        errors.contains("`string`"),
+        "the rejection must be the heap-value one, not an unrelated error. \
+         stderr: {errors}"
+    );
+}
+
+/// The same rejection reaches the run path — the interpreters returned 9 before
+/// the fix, i.e. they executed the heap allocation the gate had waved through.
+#[test]
+fn the_masked_heap_value_is_rejected_on_every_interpreter() {
+    assert_no_runtime_rejected_on_interpreters(
+        "tests/fixtures/invalid/modules_method_span_collision/main.lby",
+    );
+}
+
+/// The masked violation is attributed to `b.lby`, the file that actually holds
+/// it — not to the entry file and not to `a.lby`, whose `label` sits at the very
+/// same `(line, column)`.
+///
+/// This is the exact channel the collision fix bought: `label` is a display name
+/// two modules claim, so name-based attribution cannot resolve it, but `L0441`
+/// records the origin module directly.
+#[test]
+fn the_masked_heap_value_names_the_module_that_holds_it() {
+    let path =
+        workspace_root().join("tests/fixtures/invalid/modules_method_span_collision/main.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        errors.contains("b.lby:6:13"),
+        "the diagnostic must name `b.lby` and the column of `to_string`. \
+         stderr: {errors}"
+    );
+    assert!(
+        !errors.contains("a.lby:6:13") && !errors.contains("main.lby:6:13"),
+        "it must name neither the decoy module nor the entry file. \
+         stderr: {errors}"
+    );
+}
+
+/// **Two violations at the same coordinates in different files are both
+/// reported.** The `L0441` de-duplication set collapses one violation reached
+/// through several paths into a single report; keyed on `(name, line, column)`
+/// it could not distinguish `Pen::tag` in `p.lby` from `Quill::tag` in `q.lby`,
+/// so the second file's rejection vanished — the author would fix one, recompile,
+/// and only then discover the other. The key carries the origin module too.
+#[test]
+fn two_modules_violating_at_the_same_position_are_both_reported() {
+    let path = workspace_root().join("tests/fixtures/invalid/modules_method_dedup/main.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let errors = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "the fixture must be rejected. stderr: {errors}"
+    );
+    assert!(
+        errors.contains("p.lby:6:13"),
+        "`p.lby`'s violation must be reported. stderr: {errors}"
+    );
+    assert!(
+        errors.contains("q.lby:6:13"),
+        "`q.lby`'s violation must be reported too, not swallowed by the \
+         de-duplication key. stderr: {errors}"
+    );
+}
+
 /// **The ambiguous case, decided conservatively and pinned.** A module imported
 /// by both a hosted and a freestanding module in one build cannot be compiled
 /// two ways, so the stricter tier wins: it is checked as freestanding and

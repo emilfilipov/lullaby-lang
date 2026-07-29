@@ -1,0 +1,6 @@
+pub struct Coin
+    v i64
+
+impl Coin
+    fn label self -> i64
+        len(to_string(self.v))

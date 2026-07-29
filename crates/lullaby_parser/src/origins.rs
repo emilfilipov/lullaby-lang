@@ -123,12 +123,18 @@ pub fn decl_origin_key(name: &str) -> String {
 /// attribution** — a separate namespace from [`decl_origin_key`].
 ///
 /// A diagnostic identifies its site by the enclosing declaration's *display*
-/// name, and that includes names the tier namespace deliberately excludes: trait
-/// names, and impl-method names (two impls may declare `area`). Mixing those
-/// into the tier namespace would let a freestanding module's impl method drag a
-/// same-named hosted top-level function into the tier — reintroducing exactly
-/// the false-rejection class the per-module gate exists to remove. So they get
-/// their own keys: ambiguity here costs only a fallback to the entry file.
+/// name, and that includes names the tier namespace deliberately excludes:
+/// trait names, and impl-method names.
+///
+/// Impl-method names are the reason. `L0398` already forbids a method sharing a
+/// *free function's* name, so that particular collision cannot arise — but two
+/// impls on **different types** may each declare `area`, and nothing forbids one
+/// of them living in a freestanding module and the other in a hosted one. Since
+/// [`ModuleOrigins::record`] ORs the freestanding bit, folding both into one
+/// tier key would gate the hosted `Shape::area` because the freestanding
+/// `Circle::area` shares its spelling — a false rejection of exactly the class
+/// the per-module gate exists to remove. Attribution keys are free to be
+/// ambiguous, because ambiguity there costs only a fallback to the entry file.
 pub fn report_origin_key(name: &str) -> String {
     format!("report {name}")
 }
@@ -209,29 +215,31 @@ mod tests {
         assert_ne!(report_origin_key("area"), trait_origin_key("area"));
     }
 
-    /// An impl method that shares a top-level function's name blurs only the
-    /// *attribution* key. The tier key stays clean, which is what keeps a
-    /// freestanding impl from dragging a hosted same-named function into the
-    /// tier.
+    /// Two impls on *different types* may each declare `area` — `L0398` only
+    /// rules out a method sharing a **free function's** name. When one impl is
+    /// freestanding and the other hosted, the shared display name must blur only
+    /// the *attribution* key; the tier keys stay separate, so the hosted impl is
+    /// not gated by the freestanding one's spelling.
     #[test]
     fn an_ambiguous_display_name_does_not_touch_the_tier_key() {
         let mut origins = ModuleOrigins::new();
-        // A hosted top-level `fn area`...
-        origins.record(decl_origin_key("area"), "host.lby", false);
+        // A hosted `impl Shape for Square` with a method `area`...
+        origins.record(impl_origin_key("Shape", "Square"), "host.lby", false);
         origins.record(report_origin_key("area"), "host.lby", false);
-        // ...and a freestanding impl whose method is also called `area`.
+        // ...and a freestanding `impl Shape for Circle` whose method is also `area`.
         origins.record(impl_origin_key("Shape", "Circle"), "nr.lby", true);
         origins.record(report_origin_key("area"), "nr.lby", true);
 
         assert!(
-            !origins.is_freestanding(&decl_origin_key("area")),
-            "the hosted top-level function must NOT be gated"
+            !origins.is_freestanding(&impl_origin_key("Shape", "Square")),
+            "the hosted impl must NOT be gated because a freestanding impl \
+             happens to share a method name"
         );
         assert!(origins.is_freestanding(&impl_origin_key("Shape", "Circle")));
         assert_eq!(
             origins.path_for(&report_origin_key("area")),
             None,
-            "two candidate files, so the diagnostic names neither"
+            "two candidate files, so the display name alone names neither"
         );
     }
 }

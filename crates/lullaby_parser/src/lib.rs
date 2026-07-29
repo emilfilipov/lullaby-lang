@@ -629,6 +629,7 @@ impl<'a> Parser<'a> {
             is_async: false,
             is_extern: false,
             is_export: false,
+            module: None,
         })
     }
 
@@ -782,6 +783,9 @@ impl<'a> Parser<'a> {
             is_async,
             is_extern: false,
             is_export,
+            // A single parsed file was merged from nothing; only the module
+            // loader stamps an origin.
+            module: None,
         })
     }
 
@@ -815,6 +819,7 @@ impl<'a> Parser<'a> {
             is_async: false,
             is_extern: true,
             is_export: false,
+            module: None,
         })
     }
 

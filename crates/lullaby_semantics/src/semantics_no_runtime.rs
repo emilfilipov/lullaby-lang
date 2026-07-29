@@ -130,16 +130,55 @@ pub(crate) fn enforce(
     checker.run(program);
 }
 
+/// The identity of the declaration currently being walked: its module and its
+/// name.
+///
+/// **Both halves are required.** A declaration name alone is not unique in a
+/// merged multi-module program — `L0398` keeps free functions and trait methods
+/// disjoint, but two impls on *different* types may each declare `label`. Two
+/// such methods in different files can also sit at the same `(line, column)`,
+/// because a [`Span`] carries no file. Keying the expression-type lookup on the
+/// name alone therefore let one module's scalar expression mask another
+/// module's heap expression at the same coordinates: the gate saw a non-heap
+/// type, descended past the violation, and a real `to_string` heap allocation
+/// reached a `--freestanding` no-CRT binary and executed there.
+#[derive(Clone, Copy)]
+struct DeclSite<'a> {
+    /// The module the declaration was parsed from ([`Function::module`]), or
+    /// `None` for a single-file program / a declaration kind that carries no
+    /// module stamp but whose name `L0391` already makes unique.
+    module: Option<&'a str>,
+    name: &'a str,
+}
+
+impl<'a> DeclSite<'a> {
+    /// The site of a `fn` (top-level or impl method), which carries its module.
+    fn of(function: &'a Function) -> Self {
+        Self {
+            module: function.module.as_deref(),
+            name: &function.name,
+        }
+    }
+
+    /// The site of a declaration kind that carries no module stamp — a
+    /// `struct`/`enum`/`alias`/`const`/`actor`, whose name the flat namespace
+    /// already makes unique (`L0391`), or a `trait`.
+    fn unstamped(name: &'a str) -> Self {
+        Self { module: None, name }
+    }
+}
+
 struct NoRuntimeChecker<'a> {
     expression_types: &'a [ExpressionType],
     diagnostics: &'a mut Vec<SemanticDiagnostic>,
     /// Positions already reported, so a violation surfaced through more than one
     /// path (a `list<i64>` annotation whose initializer is also `list`-typed,
     /// say) is reported once. `Span` is not `Hash`, so its coordinates are the
-    /// key — qualified by the enclosing declaration name, because in a merged
-    /// multi-file program two different files hold different code at the same
-    /// `(line, column)` and a bare coordinate key would swallow the second one.
-    reported: HashSet<(String, usize, usize)>,
+    /// key — qualified by the enclosing declaration's module AND name, because in
+    /// a merged multi-file program two files hold different code at the same
+    /// `(line, column)` and may declare the same method name, so a narrower key
+    /// would silently swallow the second module's violation.
+    reported: HashSet<(Option<String>, String, usize, usize)>,
     tier: TierScope<'a>,
 }
 
@@ -163,8 +202,9 @@ impl NoRuntimeChecker<'_> {
             if !self.tier.covers(&decl_origin_key(&decl.name)) {
                 continue;
             }
+            let site = DeclSite::unstamped(&decl.name);
             for field in &decl.fields {
-                self.reject_type(&field.ty, "field", decl.span, Some(&decl.name));
+                self.reject_type(&field.ty, "field", decl.span, Some(site));
             }
         }
         for decl in &program.enums {
@@ -173,7 +213,12 @@ impl NoRuntimeChecker<'_> {
             }
             for variant in &decl.variants {
                 for payload in &variant.payload {
-                    self.reject_type(payload, "enum payload", decl.span, Some(&decl.name));
+                    self.reject_type(
+                        payload,
+                        "enum payload",
+                        decl.span,
+                        Some(DeclSite::unstamped(&decl.name)),
+                    );
                 }
             }
         }
@@ -193,11 +238,12 @@ impl NoRuntimeChecker<'_> {
             if !self.tier.covers(&trait_origin_key(&decl.name)) {
                 continue;
             }
+            let site = DeclSite::unstamped(&decl.name);
             for method in &decl.methods {
                 for param in &method.params {
-                    self.reject_type(&param.ty, "parameter", method.span, Some(&decl.name));
+                    self.reject_type(&param.ty, "parameter", method.span, Some(site));
                 }
-                self.reject_type(&method.return_type, "return", method.span, Some(&decl.name));
+                self.reject_type(&method.return_type, "return", method.span, Some(site));
             }
         }
         for decl in &program.impls {
@@ -220,7 +266,7 @@ impl NoRuntimeChecker<'_> {
             }
             self.report(
                 decl.span,
-                Some(&decl.name),
+                Some(DeclSite::unstamped(&decl.name)),
                 "an `actor` declaration is unavailable in a `no-runtime` module \
                  (actors require the Lullaby runtime scheduler); express concurrency \
                  with the raw primitives outside a `no-runtime` module"
@@ -234,9 +280,9 @@ impl NoRuntimeChecker<'_> {
             if !self.tier.covers(&decl_origin_key(&function.name)) {
                 continue;
             }
-            let name = function.name.clone();
+            let site = DeclSite::of(function);
             for stmt in &function.body {
-                self.check_stmt(stmt, &name);
+                self.check_stmt(stmt, site);
             }
         }
         for decl in &program.impls {
@@ -247,37 +293,33 @@ impl NoRuntimeChecker<'_> {
                 continue;
             }
             for method in &decl.methods {
-                let name = method.name.clone();
+                let site = DeclSite::of(method);
                 for stmt in &method.body {
-                    self.check_stmt(stmt, &name);
+                    self.check_stmt(stmt, site);
                 }
             }
         }
     }
 
     fn check_function_signature(&mut self, function: &Function) {
+        let site = DeclSite::of(function);
         if function.is_async {
             self.report(
                 function.span,
-                Some(&function.name),
+                Some(site),
                 "an `async fn` is unavailable in a `no-runtime` module \
                  (it requires the Lullaby runtime); use an ordinary `fn`"
                     .to_string(),
             );
         }
         for param in &function.params {
-            self.reject_type(&param.ty, "parameter", function.span, Some(&function.name));
+            self.reject_type(&param.ty, "parameter", function.span, Some(site));
         }
-        self.reject_type(
-            &function.return_type,
-            "return",
-            function.span,
-            Some(&function.name),
-        );
+        self.reject_type(&function.return_type, "return", function.span, Some(site));
     }
 
     /// Walk a statement, recursing into nested blocks and every expression.
-    fn check_stmt(&mut self, stmt: &Stmt, function: &str) {
+    fn check_stmt(&mut self, stmt: &Stmt, function: DeclSite<'_>) {
         match stmt {
             Stmt::Let { value, .. } => self.check_expr(value, function),
             Stmt::Assign { value, path, .. } => {
@@ -352,7 +394,7 @@ impl NoRuntimeChecker<'_> {
         }
     }
 
-    fn check_block(&mut self, body: &[Stmt], function: &str) {
+    fn check_block(&mut self, body: &[Stmt], function: DeclSite<'_>) {
         for stmt in body {
             self.check_stmt(stmt, function);
         }
@@ -363,7 +405,7 @@ impl NoRuntimeChecker<'_> {
     /// any other expression whose recorded value type is a heap/runtime type is
     /// rejected as the outermost such node (nested subexpressions of a rejected
     /// value are not additionally reported).
-    fn check_expr(&mut self, expr: &Expr, function: &str) {
+    fn check_expr(&mut self, expr: &Expr, function: DeclSite<'_>) {
         match &expr.kind {
             ExprKind::Spawn { args, .. } => {
                 self.report(
@@ -451,7 +493,7 @@ impl NoRuntimeChecker<'_> {
 
     /// Recurse into the sub-expressions of `expr` (used when `expr` itself is
     /// allowed, so a nested violation is still found).
-    fn walk_children(&mut self, expr: &Expr, function: &str) {
+    fn walk_children(&mut self, expr: &Expr, function: DeclSite<'_>) {
         match &expr.kind {
             ExprKind::Integer(_)
             | ExprKind::Float(_)
@@ -529,23 +571,37 @@ impl NoRuntimeChecker<'_> {
     /// The recorded value type of `function`'s expression at `span`, if it names
     /// a heap/runtime constructor.
     ///
-    /// The lookup is qualified by the enclosing function, not by span alone. In a
-    /// program merged from several modules a span is only a `(line, column)` pair
-    /// with no file attached, so two modules routinely record *different* types
-    /// at the same coordinates; matching on the span alone would answer with
-    /// whichever module happened to be merged first.
-    fn forbidden_value_type(&self, function: &str, span: Span) -> Option<String> {
+    /// The lookup is qualified by the enclosing declaration's **module and**
+    /// name, never by span alone and never by name alone. In a program merged
+    /// from several modules a span is only a `(line, column)` pair with no file
+    /// attached, and a method name is not unique (two impls on different types
+    /// may both declare `label`) — so a narrower key lets a first-match `find`
+    /// answer with a *different* module's type. That is not a cosmetic mismatch:
+    /// answering with a non-heap type makes the gate descend past a real heap
+    /// expression, and the allocation then reaches a `--freestanding` no-CRT
+    /// binary and runs there.
+    fn forbidden_value_type(&self, function: DeclSite<'_>, span: Span) -> Option<String> {
         let ty = self
             .expression_types
             .iter()
-            .find(|entry| entry.span == span && entry.function == function)
+            .find(|entry| {
+                entry.span == span
+                    && entry.function == function.name
+                    && entry.module.as_deref() == function.module
+            })
             .map(|entry| &entry.ty)?;
         forbidden_ctor(ty)
     }
 
     /// Reject a type spelling in a declaration signature (parameter, return,
     /// field, …) if it names a heap/runtime constructor.
-    fn reject_type(&mut self, ty: &TypeRef, position: &str, span: Span, function: Option<&str>) {
+    fn reject_type(
+        &mut self,
+        ty: &TypeRef,
+        position: &str,
+        span: Span,
+        function: Option<DeclSite<'_>>,
+    ) {
         if let Some(ctor) = forbidden_ctor(ty) {
             self.report(
                 span,
@@ -559,7 +615,7 @@ impl NoRuntimeChecker<'_> {
         }
     }
 
-    fn report_value(&mut self, span: Span, function: &str, ctor: &str) {
+    fn report_value(&mut self, span: Span, function: DeclSite<'_>, ctor: &str) {
         self.report(
             span,
             Some(function),
@@ -570,25 +626,36 @@ impl NoRuntimeChecker<'_> {
         );
     }
 
-    fn report(&mut self, span: Span, function: Option<&str>, message: String) {
-        // De-duplicate by enclosing declaration + source position so a violation
-        // reachable through more than one path is reported once, while two
-        // modules that happen to violate at the same `(line, column)` are still
-        // both reported.
+    fn report(&mut self, span: Span, function: Option<DeclSite<'_>>, message: String) {
+        // De-duplicate by enclosing declaration (module AND name) + source
+        // position, so a violation reachable through more than one path is
+        // reported once, while two modules that violate at the same
+        // `(line, column)` — possible for two same-named impl methods in
+        // different files — are still both reported rather than silently merged.
         let key = (
-            function.unwrap_or_default().to_string(),
+            function.and_then(|site| site.module).map(str::to_string),
+            function
+                .map(|site| site.name)
+                .unwrap_or_default()
+                .to_string(),
             span.line,
             span.column,
         );
         if !self.reported.insert(key) {
             return;
         }
-        self.diagnostics.push(SemanticDiagnostic::at(
-            "L0441",
-            message,
-            function.map(|name| name.to_string()),
-            span,
-        ));
+        self.diagnostics.push(
+            SemanticDiagnostic::at(
+                "L0441",
+                message,
+                function.map(|site| site.name.to_string()),
+                span,
+            )
+            // The gate knows the origin module exactly, so hand it over rather
+            // than leave the CLI to guess the file from a display name two
+            // modules may both claim.
+            .in_module(function.and_then(|site| site.module)),
+        );
     }
 }
 

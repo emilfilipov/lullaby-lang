@@ -1,0 +1,6 @@
+pub struct Quill
+    v i64
+
+impl Quill
+    fn tag self -> i64
+        len(to_string(self.v))

@@ -1,0 +1,15 @@
+# Two same-named methods on different types, in different files, violating at
+# the SAME `(line, column)`. Both are real violations and both must be reported.
+#
+# The `L0441` de-duplication set exists so one violation reachable through two
+# paths is reported once. Keyed on `(name, line, column)` it could not tell these
+# two apart, so the second file's rejection was silently swallowed — the author
+# fixed `p.lby`, recompiled, and only then learned about `q.lby`.
+no-runtime
+import p
+import q
+
+fn main -> i64
+    let a Pen = Pen(12)
+    let b Quill = Quill(345)
+    a.tag() + b.tag()

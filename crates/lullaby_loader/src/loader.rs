@@ -928,15 +928,25 @@ fn build_origins(modules: &[Module], tier: &HashSet<String>) -> ModuleOrigins {
         for decl in &module.program.impls {
             record(impl_origin_key(&decl.trait_name, &decl.type_name));
             // A diagnostic inside a method body names only the method, so give
-            // it an attribution key. Never a tier key: two impls may declare the
-            // same method name, and a freestanding one must not drag a
-            // same-named hosted top-level function into the tier.
+            // it an attribution key. Never a tier key: two impls on DIFFERENT
+            // types may each declare `area` (`L0398` only rules out a method
+            // sharing a free function's name), and `record` ORs the freestanding
+            // bit — so one tier key would gate a hosted `Shape::area` merely
+            // because a freestanding `Circle::area` shares its spelling.
             for method in &decl.methods {
                 record(report_origin_key(&method.name));
             }
         }
     }
     origins
+}
+
+/// Clone `function`, recording which module declared it. See
+/// [`lullaby_parser::Function::module`] for why a bare name is not enough.
+fn stamp_module(function: &Function, module: &str) -> Function {
+    let mut stamped = function.clone();
+    stamped.module = Some(module.to_string());
+    stamped
 }
 
 /// Concatenate every loaded module's declarations into one flat [`Program`].
@@ -954,12 +964,31 @@ fn merge(modules: &[Module]) -> Program {
     let mut consts = Vec::new();
     let mut actors = Vec::new();
     for module in modules {
-        functions.extend(module.program.functions.iter().cloned());
+        // Stamp each function with the module it came from. A bare function name
+        // is NOT unique in the merged program — two impls on different types may
+        // both declare `label` — so anything keyed on "the enclosing function"
+        // (the checker's expression-type table, and the freestanding gate that
+        // reads it) needs this to disambiguate. See `Function::module`.
+        functions.extend(
+            module
+                .program
+                .functions
+                .iter()
+                .map(|function| stamp_module(function, &module.name)),
+        );
         aliases.extend(module.program.aliases.iter().cloned());
         structs.extend(module.program.structs.iter().cloned());
         enums.extend(module.program.enums.iter().cloned());
         traits.extend(module.program.traits.iter().cloned());
-        impls.extend(module.program.impls.iter().cloned());
+        impls.extend(module.program.impls.iter().map(|decl| {
+            let mut decl = decl.clone();
+            decl.methods = decl
+                .methods
+                .iter()
+                .map(|method| stamp_module(method, &module.name))
+                .collect();
+            decl
+        }));
         consts.extend(module.program.consts.iter().cloned());
         actors.extend(module.program.actors.iter().cloned());
     }

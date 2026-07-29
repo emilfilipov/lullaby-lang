@@ -1,0 +1,6 @@
+pub struct Pen
+    v i64
+
+impl Pen
+    fn tag self -> i64
+        len(to_string(self.v))
