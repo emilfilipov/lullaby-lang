@@ -7,9 +7,19 @@ instruction.
 
 ## The core insight that orders everything
 
-There are **no known open miscompiles** — every defect discovered this cycle was
-fixed. So "fix all existing and discovered issues" resolves to three buckets, in
-priority order:
+> **This opening premise was written 2026-07-20 and is now FALSE — kept for the
+> record, corrected here (2026-07-29).** There *are* known open miscompiles, listed
+> below in the queued sections: a per-file closure-id collision inside a single
+> function (all tiers agree on the wrong answer), a native shadow-name-resolution
+> access violation, and `L0392`'s declaration-kind blind spot. The defect-discovery
+> rate across four sweeps ran **1 → 4 → 6 → 4**, plus five more found by reviewers
+> *during fixes*. It has not decayed. The plan's ordering below is still right —
+> hardening first — but "no known open miscompiles" was a snapshot, not a property,
+> and restating it as one is exactly the completeness-claim failure recorded below.
+
+There were, as of 2026-07-20, **no known open miscompiles** — every defect discovered
+in that cycle had been fixed. So "fix all existing and discovered issues" resolved to
+three buckets, in priority order:
 
 1. **Stability debt (the real 1.0-stable gate):** undiscovered miscompiles. The
    review defect-rate stayed near 1-in-2/1-in-3 and *every* FAIL was real, so
