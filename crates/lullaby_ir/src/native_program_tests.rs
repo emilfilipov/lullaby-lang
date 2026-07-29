@@ -5289,13 +5289,21 @@ fn native_closure_hof_leaky_callee_skips() {
     ));
 }
 
-/// **Refusal boundary — onward pass (documented frontier).** A callee that passes
-/// its fn parameter onward as an argument to another function is refused this
-/// increment (a HOF parameter must be call-only in its own body), so it skips
-/// cleanly rather than lowering a multi-level higher-order chain.
+/// A MULTI-LEVEL higher-order chain COMPILES (closures stage 3c): `outer` does not
+/// call its fn parameter at all — it passes it ONWARD as a bare argument to `inner`,
+/// which calls it. Both relays, `main`, and the synthesized body compile, because
+/// `build_hof_index`'s module-wide sweep proves `inner`'s parameter a sink and then
+/// `outer`'s parameter a sink by rule (b). (This asserted a skip before multi-level
+/// pass-onward was unblocked — it was the documented single-level stage-3a frontier.)
+///
+/// The end-to-end proof that the emitted code is CORRECT (a real `.exe` whose exit
+/// equals all three interpreters, at two and three levels and inside a 100 001-iteration
+/// loop) is `native_closures_direct_pe_run_parity` in
+/// `crates/lullaby_cli/tests/cli/suite3.rs`; the per-rule classification proofs are in
+/// `native_object_closure_hof_tests.rs`. This test pins only that the shape is admitted.
 #[test]
-fn native_closure_hof_onward_pass_skips() {
-    assert_main_skips(concat!(
+fn native_closure_hof_onward_pass_compiles() {
+    let program = emit_native_program(&module_for(concat!(
         "fn inner f fn(i64) -> i64 v i64 -> i64\n",
         "    f(v)\n",
         "fn outer f fn(i64) -> i64 v i64 -> i64\n",
@@ -5304,6 +5312,67 @@ fn native_closure_hof_onward_pass_skips() {
         "    let n i64 = 2\n",
         "    let c fn(i64) -> i64 = fn x i64 -> x + n\n",
         "    outer(c, 40)\n",
+    )))
+    .expect("a multi-level higher-order chain compiles");
+    for name in ["inner", "outer", "main", "__closure_0"] {
+        assert!(
+            program.compiled.contains(&name.to_string()),
+            "`{name}` must compile for a multi-level HOF chain: {:?} (skipped {:?})",
+            program.compiled,
+            program.skipped
+        );
+    }
+    assert!(program.skipped.is_empty(), "{:?}", program.skipped);
+}
+
+/// **Refusal boundary — onward pass to a NON-sink.** Widening to multi-level chains did
+/// not weaken the rule: `mid` reads its fn parameter as a bare value, so `mid`'s
+/// position is not a sink, and therefore `outer` — which passes onward INTO that
+/// position — is not one either. The denial has to propagate BACK up the chain, or
+/// `main` would lower a closure into a callee that lets it escape.
+///
+/// `mid` uses a **bare read** (`f` as a discarded expression statement) rather than a
+/// store (`let saved fn(i64) -> i64 = f`) deliberately, and the difference is the whole
+/// value of this test. A store is DOUBLE-guarded: even with the sink sweep neutered, the
+/// frame planner's `_ =>` arm rejects `let saved = f` ("not a direct closure literal or a
+/// factory call"), so the store shape skips whether or not the sweep works and proves
+/// nothing about back-propagation. A bare read is guarded by the sweep ALONE. Measured
+/// both ways: on a clean tree both `mid` AND `outer` are refused with the sink reason
+/// (back-propagation visible in the skip list); with `expr_closure_use_ok`'s
+/// `Variable(n) => n != name` arm forced to `true`, this program compiles all four
+/// symbols. The store shape does not move between those two states.
+#[test]
+fn native_closure_hof_onward_pass_to_non_sink_skips() {
+    assert_main_skips(concat!(
+        "fn mid f fn(i64) -> i64 v i64 -> i64\n",
+        "    f\n",
+        "    f(v)\n",
+        "fn outer f fn(i64) -> i64 v i64 -> i64\n",
+        "    mid(f, v)\n",
+        "fn main -> i64\n",
+        "    let n i64 = 6\n",
+        "    let c fn(i64) -> i64 = fn x i64 -> x + n\n",
+        "    outer(c, 30)\n",
+    ));
+}
+
+/// **Refusal boundary — recursive sink.** A mutually recursive would-be sink pair is
+/// pre-poisoned by `build_hof_index`'s SCC handling: each of `ping`/`pong` is
+/// "call-only or passed onward to the other", so without the on-stack back-edge poison
+/// the sweep would admit them and accept an UNBOUNDED chain. Both must be refused.
+#[test]
+fn native_closure_hof_recursive_sink_skips() {
+    assert_main_skips(concat!(
+        "fn ping f fn(i64) -> i64 v i64 -> i64\n",
+        "    if v <= 0\n",
+        "        return f(0)\n",
+        "    pong(f, v - 1)\n",
+        "fn pong f fn(i64) -> i64 v i64 -> i64\n",
+        "    ping(f, v - 1)\n",
+        "fn main -> i64\n",
+        "    let n i64 = 9\n",
+        "    let c fn(i64) -> i64 = fn x i64 -> x + n\n",
+        "    ping(c, 4)\n",
     ));
 }
 

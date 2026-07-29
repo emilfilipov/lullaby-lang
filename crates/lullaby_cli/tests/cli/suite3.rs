@@ -2551,7 +2551,11 @@ pub(crate) fn native_closures_direct_pe_run_parity() {
 ///   (`native_hof_leaky_skip`), returns it (`native_hof_return_param_skip`), reads it
 ///   as a bare value (`native_hof_bare_read_skip`), or passes it onward to a NON-sink
 ///   position (`native_hof_nonsink_pass_skip`, where the denial has to propagate BACK
-///   up the chain to the passer),
+///   up the chain to the passer — on a clean tree both `mid` and `outer` are listed
+///   with the sink reason; note this fixture's store shape is DOUBLE-guarded, since the
+///   frame planner independently rejects `let saved = f`, so the teeth for the sweep
+///   itself are in `native_closure_hof_onward_pass_to_non_sink_skips`
+///   (`native_program_tests.rs`), which uses a bare read for exactly that reason),
 /// - a MUTUALLY RECURSIVE pair of would-be sinks (`native_hof_mutual_recursion_skip`).
 ///   This one is the teeth of the SCC pre-poisoning in `build_hof_index`: each of
 ///   `ping`/`pong` is "call-only or passed onward to the other", so without the

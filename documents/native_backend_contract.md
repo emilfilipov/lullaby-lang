@@ -1645,20 +1645,39 @@ default inverted (`retaining` defaults to `true`; `sink` defaults to `false`):
 **creating** function's frame region and is owned by it. Every function in the chain
 receives it only as a `fn(...)` parameter and may only call through it or hand it to
 another sink, so every use is dynamically nested inside the creating call and the owner
-frame is live throughout. Crucially the creator is **off the arena by construction**:
+frame is live throughout. Crucially, **any creator whose closure is actually invoked
+through the chain is off the arena**:
 `fn_typed_binding_names` puts every `fn`-typed parameter into the indirect-denied set, so
-a chain function calling through its parameter is R4-retaining, the poison propagates up
-the chain through R4, and criterion 3 (`all_callees_non_retaining`) fails for the creator
-— which therefore gets neither a function region nor a per-iteration loop sub-region, so
+the chain function that CALLS through its parameter is R4-retaining, the poison propagates
+back up the chain through R4, and criterion 3 (`all_callees_non_retaining`) fails for the
+creator — which therefore gets neither a function region nor a per-iteration loop
+sub-region, so
 **no rewind can fall between block creation and last use**. This is the identical argument
 that makes single-level stage 3a sound; stage 3c only lengthens the chain. The link is
 asserted directly by `a_chain_creator_is_kept_off_the_arena`
 (`crates/lullaby_ir/src/native_object_closure_hof_tests.rs`), which first checks the
-chain really compiles so the assertion cannot pass vacuously. A chain created **inside a
+chain really compiles so the assertion cannot pass vacuously.
+
+State the qualifier precisely: this is **not** "off the arena by construction". A sink
+parameter with **zero** uses is admitted vacuously (the walker is an `all` over its
+uses), and such a sink calls nothing indirect, so it never becomes R4-retaining and a
+creator that only feeds it *can* be arena-eligible. That case is harmless — a closure
+never invoked has no capture read to dangle, and its block is reclaimed by the creator's
+own rewind like any other per-iteration allocation — but the sound claim is the weaker
+one: *invoked ⇒ creator off-arena*.
+
+A chain created **inside a
 loop** is bounded by the per-iteration closure drop (`loop_droppable_closure_locals` →
 `collect_loop_body_drops`), which fires precisely because the creator is non-arena;
 `native_hof_chain_loop.lby` runs 100 001 iterations and must return its value rather than
-trap `0xC000001D`.
+trap `0xC000001D`. **Known residual (pre-existing, but newly reachable at chain depth
+≥ 2):** if the terminal sink itself ALLOCATES a per-call heap temporary, that temporary —
+not the closure block — has no drop path, because the sink is held off-arena by the same
+R4 denial; such a program traps `0xC000001D` in a long loop while the interpreters
+complete. The single-level stage-3a form traps identically, so this is not a stage-3c
+regression, but stage 3c makes it observable at depths that previously refused with
+`L0339`. Logged in `documents/finish_line_plan.md` Phase 1 alongside the two other
+shapes in the same cross-call-fresh-temporary class.
 
 **Soundness is layered, not single-point.** The escape refusal is enforced
 independently at three places, so no one of them being wrong silently miscompiles: the

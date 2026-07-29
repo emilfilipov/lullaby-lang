@@ -216,13 +216,25 @@ What a bounds-fail / unwrap-on-`none` / divide-by-zero does in the safe tier.
   pre-poisoned to NOT-a-sink** — structurally the same sweep as the arena's
   `retaining_summary`, with the deny default inverted (unknown/`extern`/indirect callee
   ⇒ not a sink). Soundness: the capture block is owned by the CREATOR's frame region and
-  every chain use is dynamically nested inside the creating call; the creator is kept off
-  the arena by construction (a `fn` parameter is an indirect target, so every chain
-  function is R4-retaining and criterion 3 fails for the creator), so no rewind can fall
-  between block creation and last use — the same argument that makes stage 3a sound. A
+  every chain use is dynamically nested inside the creating call; any creator whose
+  closure is actually *invoked* through the chain is kept off the arena (a `fn` parameter
+  is an indirect target, so the calling chain function is R4-retaining, the poison
+  propagates back up, and criterion 3 fails for the creator), so no rewind can fall
+  between block creation and last use — the same argument that makes stage 3a sound. (Not
+  "by construction": a sink with ZERO uses is admitted vacuously and stays non-retaining,
+  so a creator feeding only such a sink can be arena-eligible — harmless, since a closure
+  never invoked has no capture to dangle, but the invoked-⇒-off-arena form is the true
+  claim.) A
   chain **inside a loop** is bounded by the per-iteration closure drop. Default-deny
   holds: a stored, returned, reassigned, bare-read, or non-sink-passed `fn` parameter,
   and any **recursive** would-be sink pair, still skip cleanly (`L0339`).
+  **Known residual, pre-existing but newly reachable:** if the terminal sink itself
+  ALLOCATES a per-call heap temporary, that temporary has no drop path (the sink is
+  off-arena by the same R4 denial) and a long loop traps `0xC000001D` while the
+  interpreters complete. The single-level stage-3a form traps identically, so this is not
+  a 3c regression — but 3c makes it observable at depths that previously refused with
+  `L0339`. Queued in `finish_line_plan.md` Phase 1 with the two other shapes in that
+  cross-call-fresh-temporary class.
 - **Still deferred (the rest of stage 3c+):** heap/aggregate captures, mutable-capture
   rebind, stored (not returned) closures, a **call-returned** closure passed onward, and
   **recursive** HOF chains (pre-poisoned by design — relaxing them needs a bound on the

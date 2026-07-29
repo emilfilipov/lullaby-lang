@@ -166,13 +166,22 @@ type SinkNode<'a> = (&'a str, usize);
 /// region and owned by it. Every function in the chain receives it only as a `fn(...)`
 /// parameter and may only call through it or hand it to another sink, so every use is
 /// dynamically nested inside the creating call and the owner frame is live throughout.
-/// The creator is off the arena by construction: `fn_typed_binding_names` puts every
-/// `fn`-typed parameter into the indirect-denied set, so a chain function that calls
-/// through its parameter is R4-retaining, the poison propagates up the chain, and
+/// Any creator whose closure is actually **invoked** through the chain is off the
+/// arena: `fn_typed_binding_names` puts every `fn`-typed parameter into the
+/// indirect-denied set, so the chain function that CALLS through its parameter is
+/// R4-retaining, the poison propagates back up the chain through R4, and
 /// [`all_callees_non_retaining`] fails for the creator — it gets neither a function
 /// region nor a loop sub-region, so no rewind can fall between block creation and last
 /// use. This is the identical argument that makes the shipped single-level stage-3a
 /// sound; stage 3c only lengthens the chain.
+///
+/// The invocation qualifier is load-bearing and deliberately not stated as "by
+/// construction": a sink parameter with **zero** uses is admitted vacuously (the walker
+/// is an `all` over its uses), and such a sink calls nothing indirect, so it does not
+/// become R4-retaining and a creator that only feeds it CAN be arena-eligible. That is
+/// harmless — a closure that is never invoked has no capture read to dangle, and the
+/// block itself is reclaimed by the creator's own rewind exactly like any other
+/// per-iteration allocation — but the weaker claim is the true one.
 pub(crate) fn build_hof_index(module: &BytecodeModule) -> HashMap<String, Vec<HofParam>> {
     // Type-level candidates: a `fn(...)` parameter with an all-native-scalar signature.
     // Nothing else can ever be a sink.
