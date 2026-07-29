@@ -1867,3 +1867,508 @@ fn ir_and_bytecode_preserve_runtime_errors() {
     assert_eq!(ir_error.span, ast_error.span);
     assert_eq!(bytecode_error.span, ast_error.span);
 }
+
+// ---------------------------------------------------------------------------
+// Optimizer barrier: an assignment target's index expressions
+//
+// The passes that carry state across statements (copy propagation's alias map,
+// CSE's available-expression table) drop that state when they see a call — a
+// callee can write through a pointer taken with `addr_of` and change a binding
+// with nothing naming it. That barrier used to be evaluated over the assigned
+// VALUE only, while the target path was cloned verbatim, so a call in an index
+// (`arr[poke(p)] = 5`) slipped past it. These fixtures pin cross-tier agreement
+// at `--optimize full`, which is where the divergence showed.
+//
+// The pre-existing barrier tests (`*_invalidates_after_assignment`) only ever
+// mutated the source with an explicit `IrStmt::Assign`, which is precisely the
+// write these passes could already see — which is why none of them caught this.
+// ---------------------------------------------------------------------------
+
+/// `fn poke p ptr<i64> -> i64` — writes 99 through `p`, returns 0, so it is
+/// usable as an array index while mutating the pointee.
+const POKE_HELPER: &str = concat!(
+    "fn poke p ptr<i64> -> i64\n",
+    "    unsafe\n",
+    "        ptr_write(p, 99)\n",
+    "    0\n",
+    "\n",
+);
+
+/// Assert every tier and optimization level agrees on `expected`:
+/// ast == ir/none == bytecode/none == **ir/full == bytecode/full**. The last two
+/// are the ones that diverged; the AST tier never runs the IR optimizer and is
+/// the oracle.
+fn assert_cross_tier_parity(source: &str, expected: i64) {
+    let (ast, ir, bytecode, optimized_ir, optimized_bytecode) = run_all_backend_variants(source);
+    assert_eq!(ast, Value::I64(expected), "ast tier");
+    assert_eq!(ir, ast, "ir/none diverged from ast");
+    assert_eq!(bytecode, ast, "bytecode/none diverged from ast");
+    assert_eq!(optimized_ir, ast, "ir/full diverged from ast");
+    assert_eq!(optimized_bytecode, ast, "bytecode/full diverged from ast");
+}
+
+/// Find `main` in an optimized module.
+fn optimized_main(module: &IrModule) -> &IrFunction {
+    module
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("main")
+}
+
+/// A call in an assignment target's index mutates through a raw pointer, so
+/// every alias recorded before it is stale afterwards.
+///
+/// INJECT-THE-BUG TEETH (verified): restoring `path: path.clone()` in
+/// `CopyPropagator`'s `IrStmt::Assign` arm — the original shape, which never
+/// walked the target path — makes `out = b` become `out = x`; this fixture then
+/// reports `ir/full diverged from ast, left: I64(99) right: I64(1)`.
+///
+/// Removing only the `ir_assign_path_exprs(path)` pre-check while keeping the
+/// path walk does NOT reproduce it: walking the path through
+/// `CopyPropagator::propagate_expr` already clears the alias map at the call.
+/// The pre-check is defence-in-depth against a tier that evaluates the target
+/// path before the RHS, and is deliberately not the only thing standing here.
+#[test]
+fn copy_propagation_barrier_covers_an_assignment_target_index() {
+    let source = &format!(
+        "{POKE_HELPER}{}",
+        concat!(
+            "fn main -> i64\n",
+            "    let arr array<i64> = [0, 0]\n",
+            "    let x i64 = 1\n",
+            "    let out i64 = 0\n",
+            "    unsafe\n",
+            "        let p ptr<i64> = addr_of(x)\n",
+            "        let b i64 = x\n",
+            "        arr[poke(p)] = 5\n",
+            "        out = b\n",
+            "    out\n",
+        )
+    );
+    assert_cross_tier_parity(source, 1);
+
+    let module = lower_source(source);
+    let (optimized, report) = optimize(&module, &OptimizationConfig::copy_propagation());
+    assert_eq!(
+        report.propagated_copies, 0,
+        "the call in the target's index must kill the `b` -> `x` alias"
+    );
+
+    let IrStmt::Assign { value, .. } = &optimized_main(&optimized).body[6] else {
+        panic!("expected `out = b`");
+    };
+    assert_eq!(value.kind, IrExprKind::Variable("b".to_string()));
+}
+
+/// The control for the fixture above: hoisting the call out of the index into
+/// its own `let` is the shape the barrier already handled, and must keep
+/// handling. If this one ever diverges, the barrier itself broke rather than the
+/// path walk.
+#[test]
+fn copy_propagation_barrier_control_call_hoisted_out_of_the_index() {
+    let source = &format!(
+        "{POKE_HELPER}{}",
+        concat!(
+            "fn main -> i64\n",
+            "    let arr array<i64> = [0, 0]\n",
+            "    let x i64 = 1\n",
+            "    let out i64 = 0\n",
+            "    unsafe\n",
+            "        let p ptr<i64> = addr_of(x)\n",
+            "        let b i64 = x\n",
+            "        let k i64 = poke(p)\n",
+            "        arr[k] = 5\n",
+            "        out = b\n",
+            "    out\n",
+        )
+    );
+    assert_cross_tier_parity(source, 1);
+}
+
+/// The barrier is *positional*: it takes effect where the call sits in
+/// evaluation order, not after the whole statement has been rewritten.
+///
+/// `pick(poke(p), b)` evaluates `poke(p)` first, so `b` is read after the
+/// mutation and must not be rewritten to `x`.
+///
+/// INJECT-THE-BUG TEETH (verified): restoring the old "rewrite the RHS, then
+/// clear if it contained a barrier" order makes this fixture return 99 on
+/// ir/full and bytecode/full while ast and both `/none` tiers return 1.
+#[test]
+fn copy_propagation_barrier_takes_effect_at_the_call_in_argument_order() {
+    let source = &format!(
+        "{POKE_HELPER}{}",
+        concat!(
+            "fn pick a, b i64 -> i64\n",
+            "    b\n",
+            "\n",
+            "fn main -> i64\n",
+            "    let x i64 = 1\n",
+            "    let out i64 = 0\n",
+            "    unsafe\n",
+            "        let p ptr<i64> = addr_of(x)\n",
+            "        let b i64 = x\n",
+            "        out = pick(poke(p), b)\n",
+            "    out\n",
+        )
+    );
+    assert_cross_tier_parity(source, 1);
+
+    let module = lower_source(source);
+    let (optimized, report) = optimize(&module, &OptimizationConfig::copy_propagation());
+    assert_eq!(report.propagated_copies, 0);
+
+    let IrStmt::Assign { value, .. } = &optimized_main(&optimized).body[4] else {
+        panic!("expected `out = pick(...)`");
+    };
+    let IrExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected the `pick` call");
+    };
+    assert_eq!(
+        args[1].kind,
+        IrExprKind::Variable("b".to_string()),
+        "`b` is read after `poke(p)` ran, so its alias is dead"
+    );
+}
+
+/// The flip side of the fixture above: an argument evaluated BEFORE any call in
+/// the statement is still propagated. Positional invalidation must not degrade
+/// into "any statement containing a call propagates nothing".
+#[test]
+fn copy_propagation_still_rewrites_arguments_that_precede_every_call() {
+    let source = concat!(
+        "fn pick a, b i64 -> i64\n",
+        "    a\n",
+        "\n",
+        "fn side -> i64\n",
+        "    7\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let x i64 = 1\n",
+        "    let b i64 = x\n",
+        "    pick(b, side())\n",
+    );
+    let module = lower_source(source);
+    let (optimized, report) = optimize(&module, &OptimizationConfig::copy_propagation());
+    assert_eq!(
+        report.propagated_copies, 1,
+        "`b` is read before `side()` runs, so its alias is still live"
+    );
+
+    let IrStmt::Expr(expr) = &optimized_main(&optimized).body[2] else {
+        panic!("expected the trailing `pick` call");
+    };
+    let IrExprKind::Call { args, .. } = &expr.kind else {
+        panic!("expected the `pick` call");
+    };
+    assert_eq!(args[0].kind, IrExprKind::Variable("x".to_string()));
+}
+
+/// CSE keeps an available-expression table across statements, and the same call
+/// in an assignment target's index invalidates it.
+///
+/// INJECT-THE-BUG TEETH (verified): dropping the `ir_assign_path_exprs(&path)`
+/// barrier check from `CommonSubexpressionEliminator`'s `IrStmt::Assign` arm
+/// rewrites the second `x + 1` to the pre-call binding `a`, and this fixture
+/// returns 4 on ir/full and bytecode/full while ast and both `/none` tiers
+/// return 102.
+#[test]
+fn common_subexpression_elimination_barrier_covers_an_assignment_target_index() {
+    let source = &format!(
+        "{POKE_HELPER}{}",
+        concat!(
+            "fn main -> i64\n",
+            "    let arr array<i64> = [0, 0]\n",
+            "    let x i64 = 1\n",
+            "    let out i64 = 0\n",
+            "    unsafe\n",
+            "        let p ptr<i64> = addr_of(x)\n",
+            "        let a i64 = x + 1\n",
+            "        arr[poke(p)] = 5\n",
+            "        let c i64 = x + 1\n",
+            "        out = c + a\n",
+            "    out\n",
+        )
+    );
+    assert_cross_tier_parity(source, 102);
+
+    let module = lower_source(source);
+    let (optimized, report) = optimize(
+        &module,
+        &OptimizationConfig::common_subexpression_elimination(),
+    );
+    assert_eq!(
+        report.eliminated_common_subexpressions, 0,
+        "the call in the target's index invalidates `x + 1`"
+    );
+
+    let IrStmt::Let { value, .. } = &optimized_main(&optimized).body[6] else {
+        panic!("expected `let c = x + 1`");
+    };
+    assert!(
+        matches!(value.kind, IrExprKind::Binary { .. }),
+        "`x + 1` must be recomputed after the call, not reused from `a`"
+    );
+}
+
+/// LICM's invariance analysis only ever saw writes it could name (an
+/// `IrStmt::Assign` target, an `asm` `out` clause). A CALL is opaque: it can
+/// write through a raw pointer into a binding nothing in the loop body names.
+///
+/// This is a distinct defect from the assignment-path barrier above — same
+/// family (a call's effects made invisible to a pass), different root cause.
+///
+/// INJECT-THE-BUG TEETH (verified): removing the `block_contains_call` /
+/// `address_taken` guard in `hoist_loop_body` hoists `x + 1` out of the loop and
+/// freezes it at its first-iteration value, and this fixture returns 4 on
+/// ir/full and bytecode/full while ast and both `/none` tiers return 102.
+#[test]
+fn loop_invariant_motion_respects_a_call_that_writes_through_a_raw_pointer() {
+    let source = &format!(
+        "{POKE_HELPER}{}",
+        concat!(
+            "fn main -> i64\n",
+            "    let x i64 = 1\n",
+            "    let total i64 = 0\n",
+            "    unsafe\n",
+            "        let p ptr<i64> = addr_of(x)\n",
+            "        let i i64 = 0\n",
+            "        while i < 2\n",
+            "            let v i64 = x + 1\n",
+            "            total = total + v\n",
+            "            let k i64 = poke(p)\n",
+            "            total = total + k\n",
+            "            i = i + 1\n",
+            "    total\n",
+        )
+    );
+    assert_cross_tier_parity(source, 102);
+
+    let module = lower_source(source);
+    let (_, report) = optimize(&module, &OptimizationConfig::loop_invariant_motion());
+    assert_eq!(
+        report.hoisted_loop_invariants, 0,
+        "`x + 1` is not loop-invariant: `poke(p)` writes `x` every iteration"
+    );
+}
+
+/// The guard above must stay targeted: a loop body that calls a function is
+/// still eligible for hoisting when the function never takes an address, because
+/// no callee can reach a local without a pointer to it.
+#[test]
+fn loop_invariant_motion_still_hoists_across_calls_without_address_taking() {
+    let source = concat!(
+        "fn twice v i64 -> i64\n",
+        "    v * 2\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let base i64 = 3\n",
+        "    let total i64 = 0\n",
+        "    for i from 1 to 3\n",
+        "        let invariant i64 = (base + 1) * 2\n",
+        "        total += invariant + twice(i)\n",
+        "    total\n",
+    );
+    let module = lower_source(source);
+    let (_, report) = optimize(&module, &OptimizationConfig::loop_invariant_motion());
+    assert_eq!(
+        report.hoisted_loop_invariants, 1,
+        "no `addr_of` in the function, so a call cannot reach `base`"
+    );
+}
+
+/// Constant folding descends into an assignment target's index. Passing the path
+/// through verbatim was only a missed fold (the pass carries no cross-statement
+/// state), but the silent skip is the shape that made the two passes above
+/// miscompile, so it is closed and pinned here.
+#[test]
+fn constant_folding_folds_an_assignment_target_index() {
+    let source = concat!(
+        "fn main -> i64\n",
+        "    let arr array<i64> = [0, 0, 0]\n",
+        "    arr[1 + 1] = 7\n",
+        "    arr[2]\n",
+    );
+    let module = lower_source(source);
+    let (optimized, report) = optimize(&module, &OptimizationConfig::constant_folding());
+    assert_eq!(report.folded_expressions, 1);
+
+    let IrStmt::Assign { path, .. } = &optimized.functions[0].body[1] else {
+        panic!("expected the indexed assignment");
+    };
+    let index = ir_assign_path_exprs(path).next().expect("index expression");
+    assert_eq!(index.kind, IrExprKind::Integer(2));
+    assert_eq!(run_main(&optimized).expect("optimized run"), Value::I64(7));
+}
+
+/// Inlining descends into an assignment target's index for the same reason.
+/// Substituting a pure-leaf body with simple arguments is position-independent,
+/// so it is as safe in an index as in a right-hand side.
+#[test]
+fn inlining_rewrites_a_call_in_an_assignment_target_index() {
+    let source = concat!(
+        "fn shift v i64 -> i64\n",
+        "    v + 1\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let arr array<i64> = [0, 0, 0]\n",
+        "    let i i64 = 1\n",
+        "    arr[shift(i)] = 7\n",
+        "    arr[2]\n",
+    );
+    let module = lower_source(source);
+    let (optimized, report) = optimize(
+        &module,
+        &OptimizationConfig::with_passes(vec![OptimizationPass::Inlining]),
+    );
+    assert_eq!(report.inlined_calls, 1);
+
+    let IrStmt::Assign { path, .. } = &optimized_main(&optimized).body[2] else {
+        panic!("expected the indexed assignment");
+    };
+    let index = ir_assign_path_exprs(path).next().expect("index expression");
+    assert!(
+        matches!(index.kind, IrExprKind::Binary { .. }),
+        "`shift(i)` must be inlined to `i + 1` in the target's index"
+    );
+    assert_eq!(run_main(&optimized).expect("optimized run"), Value::I64(7));
+}
+
+// ---------------------------------------------------------------------------
+// Callee-name shadowing
+//
+// A `fn`-typed local or parameter shadows a module function of the same name,
+// and a call then targets the binding. The inliner resolved the callee name
+// against its module-function table with no scope check, so `--optimize full`
+// substituted the wrong body. Second instance of the same family as the
+// assignment-path barrier above: a pass reaching a conclusion from incomplete
+// information — there by dropping a child-bearing field, here by resolving a
+// name without checking what is in scope.
+// ---------------------------------------------------------------------------
+
+/// `fn inner v i64 -> i64` — the module function a local binding will shadow.
+const SHADOWED_INNER_HELPER: &str = concat!("fn inner v i64 -> i64\n", "    v * 10\n", "\n",);
+
+/// A `let` binding shadows a module function; the call is the closure, not the
+/// module body.
+///
+/// INJECT-THE-BUG TEETH (verified): removing the `!self.shadowed.contains(name)`
+/// guard from `Inliner::inline_expr`'s `Call` arm substitutes `40 * 10`, and this
+/// fixture reports `ir/full diverged from ast, left: I64(400) right: I64(42)`.
+/// `lullaby native` runs the same `full` pipeline and shipped 400 in a binary;
+/// that half is pinned by `native_honors_a_shadowed_callee_name` in
+/// `crates/lullaby_cli/tests/cli/suite27.rs`.
+#[test]
+fn inlining_honors_a_local_binding_that_shadows_a_module_function() {
+    let source = &format!(
+        "{SHADOWED_INNER_HELPER}{}",
+        concat!(
+            "fn main -> i64\n",
+            "    let n i64 = 2\n",
+            "    let inner fn(i64) -> i64 = fn x i64 -> x + n\n",
+            "    inner(40)\n",
+        )
+    );
+    assert_cross_tier_parity(source, 42);
+
+    let module = lower_source(source);
+    let (_, report) = optimize(
+        &module,
+        &OptimizationConfig::with_passes(vec![OptimizationPass::Inlining]),
+    );
+    assert_eq!(
+        report.inlined_calls, 0,
+        "`inner` names the local closure here, so there is no module body to inline"
+    );
+}
+
+/// The same rule for a parameter: a `fn`-typed parameter shadows the module
+/// function for the whole body.
+#[test]
+fn inlining_honors_a_parameter_that_shadows_a_module_function() {
+    let source = &format!(
+        "{SHADOWED_INNER_HELPER}{}",
+        concat!(
+            "fn call_it inner fn(i64) -> i64 -> i64\n",
+            "    inner(40)\n",
+            "\n",
+            "fn main -> i64\n",
+            "    call_it(fn x i64 -> x + 2)\n",
+        )
+    );
+    assert_cross_tier_parity(source, 42);
+
+    let module = lower_source(source);
+    let (_, report) = optimize(
+        &module,
+        &OptimizationConfig::with_passes(vec![OptimizationPass::Inlining]),
+    );
+    assert_eq!(report.inlined_calls, 0);
+}
+
+/// Shadowing is per frame, and the guard must stay that precise: a local `inner`
+/// in `main` must not stop `other` — which binds no such name — from inlining the
+/// module `inner`. This is the control that keeps the fix from degrading into
+/// "never inline a name any function shadows".
+#[test]
+fn inlining_still_inlines_in_functions_that_do_not_shadow_the_name() {
+    let source = &format!(
+        "{SHADOWED_INNER_HELPER}{}",
+        concat!(
+            "fn other -> i64\n",
+            "    inner(4)\n",
+            "\n",
+            "fn main -> i64\n",
+            "    let inner fn(i64) -> i64 = fn x i64 -> x + 2\n",
+            "    inner(40) + other()\n",
+        )
+    );
+    assert_cross_tier_parity(source, 82);
+
+    let module = lower_source(source);
+    let (optimized, report) = optimize(
+        &module,
+        &OptimizationConfig::with_passes(vec![OptimizationPass::Inlining]),
+    );
+    assert_eq!(
+        report.inlined_calls, 1,
+        "`other` does not shadow `inner`, so its call is still inlined"
+    );
+
+    let other = optimized
+        .functions
+        .iter()
+        .find(|function| function.name == "other")
+        .expect("other");
+    let IrStmt::Expr(expr) = &other.body[0] else {
+        panic!("expected the trailing call in `other`");
+    };
+    assert!(
+        matches!(expr.kind, IrExprKind::Binary { .. }),
+        "`inner(4)` must be inlined to `4 * 10` in `other`"
+    );
+}
+
+/// The `lullaby inspect` memory report scans an assignment target's index too:
+/// `arr[inner[0]] = 5` performs a bounds check on `inner` that the report used
+/// to omit entirely.
+#[test]
+fn memory_analysis_reports_an_assignment_target_index() {
+    let module = lower_source(concat!(
+        "fn main -> i64\n",
+        "    let arr array<i64> = [0, 0]\n",
+        "    let inner array<i64> = [1, 0]\n",
+        "    arr[inner[0]] = 5\n",
+        "    arr[1]\n",
+    ));
+    let operations = analyze_memory_operations(&module);
+    let bounds_checks = operations
+        .iter()
+        .filter(|operation| matches!(operation.kind, IrMemoryOperationKind::BoundsCheck { .. }))
+        .count();
+    assert_eq!(
+        bounds_checks, 2,
+        "one for `inner[0]` in the assignment target, one for the trailing `arr[1]`"
+    );
+}

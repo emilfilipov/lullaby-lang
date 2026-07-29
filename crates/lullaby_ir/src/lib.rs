@@ -489,6 +489,69 @@ pub enum IrPlace {
     Index(IrExpr),
 }
 
+impl IrPlace {
+    /// The index expression of an `[i]` hop, or `None` for a `.field` hop.
+    ///
+    /// An index hop carries a full [`IrExpr`] tree, so **every pass that walks a
+    /// function body's expressions must walk these too**. Reach for
+    /// [`ir_assign_path_exprs`] / [`ir_assign_path_exprs_mut`] instead of
+    /// destructuring the path by hand.
+    pub fn index_expr(&self) -> Option<&IrExpr> {
+        match self {
+            IrPlace::Field(_) => None,
+            IrPlace::Index(index) => Some(index),
+        }
+    }
+
+    /// The index expression of an `[i]` hop, mutably. See [`IrPlace::index_expr`].
+    pub fn index_expr_mut(&mut self) -> Option<&mut IrExpr> {
+        match self {
+            IrPlace::Field(_) => None,
+            IrPlace::Index(index) => Some(index),
+        }
+    }
+
+    /// Rebuild this hop with its index expression replaced by `rewrite(index)`; a
+    /// `.field` hop is copied through. The sanctioned way for a rewriting pass
+    /// (constant folding, inlining, copy propagation, CSE) to transform an
+    /// assignment target without re-matching on the variant — and without
+    /// silently passing the path through verbatim.
+    pub fn map_index_expr(&self, rewrite: impl FnOnce(&IrExpr) -> IrExpr) -> IrPlace {
+        match self {
+            IrPlace::Field(field) => IrPlace::Field(field.clone()),
+            IrPlace::Index(index) => IrPlace::Index(rewrite(index)),
+        }
+    }
+}
+
+/// Every sub-expression carried by an assignment target path ([`IrStmt::Assign`]'s
+/// `path`), in source order. The IR-side counterpart of
+/// [`lullaby_parser::assign_path_exprs`], and the sanctioned way for an
+/// IR-walking pass to reach into an assignment target.
+///
+/// **The barrier rule.** An optimizer pass that carries state across statements
+/// (copy propagation's alias map, CSE's available-expression table) invalidates
+/// that state when it sees a call — a call may mutate any binding, including
+/// through a raw pointer taken with `addr_of`. That barrier must be evaluated
+/// over **every** expression the statement evaluates, which for an assignment is
+/// the RHS *and* the target's index expressions. Evaluating it over the RHS
+/// alone, and cloning `path` verbatim, let `arr[poke(p)] = 5` slip a mutating
+/// call past the barrier: a stale alias survived and a later read was rewritten
+/// to a variable the call had already changed — a wrong-value miscompile at
+/// `--optimize full` on the ir and bytecode tiers. Prefer destructuring
+/// `IrStmt::Assign { path, value, .. }` over letting `..` swallow `path`, so a
+/// future field addition is a compile error rather than another silent skip.
+/// Same shape as the `IrStmt::Asm { .. } => {}` hole on [`IrAsmOperand::expr`].
+pub fn ir_assign_path_exprs(path: &[IrPlace]) -> impl Iterator<Item = &IrExpr> {
+    path.iter().filter_map(IrPlace::index_expr)
+}
+
+/// Every sub-expression carried by an assignment target path, mutably. See
+/// [`ir_assign_path_exprs`].
+pub fn ir_assign_path_exprs_mut(path: &mut [IrPlace]) -> impl Iterator<Item = &mut IrExpr> {
+    path.iter_mut().filter_map(IrPlace::index_expr_mut)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IrExprKind {
     Integer(i64),
@@ -936,10 +999,8 @@ fn resolve_stmt_slots(stmt: &mut IrStmt, scopes: &mut Vec<Vec<String>>) {
         IrStmt::Assign { path, value, .. } => {
             // The target name keeps the name-scan `assign` path; only the RHS and
             // any index expressions in the path are read positions.
-            for place in path.iter_mut() {
-                if let IrPlace::Index(index) = place {
-                    resolve_expr_slots(index, scopes);
-                }
+            for index in ir_assign_path_exprs_mut(path) {
+                resolve_expr_slots(index, scopes);
             }
             resolve_expr_slots(value, scopes);
         }
@@ -1184,8 +1245,17 @@ fn collect_memory_operations_from_block(
 ) {
     for statement in statements {
         match statement {
-            IrStmt::Let { value, .. } | IrStmt::Assign { value, .. } | IrStmt::Expr(value) => {
+            IrStmt::Let { value, .. } | IrStmt::Expr(value) => {
                 collect_memory_operations_from_expr(function, value, operations);
+            }
+            // An assignment's target path can call a memory builtin too
+            // (`arr[ptr_read(p)] = v`), so its index expressions are scanned like
+            // any other expression — see `ir_assign_path_exprs`.
+            IrStmt::Assign { path, value, .. } => {
+                collect_memory_operations_from_expr(function, value, operations);
+                for index in ir_assign_path_exprs(path) {
+                    collect_memory_operations_from_expr(function, index, operations);
+                }
             }
             IrStmt::Return(Some(value)) => {
                 collect_memory_operations_from_expr(function, value, operations);

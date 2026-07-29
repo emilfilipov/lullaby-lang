@@ -81,6 +81,38 @@ fn run_interp_main_i64(source: &str) -> i64 {
     }
 }
 
+/// Assert WASM == IR interpreter for `source` **after the optimizer runs**, and
+/// that both equal `expected`.
+///
+/// [`assert_parity`] emits straight from `module_for`, so it never exercises an
+/// optimization pass. The `lullaby wasm` command does not: it runs
+/// `OptimizationConfig::inlining()` before emitting
+/// (`crates/lullaby_cli/src/commands/wasm.rs`), exactly like `lullaby native`.
+/// A pass that miscompiles is therefore invisible to `assert_parity` yet ships in
+/// a real `.wasm`. (The callee-shadowing defect that exposed this gap did not
+/// itself reach WASM — see `inlined_helper_call_matches_interpreter` for why —
+/// but nothing about the gap was specific to it.)
+fn assert_parity_after_inlining(source: &str, expected: i64) {
+    let module = module_for(source);
+    let (optimized, _) = crate::optimize(&module, &crate::OptimizationConfig::inlining());
+    let interp = match run_main(&optimized).expect("interpret optimized main") {
+        Value::I64(v) => v,
+        Value::Int { value, .. } => value,
+        other => panic!("main did not return an integer value: {other:?}"),
+    };
+    let artifact = emit_wasm_module(&optimized).expect("emit wasm");
+    let wasm = run_wasm_bytes_main_i64(&artifact.bytes);
+    assert_eq!(
+        interp, expected,
+        "the optimized IR interpreter disagrees with the expected value for:\n{source}"
+    );
+    assert_eq!(
+        wasm, interp,
+        "optimized WASM diverged from the IR interpreter (wasm={wasm}, interp={interp}) \
+         for:\n{source}"
+    );
+}
+
 /// Assert WASM == IR interpreter for `source`, and that both equal `expected`.
 /// This is the core cross-tier parity check every case below funnels through.
 fn assert_parity(source: &str, expected: i64) {
@@ -120,6 +152,32 @@ fn main -> i64
     return f.a + f.b
 ";
     assert_parity(source, 104);
+}
+
+/// The optimizer runs on the `lullaby wasm` path too, so a pass that rewrites a
+/// call must keep WASM in parity — every other case in this file emits straight
+/// from `module_for` and would not notice.
+///
+/// **This is deliberately NOT the callee-shadowing fixture.** That defect's shape
+/// needs a `fn`-typed local (`let inner fn(i64) -> i64 = …`), and the WASM
+/// emitter *skips* any function carrying one — `main` is then not exported at all
+/// and `wasmi` fails with `ExportedFuncNotFound` rather than returning a wrong
+/// value. Measured, not assumed: the shadowing program cannot reach a `.wasm`, so
+/// WASM was never exposed to it. The reachable halves are pinned by
+/// `inlining_honors_a_local_binding_that_shadows_a_module_function`
+/// (`ir_lib_tests.rs`) and `native_honors_a_shadowed_callee_name`
+/// (`crates/lullaby_cli/tests/cli/suite27.rs`).
+#[test]
+fn inlined_helper_call_matches_interpreter() {
+    let source = "\
+fn twice v i64 -> i64
+    v * 2
+
+fn main -> i64
+    let seed i64 = 21
+    return twice(seed)
+";
+    assert_parity_after_inlining(source, 42);
 }
 
 #[test]
