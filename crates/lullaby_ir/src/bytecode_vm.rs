@@ -1866,14 +1866,14 @@ impl<'a> Lowerer<'a> {
             // reaches here from a program that pass has walked in full — and the
             // pass is what rejects a non-constant count (`L0463`).
             //
-            // This arm is nonetheless real, not dead. The claim holds only as
-            // far as that pass's own coverage: it once dropped an assignment
-            // target's `path`, so `a[len([0; n])] = 99` arrived here unexpanded
-            // and this error was the *only* thing rejecting it (the AST
-            // interpreter, which needs no lowering, ran the program instead — a
-            // genuine cross-tier divergence). The gap is closed, but the arm
-            // stays as the lowerer's own guarantee: `lullaby_ir` is also driven
-            // directly on a parsed program in tests, without the semantic pass.
+            // This arm is nonetheless real, not dead — it is defense in depth
+            // against a coverage gap in that pass, which is exactly what has
+            // already happened once. The pass dropped an assignment target's
+            // `path`, so `a[len([0; n])] = 99` arrived here unexpanded and this
+            // error was the *only* thing rejecting it (the AST interpreter,
+            // which needs no lowering, ran the program instead — a genuine
+            // cross-tier divergence). That gap is closed; the arm stays because
+            // the next one would be caught here rather than miscompiled.
             // A constant count lowers to `count` copies of the lowered value.
             ExprKind::ArrayFill { value, count } => {
                 let count = match &count.kind {
