@@ -1,0 +1,5 @@
+{
+  "name": "libp",
+  "entry": "src/libp.lby",
+  "src": ["src"]
+}

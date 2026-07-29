@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    ActorDecl, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt, asm_operand_exprs,
+    ActorDecl, BinaryOp, Expr, ExprKind, Function, Program, Stmt, asm_operand_exprs,
     assign_path_exprs,
 };
 
@@ -1304,17 +1304,18 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
 fn stmt_mentions_var(stmt: &Stmt, name: &str) -> bool {
     match stmt {
         Stmt::Let { value, .. } | Stmt::Throw { value, .. } => expr_mentions_var(value, name),
+        // Every field is named so a future one cannot be skipped silently, and
+        // the path walk goes through the shared accessor rather than
+        // re-implementing the `Place` match — see `Place::index_expr`.
         Stmt::Assign {
             name: target,
             path,
+            op: _,
             value,
-            ..
+            span: _,
         } => {
             target == name
-                || path.iter().any(|place| match place {
-                    Place::Field(_) => false,
-                    Place::Index(index) => expr_mentions_var(index, name),
-                })
+                || assign_path_exprs(path).any(|index| expr_mentions_var(index, name))
                 || expr_mentions_var(value, name)
         }
         Stmt::Expr(expr) => expr_mentions_var(expr, name),

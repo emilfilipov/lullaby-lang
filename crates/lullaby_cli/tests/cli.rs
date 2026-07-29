@@ -1641,6 +1641,13 @@ mod suite27;
 #[path = "cli/suite28.rs"]
 mod suite28;
 
+// The two expression positions a pass can silently skip: an assignment-target
+// index (`Stmt::Assign`'s `path`) and an alias-annotated expression. Pins the
+// loader's `L0392` visibility check through an index plus its hoisted control,
+// and the cross-tier alias-position fixture.
+#[path = "cli/suite29.rs"]
+mod suite29;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

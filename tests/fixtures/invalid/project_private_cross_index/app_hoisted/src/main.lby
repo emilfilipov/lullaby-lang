@@ -1,0 +1,12 @@
+# The hoisted control for `../app`: the identical private cross-package call,
+# moved out of the assignment-target index and into an ordinary `let`. This form
+# was ALWAYS rejected — it is here so a regression cannot be masked by proving
+# only that ordinary position still works. -> L0392
+
+import libp
+
+fn main -> i64
+    let a array<i64> = [0, 0, 0]
+    let i i64 = hidden_helper(0)
+    a[i] = 99
+    a[1]

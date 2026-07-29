@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet};
 
 use lullaby_parser::{
-    ConstDecl, EnumDecl, EnumVariant, Expr, ExprKind, Function, IfBranch, MatchArm, Param, Program,
-    Stmt, StructDecl, StructField, TypeRef,
+    ConstDecl, EnumDecl, EnumVariant, Expr, ExprKind, Function, Param, Program, Stmt, StructDecl,
+    StructField, TypeRef, asm_operand_exprs_mut, assign_path_exprs_mut,
 };
 
 use super::SemanticDiagnostic;
@@ -60,11 +60,7 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                 })
                 .collect(),
             return_type: resolve_alias_type(&function.return_type, &map),
-            body: function
-                .body
-                .iter()
-                .map(|stmt| rewrite_stmt_types(stmt, &map))
-                .collect(),
+            body: rewritten_block(&function.body, &map),
             span: function.span,
             is_public: function.is_public,
             is_async: function.is_async,
@@ -177,11 +173,7 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                                 })
                                 .collect(),
                             return_type: resolve_alias_type(&function.return_type, &map),
-                            body: function
-                                .body
-                                .iter()
-                                .map(|stmt| rewrite_stmt_types(stmt, &map))
-                                .collect(),
+                            body: rewritten_block(&function.body, &map),
                             span: function.span,
                             is_public: function.is_public,
                             is_async: function.is_async,
@@ -197,14 +189,17 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                 .collect(),
             // A constant's declared type may name an alias (`const N Count = 5`);
             // resolve it to the canonical type so the checker/const-evaluator
-            // never sees an alias. The initializer expression is unchanged.
+            // never sees an alias. The initializer is an expression position like
+            // any other — the const folder descends into a closure literal there
+            // — so it goes through the same expression walk rather than a bare
+            // clone.
             consts: program
                 .consts
                 .iter()
                 .map(|decl| ConstDecl {
                     name: decl.name.clone(),
                     ty: resolve_alias_type(&decl.ty, &map),
-                    value: decl.value.clone(),
+                    value: rewritten_expr(&decl.value, &map),
                     span: decl.span,
                     is_public: decl.is_public,
                 })
@@ -235,11 +230,7 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                                 ty: resolve_alias_type(&param.ty, &map),
                             })
                             .collect(),
-                        body: init
-                            .body
-                            .iter()
-                            .map(|stmt| rewrite_stmt_types(stmt, &map))
-                            .collect(),
+                        body: rewritten_block(&init.body, &map),
                         span: init.span,
                     }),
                     handlers: decl
@@ -259,11 +250,7 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                                 .reply_type
                                 .as_ref()
                                 .map(|ty| resolve_alias_type(ty, &map)),
-                            body: handler
-                                .body
-                                .iter()
-                                .map(|stmt| rewrite_stmt_types(stmt, &map))
-                                .collect(),
+                            body: rewritten_block(&handler.body, &map),
                             span: handler.span,
                         })
                         .collect(),
@@ -325,125 +312,256 @@ fn resolve_alias_type_depth(ty: &TypeRef, map: &HashMap<String, TypeRef>, depth:
     ty.clone()
 }
 
-/// Rewrite alias types in a statement's type annotations, recursing into blocks.
-fn rewrite_stmt_types(stmt: &Stmt, map: &HashMap<String, TypeRef>) -> Stmt {
+/// Clone a block and resolve every alias spelling reachable from it.
+///
+/// The `Program`-rebuilding code above is expression-shaped, so it needs a
+/// by-value form; the walk itself is in place. See [`rewrite_stmt_types`].
+fn rewritten_block(body: &[Stmt], map: &HashMap<String, TypeRef>) -> Vec<Stmt> {
+    let mut body = body.to_vec();
+    rewrite_block_types(&mut body, map);
+    body
+}
+
+/// Clone an expression and resolve every alias spelling reachable from it.
+/// The by-value companion to [`rewrite_expr_types`], for the same reason.
+fn rewritten_expr(expr: &Expr, map: &HashMap<String, TypeRef>) -> Expr {
+    let mut expr = expr.clone();
+    rewrite_expr_types(&mut expr, map);
+    expr
+}
+
+fn rewrite_block_types(body: &mut [Stmt], map: &HashMap<String, TypeRef>) {
+    for stmt in body {
+        rewrite_stmt_types(stmt, map);
+    }
+}
+
+/// Resolve alias spellings in every type annotation a statement can reach,
+/// descending through nested blocks **and** through expressions.
+///
+/// The match names every [`Stmt`] variant and every child-bearing field, with no
+/// catch-all: exhaustiveness is what makes the pass correct, so a new variant (or
+/// a new field on an existing one) must be a compile error rather than a silent
+/// skip. The previous shape — rebuild a handful of variants, `other =>
+/// other.clone()` for the rest — was such a silent skip twice over. It never
+/// entered expressions, so `list_map(base, fn x Num -> x + x)` kept an unresolved
+/// alias in the closure parameter and the checker falsely rejected a valid
+/// program; and it reached a `match` only through a hand-written
+/// `Stmt::Expr(ExprKind::Match { .. })` special case, so identical arm bodies
+/// behaved differently in statement position (accepted) and in `let`/`return`/
+/// assignment-RHS/call-argument position (rejected `L0303`).
+fn rewrite_stmt_types(stmt: &mut Stmt, map: &HashMap<String, TypeRef>) {
     match stmt {
         Stmt::Let {
-            name,
+            name: _,
             ty,
             value,
-            span,
-        } => Stmt::Let {
-            name: name.clone(),
-            ty: ty.as_ref().map(|ty| resolve_alias_type(ty, map)),
-            value: value.clone(),
-            span: *span,
-        },
+            span: _,
+        } => {
+            if let Some(ty) = ty {
+                *ty = resolve_alias_type(ty, map);
+            }
+            rewrite_expr_types(value, map);
+        }
+        // An assignment target's index is an ordinary expression and can spell an
+        // alias (in a closure parameter) exactly like the value can — see
+        // `Place::index_expr`.
+        Stmt::Assign {
+            name: _,
+            path,
+            op: _,
+            value,
+            span: _,
+        } => {
+            for index in assign_path_exprs_mut(path) {
+                rewrite_expr_types(index, map);
+            }
+            rewrite_expr_types(value, map);
+        }
+        Stmt::Return(value) => {
+            if let Some(value) = value {
+                rewrite_expr_types(value, map);
+            }
+        }
+        Stmt::Expr(expr) => rewrite_expr_types(expr, map),
+        Stmt::Throw { value, span: _ } => rewrite_expr_types(value, map),
         Stmt::If {
             branches,
             else_body,
-            span,
-        } => Stmt::If {
-            branches: branches
-                .iter()
-                .map(|branch| IfBranch {
-                    condition: branch.condition.clone(),
-                    body: branch
-                        .body
-                        .iter()
-                        .map(|stmt| rewrite_stmt_types(stmt, map))
-                        .collect(),
-                })
-                .collect(),
-            else_body: else_body
-                .iter()
-                .map(|stmt| rewrite_stmt_types(stmt, map))
-                .collect(),
-            span: *span,
-        },
+            span: _,
+        } => {
+            for branch in branches {
+                rewrite_expr_types(&mut branch.condition, map);
+                rewrite_block_types(&mut branch.body, map);
+            }
+            rewrite_block_types(else_body, map);
+        }
         Stmt::While {
             condition,
             body,
-            span,
-        } => Stmt::While {
-            condition: condition.clone(),
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            span: *span,
-        },
+            span: _,
+        } => {
+            rewrite_expr_types(condition, map);
+            rewrite_block_types(body, map);
+        }
         Stmt::For {
-            name,
+            name: _,
             start,
             end,
             step,
             body,
-            span,
-        } => Stmt::For {
-            name: name.clone(),
-            start: start.clone(),
-            end: end.clone(),
-            step: step.clone(),
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            span: *span,
-        },
+            span: _,
+        } => {
+            rewrite_expr_types(start, map);
+            rewrite_expr_types(end, map);
+            if let Some(step) = step {
+                rewrite_expr_types(step, map);
+            }
+            rewrite_block_types(body, map);
+        }
         Stmt::ForEach {
-            name,
+            name: _,
             iterable,
             body,
-            span,
-        } => Stmt::ForEach {
-            name: name.clone(),
-            iterable: iterable.clone(),
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            span: *span,
-        },
-        Stmt::Loop { body, span } => Stmt::Loop {
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            span: *span,
-        },
-        Stmt::Unsafe { body, span } => Stmt::Unsafe {
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            span: *span,
-        },
-        Stmt::RegionBlock { body, span } => Stmt::RegionBlock {
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            span: *span,
-        },
+            span: _,
+        } => {
+            rewrite_expr_types(iterable, map);
+            rewrite_block_types(body, map);
+        }
+        Stmt::Loop { body, span: _ }
+        | Stmt::Unsafe { body, span: _ }
+        | Stmt::RegionBlock { body, span: _ } => rewrite_block_types(body, map),
         Stmt::Try {
             body,
-            catch_name,
+            catch_name: _,
             catch_body,
-            span,
-        } => Stmt::Try {
-            body: body.iter().map(|s| rewrite_stmt_types(s, map)).collect(),
-            catch_name: catch_name.clone(),
-            catch_body: catch_body
-                .iter()
-                .map(|s| rewrite_stmt_types(s, map))
-                .collect(),
-            span: *span,
-        },
-        // A `match` reaches semantics wrapped in a `Stmt::Expr`; rewrite type
-        // annotations inside its arm bodies so aliases in arm `let`s resolve.
-        Stmt::Expr(Expr {
-            kind: ExprKind::Match { scrutinee, arms },
-            span,
-        }) => Stmt::Expr(Expr {
-            kind: ExprKind::Match {
-                scrutinee: scrutinee.clone(),
-                arms: arms
-                    .iter()
-                    .map(|arm| MatchArm {
-                        pattern: arm.pattern.clone(),
-                        body: arm
-                            .body
-                            .iter()
-                            .map(|s| rewrite_stmt_types(s, map))
-                            .collect(),
-                    })
-                    .collect(),
-            },
-            span: *span,
-        }),
-        other => other.clone(),
+            span: _,
+        } => {
+            rewrite_block_types(body, map);
+            rewrite_block_types(catch_body, map);
+        }
+        // The machine-code bytes are opaque, but an `asm` operand clause carries
+        // an ordinary expression, which may spell an alias like any other — see
+        // `AsmOperand::expr`.
+        Stmt::Asm {
+            bytes: _,
+            operands,
+            clobbers: _,
+            span: _,
+        } => {
+            for expr in asm_operand_exprs_mut(operands) {
+                rewrite_expr_types(expr, map);
+            }
+        }
+        // Genuinely childless: no type annotation, no sub-expression, no nested
+        // block. `RegionDecl` carries only a name, integer size/align, and kind.
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Region(_) => {}
+    }
+}
+
+/// Resolve alias spellings reachable through an expression.
+///
+/// A closure literal is the only expression that carries a **type annotation**
+/// (its parameter types) and a `match` the only one that carries **nested
+/// statements** (its arm bodies); every other kind simply recurses into its
+/// sub-expressions. Named exhaustively for the same reason as
+/// [`rewrite_stmt_types`]: a new [`ExprKind`] must not be able to hide an
+/// annotation from this pass.
+fn rewrite_expr_types(expr: &mut Expr, map: &HashMap<String, TypeRef>) {
+    match &mut expr.kind {
+        ExprKind::Closure {
+            id: _,
+            params,
+            body,
+        } => {
+            for param in params {
+                param.ty = resolve_alias_type(&param.ty, map);
+            }
+            rewrite_expr_types(body, map);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            rewrite_expr_types(scrutinee, map);
+            for arm in arms {
+                rewrite_block_types(&mut arm.body, map);
+            }
+        }
+        ExprKind::Array(items) => {
+            for item in items {
+                rewrite_expr_types(item, map);
+            }
+        }
+        ExprKind::ArrayFill { value, count } => {
+            rewrite_expr_types(value, map);
+            rewrite_expr_types(count, map);
+        }
+        ExprKind::Index { target, index } => {
+            rewrite_expr_types(target, map);
+            rewrite_expr_types(index, map);
+        }
+        ExprKind::Unary { op: _, expr } | ExprKind::Await { expr } | ExprKind::Try(expr) => {
+            rewrite_expr_types(expr, map)
+        }
+        ExprKind::Binary { left, op: _, right }
+        | ExprKind::In {
+            value: left,
+            collection: right,
+        } => {
+            rewrite_expr_types(left, map);
+            rewrite_expr_types(right, map);
+        }
+        ExprKind::Call { name: _, args }
+        | ExprKind::Spawn {
+            actor: _,
+            args,
+            supervise: _,
+            bound: _,
+        } => {
+            for arg in args {
+                rewrite_expr_types(arg, map);
+            }
+        }
+        ExprKind::Tell {
+            target,
+            handler: _,
+            args,
+            kind: _,
+        } => {
+            rewrite_expr_types(target, map);
+            for arg in args {
+                rewrite_expr_types(arg, map);
+            }
+        }
+        ExprKind::StructLiteral { name: _, fields } => {
+            for (_, value) in fields {
+                rewrite_expr_types(value, map);
+            }
+        }
+        ExprKind::Field { target, field: _ } => rewrite_expr_types(target, map),
+        ExprKind::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            rewrite_expr_types(cond, map);
+            rewrite_expr_types(then_branch, map);
+            rewrite_expr_types(else_branch, map);
+        }
+        ExprKind::Slice { target, start, end } => {
+            rewrite_expr_types(target, map);
+            if let Some(start) = start {
+                rewrite_expr_types(start, map);
+            }
+            if let Some(end) = end {
+                rewrite_expr_types(end, map);
+            }
+        }
+        ExprKind::Combinator { op: _, operand } => rewrite_expr_types(operand, map),
+        // Leaves: no sub-expression and no type annotation.
+        ExprKind::Integer(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::String(_)
+        | ExprKind::Char(_)
+        | ExprKind::Variable(_) => {}
     }
 }
