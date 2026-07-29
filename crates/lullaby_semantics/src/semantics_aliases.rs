@@ -501,11 +501,7 @@ fn rewrite_expr_types(expr: &mut Expr, map: &HashMap<String, TypeRef>) {
         ExprKind::Unary { op: _, expr } | ExprKind::Await { expr } | ExprKind::Try(expr) => {
             rewrite_expr_types(expr, map)
         }
-        ExprKind::Binary {
-            left,
-            op: _,
-            right,
-        }
+        ExprKind::Binary { left, op: _, right }
         | ExprKind::In {
             value: left,
             collection: right,

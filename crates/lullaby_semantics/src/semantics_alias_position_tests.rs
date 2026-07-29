@@ -409,7 +409,11 @@ fn alias_definition_gates_still_fire() {
         diags(duplicate)
     );
 
-    let cyclic = concat!("alias A = B\n", "alias B = A\n\n", "fn main -> i64\n    0\n");
+    let cyclic = concat!(
+        "alias A = B\n",
+        "alias B = A\n\n",
+        "fn main -> i64\n    0\n"
+    );
     assert!(
         has(cyclic, "L0361"),
         "cyclic alias must still be L0361, got {:?}",
