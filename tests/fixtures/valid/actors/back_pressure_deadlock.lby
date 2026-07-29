@@ -1,0 +1,43 @@
+# Stage-5b back-pressure: the deterministic **back-pressure deadlock** `L0365`.
+#
+# `Gate` (bounded to 2) asks `Flooder` for a reply and awaits it, so `Gate` is
+# busy for the whole span. `Flooder`'s handler then `tell`s `Gate` three times.
+# The first two enqueue; the third finds `Gate`'s mailbox full and pumps — but
+# `Gate`'s own queued messages are the only ones that could free a slot, and
+# `Gate` is mid-turn, so nothing is deliverable. No later turn can ever free a
+# slot either (the queue only shrinks by dispatch), so the send can never
+# complete. That is reported as a clean `L0365`, never a hang.
+#
+# `Gate` learns its own handle through a `remember` message: a `spawn` returns
+# the handle to the spawner, so an actor cannot name itself in `init`.
+actor Flooder
+    on flood target Actor<Gate> -> i64
+        let i i64 = 0
+        while i < 3
+            tell target.ping(i)
+            i += 1
+        0
+
+actor Gate
+    state
+        me Actor<Gate>
+        peer Actor<Flooder>
+
+    init p Actor<Flooder>
+        peer = p
+
+    on remember self_handle Actor<Gate>
+        me = self_handle
+
+    on ping n i64
+        println("ping " + to_string(n))
+
+    on kick -> i64
+        await ask peer.flood(me)
+
+fn main -> i64
+    let f Actor<Flooder> = spawn Flooder()
+    let g Actor<Gate> = spawn Gate(f) bound 2
+    tell g.remember(g)
+    println(to_string(await ask g.kick()))
+    0

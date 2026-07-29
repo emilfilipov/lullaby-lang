@@ -1,0 +1,32 @@
+# Stage-5b: the `spawn ... bound N` mailbox-capacity clause, alongside
+# `supervise POLICY`. Both clauses are optional and independent, and the parser
+# accepts them in either order — `spawn Tank() supervise restart bound 4` below
+# is written "wrong way round" on purpose. `fmt` normalizes to the canonical
+# `bound` then `supervise` order, which re-parses to the same node, so the form
+# still round-trips and formatting stays idempotent.
+actor Tank
+    state
+        level i64
+
+    on deposit amount i64 -> result<i64, string>
+        if level + amount > 10
+            return err("overflow")
+        level += amount
+        ok(level)
+
+actor Sink
+    on take n i64
+        println("sink " + to_string(n))
+
+fn describe r result<i64, string> -> string
+    match r
+        ok(v) -> "ok " + to_string(v)
+        err(m) -> "err " + m
+
+fn main -> i64
+    let s Actor<Sink> = spawn Sink() bound 8
+    let t Actor<Tank> = spawn Tank() supervise restart bound 4
+    tell s.take(1)
+    println(to_string(try_tell s.take(2)))
+    println(describe(await ask t.deposit(3)))
+    0

@@ -997,31 +997,41 @@ fn render_expr(expr: &Expr) -> String {
             let end = end.as_deref().map(render_expr).unwrap_or_default();
             format!("{}[{start}:{end}]", render_postfix_target(target))
         }
-        // `spawn NAME(args) [supervise POLICY]` — construct and schedule an
-        // actor, optionally under a supervision policy. The clause is rendered
-        // back verbatim so the form round-trips to the same `Spawn` node.
+        // `spawn NAME(args) [bound N] [supervise POLICY]` — construct and
+        // schedule an actor, optionally with a mailbox capacity override and/or
+        // under a supervision policy. Both clauses are rendered back verbatim so
+        // the form round-trips to the same `Spawn` node. The parser accepts them
+        // in either order; rendering fixes one canonical order (`bound` first),
+        // which re-parses identically, so `fmt` stays idempotent.
         ExprKind::Spawn {
             actor,
             args,
             supervise,
+            bound,
         } => {
             let args = args.iter().map(render_expr).collect::<Vec<_>>().join(", ");
+            let bound = match bound {
+                Some(capacity) => format!(" bound {capacity}"),
+                None => String::new(),
+            };
             let clause = match supervise {
                 Some(policy) => format!(" supervise {}", policy.as_str()),
                 None => String::new(),
             };
-            format!("spawn {actor}({args}){clause}")
+            format!("spawn {actor}({args}){bound}{clause}")
         }
-        // `tell`/`ask TARGET.HANDLER(args)` — a message send. Rendered back in
-        // method-call syntax so it re-parses to the same `Tell` node; the verb is
-        // `ask` for a request-reply send and `tell` for a fire-and-forget one.
+        // `tell`/`try_tell`/`ask TARGET.HANDLER(args)` — a message send. Rendered
+        // back in method-call syntax with the verb its `SendKind` names, so it
+        // re-parses to the same `Tell` node. Dropping or changing the verb would
+        // change the send's meaning (whether it blocks, sheds, or replies), so it
+        // is never elided.
         ExprKind::Tell {
             target,
             handler,
             args,
-            is_ask,
+            kind,
         } => {
-            let verb = if *is_ask { "ask" } else { "tell" };
+            let verb = kind.as_str();
             let args = args.iter().map(render_expr).collect::<Vec<_>>().join(", ");
             format!("{verb} {}.{handler}({args})", render_postfix_target(target))
         }

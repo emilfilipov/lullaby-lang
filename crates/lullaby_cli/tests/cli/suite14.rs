@@ -994,3 +994,359 @@ fn combinator_program_formats_idempotently() {
     );
     assert_eq!(stdout(&second), formatted, "fmt must be idempotent");
 }
+
+// ---------------------------------------------------------------------------
+// Stage 5b — mailbox back-pressure (`bound N`, blocking `tell`, `try_tell`).
+//
+// Every actor's mailbox is **bounded**: 1024 messages by default, or the
+// capacity a `spawn NAME(args) bound N` clause names. Capacity is accounted per
+// actor as an occupancy counter beside the single global FIFO queue — the queue
+// and `run_one_deliverable`'s scan are unchanged, because on a deterministic
+// single thread "per-actor queues, drained by lowest global sequence among
+// deliverable heads" *is* that scan. So back-pressure adds per-target pressure
+// with **zero change to delivery order**, which is why every stage 1-5 test
+// above still asserts exactly the same output.
+//
+// Overflow policy is **block-until-space via cooperative pumping**: a `tell`/
+// `ask` to a full mailbox runs deliverable messages (in the same global FIFO
+// order `await` drives) until a slot frees, then enqueues. Re-entering the
+// scheduler mid-expression is not new — `await` has always run other actors'
+// turns nested on the Rust call stack — so the schedule stays deterministic.
+// When nothing is deliverable and the target is still full, no turn can ever
+// free a slot: that is the deterministic back-pressure deadlock **`L0365`**.
+//
+// `try_tell TARGET.HANDLER(args) -> bool` is the load-shedding escape hatch: it
+// never pumps, and answers whether the message was enqueued.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn back_pressure_tell_pumps_the_scheduler_until_space_frees() {
+    // The sink is bounded to 2 and the producer sends 3. The third `tell` finds
+    // the mailbox full and pumps one deliverable message before enqueuing, which
+    // is *observable* in the interleaving: `sink 0` prints BEFORE the producer's
+    // post-loop line. With an unbounded mailbox nothing would run until the
+    // graceful drain, so every `sink` line would follow `producer done` — that is
+    // exactly what this assertion has teeth against.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_pump.lby");
+    assert!(
+        output.status.success(),
+        "the pumping tell should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        "sink 0\nproducer done\nsink 1\nsink 2\n0\n"
+    );
+}
+
+#[test]
+fn back_pressure_deadlock_is_reported_not_hung() {
+    // `Gate` (bounded to 2) is busy awaiting a reply from `Flooder`, whose
+    // handler then `tell`s `Gate` three times. The third send finds the mailbox
+    // full, and only `Gate` could drain it — but `Gate` is mid-turn, so nothing
+    // is deliverable and no later turn can ever free a slot. Reported as a clean,
+    // deterministic `L0365` rather than a hang.
+    assert_run_fails(
+        "tests/fixtures/valid/actors/back_pressure_deadlock.lby",
+        "L0365",
+    );
+    // The diagnostic must name the actor and its occupancy — a bare "mailbox
+    // full" would not tell an author *which* mailbox to widen.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_deadlock.lby");
+    let stderr = stderr(&output);
+    for fragment in ["`Gate`", "2 of 2"] {
+        assert!(
+            stderr.contains(fragment),
+            "L0365 should report {fragment}. stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn try_tell_sheds_at_capacity_without_pumping() {
+    // The first two `try_tell`s enqueue and answer `true`; the third finds the
+    // mailbox at capacity, drops the message, and answers `false`. Two things are
+    // pinned by the ordering: `try_tell` never pumps (no `sink` line precedes
+    // `after`, unlike the blocking `tell` above), and the shed message is
+    // genuinely not delivered (the drain prints `sink 1`/`sink 2` and nothing
+    // else — `take(3)` never runs).
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_try_tell.lby");
+    assert!(
+        output.status.success(),
+        "try_tell should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        "true\ntrue\nfalse\nafter\nsink 1\nsink 2\n0\n"
+    );
+}
+
+#[test]
+fn a_full_mailbox_never_blocks_an_ask_reply() {
+    // Only the *request* is bounded. A handler's reply is written straight into
+    // its future's one-shot slot, never onto the asker's mailbox, so an actor
+    // sitting at exactly its capacity still receives every reply it awaits. Both
+    // actors here are driven to exactly 2/2 — `Coord` while it awaits, `Worker`
+    // while it serves — and every reply arrives.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_reply_slot.lby");
+    assert!(
+        output.status.success(),
+        "replies at exactly cap should resolve: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "36\n25\nnoop\n0\n");
+}
+
+#[test]
+fn an_ask_that_pumps_allocates_its_reply_slot_after_pumping() {
+    // The one ordering hazard the pump introduces, and the worst failure mode in
+    // the feature: a silently **wrong reply value**, no error, no crash.
+    //
+    // `ask` takes its slot index as `actor_reply_slots.len()`. Pumping runs other
+    // actors' turns, and one of those may itself `ask` — growing that vector. An
+    // `ask` that read `len()` before pumping would keep a stale index and hand
+    // its request a slot the pumped turn already took, so two futures alias one
+    // slot and the awaiting side takes whichever reply lands first.
+    //
+    // Both halves of the fixture are load-bearing: `Sink` is `bound 1` and
+    // already holds a message, so this `ask` genuinely finds it full and the
+    // reserve loop really pumps; and the pumped `Relay.forward` turn `ask`s a
+    // future it never awaits, leaving the aliased slot `Pending` so the wrong
+    // value is observable rather than masked by `await`'s take-and-reset.
+    //
+    // Reversing the two lines in `ask_actor` makes this read `answer 7` (Leaf's
+    // reply) instead of `answer 42` — verified by injection.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_slot_order.lby");
+    assert!(
+        output.status.success(),
+        "the slot-order fixture should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "relay fired\nnote 1\nanswer 42\n0\n");
+}
+
+#[test]
+fn bound_accepts_every_bare_integer_literal_form() {
+    // `bound N` routes through the same shared bare-integer parser a const
+    // `array<T, N>` extent uses, so it accepts every literal form the language
+    // accepts elsewhere — digit separators and the `0x`/`0b`/`0o` base prefixes —
+    // rather than only plain decimal.
+    //
+    // The interleaving proves the parsed *value* is in force, not merely
+    // accepted: `Tight` at `bound 0x2` (= 2) pumps on its third `tell`, so
+    // `tight 0` precedes `producer done`, while `Roomy` at `bound 1_000`
+    // (= 1000) never pumps and drains entirely afterwards. A misparse in either
+    // direction changes the output.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_bound_literals.lby");
+    assert!(
+        output.status.success(),
+        "bound literal forms should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        "tight 0\nproducer done\nroomy 0\ntight 1\nroomy 1\ntight 2\nroomy 2\n0\n"
+    );
+
+    // `fmt` renders both back in decimal — the same normalization every other
+    // numeric literal in the language gets.
+    let path =
+        workspace_root().join("tests/fixtures/valid/actors/back_pressure_bound_literals.lby");
+    let formatted = lullaby()
+        .args(["fmt", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run fmt");
+    assert!(
+        formatted.status.success(),
+        "fmt failed: {}",
+        stderr(&formatted)
+    );
+    let formatted = stdout(&formatted);
+    for fragment in ["spawn Tight() bound 2", "spawn Roomy() bound 1000"] {
+        assert!(
+            formatted.contains(fragment),
+            "fmt should normalize the capacity to `{fragment}`. output: {formatted}"
+        );
+    }
+}
+
+#[test]
+fn sends_after_a_supervision_stop_are_dropped_not_blocked() {
+    // The tank is at exactly 3/3 when its failing request runs; `supervise stop`
+    // purges all three queued messages and releases their occupancy. What this
+    // fixture *observes* is the consequence: the four later sends to the stopped
+    // tank are dropped (it runs no further turns) rather than blocking against a
+    // phantom-full mailbox, and the live sink still back-pressures normally
+    // alongside — its fourth `tell` pumps, so `sink 1` precedes `after stop`.
+    //
+    // Scope note, deliberately narrow: a stopped actor's occupancy is never
+    // consulted again (all three send paths short-circuit on `stopped` first), so
+    // in a release build the signal here comes from the sink's back-pressure, not
+    // from the purge. The purge's own accounting is guarded by the
+    // `debug_assert_eq!` in `stop_actor`, which fires under injection — that is
+    // what catches a dropped decrement, not this assertion.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_stop_purge.lby");
+    assert!(
+        output.status.success(),
+        "stop-purge accounting should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        "err overflow\nsink 1\nafter stop\nsink 2\nsink 3\nsink 4\n0\n"
+    );
+}
+
+#[test]
+fn spawn_bound_clause_runs_and_composes_with_supervise() {
+    // `bound N` is independent of `supervise POLICY` and may be written in either
+    // order. Here `Sink` is bounded alone and `Tank` carries both clauses written
+    // "wrong way round" (`supervise restart bound 4`); both spawn, and the
+    // program's `tell`/`try_tell`/`ask` all behave.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_bound_fmt.lby");
+    assert!(
+        output.status.success(),
+        "bound + supervise should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "true\nsink 1\nsink 2\nok 3\n0\n");
+}
+
+#[test]
+fn bound_clause_and_try_tell_format_idempotently() {
+    let scratch = ScratchDir::new("bound_clause_and_try_tell_format_idempotently");
+    // The formatter must render `bound N` and the `try_tell` verb back out.
+    // Dropping either would silently change program behavior — an unbounded
+    // mailbox instead of a bounded one, or a blocking send instead of a shedding
+    // one — so pin that both survive, that the two `spawn` clauses normalize to
+    // the canonical `bound` then `supervise` order, and that re-formatting is a
+    // fixed point.
+    let path = workspace_root().join("tests/fixtures/valid/actors/back_pressure_bound_fmt.lby");
+    let first = lullaby()
+        .args(["fmt", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run fmt");
+    assert!(first.status.success(), "fmt failed: {}", stderr(&first));
+    let formatted = stdout(&first);
+    for fragment in [
+        "spawn Sink() bound 8",
+        "spawn Tank() bound 4 supervise restart",
+        "try_tell s.take(2)",
+    ] {
+        assert!(
+            formatted.contains(fragment),
+            "fmt must preserve `{fragment}`. output: {formatted}"
+        );
+    }
+
+    let temp = scratch.join("lullaby_bound_fmt_idempotent.lby");
+    std::fs::write(&temp, &formatted).expect("write temp");
+    let second = lullaby()
+        .args(["fmt", temp.to_str().expect("temp path")])
+        .output()
+        .expect("run fmt again");
+    assert!(
+        second.status.success(),
+        "second fmt failed: {}",
+        stderr(&second)
+    );
+    assert_eq!(stdout(&second), formatted, "fmt must be idempotent");
+}
+
+#[test]
+fn back_pressure_output_is_byte_identical_across_repeated_runs() {
+    // Determinism is the property every actor stage is held to, and back-pressure
+    // is the first feature that lets a *send* re-enter the scheduler. The pump is
+    // the same single-threaded, run-to-completion `run_one_deliverable` `await`
+    // drives, and it always picks the earliest deliverable message, so the
+    // sequence of turns — and thus every side effect and every deadlock verdict —
+    // is identical on every run.
+    for fixture in [
+        "tests/fixtures/valid/actors/back_pressure_pump.lby",
+        "tests/fixtures/valid/actors/back_pressure_deadlock.lby",
+        "tests/fixtures/valid/actors/back_pressure_try_tell.lby",
+        "tests/fixtures/valid/actors/back_pressure_reply_slot.lby",
+        "tests/fixtures/valid/actors/back_pressure_stop_purge.lby",
+        "tests/fixtures/valid/actors/back_pressure_bound_fmt.lby",
+        "tests/fixtures/valid/actors/back_pressure_slot_order.lby",
+        "tests/fixtures/valid/actors/back_pressure_bound_literals.lby",
+    ] {
+        let first = run_ast(fixture);
+        for _ in 0..4 {
+            let again = run_ast(fixture);
+            assert_eq!(
+                stdout(&first),
+                stdout(&again),
+                "{fixture} stdout must be identical on every run"
+            );
+            assert_eq!(
+                first.status.code(),
+                again.status.code(),
+                "{fixture} exit code must be identical on every run"
+            );
+        }
+    }
+}
+
+#[test]
+fn try_tell_to_a_reply_handler_is_rejected() {
+    // `try_tell` is the load-shedding variant of `tell`, so it targets the same
+    // fire-and-forget handlers. Sending it to a reply (`ask`) handler is the same
+    // send-form mismatch `tell` reports, `L0352` — a shed *request* would strand a
+    // reply nobody could ever await.
+    assert_check_rejects(
+        "tests/fixtures/invalid/actors/try_tell_reply_handler.lby",
+        "L0352",
+    );
+}
+
+#[test]
+fn a_zero_mailbox_bound_is_rejected() {
+    // `bound 0` names a mailbox that could never accept a message, so every send
+    // to it would be an immediate `L0365`. Rejected at parse time rather than
+    // shipped as a program that cannot run.
+    let path = workspace_root().join("tests/fixtures/invalid/actors/spawn_bound_zero.lby");
+    let output = lullaby()
+        .args(["check", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run cli");
+    let stderr = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "`bound 0` should be rejected but exited 0. stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("bound 0"),
+        "the rejection should name the offending clause. stderr: {stderr}"
+    );
+}
+
+#[test]
+fn back_pressure_ir_and_bytecode_reject_cleanly() {
+    // Back-pressure adds no new expression node — `bound N` is a field on the
+    // existing `spawn` node and `try_tell` is a form of the existing send node —
+    // so the IR/bytecode backends reject a bounded actor program through the
+    // stage-1 `L0355` gate unchanged.
+    let path = workspace_root().join("tests/fixtures/valid/actors/back_pressure_try_tell.lby");
+    for backend in ["ir", "bytecode"] {
+        let output = lullaby()
+            .args([
+                "run",
+                "--backend",
+                backend,
+                path.to_str().expect("fixture path"),
+            ])
+            .output()
+            .expect("run cli");
+        let stderr = stderr(&output);
+        assert!(
+            !output.status.success(),
+            "[{backend}] a bounded actor program should be rejected. stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("L0355"),
+            "[{backend}] a bounded actor program should report L0355. stderr: {stderr}"
+        );
+    }
+}

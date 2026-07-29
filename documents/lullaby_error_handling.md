@@ -75,6 +75,37 @@ A recoverable failure lets the program **continue to a normal exit**. Only a `th
 
 `try`/`catch` catches **only** user-thrown `L0420` (from `throw`/`assert`). A contract-violation abort (`L0404`, `L0413`, `L0412`, `L0411`, `L0433`, …) propagates straight through any `catch` and terminates the program. This is the "no unwinding through a safety abort" rule: a safety abort is not an exception you can intercept.
 
+### Actor-scheduler errors — a third shape: "this can never complete"
+
+The actor scheduler adds a family that is neither a contract-violation abort nor
+a recoverable value: a wait that provably **can never finish**. The scheduler is
+single-threaded, cooperative, and run-to-completion, so it can *prove* that no
+future turn will change the outcome — and a compiler that can prove a hang owes
+the author a diagnostic rather than a hang. All of these are deterministic (the
+same program always reports the same one, at the same point) and terminate the
+program with a non-zero exit:
+
+| Situation | Diagnostic |
+| :--- | :--- |
+| `await`/`join_all`/`select` on a reply that would require re-entering an actor already mid-turn (a request cycle), or `select` over an empty collection | `L0356` |
+| `await`/`select` on a reply whose target was **stopped** by supervision, so no turn will ever produce it | `L0359` |
+| A `tell`/`ask` to an actor whose **mailbox is full** while nothing is deliverable to free a slot — the back-pressure deadlock | `L0365` |
+| A failure escalated past every supervisor to a root/unsupervised actor | `L0362` |
+| An actor whose `init` fails again while re-running for a `supervise restart` | `L0363` |
+
+`L0365` is the newest of these. Mailboxes are **bounded** (1024 messages by
+default, or the `spawn NAME(args) bound N` override), because an unbounded queue
+lets a fast producer grow memory without limit — which would quietly violate the
+memory-safety pillar. A send to a full mailbox therefore *waits*, cooperatively
+pumping the scheduler until a slot frees; `L0365` is what it reports when the
+pump stalls with the target still full. Use `try_tell TARGET.HANDLER(args)`,
+which answers `bool` and never pumps, to shed load instead of waiting.
+
+These are runtime-phase diagnostics on the AST interpreter (the only tier that
+runs actors); the IR/bytecode backends reject an actor program earlier with
+`L0355`, and native/WASM skip it with `L0339`/`L0338`. See
+[concurrency_model_design.md](concurrency_model_design.md).
+
 ### Backend consistency and the freestanding tier
 
 The three interpreters (AST, IR, bytecode) enforce this identically — same diagnostic code and message for each violation, and `try`/`catch` recovers only `L0420` on all three (regression-locked by `crates/lullaby_cli/tests/cli/suite13.rs`). The **native** backend turns the same contract violations into a hardware trap rather than a formatted diagnostic: an out-of-bounds index, an out-of-range substring, an empty-separator `split`, and heap exhaustion emit a `ud2` illegal-instruction trap, which surfaces as `STATUS_ILLEGAL_INSTRUCTION` (`0xC000001D`) on Windows; an integer divide-by-zero surfaces as the CPU `#DE` (`STATUS_INTEGER_DIVIDE_BY_ZERO`, `0xC0000094`). Both are defined, deterministic, non-zero-exit aborts with no unwinding — the same guarantee, expressed as a trap because native code has no diagnostic printer. See `documents/native_backend_contract.md`.

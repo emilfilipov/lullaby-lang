@@ -1,8 +1,8 @@
 use lullaby_lexer::{Keyword, Span, Token, TokenKind, lex};
 
-use crate::number_literal::parse_number_literal;
+use crate::number_literal::{parse_number_literal, parse_plain_integer_literal};
 use crate::{
-    BinaryOp, CombinatorOp, Expr, ExprKind, Param, SupervisionPolicy, TypeRef, UnaryOp,
+    BinaryOp, CombinatorOp, Expr, ExprKind, Param, SendKind, SupervisionPolicy, TypeRef, UnaryOp,
     function_type, generic_type,
 };
 
@@ -477,26 +477,32 @@ impl<'a> ExprParser<'a> {
                         }
                     }
                 }
-                let supervise = self.parse_supervise_clause()?;
+                let (supervise, bound) = self.parse_spawn_clauses()?;
                 Ok(Expr {
                     kind: ExprKind::Spawn {
                         actor,
                         args,
                         supervise,
+                        bound,
                     },
                     span: token.span,
                 })
             }
-            // `tell`/`ask TARGET.HANDLER(args)`: a message send. The operand
-            // parses as an ordinary postfix expression, which turns the
+            // `tell`/`try_tell`/`ask TARGET.HANDLER(args)`: a message send. The
+            // operand parses as an ordinary postfix expression, which turns the
             // method-call syntax `c.increment(5)` into a `Call{increment,[c,5]}`
             // (UFCS). We split that back into the target (first argument) and the
-            // handler name plus its remaining arguments. `tell` is fire-and-forget
-            // (`is_ask = false`); `ask` is request-reply (`is_ask = true`, yields
-            // `Future<R>`). Both share the `Tell` node.
-            TokenKind::Keyword(keyword @ (Keyword::Tell | Keyword::Ask)) => {
-                let is_ask = keyword == Keyword::Ask;
-                let verb = if is_ask { "ask" } else { "tell" };
+            // handler name plus its remaining arguments. All three verbs share the
+            // `Tell` node, distinguished by its `SendKind` (see that type for what
+            // each yields and how each treats a full mailbox).
+            TokenKind::Keyword(keyword @ (Keyword::Tell | Keyword::TryTell | Keyword::Ask)) => {
+                let kind = match keyword {
+                    Keyword::Ask => SendKind::Ask,
+                    Keyword::TryTell => SendKind::TryTell,
+                    // The match arm's guard admits only these three keywords.
+                    _ => SendKind::Tell,
+                };
+                let verb = kind.as_str();
                 let operand = self.parse_postfix()?;
                 match operand.kind {
                     ExprKind::Call { name, mut args } if !args.is_empty() => {
@@ -506,7 +512,7 @@ impl<'a> ExprParser<'a> {
                                 target: Box::new(target),
                                 handler: name,
                                 args,
-                                is_ask,
+                                kind,
                             },
                             span: token.span,
                         })
@@ -660,23 +666,53 @@ impl<'a> ExprParser<'a> {
         }
     }
 
-    /// Parse the optional `supervise POLICY` clause that may trail a
-    /// `spawn NAME(args)`, yielding `None` when no clause is present.
+    /// Parse the optional clauses that may trail a `spawn NAME(args)` —
+    /// `supervise POLICY` and `bound N` — in either order, each at most once.
+    /// Returns `(None, None)` when neither is present.
     ///
-    /// `supervise`, `restart`, `stop` and `escalate` are **contextual** — plain
-    /// identifiers everywhere else, recognized only in this position — so no new
-    /// keyword is reserved and existing code that uses those words as names is
-    /// unaffected. The position is unambiguous: nothing else in the expression
-    /// grammar may follow a completed `spawn NAME(...)` with a bare identifier.
-    fn parse_supervise_clause(&mut self) -> Result<Option<SupervisionPolicy>, String> {
-        let is_supervise = matches!(
-            self.peek().map(|token| &token.kind),
-            Some(TokenKind::Identifier(word)) if word == "supervise"
-        );
-        if !is_supervise {
-            return Ok(None);
+    /// `supervise`, `restart`, `stop`, `escalate` and `bound` are **contextual**
+    /// — plain identifiers everywhere else, recognized only in this position — so
+    /// no new keyword is reserved and existing code that uses those words as
+    /// names is unaffected. The position is unambiguous: nothing else in the
+    /// expression grammar may follow a completed `spawn NAME(...)` with a bare
+    /// identifier, and a statement boundary interposes a `Newline` token, so the
+    /// next line starting with `bound = 5` cannot be mistaken for a clause.
+    ///
+    /// Accepting either order keeps the two independent knobs from imposing an
+    /// arbitrary sequence on the author; `fmt` normalizes to `bound` then
+    /// `supervise`, which re-parses to the same node, so the form still
+    /// round-trips.
+    fn parse_spawn_clauses(
+        &mut self,
+    ) -> Result<(Option<SupervisionPolicy>, Option<usize>), String> {
+        let mut supervise = None;
+        let mut bound = None;
+        loop {
+            let Some(TokenKind::Identifier(word)) = self.peek().map(|token| &token.kind) else {
+                return Ok((supervise, bound));
+            };
+            match word.as_str() {
+                "supervise" if supervise.is_none() => {
+                    self.cursor += 1;
+                    supervise = Some(self.parse_supervision_policy()?);
+                }
+                "supervise" => {
+                    return Err("duplicate `supervise` clause on one `spawn`".to_string());
+                }
+                "bound" if bound.is_none() => {
+                    self.cursor += 1;
+                    bound = Some(self.parse_mailbox_bound()?);
+                }
+                "bound" => {
+                    return Err("duplicate `bound` clause on one `spawn`".to_string());
+                }
+                _ => return Ok((supervise, bound)),
+            }
         }
-        self.cursor += 1;
+    }
+
+    /// Parse the policy word following `supervise`.
+    fn parse_supervision_policy(&mut self) -> Result<SupervisionPolicy, String> {
         let Some(TokenKind::Identifier(word)) = self.peek().map(|token| &token.kind) else {
             return Err(
                 "expected a policy (`restart`, `stop`, or `escalate`) after `supervise`"
@@ -689,7 +725,54 @@ impl<'a> ExprParser<'a> {
             ));
         };
         self.cursor += 1;
-        Ok(Some(policy))
+        Ok(policy)
+    }
+
+    /// Parse the capacity following `bound`: a positive **bare integer literal**.
+    ///
+    /// A literal rather than an expression, deliberately — a mailbox capacity is
+    /// a static property of the spawn site (like the `supervise` policy), not a
+    /// computed value, and keeping it out of the expression grammar keeps every
+    /// AST walker that visits `Spawn`'s `args` correct without also having to
+    /// visit a bound sub-expression.
+    ///
+    /// The literal is parsed by the **shared** [`parse_plain_integer_literal`],
+    /// the same helper a const-sized `array<T, N>` extent uses — the other place
+    /// the grammar wants a bare integer outside an expression. That is what makes
+    /// `bound` accept every form the language accepts elsewhere (`bound 1_000`
+    /// digit separators, `bound 0x10`/`0b`/`0o` base prefixes) instead of only
+    /// the plain decimal a hand-rolled `str::parse` would take, and it inherits
+    /// the same rejections for free: a float, a typed suffix (`4i32` — a capacity
+    /// is a count, not a typed value), and anything outside `i64`.
+    ///
+    /// `bound 0` is rejected separately: a zero-capacity mailbox could never
+    /// accept a message, so every send to it would be an immediate `L0365`.
+    fn parse_mailbox_bound(&mut self) -> Result<usize, String> {
+        let Some(TokenKind::Number(literal)) = self.peek().map(|token| &token.kind) else {
+            return Err("expected a positive integer capacity after `bound`".to_string());
+        };
+        let Some(capacity) = parse_plain_integer_literal(literal) else {
+            return Err(format!(
+                "`bound {literal}` is not a valid mailbox capacity: expected a plain integer \
+                 literal — decimal or `0x`/`0b`/`0o`, with optional `_` separators, and no type \
+                 suffix"
+            ));
+        };
+        if capacity < 1 {
+            return Err(format!(
+                "`bound {literal}` is not a valid mailbox capacity: a mailbox must be able to \
+                 hold at least one message, so a zero capacity could never accept one"
+            ));
+        }
+        // Proven positive above; `try_from` still guards the (32-bit `usize`)
+        // targets the compiler itself can be built for, e.g. `wasm32`.
+        let capacity = usize::try_from(capacity).map_err(|_| {
+            format!(
+                "`bound {literal}` exceeds the largest mailbox capacity this target can address"
+            )
+        })?;
+        self.cursor += 1;
+        Ok(capacity)
     }
 
     fn is_at_end(&self) -> bool {

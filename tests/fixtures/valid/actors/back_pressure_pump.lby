@@ -1,0 +1,21 @@
+# Stage-5b back-pressure: a `tell` to a **full** mailbox blocks until space
+# frees, cooperatively pumping the scheduler rather than growing the queue.
+#
+# The sink is bounded to 2. The producer sends 3 messages in a loop, so the third
+# `tell` finds the mailbox at capacity and pumps one deliverable message — the
+# sink's own `take(0)` — before enqueuing. That pump is *observable*: `sink 0`
+# prints BEFORE the producer's post-loop line, which is impossible with an
+# unbounded mailbox (every `sink` line would follow `producer done`, since
+# nothing would run until the graceful drain).
+actor Sink
+    on take n i64
+        println("sink " + to_string(n))
+
+fn main -> i64
+    let s Actor<Sink> = spawn Sink() bound 2
+    let i i64 = 0
+    while i < 3
+        tell s.take(i)
+        i += 1
+    println("producer done")
+    0
