@@ -1509,6 +1509,14 @@ mod native_object_heapbox_tests;
 #[path = "native_object_retain_tests.rs"]
 mod native_object_retain_tests;
 
+// The higher-order SINK index (closures stage 3a/3c): which `fn`-typed parameters the
+// module-wide sweep proves non-escaping, including the multi-level pass-onward chain and
+// the SCC pre-poisoning that keeps a recursive "sink" out. Own file for the size-cap
+// reason.
+#[cfg(test)]
+#[path = "native_object_closure_hof_tests.rs"]
+mod native_object_closure_hof_tests;
+
 // The arena stage-4b promotion gate: which capture classes may appear in a relocated
 // survivor block, and the summed-word size the reset moves. Own file for the size-cap
 // reason.

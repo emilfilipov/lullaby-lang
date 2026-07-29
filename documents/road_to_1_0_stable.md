@@ -187,7 +187,7 @@ What a bounds-fail / unwrap-on-`none` / divide-by-zero does in the safe tier.
 
 ## B. Planned but unscheduled — no decision needed, needs building
 
-### B1. Closures native codegen — **stages 1–3a SHIPPED**
+### B1. Closures native codegen — **stages 1–3a, 3b, and 3c (multi-level HOF) SHIPPED**
 - **Stage 2 (scalar completeness): SHIPPED** — direct non-escaping closure calls,
   int + float captures/params/returns, any param count.
 - **Stage 3a (non-escaping higher-order functions): SHIPPED** (`native for-x`… merge
@@ -208,16 +208,34 @@ What a bounds-fail / unwrap-on-`none` / divide-by-zero does in the safe tier.
   it segfaults) and an aliasing hunt (a returned `fn` **parameter** stays refused,
   defended in depth). Only a fresh flat scalar-capture literal return lowers; a returned
   param / heap capture / stored / re-returned closure skips cleanly (`L0339`).
-- **Still deferred (stage 3c+):** heap/aggregate captures, mutable-capture rebind,
-  onward-passed (multi-level) HOF chains, and stored (not returned) closures. (**Arena
+- **Stage 3c — multi-level HOF pass-onward: SHIPPED.** A `fn`-typed parameter no longer
+  has to be *call-only*: it may be handed **onward** as a bare argument at another
+  function's sink position, to arbitrary depth (`outer(g, v)` → `inner(g, v)` → `g(v)`).
+  "Is a sink" is a mutually recursive whole-module property, so it is resolved once per
+  module by `build_hof_index` (`native_object_closure_escape.rs`) as a **memoized DFS with SCCs
+  pre-poisoned to NOT-a-sink** — structurally the same sweep as the arena's
+  `retaining_summary`, with the deny default inverted (unknown/`extern`/indirect callee
+  ⇒ not a sink). Soundness: the capture block is owned by the CREATOR's frame region and
+  every chain use is dynamically nested inside the creating call; the creator is kept off
+  the arena by construction (a `fn` parameter is an indirect target, so every chain
+  function is R4-retaining and criterion 3 fails for the creator), so no rewind can fall
+  between block creation and last use — the same argument that makes stage 3a sound. A
+  chain **inside a loop** is bounded by the per-iteration closure drop. Default-deny
+  holds: a stored, returned, reassigned, bare-read, or non-sink-passed `fn` parameter,
+  and any **recursive** would-be sink pair, still skip cleanly (`L0339`).
+- **Still deferred (the rest of stage 3c+):** heap/aggregate captures, mutable-capture
+  rebind, stored (not returned) closures, a **call-returned** closure passed onward, and
+  **recursive** HOF chains (pre-poisoned by design — relaxing them needs a bound on the
+  chain). (**Arena
   reclamation of the factory's scratch — stage-4b — has since SHIPPED** at `c356b2f`
   via mark-advance promotion of the returned block into the caller's region; the arena
   model is complete.) Everything still deferred skips cleanly to the interpreters via
   `L0339`, so these are native-coverage gaps, not correctness or expressiveness gaps.
-  Note D5's strict-RC policy bounds what is implementable: an **escaping** heap-capture
-  closure that promotion cannot reach stays `L0339`-deferred by decision rather than
-  being RC-managed — so stage 3c is not simply "unblocked", it needs a design pass to
-  separate the soundly-implementable cases from the policy-bounded ones.
+  Note D5's strict-RC policy still bounds what is implementable: an **escaping**
+  heap-capture closure that promotion cannot reach stays `L0339`-deferred by decision
+  rather than being RC-managed. The design pass that separated the soundly-implementable
+  cases from the policy-bounded ones is what unblocked the pass-onward case above; the
+  remainder stays bounded by that policy.
 
 ### B2. Concrete stdlib contents — **PLANNED**
 The API-stability *posture* is decided (freeze a small core, version the rest) but

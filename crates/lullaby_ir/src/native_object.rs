@@ -1029,6 +1029,10 @@ pub(crate) use arena::*;
 mod closure;
 pub(crate) use closure::*;
 
+#[path = "native_object_closure_escape.rs"]
+mod closure_escape;
+pub(crate) use closure_escape::*;
+
 #[path = "native_object_promote.rs"]
 mod promote;
 pub(crate) use promote::*;

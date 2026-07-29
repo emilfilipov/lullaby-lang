@@ -1443,8 +1443,10 @@ Stage 1 delivered integer-cell captures with at most three parameters. Stage 2
 completes the **scalar** subset: float captures, float parameters and returns, and
 any parameter count (positions past the register file spill to the stack). **Stage
 3a** adds **non-escaping higher-order functions** — a closure passed as an argument
-to another Lullaby function that *calls* it (`apply(f, x)`) — see the "Non-escaping
-higher-order functions (stage 3a)" subsection below. **Stage 4 (increment a)** adds
+to another Lullaby function that *calls* it (`apply(f, x)`) — and **stage 3c** extends
+that to a **multi-level pass-onward chain** of any depth (`outer(f, x)` →
+`inner(f, x)`); see the "Non-escaping
+higher-order functions (stages 3a and 3c)" subsection below. **Stage 4 (increment a)** adds
 **returned closures** — a factory returning a locally-created literal closure, and a
 caller invoking the call-returned closure (`let g = make_adder(5) … g(3)`) — see the
 "Returned closures" subsection below. **Stage 4 (increment b) — the mark-advance
@@ -1510,10 +1512,11 @@ A closure is compiled natively when ALL hold:
   retains no pointer — keeping the enclosing arena reasoning a true leaf.
 - The closure local is used **only** as its `let`'s literal initializer, as the
   callee of a direct call `f(args)`, or as a bare argument passed to a **higher-order
-  sink** — argument position `i` of a call whose callee has a call-only fn parameter
-  there (`closure_local_ok` + `is_hof_sink`; see the stage-3a subsection). A bare
-  value read, a return, a reassignment, any store, or being passed to a NON-sink
-  position makes it escape and defers.
+  sink** — argument position `i` of a call whose callee has a proven sink fn parameter
+  there, i.e. one that is call-only or passes the value onward only to further sinks
+  (`closure_local_ok` + `is_hof_sink` over `build_hof_index`; see the stage-3a/3c
+  subsection). A bare value read, a return, a reassignment, any store, or being passed
+  to a NON-sink position makes it escape and defers.
 
 ### Object layout and call ABI
 
@@ -1578,14 +1581,21 @@ A closure is compiled natively when ALL hold:
   and issue an indirect `call rax` (`FF D0`). The result is in `rax` (integer cell) or
   `xmm0` (float).
 
-### Non-escaping higher-order functions (stage 3a)
+### Non-escaping higher-order functions (stages 3a and 3c)
 
 A closure passed as an **argument** to another Lullaby function that *calls* it —
-`fn apply f fn(i64) -> i64 x i64 -> i64 … apply(myclosure, 5)` — now lowers, provided
+`fn apply f fn(i64) -> i64 x i64 -> i64 … apply(myclosure, 5)` — lowers, provided
 the closure does **not escape**. Because it does not escape, its capture environment
 stays valid for the whole dynamic extent of the call (the callee returns before the
 caller's frame/heap region is torn down), so no heap-lifetime or memory-model work is
 needed. This is what keeps the increment bounded and sound.
+
+**Stage 3c** removes the single-level restriction: the receiving parameter no longer
+has to be *call-only*, it may be handed **onward** as a bare argument at another
+function's sink position, to arbitrary depth (`outer(g, v)` → `inner(g, v)` → `g(v)`).
+The escape rule below is stated once for both stages; the only change 3c makes is that
+clause (b) of rule 2 exists at all, and that resolving rule 2 becomes a module-wide
+sweep instead of a per-function check.
 
 **The escape rule (correct-or-refuse).** A closure argument to a call `g(…, f, …)`
 lowers to a real indirect call **iff all** hold — otherwise the enclosing function
@@ -1593,33 +1603,71 @@ skips cleanly (`L0339`) and demotes to the interpreters, which run higher-order
 functions correctly:
 
 1. **`g` is a known function with a fn-typed parameter** at that position.
-2. **That parameter is used CALL-ONLY inside `g`** — its only occurrences are as the
-   callee of a direct call `param(args)`. It is never stored, returned, reassigned,
-   captured, read as a bare value, or **passed onward** as an argument. This is the
-   same default-deny check (`body_closure_use_ok` / `expr_closure_use_ok`) a closure
-   local satisfies, applied to the parameter name. `hof_params` computes the set of
-   such parameters per function; `is_hof_sink` answers "is position `i` of `g` one".
+2. **That parameter is a SINK inside `g`** — every one of its occurrences is either
+   **(a)** the callee of a direct call `param(args)`, or **(b)** a bare argument at
+   another function's **sink** position (the stage-3c pass-onward). It is never stored,
+   returned, reassigned, captured, read as a bare value, or passed to a NON-sink
+   position. This is the same default-deny check (`body_closure_use_ok` /
+   `expr_closure_use_ok`) a closure local satisfies, applied to the parameter name.
+   `build_hof_index` computes the sink set for the whole module; `is_hof_sink` answers
+   "is position `i` of `g` one".
 3. **The closure `f` is itself a supported non-escaping closure** in the caller (a
    direct-literal scalar closure local whose every other use is a direct call or its
    own initializer).
 
-Call-only (2) is what makes the argument non-escaping: since `g` may only *call* the
-parameter and may not pass it onward, the closure never outlives the `g(f, …)` call.
-The rule is **conservative** — anything it cannot prove non-escaping is refused. It is
-also **single-level** by construction (this increment's documented frontier): a callee
-that passes its fn parameter onward to another function is an argument position, which
-(2) rejects, so multi-level higher-order chains defer. Onward-passing to another
-call-only parameter would in fact be sound, but proving it interprocedurally is left
-to a later increment.
+Rule (2) is what makes the argument non-escaping: `g` may only *call* the parameter or
+hand it to a further sink, so every use is dynamically nested inside the `g(f, …)` call
+and the closure never outlives it. The rule is **conservative** — anything it cannot
+prove non-escaping is refused.
+
+**Resolving (2) — a module-wide sweep, not a local check (stage 3c).** Because (b) is
+mutually recursive across functions, the sink set is computed once per module by
+`build_hof_index`, structurally mirroring the arena's `retaining_summary` with the deny
+default inverted (`retaining` defaults to `true`; `sink` defaults to `false`):
+
+- **Local property first.** Each candidate — a `fn` parameter whose signature is all
+  native scalars — is walked once under an **optimistic** index in which every candidate
+  position in the module is assumed to be a sink. That is the most permissive assumption
+  possible, so a parameter that fails under it can never be a sink under any fixpoint.
+  This also folds in the unknown-callee denial: the optimistic index holds only
+  module-function candidate positions, so a bare pass to an `extern`, builtin, or
+  indirect callee, or to a non-scalar `fn` parameter, fails here.
+- **Edges from the same walk.** That walk *records* the onward positions it accepted, so
+  the dependency graph can never disagree with the check that produced it.
+- **One memoized DFS, no fixpoint.** `sink(node) = local_ok(node) AND every onward edge
+  is a sink`, resolved in `O(nodes + edges)`.
+- **SCCs are pre-poisoned.** Reaching a node already on the DFS stack yields `false`
+  without inspecting it, and the poison propagates outward through (b). Without this, a
+  mutually recursive pair would admit each other and the sweep would accept an unbounded
+  chain — which is exactly what `native_hof_mutual_recursion_skip.lby` pins.
+
+**Why a longer chain stays sound.** The `[code_ptr][captures…]` block lives in the
+**creating** function's frame region and is owned by it. Every function in the chain
+receives it only as a `fn(...)` parameter and may only call through it or hand it to
+another sink, so every use is dynamically nested inside the creating call and the owner
+frame is live throughout. Crucially the creator is **off the arena by construction**:
+`fn_typed_binding_names` puts every `fn`-typed parameter into the indirect-denied set, so
+a chain function calling through its parameter is R4-retaining, the poison propagates up
+the chain through R4, and criterion 3 (`all_callees_non_retaining`) fails for the creator
+— which therefore gets neither a function region nor a per-iteration loop sub-region, so
+**no rewind can fall between block creation and last use**. This is the identical argument
+that makes single-level stage 3a sound; stage 3c only lengthens the chain. The link is
+asserted directly by `a_chain_creator_is_kept_off_the_arena`
+(`crates/lullaby_ir/src/native_object_closure_hof_tests.rs`), which first checks the
+chain really compiles so the assertion cannot pass vacuously. A chain created **inside a
+loop** is bounded by the per-iteration closure drop (`loop_droppable_closure_locals` →
+`collect_loop_body_drops`), which fires precisely because the creator is non-arena;
+`native_hof_chain_loop.lby` runs 100 001 iterations and must return its value rather than
+trap `0xC000001D`.
 
 **Soundness is layered, not single-point.** The escape refusal is enforced
 independently at three places, so no one of them being wrong silently miscompiles: the
 caller's `closure_local_ok` (a closure may only reach a *sink* position), the callee's
 `native_signature_eligibility` (a fn parameter is native-eligible only when it is a
-call-only HOF parameter — else the callee skips, and a caller passing a closure to a
-skipped callee demotes through the fixpoint), and `hof_params`'s own call-only check.
+sink — else the callee skips, and a caller passing a closure to a skipped callee
+demotes through the fixpoint), and `NativeCtx::plan`'s own re-check against the index.
 
-**Lowering — the callee side.** A call-only fn parameter resolves to a single **`I64`
+**Lowering — the callee side.** A sink fn parameter resolves to a single **`I64`
 pointer word** (`compute_native_signature`/`plan` special-case `param.ty.is_function()`
 → `I64`); a caller passes the closure's block pointer as an ordinary integer argument,
 and the callee seats it into the parameter's frame slot exactly like any pointer
@@ -1830,15 +1878,20 @@ closure allocated per iteration.
 
 A `string`/`list`/`map`/aggregate capture; a closure **stored** into an
 aggregate/global, aliased into another local, or passed to a builtin higher-order
-(`sort_by`, `list_map`); a higher-order callee that is **not call-only** (it reads
-its fn parameter as a value or **passes it onward** — the single-level frontier of
-stage 3a); a mutable/rebound closure local; a **returned fn PARAMETER** (it aliases a
+(`sort_by`, `list_map`); a higher-order callee whose fn parameter is **not a sink**
+(it stores, returns, reassigns, or bare-reads the parameter, or passes it to a NON-sink
+position); a **recursive** would-be sink (self- or mutually recursive — pre-poisoned by
+`build_hof_index`'s SCC handling, since admitting it would accept an unbounded chain);
+a **call-returned** closure passed onward, even to a proven sink (`call_returned_callable_ok`
+is deliberately checked against an EMPTY index); a mutable/rebound closure local; a
+**returned fn PARAMETER** (it aliases a
 caller's env) or a **returned call-returned closure** (`return g` where `g =
 factory()` — increment b's promotion territory); and a closure body that touches the
 heap or calls a user/`extern` function. Each is default-denied at classification,
 eligibility, or synthesis time, so the enclosing function is recorded skipped and runs
 on the interpreters — never miscompiled. (A **non-escaping** higher-order argument to
-a call-only callee — `apply(f, x)` — is no longer deferred; see the stage-3a
+a sink callee — `apply(f, x)` — is no longer deferred, and neither is a **multi-level
+pass-onward chain** (`outer(f, x)` → `inner(f, x)`) at any depth; see the stage-3a/3c
 subsection above. A **returned locally-created literal** closure and a **call-returned
 closure invoked** by the caller are likewise no longer deferred; see the
 returned-closures subsection above.)
@@ -1880,6 +1933,9 @@ that is itself wrong):
 | `native_hof_noncapture.lby` | non-capturing closure passed to a higher-order callee | `36` |
 | `native_hof_multi_call.lby` | capturing closure invoked THREE times inside the callee, fed back | `30` |
 | `native_hof_float_arg.lby` | FLOAT closure passed as a HOF argument (callee returns i64) | `1` |
+| `native_hof_chain2.lby` | stage 3c: 2-level pass-onward (`outer`→`inner`→`f`) | `42` |
+| `native_hof_chain3.lby` | stage 3c: 3-level chain onto a terminal that calls twice | `15` |
+| `native_hof_chain_loop.lby` | stage 3c: a 2-level chain inside a **100 001-iteration** loop (bounded heap) | `161` |
 | `native_closure_factory_bound.lby` | a FACTORY returns a closure; the caller invokes the call-returned closure (stage 4) | `64` |
 
 **These fixtures are proven non-vacuous by bug injection.** Injecting the
@@ -1897,9 +1953,15 @@ coincidence, which is why the fixture set includes them.
 sink plus a reassigned capture (`run_closures_returned.lby` — note a plain
 factory-then-invoke now COMPILES, pinned as `native_closure_factory_bound.lby` in the
 run-parity table above; this fixture skips for the onward-pass/rebind, not for the
-return), the stage-3a refusal boundaries (a callee that reads its fn parameter as a
-value, `native_hof_leaky_skip.lby`, and one that passes it **onward**,
-`native_hof_onward_skip.lby`), and, re-pinned with FLOAT-capturing closures so scalar
+return — and a **call-returned** closure may not be passed onward even to a proven
+sink, because `call_returned_callable_ok` is deliberately checked against an EMPTY
+index), the sink refusal boundaries (a callee that STORES its fn parameter,
+`native_hof_leaky_skip.lby`; one that RETURNS it, `native_hof_return_param_skip.lby`;
+one that reads it as a bare value, `native_hof_bare_read_skip.lby`; one that passes it
+onward to a **non-sink** position, `native_hof_nonsink_pass_skip.lby`, where the denial
+must propagate BACK up the chain to the passer; and a **mutually recursive** would-be
+sink pair, `native_hof_mutual_recursion_skip.lby`, which is the teeth of the SCC
+pre-poisoning — without it the sweep would admit an unbounded chain), and, re-pinned with FLOAT-capturing closures so scalar
 completeness cannot have quietly admitted them, `native_closure_float_hof.lby` (which
 also needs a float-returning user call, an orthogonally deferred feature),
 `native_closure_float_body_call.lby`, and `native_closure_float_rebind.lby`. Each fails
