@@ -19,9 +19,17 @@
 //! construction — every `Stmt` variant and every `ExprKind` named, no catch-all —
 //! rather than two more special cases. These tests pin each position the two
 //! annotation carriers can occupy. A closure literal can appear in **any**
-//! expression position; a `match` is a value-position form only (bare statement,
-//! `let`/assignment RHS, `return` operand, inline arm value), so those are all of
-//! its positions.
+//! expression position; a `match` is a value-position form only — the grammar
+//! admits it as a bare statement, and through `parse_value_expr`'s four callers as
+//! a `let` RHS, an assignment RHS, a `return` operand and a `const` initializer,
+//! plus `parse_arm_body`'s inline nested form — so those are all of its positions.
+//!
+//! What this pass does **not** fix is which type *spellings* `resolve_alias_type`
+//! understands: it descends into `array`/`ptr`/`ref`/`rc` only, so `list<Num>`,
+//! `map<K, Num>`, `option<Num>` and `fn(Num) -> Num` still leave the alias
+//! unresolved and are falsely rejected. That is a separate open gap — orthogonal
+//! to position — and it is why the sources below spell their collections
+//! `list<i64>` rather than `list<Num>`.
 //!
 //! The negative controls at the end matter as much as the positives: widening a
 //! rewrite is exactly the kind of change that can turn a gate into a rubber stamp,
@@ -376,6 +384,14 @@ fn unknown_type_in_a_closure_parameter_is_still_rejected() {
 /// A **genuine** mismatch inside a `let`-RHS match arm is still `L0303`. The
 /// alias-position fix removed a false rejection; it must not remove the real one
 /// that shares the diagnostic.
+///
+/// NOTE on what this does and does not prove: it is a rubber-stamp control, not a
+/// resolver-insensitive one. Neutering `resolve_alias_type` leaves this test green
+/// — but only because the source's other arm (`let a Num = 3`) then emits `L0303`
+/// too, and the assertion is `has(source, "L0303")`, which cannot tell the two
+/// apart. It still catches the failure mode it exists for (a rewrite so wide that
+/// `let b bool = 7` stops being an error); do not read its survival in the
+/// resolver-neutered run as evidence of independence.
 #[test]
 fn genuine_mismatch_in_a_let_rhs_match_arm_is_still_l0303() {
     let source = concat!(

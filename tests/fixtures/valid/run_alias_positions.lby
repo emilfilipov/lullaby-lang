@@ -14,10 +14,14 @@
 #     assignment RHS, a `return` operand, or when nested.
 #
 # Every position each form can occupy appears below. A `match` is a value-position
-# form only — the grammar admits it as a bare statement, a `let`/assignment RHS, a
-# `return` operand, and an inline arm value; it cannot sit inside a call-argument
-# list. Call-argument position is therefore exercised by the other annotation
-# carrier, the closure literal, which can appear in any expression position.
+# form only — the grammar admits it as a bare statement, and through the four
+# callers of `parse_value_expr` as a `let` RHS, an assignment RHS, a `return`
+# operand and a `const` initializer, plus an inline nested arm value; it cannot sit
+# inside a call-argument list. Call-argument position is therefore exercised by the
+# other annotation carrier, the closure literal, which can appear in any expression
+# position. (The `const`-initializer position is covered by routing `consts[].value`
+# through the same expression walk; it needs no runtime case here, since a folded
+# constant carries no annotation into any tier.)
 #
 # The program is pure and deterministic, so the whole-directory backend-parity
 # harness in `crates/lullaby_ir/src/ir_lib_tests.rs` runs it across all five
@@ -38,11 +42,13 @@ fn parity n Num -> P
 
 # The higher-order parameter is spelled `fn(i64) -> i64`, not `fn(Num) -> Num`:
 # `resolve_alias_type` descends into the `array`/`ptr`/`ref`/`rc` constructors and
-# resolves a bare alias name, but not into a *function*-type spelling. That is a
-# separate, pre-existing gap in which type spellings the resolver understands —
-# orthogonal to this fixture, which is about which expression *positions* the
-# resolver is invoked on. The closure literals below still spell their parameters
-# with the alias, which is the case that was falsely rejected.
+# resolves a bare alias name, and into nothing else — not `list`, `map`, `option`,
+# `result`, nor a function type. That is a separate, pre-existing gap in which type
+# spellings the resolver understands, orthogonal to this fixture, which is about
+# which expression *positions* the resolver is invoked on. It is also why `Nums` is
+# an alias *for* `list<i64>` (a bare alias name, which resolves) rather than a
+# `list<Num>` spelling (which would not). The closure literals below still spell
+# their parameters with the alias, which is the case that was falsely rejected.
 fn twice f fn(i64) -> i64 v Num -> Num
     f(f(v))
 
