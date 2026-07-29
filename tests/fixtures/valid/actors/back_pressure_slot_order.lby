@@ -1,0 +1,66 @@
+# Stage-5b back-pressure: an `ask` that has to **pump** must reserve mailbox
+# capacity BEFORE it allocates its reply slot.
+#
+# This pins the one ordering hazard the pump introduces, and its failure mode is
+# the worst in the whole feature: a silently **wrong reply value**, with no
+# error and no crash.
+#
+# The hazard. `ask` takes its slot index as `actor_reply_slots.len()`. Pumping
+# runs other actors' turns, and one of those turns may itself `ask` — which
+# allocates a slot and grows that vector. So an `ask` that reads `len()` first
+# and pumps second keeps a **stale** index, and then hands its request the slot
+# the pumped turn already took. Two futures alias one slot, and the awaiting side
+# takes whichever reply lands first.
+#
+# The shape needed to observe it, both halves load-bearing:
+#
+#   1. `Sink` is `bound 1` and already has one queued message, so main's `ask`
+#      genuinely finds it full and the reserve loop really pumps. (Every `ask` in
+#      `back_pressure_reply_slot.lby` finds room, which is exactly why that
+#      fixture does not catch this.)
+#   2. `Relay.forward` — one of the turns the pump runs — `ask`s `Leaf` and
+#      **never awaits** the future. That leaves the aliased slot `Pending`, so
+#      the wrong value is observable. Awaiting it would reset the slot to
+#      `Pending` on take and mask the aliasing.
+#
+# Correct output ends `answer 42` (Sink's own reply). Under the reversed
+# ordering it reads `answer 7` — Leaf's reply, delivered to the wrong future.
+actor Leaf
+    on value -> i64
+        7
+
+actor Relay
+    state
+        leaf Actor<Leaf>
+
+    init target Actor<Leaf>
+        leaf = target
+
+    on forward
+        # Deliberately never awaited: the slot stays `Pending`, which is what
+        # makes a stolen slot index observable rather than masked.
+        let ignored Future<i64> = ask leaf.value()
+        println("relay fired")
+
+actor Sink
+    on note n i64
+        println("note " + to_string(n))
+
+    on answer -> i64
+        42
+
+fn main -> i64
+    let leaf Actor<Leaf> = spawn Leaf()
+    let relay Actor<Relay> = spawn Relay(leaf) bound 4
+    let sink Actor<Sink> = spawn Sink() bound 1
+
+    # Queue the turn that will `ask` during the pump, then fill Sink to 1/1.
+    tell relay.forward()
+    tell sink.note(1)
+
+    # Sink is full, so this `ask` must pump — running `forward` (which asks) and
+    # then `note` — before it may enqueue. Its reply slot must be allocated after
+    # all of that, not before.
+    let reply Future<i64> = ask sink.answer()
+    println("answer " + to_string(await reply))
+    0

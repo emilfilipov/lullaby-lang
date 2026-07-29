@@ -1,0 +1,33 @@
+# Stage-5b: `bound N` accepts every **bare integer literal** form the language
+# accepts elsewhere, because it routes through the same shared parser a const
+# `array<T, N>` extent uses — digit separators and the `0x`/`0b`/`0o` base
+# prefixes, not just plain decimal.
+#
+# The output proves the parsed *value* is really in force, not merely accepted:
+#
+#   - `Tight` is `bound 0x2` (= 2), so the third `tell` to it pumps and
+#     `tight 0` prints BEFORE `producer done`.
+#   - `Roomy` is `bound 1_000` (= 1000), so nothing ever pumps for it and every
+#     `roomy` line falls in the graceful drain after `producer done`.
+#
+# A misparse in either direction changes the interleaving. `fmt` renders both
+# back in decimal (`bound 2`, `bound 1000`), the same normalization every other
+# numeric literal in the language gets.
+actor Tight
+    on take n i64
+        println("tight " + to_string(n))
+
+actor Roomy
+    on take n i64
+        println("roomy " + to_string(n))
+
+fn main -> i64
+    let t Actor<Tight> = spawn Tight() bound 0x2
+    let r Actor<Roomy> = spawn Roomy() bound 1_000
+    let i i64 = 0
+    while i < 3
+        tell t.take(i)
+        tell r.take(i)
+        i += 1
+    println("producer done")
+    0

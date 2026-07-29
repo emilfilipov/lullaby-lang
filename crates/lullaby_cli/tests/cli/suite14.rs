@@ -1099,13 +1099,93 @@ fn a_full_mailbox_never_blocks_an_ask_reply() {
 }
 
 #[test]
-fn a_supervision_stop_releases_the_purged_mailbox_occupancy() {
+fn an_ask_that_pumps_allocates_its_reply_slot_after_pumping() {
+    // The one ordering hazard the pump introduces, and the worst failure mode in
+    // the feature: a silently **wrong reply value**, no error, no crash.
+    //
+    // `ask` takes its slot index as `actor_reply_slots.len()`. Pumping runs other
+    // actors' turns, and one of those may itself `ask` — growing that vector. An
+    // `ask` that read `len()` before pumping would keep a stale index and hand
+    // its request a slot the pumped turn already took, so two futures alias one
+    // slot and the awaiting side takes whichever reply lands first.
+    //
+    // Both halves of the fixture are load-bearing: `Sink` is `bound 1` and
+    // already holds a message, so this `ask` genuinely finds it full and the
+    // reserve loop really pumps; and the pumped `Relay.forward` turn `ask`s a
+    // future it never awaits, leaving the aliased slot `Pending` so the wrong
+    // value is observable rather than masked by `await`'s take-and-reset.
+    //
+    // Reversing the two lines in `ask_actor` makes this read `answer 7` (Leaf's
+    // reply) instead of `answer 42` — verified by injection.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_slot_order.lby");
+    assert!(
+        output.status.success(),
+        "the slot-order fixture should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "relay fired\nnote 1\nanswer 42\n0\n");
+}
+
+#[test]
+fn bound_accepts_every_bare_integer_literal_form() {
+    // `bound N` routes through the same shared bare-integer parser a const
+    // `array<T, N>` extent uses, so it accepts every literal form the language
+    // accepts elsewhere — digit separators and the `0x`/`0b`/`0o` base prefixes —
+    // rather than only plain decimal.
+    //
+    // The interleaving proves the parsed *value* is in force, not merely
+    // accepted: `Tight` at `bound 0x2` (= 2) pumps on its third `tell`, so
+    // `tight 0` precedes `producer done`, while `Roomy` at `bound 1_000`
+    // (= 1000) never pumps and drains entirely afterwards. A misparse in either
+    // direction changes the output.
+    let output = run_ast("tests/fixtures/valid/actors/back_pressure_bound_literals.lby");
+    assert!(
+        output.status.success(),
+        "bound literal forms should run: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&output),
+        "tight 0\nproducer done\nroomy 0\ntight 1\nroomy 1\ntight 2\nroomy 2\n0\n"
+    );
+
+    // `fmt` renders both back in decimal — the same normalization every other
+    // numeric literal in the language gets.
+    let path =
+        workspace_root().join("tests/fixtures/valid/actors/back_pressure_bound_literals.lby");
+    let formatted = lullaby()
+        .args(["fmt", path.to_str().expect("fixture path")])
+        .output()
+        .expect("run fmt");
+    assert!(
+        formatted.status.success(),
+        "fmt failed: {}",
+        stderr(&formatted)
+    );
+    let formatted = stdout(&formatted);
+    for fragment in ["spawn Tight() bound 2", "spawn Roomy() bound 1000"] {
+        assert!(
+            formatted.contains(fragment),
+            "fmt should normalize the capacity to `{fragment}`. output: {formatted}"
+        );
+    }
+}
+
+#[test]
+fn sends_after_a_supervision_stop_are_dropped_not_blocked() {
     // The tank is at exactly 3/3 when its failing request runs; `supervise stop`
-    // purges all three queued messages, so its occupancy must return to zero
-    // rather than stay stale. The four later sends to it are then dropped (it
-    // runs no further turns) instead of blocking against a phantom-full mailbox,
-    // and the live sink still back-pressures normally alongside — its fourth
-    // `tell` pumps, so `sink 1` precedes `after stop`.
+    // purges all three queued messages and releases their occupancy. What this
+    // fixture *observes* is the consequence: the four later sends to the stopped
+    // tank are dropped (it runs no further turns) rather than blocking against a
+    // phantom-full mailbox, and the live sink still back-pressures normally
+    // alongside — its fourth `tell` pumps, so `sink 1` precedes `after stop`.
+    //
+    // Scope note, deliberately narrow: a stopped actor's occupancy is never
+    // consulted again (all three send paths short-circuit on `stopped` first), so
+    // in a release build the signal here comes from the sink's back-pressure, not
+    // from the purge. The purge's own accounting is guarded by the
+    // `debug_assert_eq!` in `stop_actor`, which fires under injection — that is
+    // what catches a dropped decrement, not this assertion.
     let output = run_ast("tests/fixtures/valid/actors/back_pressure_stop_purge.lby");
     assert!(
         output.status.success(),
@@ -1189,6 +1269,8 @@ fn back_pressure_output_is_byte_identical_across_repeated_runs() {
         "tests/fixtures/valid/actors/back_pressure_reply_slot.lby",
         "tests/fixtures/valid/actors/back_pressure_stop_purge.lby",
         "tests/fixtures/valid/actors/back_pressure_bound_fmt.lby",
+        "tests/fixtures/valid/actors/back_pressure_slot_order.lby",
+        "tests/fixtures/valid/actors/back_pressure_bound_literals.lby",
     ] {
         let first = run_ast(fixture);
         for _ in 0..4 {

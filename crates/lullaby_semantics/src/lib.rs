@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AsmClobber, AsmOperand, AssignOp, BinaryOp, CombinatorOp, EnumVariant, Expr, ExprKind,
-    Function, INFERRED_RETURN, MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt,
-    SendKind, StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs,
+    Function, INFERRED_RETURN, MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl,
+    SendKind, Stmt, StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs,
     function_type, generic_type,
 };
 

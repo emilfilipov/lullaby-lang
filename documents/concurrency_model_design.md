@@ -452,9 +452,16 @@ with every earlier stage this is live on the **AST interpreter only**.
   the default rather than an opt-in (§2.5 option A, as recommended).
 - **`spawn NAME(args) bound N`** — a per-spawn capacity override. `N` is a
   positive integer **literal**, not an expression: a mailbox capacity is a static
-  property of the spawn site, exactly like the `supervise` policy. `bound 0` is a
-  parse error (a zero-capacity mailbox could never accept a message). The clause
-  is independent of `supervise POLICY` and may be written in either order;
+  property of the spawn site, exactly like the `supervise` policy. It is parsed
+  by the **same shared bare-integer helper a const `array<T, N>` extent uses**,
+  the other place the grammar wants an integer outside an expression — so every
+  literal form the language accepts elsewhere works here (`bound 1_000` digit
+  separators, `bound 0x10`/`0b101`/`0o17` base prefixes), and the same forms are
+  rejected (a float, a typed suffix like `4i32` — a capacity is a count, not a
+  typed value — and anything outside `i64`). `bound 0` is a parse error too: a
+  zero-capacity mailbox could never accept a message. `fmt` renders the capacity
+  back in decimal, the normalization every numeric literal gets. The clause is
+  independent of `supervise POLICY` and may be written in either order;
   `lullaby fmt` normalizes to `spawn NAME(args) bound N supervise POLICY`.
 - **`tell` blocks until space frees.** A `tell`/`ask` to a full mailbox does not
   fail and does not grow the queue: it runs deliverable messages until the
@@ -522,6 +529,16 @@ stage.
   lose, delay, or deadlock a reply. Pinned by a fixture that drives both the
   asker and the replier to exactly their capacity and asserts every reply
   arrives.
+- **An `ask` that pumps must reserve capacity *before* allocating its reply
+  slot.** This is the one ordering hazard the pump introduces, and the worst
+  failure mode in the feature: a silently wrong reply value. `ask` takes its slot
+  index as `actor_reply_slots.len()`, and pumping runs other turns that may
+  themselves `ask` and grow that vector — so reading `len()` first would leave a
+  stale index and alias two futures onto one slot. Pinned by
+  `back_pressure_slot_order.lby`, whose shape is deliberate on both counts: the
+  target is genuinely full so the reserve loop really pumps, and the pumped turn
+  `ask`s a future it never awaits so the aliased slot stays `Pending` and the
+  wrong value is observable rather than masked by `await`'s take-and-reset.
 - **Supervision `stop`** purges the target's queued messages, so it releases
   their occupancy too — the counter returns to zero. Reply slots are still marked
   `Unavailable` (`L0359`), unchanged.

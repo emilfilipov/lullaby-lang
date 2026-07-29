@@ -1,6 +1,6 @@
 use lullaby_lexer::{Keyword, Span, Token, TokenKind, lex};
 
-use crate::number_literal::parse_number_literal;
+use crate::number_literal::{parse_number_literal, parse_plain_integer_literal};
 use crate::{
     BinaryOp, CombinatorOp, Expr, ExprKind, Param, SendKind, SupervisionPolicy, TypeRef, UnaryOp,
     function_type, generic_type,
@@ -495,9 +495,7 @@ impl<'a> ExprParser<'a> {
             // handler name plus its remaining arguments. All three verbs share the
             // `Tell` node, distinguished by its `SendKind` (see that type for what
             // each yields and how each treats a full mailbox).
-            TokenKind::Keyword(
-                keyword @ (Keyword::Tell | Keyword::TryTell | Keyword::Ask),
-            ) => {
+            TokenKind::Keyword(keyword @ (Keyword::Tell | Keyword::TryTell | Keyword::Ask)) => {
                 let kind = match keyword {
                     Keyword::Ask => SendKind::Ask,
                     Keyword::TryTell => SendKind::TryTell,
@@ -730,29 +728,49 @@ impl<'a> ExprParser<'a> {
         Ok(policy)
     }
 
-    /// Parse the capacity following `bound`: a positive decimal integer literal.
+    /// Parse the capacity following `bound`: a positive **bare integer literal**.
     ///
     /// A literal rather than an expression, deliberately — a mailbox capacity is
     /// a static property of the spawn site (like the `supervise` policy), not a
     /// computed value, and keeping it out of the expression grammar keeps every
     /// AST walker that visits `Spawn`'s `args` correct without also having to
-    /// visit a bound sub-expression. `bound 0` is rejected: a zero-capacity
-    /// mailbox could never accept a message, so every send to it would be an
-    /// immediate `L0365`.
+    /// visit a bound sub-expression.
+    ///
+    /// The literal is parsed by the **shared** [`parse_plain_integer_literal`],
+    /// the same helper a const-sized `array<T, N>` extent uses — the other place
+    /// the grammar wants a bare integer outside an expression. That is what makes
+    /// `bound` accept every form the language accepts elsewhere (`bound 1_000`
+    /// digit separators, `bound 0x10`/`0b`/`0o` base prefixes) instead of only
+    /// the plain decimal a hand-rolled `str::parse` would take, and it inherits
+    /// the same rejections for free: a float, a typed suffix (`4i32` — a capacity
+    /// is a count, not a typed value), and anything outside `i64`.
+    ///
+    /// `bound 0` is rejected separately: a zero-capacity mailbox could never
+    /// accept a message, so every send to it would be an immediate `L0365`.
     fn parse_mailbox_bound(&mut self) -> Result<usize, String> {
-        let Some(TokenKind::Number(digits)) = self.peek().map(|token| &token.kind) else {
+        let Some(TokenKind::Number(literal)) = self.peek().map(|token| &token.kind) else {
             return Err("expected a positive integer capacity after `bound`".to_string());
         };
-        let capacity: usize = digits.parse().map_err(|_| {
-            format!("`bound {digits}` is not a valid mailbox capacity: expected a positive integer")
-        })?;
-        if capacity == 0 {
-            return Err(
-                "`bound 0` is not a valid mailbox capacity: a zero-capacity mailbox could never \
-                 accept a message"
-                    .to_string(),
-            );
+        let Some(capacity) = parse_plain_integer_literal(literal) else {
+            return Err(format!(
+                "`bound {literal}` is not a valid mailbox capacity: expected a plain integer \
+                 literal — decimal or `0x`/`0b`/`0o`, with optional `_` separators, and no type \
+                 suffix"
+            ));
+        };
+        if capacity < 1 {
+            return Err(format!(
+                "`bound {literal}` is not a valid mailbox capacity: a mailbox must be able to \
+                 hold at least one message, so a zero capacity could never accept one"
+            ));
         }
+        // Proven positive above; `try_from` still guards the (32-bit `usize`)
+        // targets the compiler itself can be built for, e.g. `wasm32`.
+        let capacity = usize::try_from(capacity).map_err(|_| {
+            format!(
+                "`bound {literal}` exceeds the largest mailbox capacity this target can address"
+            )
+        })?;
         self.cursor += 1;
         Ok(capacity)
     }

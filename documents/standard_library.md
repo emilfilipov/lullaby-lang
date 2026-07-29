@@ -535,6 +535,34 @@ constructs or calls a closure is skipped and runs on the interpreters instead.
 
 ## Concurrency  — **Experimental**
 
+### The actor surface (safe tier)
+
+The 1.0 safe-tier concurrency model is the **actor** surface — `actor`/`spawn`/
+`tell`/`ask`/`await`/`join_all`/`select` — which is language syntax rather than
+prelude functions, and is documented in full in
+[concurrency_model_design.md](concurrency_model_design.md). Two pieces of it are
+worth naming here because they read like calls:
+
+- **`try_tell TARGET.HANDLER(args) -> bool`** — the non-blocking, load-shedding
+  variant of `tell`. Actor mailboxes are **bounded** (1024 messages by default,
+  or the capacity a `spawn NAME(args) bound N` clause names), and an ordinary
+  `tell` to a full mailbox *waits* for space, cooperatively pumping the
+  scheduler. `try_tell` never waits: it answers **`true`** when the message was
+  enqueued and **`false`** when the mailbox was already at capacity (or the
+  target had been stopped by supervision) and the message was therefore dropped.
+  Because it never pumps, it can never raise the back-pressure deadlock `L0365`.
+  It targets the same fire-and-forget handlers `tell` does — a `try_tell` to a
+  reply (`-> T`) handler is the same `L0352` send-form mismatch, since a shed
+  *request* would strand a reply nobody could await.
+- **`spawn NAME(args) bound N`** — the per-spawn mailbox capacity override. `N`
+  is a positive integer literal; `bound 0` is a parse error. Independent of
+  `supervise POLICY` and writable in either order.
+
+Actors run on the **AST interpreter only**: the IR/bytecode backends reject an
+actor program (`L0355`) and native/WASM skip it (`L0339`/`L0338`).
+
+### The low-level substrate
+
 This whole surface (`parallel_map`; channels/threads/mutex; and the atomics +
 memory-ordering set below) is **Experimental** — an early increment. The fixed
 `spawn(Chan, i64)` worker shape, `i64`-only channels, absence of `select`/`async`,
