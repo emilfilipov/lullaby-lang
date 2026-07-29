@@ -282,7 +282,21 @@ productive and only partly audited. The generative question that found #1 and #2
 is assigned or keyed per-file and then merged?* — closure ids were the answer; verify actor
 ids, region ids, generic instantiation ids, and `$mth$` names.
 
-## A recurring, load-bearing pattern: "the class is closed" has been disproved THREE times
+## A recurring, load-bearing pattern: "the class is closed" has been disproved FOUR times
+
+**Instance 4 (2026-07-29), caught by the rule the same day it was written.** The closure-id
+fix added a guard commented as *"the only exhaustive enumeration of the program's closure
+literals … the one place a duplicate is visible no matter where it came from."* Its roots are
+`program.functions` and `program.impls[].methods`; **`program.actors` is never walked.** A
+duplicate confined to an actor handler is invisible to it — and the sibling guard structurally
+cannot see inside a file, which was the stated reason this one was load-bearing.
+**It also exposed a feature that has never worked**: a closure inside an actor `init`/`on`
+handler fails `L0402 closure #0 has no registered body` on every build, pre-fix included,
+from the same missing root. The declaration kinds that walks keep forgetting are now
+**`impls`, `consts`, `actors`, `traits`** — the same set `L0392` misses. A walk over "the
+program" that enumerates only `functions` is the standing shape to suspect.
+
+## The first three instances
 
 Each time by a reviewer *exploiting* the claim rather than reading the code:
 1. The assignment-path class was declared closed; `loader.rs:637` was still open (private
