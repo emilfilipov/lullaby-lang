@@ -251,6 +251,27 @@ now being fixed. Generalize the lesson: **any map keyed by a display name in a f
 program is a candidate hole** — audit every such key for a uniqueness guarantee that actually
 holds, rather than one that looks plausible.
 
+## Sweep #4 (2026-07-29) — a CRITICAL multi-module miscompile
+
+Aimed at the two axes prior sweeps *discovered* (fields behind `..`; key uniqueness).
+**Axis 2 came back essentially clean** — 53 struct-like variants enumerated mechanically
+across every AST/IR/bytecode enum, all 149k lines of `crates/` scanned for
+`Enum::Variant { … .. }` patterns, named-vs-declared fields diffed: every remaining `..`
+is legitimately partial. `Stmt::Try.catch_body` and `Stmt::For.step` — the two shapes most
+expected to be wrong — were already correct everywhere. **Axis 3 is where the defects were.**
+
+| # | Sev | Finding | Status |
+|---|---|---|---|
+| 1 | **CRITICAL** | **Closure ids are per-FILE and the loader merges without renumbering.** The simplest two-module program with one closure each gives **four-way disagreement**: expected 11020, interpreters 20020 (last-wins table), native exe 11011 (first-wins symbol), `check` exit 0. Also breaks **type soundness** — a `fn(i64) -> string` closure executes an `i64` body (`L0417` at runtime), and a 1-param closure executes a 2-param body (`L0402`). The emitted `.lbc` is itself malformed (two entries with `"id": 0`). Never caught because **not one multi-module fixture contains a closure literal**. | fix lane dispatched |
+| 2 | MED (latent) | Actor use-after-send keys its type map on `(line, column)` alone (`semantics_actor_ownership.rs:220`) — the exact shape of the already-fixed `(function, span)` defect, and it contradicts the documented invariant on `ExpressionType::module`. **Could not be made to fire**: `check_message_ownership` runs at the end of `validate_function`, so current-function entries are always most-recently-pushed and win. Goes live the moment anything reorders or re-appends `expression_types`. | queued (cheap hardening) |
+| 3 | LOW-MED (latent) | `mangle_method` sanitization is not injective — `Wrap<i64>` and a struct named `Wrap_i64_` both mangle to `$mth$Wrap_i64_$get`, and the dedup `HashSet` then synthesizes one body for both call sites. Today the layout check catches it (`L0339` clean refusal, **not** a miscompile); becomes one as soon as two colliding receivers share a native layout. The module doc calls the mangled name "unique, collision-free" — it isn't. | queued |
+| 4 | LOW | `L0357` attributed to the entry file when two modules declare the same impl-method name (`build_origins` keys on the ambiguous display name). | queued |
+
+**Sweep #5 starts here:** axis 2 is exhausted (scanner scripts kept, re-runnable); axis 3 is
+productive and only partly audited. The generative question that found #1 and #2: *what else
+is assigned or keyed per-file and then merged?* — closure ids were the answer; verify actor
+ids, region ids, generic instantiation ids, and `$mth$` names.
+
 ## Phase 1 — queued residual (found by review, proven pre-existing)
 
 - **Closure-loop reclamation is NARROWED, NOT CLOSED** (Phase-0 reviewer, 2026-07-23).
