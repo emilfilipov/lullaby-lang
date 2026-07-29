@@ -56,6 +56,112 @@ fn combine_signatures(
     (format!("{prefix}:{ty}({})", parts.join(",")), dependencies)
 }
 
+/// Every name bound **locally** inside `function`: its parameters plus every
+/// binding the body introduces (`let`, a `for` loop variable, a `catch` name, a
+/// `match` arm's payload bindings), at any nesting depth.
+///
+/// # A call whose callee name is in this set is NOT the module function
+///
+/// Lullaby lets a `fn`-typed local or parameter shadow a module function, and a
+/// call then targets the local value:
+///
+/// ```text
+/// fn inner v i64 -> i64
+///     v * 10
+///
+/// fn main -> i64
+///     let n i64 = 2
+///     let inner fn(i64) -> i64 = fn x i64 -> x + n
+///     inner(40)          # 42 — the closure, NOT the module `inner`
+/// ```
+///
+/// The inliner used to look `inner` up in its module-function table with no
+/// scope check and substitute `40 * 10`, so `--optimize full` answered **400**
+/// while `none`/`constant-fold`/`dead-code` on every tier answered **42** —
+/// and `lullaby native`, which runs the `full` pipeline, shipped the wrong
+/// answer in a binary. **Any pass that maps a call name to a module function
+/// must consult this set first.**
+///
+/// The set is deliberately function-wide rather than scope-precise. Declining to
+/// resolve a name is always semantics-preserving, so over-approximating costs at
+/// most a missed inline, while a lexical scope walk is exactly the kind of
+/// reasoning that produced the bug. LICM uses the same set for a second purpose:
+/// reserving names so a hoisted temp cannot collide with a user binding.
+fn collect_function_binding_names(function: &IrFunction) -> HashSet<String> {
+    let mut names = function
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<HashSet<_>>();
+    collect_declared_names(&function.body, &mut names);
+    names
+}
+
+/// Every name declared by `statements` and the blocks nested in them. The
+/// recursive worker behind [`collect_function_binding_names`]; LICM also calls it
+/// directly for a loop body, to know which bindings a candidate expression's
+/// dependencies were (re)declared inside the loop.
+fn collect_declared_names(statements: &[IrStmt], names: &mut HashSet<String>) {
+    for statement in statements {
+        match statement {
+            IrStmt::Let { name, .. } => {
+                names.insert(name.clone());
+            }
+            IrStmt::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    collect_declared_names(&branch.body, names);
+                }
+                collect_declared_names(else_body, names);
+            }
+            IrStmt::While { body, .. }
+            | IrStmt::Loop { body, .. }
+            | IrStmt::RegionBlock { body, .. } => {
+                collect_declared_names(body, names);
+            }
+            IrStmt::Try {
+                body,
+                catch_name,
+                catch_body,
+                ..
+            } => {
+                names.insert(catch_name.clone());
+                collect_declared_names(body, names);
+                collect_declared_names(catch_body, names);
+            }
+            IrStmt::Match { arms, .. } => {
+                for arm in arms {
+                    if let IrMatchPattern::Variant { bindings, .. } = &arm.pattern {
+                        for binding in bindings {
+                            names.insert(binding.clone());
+                        }
+                    }
+                    collect_declared_names(&arm.body, names);
+                }
+            }
+            IrStmt::For { name, body, .. } => {
+                names.insert(name.clone());
+                collect_declared_names(body, names);
+            }
+            // DELIBERATELY does not descend into `asm` operands, or into an
+            // assignment's target path: this collects names DECLARED here, and
+            // neither an operand clause nor an `[i]` index expression can
+            // introduce a binding — both only read or write bindings that already
+            // exist. (Writes are LICM's `collect_mutated_names`.)
+            IrStmt::Assign { .. }
+            | IrStmt::Return(_)
+            | IrStmt::Break(_)
+            | IrStmt::Continue(_)
+            | IrStmt::Throw { .. }
+            | IrStmt::Asm { .. }
+            | IrStmt::Expr(_) => {}
+        }
+    }
+}
+
 fn expr_requires_optimizer_barrier(expr: &IrExpr) -> bool {
     match &expr.kind {
         IrExprKind::Call { .. } => true,

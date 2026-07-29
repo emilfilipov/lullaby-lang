@@ -63,6 +63,12 @@ impl ConstantFolder {
                 value: self.fold_expr(value),
                 span: *span,
             },
+            // The target path's index expressions are ordinary expressions and are
+            // folded like any other (`arr[2 + 3] = v` becomes `arr[5] = v`). This
+            // pass carries no cross-statement state, so passing them through
+            // verbatim was only a missed fold — but the silent skip is the same
+            // shape that made copy propagation and CSE miscompile; see
+            // `ir_assign_path_exprs`.
             IrStmt::Assign {
                 name,
                 path,
@@ -71,7 +77,10 @@ impl ConstantFolder {
                 span,
             } => IrStmt::Assign {
                 name: name.clone(),
-                path: path.clone(),
+                path: path
+                    .iter()
+                    .map(|place| place.map_index_expr(|index| self.fold_expr(index)))
+                    .collect(),
                 op: *op,
                 value: self.fold_expr(value),
                 span: *span,

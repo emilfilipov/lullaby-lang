@@ -22,6 +22,48 @@ The current Rust workspace implements a frontend and in-process execution pipeli
 4. `lullaby_ir` lowers a `CheckedProgram` into typed semantic IR for the current implemented subset, including typed functions, parameters, statements, control flow, calls, builtins, and expressions. It also exposes memory-operation analysis for current heap-slot operations and array bounds checks so optimizers, bytecode work, and later native backends can share one side-effect and safety model.
 5. `lullaby_runtime` executes the validated AST directly, including `main`, calls, scoped locals, assignment, branch result values, while/loop/range-for control flow, array literals/indexing with runtime bounds checks, arithmetic/comparisons, short-circuit boolean logic, heap-slot memory operations including `alloc`/`load`/`store`/`dealloc`, text file I/O, and safe system command builtins.
 6. `lullaby_ir` provides a deterministic optimization pass framework. Implemented passes are constant folding for pure literal arithmetic, comparisons, boolean logic, string equality, and unary `not`, conservative block-local common subexpression elimination for repeated pure bindings, conservative loop-invariant motion for safe loop-body bindings, conservative block-local copy propagation for simple variable aliases, plus dead-code elimination for statements after unconditional `return`, `break`, or `continue` in the same block. Constant folding and loop-invariant motion deliberately leave potentially failing divide-by-zero expressions in place so runtime diagnostics and zero-iteration loop behavior are preserved. Optimizer barriers are conservative around calls and bounds-checked indexing.
+
+#### The IR optimizer's correctness contract
+
+Two rules bind every pass. Both were violated in shipped code and produced
+wrong-value miscompiles at `--optimize full` while `--optimize none` and the AST
+tier stayed correct, so they are stated here rather than left implicit.
+
+**1. The barrier covers every expression a statement evaluates.** A pass carrying
+state across statements — copy propagation's alias map, CSE's available-expression
+table — must invalidate that state at a call, because a callee can write through a
+raw pointer taken with `addr_of` and mutate a binding that no statement names. The
+barrier must be evaluated over *all* of a statement's expressions, and an
+assignment evaluates its right-hand side **and every index expression in its
+target path**: `arr[poke(p)] = 5` runs a call in the target. Evaluating the
+barrier over the value alone and passing the path through verbatim let a stale
+alias survive a mutation. Reach an assignment path through the shared accessors
+(`IrPlace::index_expr`, `IrPlace::map_index_expr`, `ir_assign_path_exprs`,
+`ir_assign_path_exprs_mut`) and destructure `IrStmt::Assign { path, value, .. }`
+so a future field addition is a compile error, not a silent skip.
+
+Copy propagation's barrier is further **positional**: it fires inside the
+expression walk at the point the call is reached in evaluation order, not after
+the statement has been rewritten. An argument to the left of every call may still
+be propagated; one to the right may not.
+
+The same "a call is opaque" reasoning binds loop-invariant motion, which must
+treat a call in a loop body as writing every binding whose address is taken in the
+enclosing function — otherwise an expression over such a binding looks invariant
+and is hoisted to a value frozen at the first iteration.
+
+**2. A call name is a module function only when nothing in that function binds
+it.** A `fn`-typed local or parameter shadows a module function of the same name,
+and the call then targets the binding's value. Any pass that maps a callee name to
+a module function must first consult the function's local binding names
+(`collect_function_binding_names`). The inliner did not, and substituted the
+module body over a shadowing closure. This rule reaches the native backend, whose
+pipeline is exactly `OptimizationConfig::inlining()`.
+
+Both rules are pinned as cross-tier parity fixtures asserting
+`ast == ir/none == bytecode/none == ir/full == bytecode/full` (and, for the
+shadowing rule, a real `.exe`'s exit code), each with its teeth proven by
+reverting the fix and observing the wrong value.
 7. `lullaby_ir` can also execute the lowered typed IR, lower it into an explicit instruction-bytecode module, and encode/decode a versioned `.lbc` bytecode artifact for the current implemented subset.
 8. `lullaby_cli` exposes the current pipeline as `lullaby check <file.lby>`, `lullaby compile [--optimize none|constant-fold|dead-code|full] [-o output.lbc] <file.lby>`, `lullaby build [--optimize none|constant-fold|dead-code|full] [-o output.lbc] <file.lby>`, `lullaby inspect <file.lbc>`, `lullaby run [--backend ast|ir|bytecode] [--optimize none|constant-fold|dead-code|full] <file.lby|file.lbc>`, `lullaby docs`, and `lullaby examples`. Optimization is opt-in and applies only to IR/bytecode source runs and compiled bytecode artifacts.
 

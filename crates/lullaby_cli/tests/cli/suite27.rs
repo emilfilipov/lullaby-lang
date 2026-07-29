@@ -373,3 +373,43 @@ fn rejects_cross_package_private_use_from_an_asm_operand_with_l0392() {
     assert!(stderr.contains("L0392 [loader error]"), "{stderr}");
     assert!(stderr.contains("hidden_helper"), "{stderr}");
 }
+
+/// CALLEE SHADOWING, native half: `lullaby native` runs
+/// `OptimizationConfig::inlining()` — the inliner is the *whole* native
+/// pipeline — so its unscoped module-function lookup did not just make
+/// `--optimize full` answer 400, it baked 400 into a shipped binary while
+/// `--optimize none` on every interpreter answered 42.
+///
+/// `lullaby wasm` runs the same config but was NOT exposed: the WASM emitter
+/// skips any function carrying a `fn`-typed local, so this program's `main` is
+/// never exported (measured — `wasmi` reports `ExportedFuncNotFound`, not a wrong
+/// value). Native is the only compiled tier that shipped the bug.
+///
+/// The native *lowering* already resolved shadowing correctly
+/// (`native_object_expr.rs`); only the pass ahead of it did not, which is why
+/// this needs its own pin rather than riding on the interpreter parity test
+/// (`inlining_honors_a_local_binding_that_shadows_a_module_function` in
+/// `crates/lullaby_ir/src/ir_lib_tests.rs`).
+///
+/// INJECT-THE-BUG TEETH (verified): removing the `!self.shadowed.contains(name)`
+/// guard from `Inliner::inline_expr` makes this exe exit 400 instead of 42.
+#[test]
+fn native_honors_a_shadowed_callee_name() {
+    let source = concat!(
+        "fn inner v i64 -> i64\n",
+        "    v * 10\n",
+        "\n",
+        "fn main -> i64\n",
+        "    let n i64 = 2\n",
+        "    let inner fn(i64) -> i64 = fn x i64 -> x + n\n",
+        "    inner(40)\n",
+    );
+    let Some(code) = native_exit_for(source, "shadowed_callee") else {
+        return;
+    };
+    assert_eq!(
+        code, 42,
+        "the local `inner` closure is the callee; 400 means the module `inner` \
+         body was inlined over it"
+    );
+}

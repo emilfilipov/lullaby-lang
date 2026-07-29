@@ -3,6 +3,16 @@
 //! `combine_signatures` helper live in `ir_optimizer.rs` (also used by LICM); the
 //! shared `expr_requires_optimizer_barrier` predicate lives there too (also used
 //! by copy propagation). See `ir_optimizer.rs` for the pass pipeline.
+//!
+//! Reuse happens only at the `IrStmt::Let` level: `rewrite_expr` rebuilds an
+//! expression structurally and never substitutes an available binding into a
+//! sub-expression. That is why this pass, unlike copy propagation, does not need
+//! a *positional* barrier inside the expression walk — a whole `let` RHS either
+//! precedes every call in its statement or contains one, and an RHS containing a
+//! call is not CSE-eligible in the first place (`pure_expr_signature` refuses
+//! `Call`/`Await`). What it does need is the barrier evaluated over *every*
+//! expression a statement evaluates, which for an assignment includes the target
+//! path — see [`ir_assign_path_exprs`].
 
 use super::*;
 
@@ -120,14 +130,26 @@ impl CommonSubexpressionEliminator {
                 span,
             } => {
                 let value = self.rewrite_expr(value);
-                if expr_requires_optimizer_barrier(&value) {
+                let path = path
+                    .iter()
+                    .map(|place| place.map_index_expr(|index| self.rewrite_expr(index)))
+                    .collect::<Vec<_>>();
+                // The statement evaluates its RHS *and* every index expression in
+                // its target path, so the barrier is evaluated over both. Reading
+                // the value alone let a call in the target's index (`arr[poke(p)]
+                // = 5`) leave the available-expression table intact across a
+                // mutation, and a later `x + 1` was then replaced by a binding
+                // computed before the call — see `ir_assign_path_exprs`.
+                if expr_requires_optimizer_barrier(&value)
+                    || ir_assign_path_exprs(&path).any(expr_requires_optimizer_barrier)
+                {
                     available.clear();
                 }
                 // Mutating a field of `name` invalidates expressions over `name`.
                 invalidate_available_exprs(name, available);
                 IrStmt::Assign {
                     name: name.clone(),
-                    path: path.clone(),
+                    path,
                     op: *op,
                     value,
                     span: *span,

@@ -157,6 +157,14 @@ impl DeadCodeEliminator {
                     .collect(),
                 span: *span,
             },
+            // These carry expressions (including `IrStmt::Assign`'s target-path
+            // index expressions) but are cloned whole and never rewritten: this
+            // pass is purely structural — it drops statements that follow an
+            // unconditional terminator in a block and reads nothing inside an
+            // expression. It holds no cross-statement state, so it has no
+            // optimizer barrier to miss. Not descending is therefore safe here,
+            // unlike in copy propagation and CSE, where the same shape was a
+            // wrong-value miscompile (see `ir_assign_path_exprs`).
             IrStmt::Let { .. }
             | IrStmt::Assign { .. }
             | IrStmt::Return(_)

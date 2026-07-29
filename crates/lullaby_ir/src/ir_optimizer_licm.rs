@@ -10,6 +10,9 @@ pub(crate) struct LoopInvariantMover {
     pub(crate) hoisted_loop_invariants: usize,
     next_temp: usize,
     reserved_names: HashSet<String>,
+    /// Bindings of the function being rewritten whose address is taken with
+    /// `addr_of`. See [`collect_address_taken_names`].
+    address_taken: HashSet<String>,
 }
 
 impl LoopInvariantMover {
@@ -39,7 +42,8 @@ impl LoopInvariantMover {
 
     fn move_function(&mut self, function: &IrFunction) -> IrFunction {
         self.next_temp = 0;
-        self.reserved_names = collect_function_variable_names(function);
+        self.reserved_names = collect_function_binding_names(function);
+        self.address_taken = collect_address_taken_names(function);
         let mut available = function
             .params
             .iter()
@@ -151,6 +155,13 @@ impl LoopInvariantMover {
             // change when it runs relative to the assembly. Keeping the statement
             // verbatim is the only correct treatment. (Its `out` writes ARE
             // reported to the invariance analysis by `collect_mutated_names`.)
+            //
+            // `IrStmt::Assign`'s target-path index expressions are likewise passed
+            // through verbatim, and safely so: this pass only ever hoists whole
+            // `IrStmt::Let` statements out of a loop — it never rewrites an
+            // expression in place — so there is nothing to miss inside a path.
+            // What the path DOES contribute is reads and (through calls) writes,
+            // and both reach the invariance analysis below.
             IrStmt::Let { .. }
             | IrStmt::Assign { .. }
             | IrStmt::Return(_)
@@ -174,6 +185,25 @@ impl LoopInvariantMover {
         collect_declared_names(&body, &mut loop_declared);
         let mut loop_mutated = HashSet::new();
         collect_mutated_names(&body, &mut loop_mutated);
+        // `collect_mutated_names` sees only writes this pass can name: an
+        // `IrStmt::Assign` target and an `asm` `out` clause. A CALL is opaque —
+        // the callee can write through a raw pointer straight into one of this
+        // function's bindings, with nothing in the loop body naming it. Without
+        // this, `while … { let v = x + 1; … poke(p) … }` (where `p = addr_of(x)`)
+        // hoisted `x + 1` out of the loop and froze it at its first-iteration
+        // value — a wrong-value miscompile at `--optimize full` on the ir and
+        // bytecode tiers, while `--optimize none` and the AST tier were correct.
+        //
+        // `addr_of` is the only way to obtain a pointer at a named local (it
+        // requires an addressable place; everything else points into the heap or
+        // an arena), so the address-taken set is exactly what an opaque call can
+        // reach. Deriving a pointer to a *different* local with `ptr_offset` is
+        // already outside the raw-pointer contract and is not defended against.
+        // Functions that never use `addr_of` pay nothing: the set is empty and
+        // the call scan is skipped.
+        if !self.address_taken.is_empty() && block_contains_call(&body) {
+            loop_mutated.extend(self.address_taken.iter().cloned());
+        }
 
         let mut hoisted = Vec::new();
         let mut rewritten_body = Vec::new();
@@ -260,76 +290,6 @@ fn add_available_declaration(statement: &IrStmt, available: &mut HashSet<String>
     }
 }
 
-fn collect_function_variable_names(function: &IrFunction) -> HashSet<String> {
-    let mut names = function
-        .params
-        .iter()
-        .map(|param| param.name.clone())
-        .collect::<HashSet<_>>();
-    collect_declared_names(&function.body, &mut names);
-    names
-}
-
-fn collect_declared_names(statements: &[IrStmt], names: &mut HashSet<String>) {
-    for statement in statements {
-        match statement {
-            IrStmt::Let { name, .. } => {
-                names.insert(name.clone());
-            }
-            IrStmt::If {
-                branches,
-                else_body,
-                ..
-            } => {
-                for branch in branches {
-                    collect_declared_names(&branch.body, names);
-                }
-                collect_declared_names(else_body, names);
-            }
-            IrStmt::While { body, .. }
-            | IrStmt::Loop { body, .. }
-            | IrStmt::RegionBlock { body, .. } => {
-                collect_declared_names(body, names);
-            }
-            IrStmt::Try {
-                body,
-                catch_name,
-                catch_body,
-                ..
-            } => {
-                names.insert(catch_name.clone());
-                collect_declared_names(body, names);
-                collect_declared_names(catch_body, names);
-            }
-            IrStmt::Match { arms, .. } => {
-                for arm in arms {
-                    if let IrMatchPattern::Variant { bindings, .. } = &arm.pattern {
-                        for binding in bindings {
-                            names.insert(binding.clone());
-                        }
-                    }
-                    collect_declared_names(&arm.body, names);
-                }
-            }
-            IrStmt::For { name, body, .. } => {
-                names.insert(name.clone());
-                collect_declared_names(body, names);
-            }
-            // DELIBERATELY does not descend into `asm` operands: this collects
-            // names DECLARED in the loop body, and an operand clause only reads or
-            // writes bindings that already exist — it declares nothing. (Its
-            // writes are handled by `collect_mutated_names` below.)
-            IrStmt::Assign { .. }
-            | IrStmt::Return(_)
-            | IrStmt::Break(_)
-            | IrStmt::Continue(_)
-            | IrStmt::Throw { .. }
-            | IrStmt::Asm { .. }
-            | IrStmt::Expr(_) => {}
-        }
-    }
-}
-
 fn collect_mutated_names(statements: &[IrStmt], names: &mut HashSet<String>) {
     for statement in statements {
         match statement {
@@ -388,6 +348,170 @@ fn collect_mutated_names(statements: &[IrStmt], names: &mut HashSet<String>) {
             | IrStmt::Throw { .. }
             | IrStmt::Expr(_) => {}
         }
+    }
+}
+
+/// Every binding of `function` whose address is taken with `addr_of(<place>)`,
+/// anywhere in the body — including outside the loop being considered, which is
+/// where the pointer is usually made.
+///
+/// `addr_of` is the only builtin that yields a pointer at a *named local*: it
+/// requires an addressable place (`L0458`), while every other pointer source
+/// points into the heap, an arena, or another pointer. So this set is exactly
+/// the set of bindings an opaque call can mutate without any statement in the
+/// loop body naming them.
+///
+/// The `addr_of` match is by name and deliberately does not consult
+/// [`collect_function_binding_names`]: a local shadowing the builtin would make
+/// this record a binding whose address was never taken, which only *widens* the
+/// set and so can only cost a hoist. That is the safe direction — unlike the
+/// inliner, where the same unchecked name lookup changed emitted semantics.
+fn collect_address_taken_names(function: &IrFunction) -> HashSet<String> {
+    let mut names = HashSet::new();
+    walk_block_exprs(&function.body, &mut |expr| {
+        if let IrExprKind::Call { name, args } = &expr.kind
+            && name == "addr_of"
+            && let Some(place) = args.first()
+            && let Some(root) = expr_root_name(place)
+        {
+            names.insert(root);
+        }
+    });
+    names
+}
+
+/// Whether a block evaluates any call or `await` — the operations whose effects
+/// on this function's bindings the pass cannot see.
+fn block_contains_call(statements: &[IrStmt]) -> bool {
+    let mut found = false;
+    walk_block_exprs(statements, &mut |expr| {
+        if matches!(
+            expr.kind,
+            IrExprKind::Call { .. } | IrExprKind::Await { .. }
+        ) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Visit every expression evaluated by `statements`, nested blocks included.
+///
+/// Every child-bearing field is walked: an assignment's target path (via
+/// [`ir_assign_path_exprs`]) and an `asm` statement's operand clauses (via
+/// [`ir_asm_operand_exprs`]) carry ordinary expressions and are as capable of
+/// holding a call as any RHS.
+fn walk_block_exprs<F: FnMut(&IrExpr)>(statements: &[IrStmt], visit: &mut F) {
+    for statement in statements {
+        match statement {
+            IrStmt::Let { value, .. } | IrStmt::Expr(value) | IrStmt::Throw { value, .. } => {
+                walk_expr(value, visit);
+            }
+            IrStmt::Assign { path, value, .. } => {
+                walk_expr(value, visit);
+                for index in ir_assign_path_exprs(path) {
+                    walk_expr(index, visit);
+                }
+            }
+            IrStmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    walk_expr(expr, visit);
+                }
+            }
+            IrStmt::Break(_) | IrStmt::Continue(_) => {}
+            IrStmt::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    walk_expr(&branch.condition, visit);
+                    walk_block_exprs(&branch.body, visit);
+                }
+                walk_block_exprs(else_body, visit);
+            }
+            IrStmt::While {
+                condition, body, ..
+            } => {
+                walk_expr(condition, visit);
+                walk_block_exprs(body, visit);
+            }
+            IrStmt::For {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
+                walk_expr(start, visit);
+                walk_expr(end, visit);
+                if let Some(step) = step {
+                    walk_expr(step, visit);
+                }
+                walk_block_exprs(body, visit);
+            }
+            IrStmt::Loop { body, .. } | IrStmt::RegionBlock { body, .. } => {
+                walk_block_exprs(body, visit);
+            }
+            IrStmt::Try {
+                body, catch_body, ..
+            } => {
+                walk_block_exprs(body, visit);
+                walk_block_exprs(catch_body, visit);
+            }
+            IrStmt::Match {
+                scrutinee, arms, ..
+            } => {
+                walk_expr(scrutinee, visit);
+                for arm in arms {
+                    walk_block_exprs(&arm.body, visit);
+                }
+            }
+            IrStmt::Asm { operands, .. } => {
+                for expr in ir_asm_operand_exprs(operands) {
+                    walk_expr(expr, visit);
+                }
+            }
+        }
+    }
+}
+
+/// Visit `expr` and every sub-expression it contains, outermost first.
+fn walk_expr<F: FnMut(&IrExpr)>(expr: &IrExpr, visit: &mut F) {
+    visit(expr);
+    match &expr.kind {
+        IrExprKind::Array(values) => {
+            for value in values {
+                walk_expr(value, visit);
+            }
+        }
+        IrExprKind::Index { target, index } => {
+            walk_expr(target, visit);
+            walk_expr(index, visit);
+        }
+        IrExprKind::Field { target, .. } => walk_expr(target, visit),
+        IrExprKind::Unary { expr: inner, .. } | IrExprKind::Await { expr: inner } => {
+            walk_expr(inner, visit);
+        }
+        IrExprKind::Binary { left, right, .. } => {
+            walk_expr(left, visit);
+            walk_expr(right, visit);
+        }
+        IrExprKind::Call { args, .. } => {
+            for arg in args {
+                walk_expr(arg, visit);
+            }
+        }
+        // A closure literal carries only an id; its body lives in the module's
+        // closure table and is walked (if at all) when that function is rewritten.
+        IrExprKind::Closure { .. }
+        | IrExprKind::Integer(_)
+        | IrExprKind::Float(_)
+        | IrExprKind::Bool(_)
+        | IrExprKind::String(_)
+        | IrExprKind::Char(_)
+        | IrExprKind::Variable(_)
+        | IrExprKind::Local { .. } => {}
     }
 }
 

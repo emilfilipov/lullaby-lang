@@ -16,6 +16,10 @@ use super::*;
 pub(crate) struct Inliner {
     /// name -> (parameter names, body expression) for each inlinable helper.
     inlinable: HashMap<String, (Vec<String>, IrExpr)>,
+    /// Names bound locally in the function currently being rewritten. A call to
+    /// one of these targets that binding's `fn`-typed value, never the module
+    /// function of the same name — see [`collect_function_binding_names`].
+    shadowed: HashSet<String>,
     pub(crate) inlined_calls: usize,
 }
 
@@ -44,6 +48,7 @@ impl Inliner {
         }
         Self {
             inlinable,
+            shadowed: HashSet::new(),
             inlined_calls: 0,
         }
     }
@@ -125,12 +130,18 @@ impl Inliner {
             functions: module
                 .functions
                 .iter()
-                .map(|function| IrFunction {
-                    name: function.name.clone(),
-                    params: function.params.clone(),
-                    return_type: function.return_type.clone(),
-                    body: self.inline_block(&function.body),
-                    span: function.span,
+                .map(|function| {
+                    // A call is only a module-function call if nothing in THIS
+                    // function binds that name; recomputed per function because
+                    // shadowing is per frame.
+                    self.shadowed = collect_function_binding_names(function);
+                    IrFunction {
+                        name: function.name.clone(),
+                        params: function.params.clone(),
+                        return_type: function.return_type.clone(),
+                        body: self.inline_block(&function.body),
+                        span: function.span,
+                    }
                 })
                 .collect(),
         }
@@ -156,6 +167,12 @@ impl Inliner {
                 value: self.inline_expr(value),
                 span: *span,
             },
+            // A call in the target path's index (`arr[double(i)] = v`) is inlined
+            // like any other call: substitution of a pure-leaf body with simple
+            // arguments is position-independent, so it is as safe here as in the
+            // RHS. Cloning the path was only a missed inline, but it is the same
+            // silent skip that made copy propagation and CSE miscompile; see
+            // `ir_assign_path_exprs`.
             IrStmt::Assign {
                 name,
                 path,
@@ -164,7 +181,10 @@ impl Inliner {
                 span,
             } => IrStmt::Assign {
                 name: name.clone(),
-                path: path.clone(),
+                path: path
+                    .iter()
+                    .map(|place| place.map_index_expr(|index| self.inline_expr(index)))
+                    .collect(),
                 op: *op,
                 value: self.inline_expr(value),
                 span: *span,
@@ -310,7 +330,13 @@ impl Inliner {
             },
             IrExprKind::Call { name, args } => {
                 let args: Vec<IrExpr> = args.iter().map(|arg| self.inline_expr(arg)).collect();
-                if let Some((params, body)) = self.inlinable.get(name)
+                // A local or parameter of this name shadows the module function,
+                // so the call targets that binding's `fn` value and there is
+                // nothing to inline. Resolving the name against the module table
+                // regardless is what made `--optimize full` (and `lullaby native`)
+                // answer 400 where every other level answered 42.
+                if !self.shadowed.contains(name)
+                    && let Some((params, body)) = self.inlinable.get(name)
                     && params.len() == args.len()
                     && args.iter().all(Self::is_simple_arg)
                 {

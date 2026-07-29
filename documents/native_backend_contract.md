@@ -2350,6 +2350,19 @@ and pinned**, not retrofitted:
   (`Inliner::is_pure_leaf` rejects any `Call`), and (b) only substitutes arguments
   that are a bare variable or literal (`is_simple_arg`), so a `volatile_load(p)`
   argument is never duplicated into two evaluations.
+
+  **The inliner being the whole native pipeline cuts both ways.** It is why the IR
+  optimizer's assignment-path barrier defect never reached native (copy
+  propagation and CSE do not run here), and equally why the inliner's *own* defect
+  did: it resolved a callee name against its module-function table with no scope
+  check, so a `fn`-typed local or parameter shadowing a module function
+  (`let inner fn(i64) -> i64 = fn x i64 -> x + n` next to `fn inner v i64`) had the
+  module body substituted over it. Native shipped an exe exiting **400** where every
+  interpreter at `--optimize none` answered **42** — the native *lowering* resolved
+  the shadow correctly (`native_object_expr.rs`), but the pass ahead of it had
+  already rewritten the call away. Any name→function lookup in a pass must first
+  consult `collect_function_binding_names`; pinned by
+  `native_honors_a_shadowed_callee_name` (`crates/lullaby_cli/tests/cli/suite27.rs`).
 * The other passes are not in the native pipeline and are safe regardless: CSE's
   `pure_expr_signature` returns `None` for a `Call`; LICM excludes `Call` from
   hoisting; copy propagation only aliases `let x = <Variable>` and treats a `Call`
