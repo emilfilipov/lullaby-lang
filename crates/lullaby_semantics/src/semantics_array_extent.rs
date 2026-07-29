@@ -37,8 +37,8 @@ use std::collections::HashMap;
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    Expr, ExprKind, Function, Program, Stmt, TypeRef, asm_operand_exprs_mut, function_type,
-    generic_type,
+    Expr, ExprKind, Function, Program, Stmt, TypeRef, asm_operand_exprs_mut, assign_path_exprs_mut,
+    function_type, generic_type,
 };
 
 use super::SemanticDiagnostic;
@@ -348,9 +348,24 @@ fn walk_stmt_types(
             }
             walk_expr_types(value, mode, diagnostics, span);
         }
-        Stmt::Assign { value, .. } | Stmt::Throw { value, .. } => {
-            walk_expr_types(value, mode, diagnostics, span)
+        // An assignment target's index is an ordinary expression and can spell a
+        // type (a closure parameter annotation) exactly like any other. Dropping
+        // `path` here left an `array<T, N>` in `a[apply(fn x array<i64, 2> -> 1,
+        // …)] = v` unresolved and un-erased, so the checker saw the un-erased
+        // spelling and falsely rejected the program — see `Place::index_expr`.
+        Stmt::Assign {
+            name: _,
+            path,
+            op: _,
+            value,
+            span: _,
+        } => {
+            for index in assign_path_exprs_mut(path) {
+                walk_expr_types(index, mode, diagnostics, span);
+            }
+            walk_expr_types(value, mode, diagnostics, span);
         }
+        Stmt::Throw { value, .. } => walk_expr_types(value, mode, diagnostics, span),
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
                 walk_expr_types(expr, mode, diagnostics, span);
@@ -615,7 +630,26 @@ fn check_and_expand_stmt(
             let expected = if trailing { Some(return_type) } else { None };
             check_and_expand_expr(expr, expected, owner, sigs, diagnostics);
         }
-        Stmt::Assign { value, .. } | Stmt::Throw { value, .. } => {
+        // An assignment target's index holds a full expression tree, so a fill
+        // literal can live there (`a[len([0; n])] = v`). Dropping `path` meant
+        // the fill was neither validated (`L0463`/`L0464`) nor expanded, and an
+        // `ArrayFill` node survived into the backends: the AST interpreter
+        // evaluated it dynamically while every other tier hit the IR lowerer's
+        // rejection. There is no extent context for an index, so `expected` is
+        // `None`, exactly as for an assignment right-hand side.
+        Stmt::Assign {
+            name: _,
+            path,
+            op: _,
+            value,
+            span: _,
+        } => {
+            for index in assign_path_exprs_mut(path) {
+                check_and_expand_expr(index, None, owner, sigs, diagnostics);
+            }
+            check_and_expand_expr(value, None, owner, sigs, diagnostics);
+        }
+        Stmt::Throw { value, .. } => {
             check_and_expand_expr(value, None, owner, sigs, diagnostics);
         }
         Stmt::If {

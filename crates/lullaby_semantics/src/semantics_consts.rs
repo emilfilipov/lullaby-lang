@@ -35,8 +35,8 @@ use std::collections::{HashMap, HashSet};
 
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
-    BinaryOp, ConstDecl, Expr, ExprKind, MatchPattern, Place, Program, Stmt, TypeRef, UnaryOp,
-    asm_operand_exprs_mut,
+    BinaryOp, ConstDecl, Expr, ExprKind, MatchPattern, Program, Stmt, TypeRef, UnaryOp,
+    asm_operand_exprs_mut, assign_path_exprs_mut,
 };
 
 use super::SemanticDiagnostic;
@@ -527,11 +527,15 @@ impl Folder<'_> {
                 self.fold_expr(value, local);
                 local.insert(name.clone());
             }
-            Stmt::Assign { path, value, .. } => {
-                for place in path.iter_mut() {
-                    if let Place::Index(index) = place {
-                        self.fold_expr(index, local);
-                    }
+            Stmt::Assign {
+                name: _,
+                path,
+                op: _,
+                value,
+                span: _,
+            } => {
+                for index in assign_path_exprs_mut(path) {
+                    self.fold_expr(index, local);
                 }
                 self.fold_expr(value, local);
             }

@@ -1118,3 +1118,115 @@ fn fuzz_oob_wasm_and_interpreters_parity() {
          wasmi trap), {inbounds_count} in-bounds (four-tier value parity)"
     );
 }
+
+// -- Assignment-target index parity (`a[<expr>] = v`) --------------------------
+//
+// `Stmt::Assign`'s `path` carries a full expression tree, and passes that
+// dropped it produced real cross-tier divergence: an un-expanded `ArrayFill` in
+// an index ran under the AST tree-walker while IR/bytecode/WASM all rejected it
+// at lowering, and a closure literal in an index was missing from the AST
+// interpreter's closure table (`L0402`) on a program IR and bytecode both ran.
+// Both are fixed by walking the path (see `lullaby_parser::assign_path_exprs`);
+// these pin the four tiers to the same answer.
+
+/// Assert the three interpreter tiers (AST tree-walker, IR, bytecode VM) all
+/// return `expected` for `source`.
+fn assert_assign_path_interp_parity(source: &str, expected: i64) {
+    let [ast, ir, bc] = oob_interp_results(source);
+    assert_eq!(
+        ast,
+        Ok(expected),
+        "AST interpreter diverged for:\n{source}\ngot {ast:?}"
+    );
+    assert_eq!(
+        ir,
+        Ok(expected),
+        "IR interpreter diverged for:\n{source}\ngot {ir:?}"
+    );
+    assert_eq!(
+        bc,
+        Ok(expected),
+        "bytecode VM diverged for:\n{source}\ngot {bc:?}"
+    );
+}
+
+/// As above, plus WASM. Only for sources inside the WASM scalar subset — a
+/// closure-taking function is not (`L0338`), so those cases use the three-tier
+/// form above.
+fn assert_assign_path_parity(source: &str, expected: i64) {
+    assert_assign_path_interp_parity(source, expected);
+    let wasm = oob_wasm_result(source);
+    assert_eq!(
+        wasm,
+        Ok(expected),
+        "WASM diverged for:\n{source}\ngot {wasm:?}"
+    );
+}
+
+#[test]
+fn constant_fill_in_assignment_target_index_agrees_across_tiers() {
+    // `[0; 2]` inside the assignment *target*, guarding the VALUE invariant.
+    //
+    // Be precise about what this proves: it passed on the pre-fix compiler too.
+    // With a CONSTANT count the un-expanded `ArrayFill` reached IR lowering and
+    // the lowerer's own arm built the same 2-element array, so every tier still
+    // answered 99 — that accidental agreement is exactly what made the defect
+    // latent. The teeth against the missing expansion live where the expansion
+    // is observable: `lullaby_semantics`'s
+    // `constant_fill_in_assign_path_index_is_expanded`, which asserts on the
+    // post-pass AST. What this case guards is that the four tiers keep agreeing
+    // on the value once the node is expanded up front.
+    let source = concat!(
+        "fn main -> i64\n",
+        "    let a array<i64> = [10, 20, 30]\n",
+        "    a[len([0; 2])] = 99\n",
+        "    a[2]\n",
+    );
+    assert_assign_path_parity(source, 99);
+}
+
+#[test]
+fn non_constant_fill_in_assignment_target_index_never_reaches_a_tier() {
+    // The case the tiers genuinely diverged on: a NON-constant count. The AST
+    // tree-walker evaluated `[0; n]` dynamically and returned 99, while IR,
+    // bytecode and WASM all failed lowering with "array fill count must be a
+    // positive integer literal". It cannot be run four ways to compare, because
+    // the fix makes the frontend reject it outright — so what this pins is that
+    // precondition: the divergent program must never get past `validate` and
+    // reach a tier at all. Drop the path walk from the extent pass and this
+    // validates cleanly again, putting the divergence back.
+    let source = concat!(
+        "fn main -> i64\n",
+        "    let a array<i64> = [10, 20, 30]\n",
+        "    let n = 2\n",
+        "    a[len([0; n])] = 99\n",
+        "    a[2]\n",
+    );
+    let tokens = lex(source).expect("lex");
+    let program = parse(&tokens).expect("parse");
+    let diagnostics = validate(&program)
+        .expect_err("a non-constant fill count must be rejected before any tier runs");
+    assert!(
+        diagnostics.iter().any(|d| d.code == "L0463"),
+        "expected L0463, got {diagnostics:?}"
+    );
+}
+
+#[test]
+fn closure_literal_in_assignment_target_index_agrees_across_tiers() {
+    // A closure literal inside the assignment target. The AST interpreter's
+    // closure-body table is built by a walk that dropped `path`, so this program
+    // raised `L0402 closure #0 has no registered body` on the AST tier alone
+    // while IR and bytecode both returned 99. Three tiers only: a closure-taking
+    // function is outside the WASM scalar subset, so WASM emits `L0338` here for
+    // reasons unrelated to the assignment path.
+    let source = concat!(
+        "fn apply f fn(i64) -> i64 v i64 -> i64\n",
+        "    f(v)\n\n",
+        "fn main -> i64\n",
+        "    let a array<i64> = [10, 20, 30]\n",
+        "    a[apply(fn x i64 -> x + 1, 0)] = 99\n",
+        "    a[1]\n",
+    );
+    assert_assign_path_interp_parity(source, 99);
+}

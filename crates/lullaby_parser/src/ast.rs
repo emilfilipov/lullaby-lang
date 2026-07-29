@@ -910,6 +910,62 @@ pub enum Place {
     Index(Expr),
 }
 
+impl Place {
+    /// The step's index sub-expression — `Some` for [`Place::Index`], `None` for
+    /// a [`Place::Field`] step, which carries only a name.
+    ///
+    /// An index step holds a **full [`Expr`] tree**: `a[f(x)] = v` puts a call
+    /// inside the assignment *target*, and `a[len([0; n])] = v` puts an array
+    /// construction there. So **every pass that walks a function body's
+    /// expressions must walk an assignment path's indices too**. Destructuring
+    /// `Stmt::Assign { name, value, .. }` and dropping `path` makes them
+    /// invisible to that pass — a real soundness hole, and the exact same class
+    /// as the `Stmt::Asm { .. } => {}` arms that once hid operand expressions
+    /// (see [`AsmOperand::expr`]).
+    ///
+    /// Two defects of this class were found and fixed together: the lifetime
+    /// walk missed `dealloc(p)` followed by `a[ptr_read(p)] = 99` (`L0350` never
+    /// fired, though the hoisted `let i = ptr_read(p)` form was rejected), and
+    /// the const-sized-array pass neither validated nor expanded a fill literal
+    /// in an index (`a[len([0; n])] = 99` passed `check`, then ran under the AST
+    /// interpreter while every other tier rejected the un-expanded `ArrayFill`
+    /// node). Reach for [`assign_path_exprs`] / [`assign_path_exprs_mut`] rather
+    /// than re-implementing the walk, and prefer naming `path` in the pattern
+    /// over `..`, so a future field addition is a compile error instead of a
+    /// silent skip.
+    pub fn index_expr(&self) -> Option<&Expr> {
+        match self {
+            Place::Index(index) => Some(index),
+            Place::Field(_) => None,
+        }
+    }
+
+    /// The step's index sub-expression, mutably. See [`Place::index_expr`].
+    pub fn index_expr_mut(&mut self) -> Option<&mut Expr> {
+        match self {
+            Place::Index(index) => Some(index),
+            Place::Field(_) => None,
+        }
+    }
+}
+
+/// Every sub-expression carried by an assignment target's path, in source order:
+/// the index expression of each [`Place::Index`] step, skipping `.field` steps.
+///
+/// This is the single sanctioned way for an AST-walking pass to reach into a
+/// [`Stmt::Assign`]'s `path`. Use it (rather than dropping `path` with `..`)
+/// wherever the pass descends into expressions — see [`Place::index_expr`] for
+/// why.
+pub fn assign_path_exprs(path: &[Place]) -> impl Iterator<Item = &Expr> {
+    path.iter().filter_map(Place::index_expr)
+}
+
+/// Every sub-expression carried by an assignment target's path, mutably. See
+/// [`assign_path_exprs`].
+pub fn assign_path_exprs_mut(path: &mut [Place]) -> impl Iterator<Item = &mut Expr> {
+    path.iter_mut().filter_map(Place::index_expr_mut)
+}
+
 /// Convert an lvalue expression (a variable plus `.field` / `[index]` accessors)
 /// into a root variable name and place path. Returns `None` for anything that is
 /// not a valid assignment target.

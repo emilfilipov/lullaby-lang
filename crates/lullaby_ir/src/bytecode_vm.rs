@@ -1862,9 +1862,19 @@ impl<'a> Lowerer<'a> {
                 )
             }
             // A fill literal `[value; count]` is expanded to an ordinary array
-            // literal by the semantic array-extent pass before IR lowering, so
-            // this arm is not reached in practice. It stays correct if it ever
-            // is, lowering to an array of `count` copies of the lowered value.
+            // literal by the semantic array-extent pass, so no `ArrayFill` node
+            // reaches here from a program that pass has walked in full — and the
+            // pass is what rejects a non-constant count (`L0463`).
+            //
+            // This arm is nonetheless real, not dead. The claim holds only as
+            // far as that pass's own coverage: it once dropped an assignment
+            // target's `path`, so `a[len([0; n])] = 99` arrived here unexpanded
+            // and this error was the *only* thing rejecting it (the AST
+            // interpreter, which needs no lowering, ran the program instead — a
+            // genuine cross-tier divergence). The gap is closed, but the arm
+            // stays as the lowerer's own guarantee: `lullaby_ir` is also driven
+            // directly on a parsed program in tests, without the semantic pass.
+            // A constant count lowers to `count` copies of the lowered value.
             ExprKind::ArrayFill { value, count } => {
                 let count = match &count.kind {
                     ExprKind::Integer(value) if *value > 0 => *value as usize,
