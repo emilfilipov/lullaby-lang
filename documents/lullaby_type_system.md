@@ -583,7 +583,14 @@ fn main -> i64
 Like `const`, const-sized arrays are **frontend-only**. The array-extent pass
 resolves and validates every extent, checks construction counts, then **erases**
 the extent (`array<T, N>` becomes `array<T>`) and expands every fill literal to an
-ordinary array literal, all before the type checker runs. Every backend therefore
+ordinary array literal, all before the type checker runs. It reaches **every
+expression position**, including an inline-`asm` operand clause and an
+**assignment target's index**: `a[len([0; n])] = 99` is `L0463` like any other
+non-constant count, and a legal spelling there is erased and its fill expanded
+like any other. That completeness is load-bearing rather than cosmetic — while
+the pass skipped assignment paths, an un-expanded fill node reached the backends,
+where the AST interpreter evaluated it dynamically and every other tier rejected
+it. Every backend therefore
 sees only the existing `array<T>` representation: `array<T, N>` compiles and runs
 exactly wherever the same-length `array<T>` already does, on every tier
 (AST/IR/bytecode interpreters, native, WASM), with no new miscompile surface. A

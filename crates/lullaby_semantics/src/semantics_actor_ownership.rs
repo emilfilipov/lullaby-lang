@@ -31,7 +31,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lullaby_parser::{AssignOp, Expr, ExprKind, Place, Stmt, TypeRef, asm_operand_exprs};
+use lullaby_parser::{
+    AssignOp, Expr, ExprKind, Stmt, TypeRef, asm_operand_exprs, assign_path_exprs,
+};
 
 use super::{Checker, SemanticDiagnostic, split_named_type};
 
@@ -250,10 +252,8 @@ impl<'a> Checker<'a> {
                     span,
                 } => {
                     self.check_uses_and_sends(value, moved, types, fn_name);
-                    for place in path {
-                        if let Place::Index(index) = place {
-                            self.check_uses_and_sends(index, moved, types, fn_name);
-                        }
+                    for index in assign_path_exprs(path) {
+                        self.check_uses_and_sends(index, moved, types, fn_name);
                     }
                     let full_rebind = path.is_empty() && matches!(op, AssignOp::Replace);
                     if full_rebind {

@@ -4,8 +4,8 @@ use lullaby_diagnostics::Span;
 use lullaby_parser::{
     AsmClobber, AsmOperand, AssignOp, BinaryOp, CombinatorOp, EnumVariant, Expr, ExprKind,
     Function, INFERRED_RETURN, MatchArm, MatchPattern, MethodSig, Place, Program, RegionDecl, Stmt,
-    StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs, function_type,
-    generic_type,
+    StructField, SupervisionPolicy, TypeParam, TypeRef, UnaryOp, asm_operand_exprs,
+    assign_path_exprs, function_type, generic_type,
 };
 
 mod semantics_actor_ownership;
@@ -2818,7 +2818,22 @@ impl<'a> Checker<'a> {
                     // Re-binding revives a name; a direct copy aliases its source.
                     freed.record_binding(name, value);
                 }
-                Stmt::Assign { name, value, .. } => {
+                // The assignment *target* carries expressions too: `a[i] = v`
+                // holds `i` in `path`. Dropping `path` let `dealloc(p)` followed
+                // by `a[ptr_read(p)] = 99` pass `check` while the hoisted
+                // `let i = ptr_read(p)` form was correctly rejected — see
+                // `Place::index_expr`. Every field is named so a future one
+                // cannot be skipped silently.
+                Stmt::Assign {
+                    name,
+                    path,
+                    op: _,
+                    value,
+                    span: _,
+                } => {
+                    for index in assign_path_exprs(path) {
+                        self.check_freed_uses(index, freed, function);
+                    }
                     self.check_freed_uses(value, freed, function);
                     freed.record_binding(name, value);
                 }
@@ -4283,3 +4298,10 @@ mod tests;
 #[cfg(test)]
 #[path = "semantics_asm_tests.rs"]
 mod semantics_asm_tests;
+
+// The assignment-path expression class (`a[i] = v`): the `L0350` lifetime gate
+// and the const-sized-array gates must all see the index expressions carried by
+// `Stmt::Assign`'s `path`. Own file for the same reason as the `asm` tests.
+#[cfg(test)]
+#[path = "semantics_assign_path_tests.rs"]
+mod semantics_assign_path_tests;

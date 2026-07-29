@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use lullaby_diagnostics::Span;
 use lullaby_parser::{
     ActorDecl, BinaryOp, Expr, ExprKind, Function, Place, Program, Stmt, asm_operand_exprs,
+    assign_path_exprs,
 };
 
 use crate::*;
@@ -97,7 +98,24 @@ fn collect_closures_in_stmt<'a>(
     table: &mut HashMap<usize, (Vec<String>, &'a Expr)>,
 ) {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Throw { value, .. } => {
+        Stmt::Let { value, .. } | Stmt::Throw { value, .. } => {
+            collect_closures_in_expr(value, table);
+        }
+        // An assignment target's index is a full expression and can hold a
+        // closure literal (`a[apply(fn x i64 -> x + 1, 0)] = v`). Dropping
+        // `path` left that closure out of the table, so the AST interpreter
+        // raised `L0402 closure #0 has no registered body` on a program the IR
+        // and bytecode tiers both ran — see `Place::index_expr`.
+        Stmt::Assign {
+            name: _,
+            path,
+            op: _,
+            value,
+            span: _,
+        } => {
+            for index in assign_path_exprs(path) {
+                collect_closures_in_expr(index, table);
+            }
             collect_closures_in_expr(value, table);
         }
         Stmt::Return(Some(expr)) | Stmt::Expr(expr) => collect_closures_in_expr(expr, table),
