@@ -1,8 +1,16 @@
 //! Native codegen for closures — Stage 2 (**scalar completeness**: integer AND
 //! float captures/parameters/returns, any parameter count, direct non-escaping
-//! call) plus **Stage 3a** (**non-escaping higher-order functions**: a closure
-//! passed as a call-only argument to another function that calls it). Split out of
-//! native_object.rs; sees the parent's items via `use super::*`.
+//! call) plus **Stage 3a/3c** (**non-escaping higher-order functions**: a closure
+//! passed as an argument to another function that calls it, or relays it onward).
+//! Split out of native_object.rs; sees the parent's items via `use super::*`.
+//!
+//! This file owns **layout and lowering** — the scalar subset, the capture analysis,
+//! the `[code_ptr][captures…]` block, the indirect-call ABI, and the synthesized
+//! `__closure_{id}` body. The **escape rules** that decide what may be lowered at all
+//! — the default-deny use walker ([`closure_local_ok`], [`call_returned_callable_ok`],
+//! [`closure_local_confined_to_iteration`]) and the module-wide higher-order sink
+//! index ([`build_hof_index`]) — live in the sibling `native_object_closure_escape.rs`,
+//! split out when the stage-3c sweep pushed this file past the size-backlog cap.
 //!
 //! A closure literal `fn PARAMS -> EXPR` lowers (in the interpreters) to a
 //! `Value::Closure { id, captured }` whose body lives in `BytecodeModule::closures`
@@ -15,20 +23,32 @@
 //!   parameters, returns a native scalar, and its single-expression body neither
 //!   touches the heap nor calls a user/`extern` function.
 //! - The closure local is used as the callee of a direct call (`f(args)`), as a bare
-//!   argument passed to a **non-escaping higher-order sink** — a call-only
-//!   `fn(...)`-typed parameter of a known function (`apply(f, x)`, stage 3a; see
-//!   [`hof_params`] and [`ClosureCallSig`]) — or **RETURNED** when it is a factory's
+//!   argument passed to a **non-escaping higher-order sink** — a `fn(...)`-typed
+//!   parameter of a known function that is itself call-only or passes the value onward
+//!   only to further sinks (`apply(f, x)`, stage 3a; `outer(f, x)` → `inner(f, x)`,
+//!   stage 3c; see [`build_hof_index`] and [`ClosureCallSig`]) — or **RETURNED** when it is a factory's
 //!   own fresh literal-bound closure (stage 4a; see [`closure_local_ok`]'s return
 //!   relaxation and [`returns_only_local_closure_literals`]). It is never reassigned,
 //!   stored, read as a bare value, or passed to a non-sink position.
 //!
-//! A **higher-order callee** side is symmetric: a `fn(...)` parameter that is used
-//! call-only (never stored, returned, reassigned, or passed onward) is a single
+//! A **higher-order callee** side is symmetric: a `fn(...)` parameter that is a
+//! **sink** — never stored, returned, reassigned, or read as a value — is a single
 //! pointer word holding a closure env block a caller passed in, and a call
 //! `param(args)` through it reuses the identical indirect-call ABI as a
 //! closure-local call ([`NativeCtx::indirect_callable_sig`] resolves either). The
-//! parameter is call-only precisely so the closure never escapes the callee, which
+//! parameter is non-escaping precisely so the closure never escapes the callee, which
 //! is what keeps a caller's capture environment valid for the whole call.
+//!
+//! **Stage 3c — multi-level pass-onward.** A sink parameter may also be handed
+//! ONWARD as a bare argument at another function's sink position (`outer(g, v)` calls
+//! `inner(g, v)` which calls `g(v)`), to arbitrary depth. "Is a sink" is therefore a
+//! mutually recursive whole-module property, resolved once per module by
+//! [`build_hof_index`] as a memoized DFS with SCCs pre-poisoned to NOT-a-sink —
+//! structurally the same sweep as the arena's `retaining_summary`, with the deny
+//! default inverted. Every other use of a `fn` parameter (stored, returned,
+//! reassigned, bare-read, passed to a non-sink position, or passed to an
+//! `extern`/indirect/unknown callee) keeps it out of the index, so the holding
+//! function skips cleanly (`L0339`).
 //!
 //! A **returned closure** (stage 4a) is the first *escaping* shape admitted: a factory
 //! whose every return edge is a locally-created literal closure lowers, its `fn(...)`
@@ -40,9 +60,10 @@
 //! and a returned call-returned closure stay refused.
 //!
 //! Everything else — a `string`/`list`/`map`/aggregate capture, a closure stored or
-//! passed **onward** (the single-level stage-3a frontier), a mutable capture, a
-//! returned fn parameter, a returned call-returned closure — makes the enclosing
-//! function **skip cleanly to the interpreters** (`L0339`), never miscompiled.
+//! passed to a **non-sink** position, a mutable capture, a returned fn parameter, a
+//! returned call-returned closure, a call-returned closure passed onward — makes the
+//! enclosing function **skip cleanly to the interpreters** (`L0339`), never
+//! miscompiled.
 //!
 //! A closure body is a **single expression** in the surface grammar (`expr_parser`
 //! parses it with `parse_conditional`), so there is no block-bodied closure for
@@ -162,100 +183,6 @@ pub(crate) struct ClosureLayout {
     pub(crate) ret: NativeType,
 }
 
-/// The call signature of an INDIRECT callable that is NOT a locally-created
-/// closure literal but a **fn-typed parameter** holding a closure env pointer
-/// passed in by a caller (the callee side of a non-escaping higher-order call).
-/// It carries only what the *call site* needs — the parameter scalar classes and
-/// the return class — because the captures are read by the closure body (which is
-/// synthesized from its own `BytecodeClosureDef`), never by the callee. The ABI to
-/// call through it is byte-identical to a closure-local call: env pointer in `rcx`,
-/// visible arguments shifted to effective positions 1.., `call [env]`.
-#[derive(Debug, Clone)]
-pub(crate) struct ClosureCallSig {
-    /// The parameter scalar classes in order (env pointer is the hidden position 0).
-    pub(crate) params: Vec<NativeType>,
-    /// The return scalar class (integer cell in `rax`, float in `xmm0`).
-    pub(crate) ret: NativeType,
-}
-
-/// A **higher-order parameter**: a `fn(...)`-typed parameter of a function that is
-/// used CALL-ONLY (its only occurrences are as the callee of a direct call
-/// `param(args)`), whose fn-signature is entirely native scalars. This is the
-/// callee side of a non-escaping higher-order call — the parameter receives a
-/// closure's `[code_ptr][captures…]` block pointer and calls through it, never
-/// letting it escape (so the caller's capture environment stays valid for the whole
-/// dynamic extent of the call).
-#[derive(Debug, Clone)]
-pub(crate) struct HofParam {
-    /// The parameter's position in the function's parameter list. This is what a
-    /// caller's escape check matches against: passing a closure as argument `index`
-    /// of this function is a sanctioned non-escaping sink.
-    pub(crate) index: usize,
-    /// The parameter's name (its frame-slot key inside the callee).
-    pub(crate) name: String,
-    /// Its native call signature (parameter + return scalar classes).
-    pub(crate) sig: ClosureCallSig,
-}
-
-/// The native call signature of a `fn(param types) -> R` type when every parameter
-/// and the return are native scalars, or `None` when any piece is outside the
-/// scalar slice (a heap/aggregate parameter or return, or a nested `fn(...)`). The
-/// scalar subset is exactly [`native_closure_scalar`] — the same classes a closure
-/// literal supports — so a closure and the parameter it is passed to always agree
-/// on register classes by construction.
-pub(crate) fn native_fn_call_sig(fn_ty: &TypeRef) -> Option<ClosureCallSig> {
-    let (param_types, ret_ty) = fn_ty.function_signature()?;
-    let mut params = Vec::with_capacity(param_types.len());
-    for ty in &param_types {
-        params.push(native_closure_scalar(ty)?);
-    }
-    let ret = native_closure_scalar(&ret_ty)?;
-    Some(ClosureCallSig { params, ret })
-}
-
-/// The **higher-order parameters** of `function`: every `fn(...)`-typed parameter
-/// that (a) has an all-native-scalar signature and (b) is used CALL-ONLY in the
-/// body (only ever the callee of a direct call, never stored, returned, reassigned,
-/// captured, or passed onward as an argument — the same default-deny check
-/// [`closure_local_ok`] applies to a closure local). A parameter failing either
-/// condition is NOT a HOF parameter, which makes the function ineligible for native
-/// codegen (it skips cleanly, `L0339`) rather than miscompiling — a fn parameter
-/// that might escape could leave a caller's captures dangling.
-///
-/// This is a pure function of the source and does not depend on native eligibility,
-/// so a caller may consult it to decide whether passing a closure to `function` is a
-/// sanctioned non-escaping sink even before `function` itself is known to compile:
-/// if `function` turns out to be native-ineligible, the caller demotes anyway (a
-/// call to a non-callable function), so the decision is sound either way.
-pub(crate) fn hof_params(function: &BytecodeFunction) -> Vec<HofParam> {
-    let mut out = Vec::new();
-    for (index, param) in function.params.iter().enumerate() {
-        if !param.ty.is_function() {
-            continue;
-        }
-        let Some(sig) = native_fn_call_sig(&param.ty) else {
-            continue;
-        };
-        // Call-only: the parameter never escapes the callee. An empty `hof_index`
-        // is passed because a HOF parameter may not itself pass the closure onward
-        // (that would be an argument position, which the check already rejects), so
-        // no onward-sink is admitted here. `allow_return_escape = false`: a fn
-        // parameter RETURNED aliases a caller/grandcaller value and is NOT a
-        // sanctioned escape (only a factory returning its OWN fresh literal is — see
-        // [`closure_local_ok`]), so returning it must keep the parameter out of the
-        // HOF set.
-        if !body_closure_use_ok(&function.instructions, &param.name, &HashMap::new(), false) {
-            continue;
-        }
-        out.push(HofParam {
-            index,
-            name: param.name.clone(),
-            sig,
-        });
-    }
-    out
-}
-
 /// A closure body's env binding while it is being lowered: the frame slot holding
 /// the env pointer (block base; word 0 is the code pointer, captures follow) and
 /// each captured name's byte offset within the env block plus its scalar class
@@ -334,252 +261,6 @@ pub(crate) fn compute_closure_layout(
         params,
         ret,
     })
-}
-
-/// Whether the call `callee` has a **higher-order sink** at argument position
-/// `index` — a `fn(...)`-typed parameter used call-only in `callee`'s body (see
-/// [`hof_params`]). Passing a closure into such a position is a sanctioned
-/// non-escaping use: the callee only *calls* the closure and never lets it escape,
-/// so the caller's capture environment stays valid for the whole call. `hof_index`
-/// maps each function name to its higher-order parameters (empty for a function
-/// with none).
-fn is_hof_sink(hof_index: &HashMap<String, Vec<HofParam>>, callee: &str, index: usize) -> bool {
-    hof_index
-        .get(callee)
-        .is_some_and(|params| params.iter().any(|p| p.index == index))
-}
-
-/// Whether every use of a closure-bound local `name` in `function` is a
-/// **supported** use: the value initializer of its own `let` (a direct closure
-/// literal), the callee of a direct call `name(args)`, or a bare argument passed to
-/// a **higher-order sink** — argument position `i` of a call whose callee has a
-/// call-only fn parameter there (per `hof_index`). Default-deny — a bare value read,
-/// a reassignment, a field/index, or being passed to any NON-sink position makes the
-/// closure escape, so the enclosing function must skip. A bare `return name` IS
-/// admitted here (`allow_return_escape = true`): a factory returning its OWN fresh,
-/// flat, scalar-capture literal-bound closure is the sanctioned escape this increment
-/// unblocks — the block is a heap value the factory does not reclaim (the factory is
-/// kept off the arena, `native_object_eligibility.rs`), so it stays valid for the
-/// caller to invoke. Returning a fn PARAMETER (which aliases a caller value) or a
-/// call-returned closure stays refused, checked with `allow_return_escape = false`
-/// (see [`hof_params`] and [`call_returned_callable_ok`]). This keeps a stored closure
-/// out of the native slice while admitting a non-escaping higher-order argument
-/// (`apply(f, x)`) and a returned local literal.
-pub(crate) fn closure_local_ok(
-    function: &BytecodeFunction,
-    name: &str,
-    hof_index: &HashMap<String, Vec<HofParam>>,
-) -> bool {
-    // A closure LOCAL reaches here only if its `let` bound a native-layout closure
-    // LITERAL (`collect_native_locals` gates that), so a returned one is a fresh flat
-    // scalar-capture block — safe to escape by return.
-    body_closure_use_ok(&function.instructions, name, hof_index, true)
-}
-
-/// Whether every use of a **call-returned callable** local `name` (a `fn`-typed local
-/// bound to a factory call, not a literal) is supported: its own defining `let`, or
-/// the callee of a direct call `name(args)`. Strict — `allow_return_escape = false`,
-/// so a RETURN of `name` is refused (re-escaping a caller-region block is increment
-/// b's promotion job, not this one), as are a store/reassign/alias/bare read. Its
-/// defining `let` binds a `Call`, which the shared walker's `Let` arm now accepts.
-pub(crate) fn call_returned_callable_ok(function: &BytecodeFunction, name: &str) -> bool {
-    body_closure_use_ok(&function.instructions, name, &HashMap::new(), false)
-}
-
-/// Whether every use of the closure-literal local `name` in `rest` — the statements
-/// that FOLLOW its `let` inside the same loop body — keeps it confined to the
-/// iteration: it is only the callee of a direct call `name(args)` or a bare argument
-/// at a **higher-order sink** (`apply(name, x)`). Checked with
-/// `allow_return_escape = false`, so a bare `return name` / bare `name` value read is
-/// refused — those would let the block outlive the iteration edge at which the
-/// loop-body drop frees it (see `collect_loop_body_drops`). Default-deny: anything
-/// else (a store, a reassignment, a non-sink argument position) fails.
-pub(crate) fn closure_local_confined_to_iteration(
-    rest: &[BytecodeInstruction],
-    name: &str,
-    hof_index: &HashMap<String, Vec<HofParam>>,
-) -> bool {
-    body_closure_use_ok(rest, name, hof_index, false)
-}
-
-fn body_closure_use_ok(
-    body: &[BytecodeInstruction],
-    name: &str,
-    hof_index: &HashMap<String, Vec<HofParam>>,
-    allow_return_escape: bool,
-) -> bool {
-    body.iter()
-        .all(|stmt| stmt_closure_use_ok(stmt, name, hof_index, allow_return_escape))
-}
-
-fn stmt_closure_use_ok(
-    stmt: &BytecodeInstruction,
-    name: &str,
-    hof_index: &HashMap<String, Vec<HofParam>>,
-    allow_return_escape: bool,
-) -> bool {
-    match stmt {
-        BytecodeInstruction::Let {
-            name: bound, value, ..
-        } => {
-            // The callable local's own declaration binds it to a closure LITERAL (a
-            // closure-literal local) or a factory CALL (a call-returned callable) —
-            // that is its one allowed defining occurrence. A factory call's own args
-            // still cannot leak `name` (impossible before the binding, but checked
-            // defensively). Any OTHER `let` must not reference `name` except as a
-            // direct call callee inside its value.
-            if bound == name {
-                match &value.kind {
-                    BytecodeExprKind::Closure { .. } => true,
-                    BytecodeExprKind::Call { .. } => expr_closure_use_ok(value, name, hof_index),
-                    _ => false,
-                }
-            } else {
-                expr_closure_use_ok(value, name, hof_index)
-            }
-        }
-        // A reassignment of the callable local is a mutable-closure rebind (deferred);
-        // any other assignment must use `name` only as a call callee in its value/
-        // path indices.
-        BytecodeInstruction::Assign {
-            name: target,
-            path,
-            value,
-            ..
-        } => {
-            target != name
-                && path.iter().all(|p| match p {
-                    BytecodePlace::Index(i) => expr_closure_use_ok(i, name, hof_index),
-                    BytecodePlace::Field(_) => true,
-                })
-                && expr_closure_use_ok(value, name, hof_index)
-        }
-        // A bare `return name` is the sanctioned escape only when `allow_return_escape`
-        // (a factory returning its own literal-bound closure local). Otherwise — and
-        // for any non-bare return expression — the returned value must not leak `name`.
-        //
-        // A bare `Expr(Variable(name))` is treated identically: the language's implicit
-        // tail return of a factory whose body ends in `f` is an `Expr`, not a `Return`,
-        // so the sanctioned tail escape reaches here as an `Expr`. Admitting a bare
-        // `name` in ANY `Expr` position (not just the tail) under `allow_return_escape`
-        // is still sound: a discarded closure read stores the pointer nowhere, so it
-        // never escapes — only the tail one actually leaves the function.
-        BytecodeInstruction::Return(Some(e)) | BytecodeInstruction::Expr(e) => {
-            if allow_return_escape && matches!(&e.kind, BytecodeExprKind::Variable(n) if n == name)
-            {
-                true
-            } else {
-                expr_closure_use_ok(e, name, hof_index)
-            }
-        }
-        BytecodeInstruction::Throw { value: e, .. } => expr_closure_use_ok(e, name, hof_index),
-        BytecodeInstruction::Return(None)
-        | BytecodeInstruction::Break(_)
-        | BytecodeInstruction::Continue(_)
-        | BytecodeInstruction::Asm { .. } => true,
-        BytecodeInstruction::If {
-            branches,
-            else_body,
-            ..
-        } => {
-            branches.iter().all(|b| {
-                expr_closure_use_ok(&b.condition, name, hof_index)
-                    && body_closure_use_ok(&b.body, name, hof_index, allow_return_escape)
-            }) && body_closure_use_ok(else_body, name, hof_index, allow_return_escape)
-        }
-        BytecodeInstruction::While {
-            condition, body, ..
-        } => {
-            expr_closure_use_ok(condition, name, hof_index)
-                && body_closure_use_ok(body, name, hof_index, allow_return_escape)
-        }
-        BytecodeInstruction::For {
-            start,
-            end,
-            step,
-            body,
-            ..
-        } => {
-            expr_closure_use_ok(start, name, hof_index)
-                && expr_closure_use_ok(end, name, hof_index)
-                && step
-                    .as_ref()
-                    .is_none_or(|s| expr_closure_use_ok(s, name, hof_index))
-                && body_closure_use_ok(body, name, hof_index, allow_return_escape)
-        }
-        BytecodeInstruction::Loop { body, .. } | BytecodeInstruction::RegionBlock { body, .. } => {
-            body_closure_use_ok(body, name, hof_index, allow_return_escape)
-        }
-        BytecodeInstruction::Try {
-            body, catch_body, ..
-        } => {
-            body_closure_use_ok(body, name, hof_index, allow_return_escape)
-                && body_closure_use_ok(catch_body, name, hof_index, allow_return_escape)
-        }
-        BytecodeInstruction::Match {
-            scrutinee, arms, ..
-        } => {
-            expr_closure_use_ok(scrutinee, name, hof_index)
-                && arms
-                    .iter()
-                    .all(|arm| body_closure_use_ok(&arm.body, name, hof_index, allow_return_escape))
-        }
-    }
-}
-
-/// Whether every occurrence of the closure local `name` inside `expr` is a
-/// supported position: the callee of a direct call `name(args)`, or a bare
-/// `Variable(name)` argument at a **higher-order sink** (argument position `i` of a
-/// call whose callee `callee` has a call-only fn parameter there — `is_hof_sink`).
-/// A bare `Variable(name)` anywhere else is an escaping/value use and is rejected.
-fn expr_closure_use_ok(
-    expr: &BytecodeExpr,
-    name: &str,
-    hof_index: &HashMap<String, Vec<HofParam>>,
-) -> bool {
-    match &expr.kind {
-        // A bare read of the closure local (as a value) is an escape unless it is
-        // the callee position handled by the `Call` arm below.
-        BytecodeExprKind::Variable(n) => n != name,
-        BytecodeExprKind::Call { name: callee, args } => {
-            // `callee(args)` — the callee name itself is not an argument, so the
-            // closure local named as a direct callee never leaks as a value. Each
-            // argument must not leak `name`, EXCEPT a bare `name` handed to a
-            // higher-order sink (a call-only fn parameter of `callee`), which is a
-            // sanctioned non-escaping use: `callee` only calls the closure through
-            // the pointer and never lets it escape.
-            args.iter().enumerate().all(|(i, a)| {
-                if matches!(&a.kind, BytecodeExprKind::Variable(n) if n == name)
-                    && is_hof_sink(hof_index, callee, i)
-                {
-                    true
-                } else {
-                    expr_closure_use_ok(a, name, hof_index)
-                }
-            })
-        }
-        BytecodeExprKind::Integer(_)
-        | BytecodeExprKind::Float(_)
-        | BytecodeExprKind::Bool(_)
-        | BytecodeExprKind::String(_)
-        | BytecodeExprKind::Char(_)
-        | BytecodeExprKind::Closure { .. } => true,
-        BytecodeExprKind::Array(elems) => elems
-            .iter()
-            .all(|e| expr_closure_use_ok(e, name, hof_index)),
-        BytecodeExprKind::Unary { expr, .. } | BytecodeExprKind::Await { expr } => {
-            expr_closure_use_ok(expr, name, hof_index)
-        }
-        BytecodeExprKind::Binary { left, right, .. } => {
-            expr_closure_use_ok(left, name, hof_index)
-                && expr_closure_use_ok(right, name, hof_index)
-        }
-        BytecodeExprKind::Field { target, .. } => expr_closure_use_ok(target, name, hof_index),
-        BytecodeExprKind::Index { target, index } => {
-            expr_closure_use_ok(target, name, hof_index)
-                && expr_closure_use_ok(index, name, hof_index)
-        }
-    }
 }
 
 /// Whether **every** value `function` returns is a locally-created closure literal —

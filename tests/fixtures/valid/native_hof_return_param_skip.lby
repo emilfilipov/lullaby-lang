@@ -1,0 +1,8 @@
+fn giveback f fn(i64) -> i64 -> fn(i64) -> i64
+    f
+
+fn main -> i64
+    let n i64 = 4
+    let c fn(i64) -> i64 = fn x i64 -> x + n
+    let g fn(i64) -> i64 = giveback(c)
+    g(6)

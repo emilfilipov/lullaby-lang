@@ -2447,6 +2447,18 @@ pub(crate) fn native_closures_direct_pe_run_parity() {
         "native_hof_noncapture",
         "native_hof_multi_call",
         "native_hof_float_arg",
+        // Closures stage 3c: MULTI-LEVEL pass-onward. The receiving `fn` parameter is no
+        // longer required to be call-only — it may hand the closure ONWARD as a bare
+        // argument at a further sink position, to arbitrary depth (`chain2`:
+        // `outer(c,40)` → `inner(c,40)` → `c(40)` = 42; `chain3`: three relays onto a
+        // terminal that calls twice = 15). `chain_loop` runs a 2-level chain inside a
+        // 100 001-iteration loop (`for i from 0 to 100000` is INCLUSIVE): its correct
+        // result rather than a `0xC000001D` heap-exhaustion trap is what proves the
+        // closure-local per-iteration DROP covers a chained closure, not just a directly
+        // called one.
+        "native_hof_chain2",
+        "native_hof_chain3",
+        "native_hof_chain_loop",
         // Closures stage 4 (increment a): a FACTORY returns a closure and the caller
         // invokes the call-returned closure (`let g = make(2.0) … g(3.0)`). The factory
         // stays off the arena, so the returned block is not reclaimed.
@@ -2535,12 +2547,26 @@ pub(crate) fn native_closures_direct_pe_run_parity() {
 /// - a call-returned closure passed ONWARD to a higher-order sink or itself returned
 ///   (`run_closures_returned` — a single factory-then-invoke DOES compile now; see
 ///   `native_closure_factory_bound` in the run-parity test),
-/// - a higher-order callee that is NOT call-only — it reads its fn parameter as a
-///   value (`native_hof_leaky_skip`) or passes it onward (`native_hof_onward_skip`,
-///   the documented single-level frontier of closures stage 3a).
+/// - a higher-order callee whose fn parameter is NOT a sink — it stores the parameter
+///   (`native_hof_leaky_skip`), returns it (`native_hof_return_param_skip`), reads it
+///   as a bare value (`native_hof_bare_read_skip`), or passes it onward to a NON-sink
+///   position (`native_hof_nonsink_pass_skip`, where the denial has to propagate BACK
+///   up the chain to the passer — on a clean tree both `mid` and `outer` are listed
+///   with the sink reason; note this fixture's store shape is DOUBLE-guarded, since the
+///   frame planner independently rejects `let saved = f`, so the teeth for the sweep
+///   itself are in `native_closure_hof_onward_pass_to_non_sink_skips`
+///   (`native_program_tests.rs`), which uses a bare read for exactly that reason),
+/// - a MUTUALLY RECURSIVE pair of would-be sinks (`native_hof_mutual_recursion_skip`).
+///   This one is the teeth of the SCC pre-poisoning in `build_hof_index`: each of
+///   `ping`/`pong` is "call-only or passed onward to the other", so without the
+///   on-stack back-edge poison the sweep would admit them and accept an unbounded
+///   chain. Both must be refused, and both are listed in the skip output.
 ///
 /// A NON-escaping higher-order argument (`apply(f, x)`) is no longer here — it
-/// compiles and is pinned by `native_closures_direct_pe_run_parity`. `native_closure_float_hof`
+/// compiles and is pinned by `native_closures_direct_pe_run_parity`. Nor is the
+/// single-level pass-onward frontier: closures stage 3c admits a bare pass to any
+/// depth, so the former `native_hof_onward_skip` fixture is now
+/// `native_hof_chain2` in the run-parity test. `native_closure_float_hof`
 /// stays a skip because it needs a float-RETURNING user call, an orthogonally
 /// deferred feature, not because of the higher-order argument itself.
 #[test]
@@ -2559,11 +2585,15 @@ pub(crate) fn native_closure_deferred_shapes_skip() {
         ("native_closure_float_hof", 61),
         ("native_closure_float_body_call", 62),
         ("native_closure_float_rebind", 63),
-        // Closures stage 3a refusal boundaries: a callee whose fn parameter escapes
-        // (read as a value, or passed onward) is not a higher-order parameter, so
-        // both it and the caller demote cleanly and still run on the interpreters.
+        // Closures stage 3a/3c refusal boundaries: a callee whose fn parameter is not a
+        // SINK — stored, returned, bare-read, or passed to a non-sink position — and a
+        // recursive would-be sink pair. Each demotes cleanly along with its caller and
+        // still runs on the interpreters.
         ("native_hof_leaky_skip", 12),
-        ("native_hof_onward_skip", 42),
+        ("native_hof_return_param_skip", 10),
+        ("native_hof_bare_read_skip", 28),
+        ("native_hof_nonsink_pass_skip", 36),
+        ("native_hof_mutual_recursion_skip", 9),
     ];
     for (name, expected) in skips {
         let fixture = workspace_root().join(format!("tests/fixtures/valid/{name}.lby"));

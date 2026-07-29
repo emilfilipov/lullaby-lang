@@ -264,12 +264,50 @@ holds, rather than one that looks plausible.
   Next increment after the current wave; same teeth discipline (≥100k iterations so the
   fixture provably traps without the fix).
 
+- **A HOF chain whose TERMINAL SINK allocates** (stage-3c reviewer, 2026-07-28). A third
+  shape in the same class, and the one the multi-level widening made newly *reachable*:
+
+  ```
+  fn inner f fn(i64) -> i64 v i64 -> i64
+      let s string = "abcd"          # a per-call fresh heap temporary
+      f(v) + len(s)
+  fn outer f fn(i64) -> i64 v i64 -> i64
+      inner(f, v)
+  fn main -> i64
+      let n i64 = 2
+      let total i64 = 0
+      for i from 0 to 100000
+          let c fn(i64) -> i64 = fn x i64 -> x + n
+          total = (total + outer(c, 1)) % 251
+      total
+  ```
+
+  Interpreters answer **219**; native traps `0xC000001D`. **Proven pre-existing** — the
+  single-level stage-3a form traps identically, and 101 iterations passes — so it is NOT
+  a stage-3c regression and was deliberately not fixed in that change. But stage 3c
+  **widens its reach**: at chain depth ≥ 2 this program previously refused with `L0339`
+  and ran correctly on the interpreters; now it compiles, so the pre-existing trap
+  becomes observable at a depth where it was not before.
+
+  Root cause is the documented **cross-call fresh-temporary** class, not the closure
+  block: a sink calls through its `fn` parameter, which is an indirect callee, so
+  criterion 3 `all_callees_non_retaining` fails and the sink is held **off the arena** —
+  and its per-call fresh heap `string` consequently has no drop path. The closure block
+  itself IS reclaimed (the per-iteration drop covers it); what leaks is the callee's own
+  heap temporary. Fixing it means giving an off-arena callee a drop path for its fresh
+  temporaries — the same underlying work items 1 and 2 need, which is why all three
+  belong together in one increment rather than being patched per-shape.
+
 ## Phase 2 — Completions (the spanning-set "100%")
 
 Each design→build→adversarial-review, serialized where files collide.
-- **P2.1 — Closures stage 3c:** heap/aggregate captures, mutable-capture rebind,
-  multi-level HOF chains. (Heap captures now have a home — the arena/RC model is
-  complete — so this is unblocked.)
+- **P2.1 — Closures stage 3c:** heap/aggregate captures and mutable-capture rebind.
+  (Heap captures now have a home — the arena/RC model is complete — so this is
+  unblocked.) **Multi-level HOF chains SHIPPED** (2026-07-28): a `fn` parameter may be
+  passed onward at a proven sink position to any depth, resolved by `build_hof_index`'s
+  module-wide memoized DFS with SCCs pre-poisoned; recursive chains stay refused by
+  design. See `documents/native_backend_contract.md`. Note the residual it made newly
+  reachable, logged in Phase 1 above.
 - **P2.2 — FFI fn-pointer returns** (completes A3's 1.0 scope; struct-by-value +
   deep marshalling stay post-1.0 by decision).
 - **P2.3 — Actor back-pressure** (bounded mailboxes; scheduler change) and

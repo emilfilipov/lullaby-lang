@@ -201,29 +201,24 @@ pub fn emit_native_program_for_target(
     // not depend on the eligible set.
     let closure_layouts = compute_module_closure_layouts(module);
 
-    // Higher-order parameters: for each function, its call-only native-scalar
-    // `fn(...)`-typed parameters (the callee side of a non-escaping higher-order
-    // call). A caller's closure-escape check consults this to decide whether passing
-    // a closure to a given function+position is a sanctioned non-escaping sink, and
-    // the callee's `plan` reads its own entry to lower `param(args)` as an indirect
-    // call. It is a pure source-level property (independent of which functions end
-    // up native-eligible), so it is computed once here. Functions with no
-    // higher-order parameter get no entry, keeping their codegen byte-identical.
-    let hof_index: HashMap<String, Vec<HofParam>> = module
-        .functions
-        .iter()
-        .filter_map(|f| {
-            let params = hof_params(f);
-            (!params.is_empty()).then(|| (f.name.clone(), params))
-        })
-        .collect();
+    // Higher-order SINK parameters: for each function, its non-escaping native-scalar
+    // `fn(...)`-typed parameters (the callee side of a higher-order call). A caller's
+    // closure-escape check consults this to decide whether passing a closure to a given
+    // function+position is a sanctioned non-escaping sink, and the callee's `plan` reads
+    // its own entry to lower `param(args)` as an indirect call. "Is a sink" is mutually
+    // recursive across functions (stage 3c admits a bare pass ONWARD to another sink),
+    // so it is resolved by one module-wide memoized DFS with cycles pre-poisoned — see
+    // `build_hof_index`. It is a pure source-level property (independent of which
+    // functions end up native-eligible), so it is computed once here. Functions with no
+    // sink parameter get no entry, keeping their codegen byte-identical.
+    let hof_index: HashMap<String, Vec<HofParam>> = build_hof_index(module);
 
     // First pass: decide signature eligibility. Calls resolve against the set of
     // names we intend to compile.
     let mut skipped: Vec<NativeSkippedFunction> = Vec::new();
     let mut eligible_names: Vec<String> = Vec::new();
     for function in &module.functions {
-        match native_signature_eligibility(function, &module.structs, &module.enums) {
+        match native_signature_eligibility(function, &module.structs, &module.enums, &hof_index) {
             Ok(()) => eligible_names.push(function.name.clone()),
             Err(reason) => skipped.push(NativeSkippedFunction {
                 name: function.name.clone(),
