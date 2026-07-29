@@ -1,0 +1,11 @@
+# A HOSTED module — it carries no `no-runtime` directive — that imports the
+# freestanding `nrlib`. It is entitled to the full safe tier: `to_string` heap
+# allocation here is legal, because the tier is a property of the module that
+# declares the directive, not of everything in the build.
+#
+# `to_string(double(21))` is "42", so `len` is 2.
+import nrlib
+
+fn main -> i64
+    let s string = to_string(double(21))
+    len(s)

@@ -1,6 +1,8 @@
 use lullaby_lexer::Span;
 use serde::{Deserialize, Serialize};
 
+use crate::origins::ModuleOrigins;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -36,15 +38,30 @@ pub struct Program {
     /// artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actors: Vec<ActorDecl>,
-    /// True when the module opens with the `no-runtime` freestanding-tier
-    /// directive (the first non-comment line). It marks every declaration in the
-    /// compilation unit as freestanding: semantic analysis rejects any construct
-    /// that requires the safe-tier runtime (growable heap allocation, actors/
-    /// `spawn`/`tell`, heap closures, `rc`/`ref` handles) with `L0441`. A module
-    /// without the directive is completely unaffected. Serde-defaulted to `false`
+    /// True when *every* declaration in this compilation unit is freestanding —
+    /// for a single parsed file, that the module opens with the `no-runtime`
+    /// directive (the first non-comment line); for a program merged from several
+    /// modules, that every merged module carries it. Semantic analysis rejects
+    /// any construct that requires the safe-tier runtime (growable heap
+    /// allocation, actors/`spawn`/`tell`, heap closures, `rc`/`ref` handles) with
+    /// `L0441`. A module without the directive is completely unaffected.
+    ///
+    /// This flag is deliberately *not* the whole tier story for a multi-module
+    /// build: a mixed-tier program (a hosted program importing a freestanding
+    /// library, or the reverse) leaves it `false` and carries the real,
+    /// per-declaration answer in [`Program::origins`]. Serde-defaulted to `false`
     /// so existing single-file artifacts and AST snapshots stay valid.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_no_runtime: bool,
+    /// Per-declaration origin attribution for a program the module loader merged
+    /// from several files: which file each declaration was declared in, and
+    /// whether that file's module is in the freestanding (`no-runtime`) tier.
+    ///
+    /// Empty for a single-file program — nothing was merged, so nothing needs
+    /// attributing. Serde-defaulted and skipped when empty so existing
+    /// single-file artifacts and AST snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "ModuleOrigins::is_empty")]
+    pub origins: ModuleOrigins,
 }
 
 /// What a supervisor does when a supervised child's fallible handler returns
@@ -423,10 +440,28 @@ pub struct Function {
     /// valid.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_export: bool,
+    /// The name of the module (source file stem) this function was parsed from,
+    /// stamped by the module loader when it merges several modules into one flat
+    /// program. `None` for a single-file program, which was merged from nothing.
+    ///
+    /// This is the **declaration-unique** half of a function's identity. A bare
+    /// name is not unique across a merged program: `L0398` keeps free-function
+    /// and trait-method namespaces disjoint, but two impls on *different* types
+    /// may each declare `label`, and if they sit in different files they can also
+    /// share a `(line, column)`. Anything that keys a side table on "the
+    /// enclosing function" — the checker's recorded expression types, and the
+    /// freestanding gate that reads them — must therefore key on
+    /// `(module, name, span)`, never on `(name, span)`. Keying on the bare name
+    /// let a heap allocation in one module's `label` be masked by another
+    /// module's same-named, same-positioned scalar expression, and reach a
+    /// `--freestanding` no-CRT binary. Serde-defaulted and skipped when absent so
+    /// existing single-file artifacts and AST snapshots stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
 }
 
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 

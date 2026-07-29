@@ -1,0 +1,9 @@
+pub struct Card
+    v i64
+
+impl Card
+    fn label self -> i64
+        pik(self.v)
+
+pub fn pik n i64 -> i64
+    n

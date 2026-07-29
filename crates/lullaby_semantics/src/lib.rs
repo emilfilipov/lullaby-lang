@@ -38,6 +38,17 @@ pub struct SemanticDiagnostic {
     pub message: String,
     pub function: Option<String>,
     pub span: Option<Span>,
+    /// The module the reported declaration was declared in, when the reporting
+    /// pass knows it exactly (see [`lullaby_parser::Function::module`]).
+    ///
+    /// This is the *unambiguous* channel for attributing a diagnostic to a file
+    /// in a merged multi-module program. `function` alone is only a display
+    /// name, and a display name can be claimed by two modules (two impls on
+    /// different types may each declare `label`), in which case a consumer
+    /// cannot tell which file to name. `None` where the pass does not track the
+    /// module; consumers then fall back to resolving `function` and, failing
+    /// that, to the entry file.
+    pub module: Option<String>,
 }
 
 impl SemanticDiagnostic {
@@ -47,6 +58,7 @@ impl SemanticDiagnostic {
             message: message.into(),
             function,
             span: None,
+            module: None,
         }
     }
 
@@ -61,7 +73,15 @@ impl SemanticDiagnostic {
             message: message.into(),
             function,
             span: Some(span),
+            module: None,
         }
+    }
+
+    /// Record the module the reported declaration was declared in, so a consumer
+    /// can name its file exactly rather than guessing from the display name.
+    fn in_module(mut self, module: Option<&str>) -> Self {
+        self.module = module.map(str::to_string);
+        self
     }
 }
 
@@ -90,6 +110,16 @@ pub struct SemanticInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpressionType {
     pub function: String,
+    /// The module the enclosing function was declared in, for a program the
+    /// loader merged from several files (`None` for a single-file program).
+    ///
+    /// A lookup into this table must key on `(module, function, span)`. Keying on
+    /// `(function, span)` is unsound in a merged program: a span is a bare
+    /// `(line, column)` pair and a function name is not unique — two impls on
+    /// different types may each declare `label` — so two entries from different
+    /// files can collide, and a first-match lookup answers with the wrong
+    /// module's type. See [`lullaby_parser::Function::module`].
+    pub module: Option<String>,
     pub span: Span,
     pub ty: TypeRef,
 }
@@ -779,6 +809,12 @@ impl<'a> Checker<'a> {
             is_async: false,
             is_extern: false,
             is_export: false,
+            // A synthesized function belongs to no module. The freestanding gate
+            // never looks one up: it rejects an `actor` declaration wholesale and
+            // does not walk handler bodies, and its lookups always carry a real
+            // declaration's module, which never matches `None` in a merged
+            // program.
+            module: None,
         }
     }
 
@@ -3042,6 +3078,7 @@ impl<'a> Checker<'a> {
             if let Some(ty) = &ty {
                 self.expression_types.push(ExpressionType {
                     function: function.name.clone(),
+                    module: function.module.clone(),
                     span: expr.span,
                     ty: ty.clone(),
                 });
@@ -3648,6 +3685,7 @@ impl<'a> Checker<'a> {
         if let Some(ty) = &inferred {
             self.expression_types.push(ExpressionType {
                 function: function.name.clone(),
+                module: function.module.clone(),
                 span: expr.span,
                 ty: ty.clone(),
             });

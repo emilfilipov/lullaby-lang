@@ -1,0 +1,4 @@
+# A hosted helper that allocates, imported by BOTH a hosted and a freestanding
+# module in the same build.
+pub fn digits n i64 -> i64
+    len(to_string(n))

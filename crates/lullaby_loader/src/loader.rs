@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use lullaby_diagnostics::{DiagnosticPhase, DiagnosticReport, Span};
 use lullaby_lexer::{lex, validate_source_path};
 use lullaby_parser::{
-    AliasDecl, EnumDecl, Expr, ExprKind, Function, MatchArm, Program, Stmt, StructDecl, TypeRef,
-    asm_operand_exprs, parse,
+    AliasDecl, EnumDecl, Expr, ExprKind, Function, MatchArm, ModuleOrigins, Program, Stmt,
+    StructDecl, TypeRef, asm_operand_exprs, decl_origin_key, impl_origin_key, parse,
+    report_origin_key, trait_origin_key,
 };
 
 /// An in-memory override of on-disk source: `overlay_key(path) -> source text`.
@@ -823,9 +824,136 @@ fn type_names(spelling: &str) -> Vec<String> {
     names
 }
 
+/// The names of every module in the **freestanding tier**: each module that
+/// carries the `no-runtime` directive itself, plus everything such a module
+/// transitively imports.
+///
+/// The tier travels *down* the import edges and never *up*. That asymmetry is
+/// the whole rule, and both directions are deliberate:
+///
+/// - **Down (a `no-runtime` module's imports are freestanding too).** The
+///   freestanding tier's first hard rule is "no hidden allocation". A helper the
+///   freestanding module calls runs inside the freestanding binary, so a heap
+///   allocation in that helper's body is exactly the hidden allocation the tier
+///   forbids — the call site cannot see it, and the type-based gate cannot catch
+///   it when the helper returns a scalar. Pulling the imported module into the
+///   tier is what makes `L0441` reject it.
+/// - **Not up (a hosted module importing a freestanding library stays hosted).**
+///   The freestanding module's own declarations are already checked against the
+///   tier rules; nothing about a hosted caller weakens that. `no-runtime` is a
+///   *module* directive, and forcing it onto every importer contradicted the
+///   design goal of keeping the directive separable from `--freestanding`
+///   precisely so a `no-runtime` driver's pure logic can be unit-tested from a
+///   hosted harness.
+///
+/// A module reachable from **both** a hosted and a freestanding module lands in
+/// the tier (default-deny): it may end up linked into a freestanding binary, and
+/// the safe answer when a module is used from both tiers is the stricter one.
+fn freestanding_modules(modules: &[Module]) -> HashSet<String> {
+    let by_name: HashMap<&str, &Module> = modules
+        .iter()
+        .map(|module| (module.name.as_str(), module))
+        .collect();
+    let mut tier: HashSet<String> = HashSet::new();
+    let mut pending: Vec<&str> = modules
+        .iter()
+        .filter(|module| module.program.is_no_runtime)
+        .map(|module| module.name.as_str())
+        .collect();
+    while let Some(name) = pending.pop() {
+        if !tier.insert(name.to_string()) {
+            continue;
+        }
+        if let Some(module) = by_name.get(name) {
+            for import in &module.program.imports {
+                pending.push(import.as_str());
+            }
+        }
+    }
+    tier
+}
+
+/// Build the declaration -> origin table that survives the flat merge: which
+/// file each declaration came from (so a diagnostic can name the file its span
+/// actually belongs to) and whether that file's module is in the freestanding
+/// tier (so `L0441` gates per module rather than program-wide).
+///
+/// Two key namespaces are filled, deliberately kept apart:
+///
+/// - the **tier** namespace ([`decl_origin_key`]/[`trait_origin_key`]/
+///   [`impl_origin_key`]), which the `L0441` gate reads. Each key identifies one
+///   declaration unambiguously, so the gate can never reach onto a same-named
+///   declaration from another module;
+/// - the **attribution** namespace ([`report_origin_key`]), which the CLI reads
+///   to resolve a diagnostic's enclosing-declaration *display* name to a file.
+///   Display names include trait names and impl-method names, which are not
+///   unique — an ambiguous one simply loses its path and falls back to the entry
+///   file, and cannot perturb the tier.
+fn build_origins(modules: &[Module], tier: &HashSet<String>) -> ModuleOrigins {
+    let mut origins = ModuleOrigins::new();
+    for module in modules {
+        let path = module.path.display().to_string();
+        let freestanding = tier.contains(&module.name);
+        let mut record = |key: String| origins.record(key, &path, freestanding);
+
+        let mut named = |name: &str| {
+            record(decl_origin_key(name));
+            record(report_origin_key(name));
+        };
+        for function in &module.program.functions {
+            named(&function.name);
+        }
+        for decl in &module.program.structs {
+            named(&decl.name);
+        }
+        for decl in &module.program.enums {
+            named(&decl.name);
+        }
+        for decl in &module.program.aliases {
+            named(&decl.name);
+        }
+        for decl in &module.program.consts {
+            named(&decl.name);
+        }
+        for decl in &module.program.actors {
+            named(&decl.name);
+        }
+        for decl in &module.program.traits {
+            record(trait_origin_key(&decl.name));
+            // A trait-signature diagnostic names the trait, so attribution needs
+            // the bare name too — in the attribution namespace only, since trait
+            // names are not covered by the `L0391` uniqueness rule.
+            record(report_origin_key(&decl.name));
+        }
+        for decl in &module.program.impls {
+            record(impl_origin_key(&decl.trait_name, &decl.type_name));
+            // A diagnostic inside a method body names only the method, so give
+            // it an attribution key. Never a tier key: two impls on DIFFERENT
+            // types may each declare `area` (`L0398` only rules out a method
+            // sharing a free function's name), and `record` ORs the freestanding
+            // bit — so one tier key would gate a hosted `Shape::area` merely
+            // because a freestanding `Circle::area` shares its spelling.
+            for method in &decl.methods {
+                record(report_origin_key(&method.name));
+            }
+        }
+    }
+    origins
+}
+
+/// Clone `function`, recording which module declared it. See
+/// [`lullaby_parser::Function::module`] for why a bare name is not enough.
+fn stamp_module(function: &Function, module: &str) -> Function {
+    let mut stamped = function.clone();
+    stamped.module = Some(module.to_string());
+    stamped
+}
+
 /// Concatenate every loaded module's declarations into one flat [`Program`].
 /// Visibility and shadowing were already enforced, so the merged program is an
-/// ordinary single-file program from semantics' point of view.
+/// ordinary single-file program from semantics' point of view — except for the
+/// two facts the flattening would otherwise destroy, which ride along in
+/// [`Program::origins`]: each declaration's origin file and its tier.
 fn merge(modules: &[Module]) -> Program {
     let mut functions = Vec::new();
     let mut aliases = Vec::new();
@@ -835,23 +963,44 @@ fn merge(modules: &[Module]) -> Program {
     let mut impls = Vec::new();
     let mut consts = Vec::new();
     let mut actors = Vec::new();
-    // The merged compilation unit is freestanding if any module declares the
-    // `no-runtime` directive. This is the conservative (default-deny) choice for
-    // the tier gate: a `no-runtime` module in the build enforces the freestanding
-    // rules over the merged program. Per-module tier granularity in mixed-tier
-    // multi-file projects is a later freestanding-tier stage.
-    let mut is_no_runtime = false;
     for module in modules {
-        functions.extend(module.program.functions.iter().cloned());
+        // Stamp each function with the module it came from. A bare function name
+        // is NOT unique in the merged program — two impls on different types may
+        // both declare `label` — so anything keyed on "the enclosing function"
+        // (the checker's expression-type table, and the freestanding gate that
+        // reads it) needs this to disambiguate. See `Function::module`.
+        functions.extend(
+            module
+                .program
+                .functions
+                .iter()
+                .map(|function| stamp_module(function, &module.name)),
+        );
         aliases.extend(module.program.aliases.iter().cloned());
         structs.extend(module.program.structs.iter().cloned());
         enums.extend(module.program.enums.iter().cloned());
         traits.extend(module.program.traits.iter().cloned());
-        impls.extend(module.program.impls.iter().cloned());
+        impls.extend(module.program.impls.iter().map(|decl| {
+            let mut decl = decl.clone();
+            decl.methods = decl
+                .methods
+                .iter()
+                .map(|method| stamp_module(method, &module.name))
+                .collect();
+            decl
+        }));
         consts.extend(module.program.consts.iter().cloned());
         actors.extend(module.program.actors.iter().cloned());
-        is_no_runtime = is_no_runtime || module.program.is_no_runtime;
     }
+    let tier = freestanding_modules(modules);
+    // `is_no_runtime` on a merged program means what it means on a parsed one:
+    // *every* declaration in this unit is freestanding. That is true only when
+    // every merged module is in the tier. A mixed-tier build leaves it false and
+    // is gated per declaration through `origins` instead — which is what stops a
+    // hosted program from being forced into the freestanding tier merely by
+    // importing a `no-runtime` library.
+    let is_no_runtime =
+        !modules.is_empty() && modules.iter().all(|module| tier.contains(&module.name));
     Program {
         functions,
         aliases,
@@ -863,6 +1012,7 @@ fn merge(modules: &[Module]) -> Program {
         consts,
         actors,
         is_no_runtime,
+        origins: build_origins(modules, &tier),
     }
 }
 
@@ -942,6 +1092,144 @@ mod tests {
         // Without the overlay the on-disk (broken) source is what loads.
         let disk = load_program_in_project(&entry, &[]).expect("disk load parses");
         assert!(disk.entry_source.contains("nope"));
+    }
+
+    /// The tier travels **down** the import edges, never up: a hosted module
+    /// that imports a freestanding one stays hosted, so the merged unit is not
+    /// wholesale `no-runtime` and only the freestanding module's declarations
+    /// are marked.
+    #[test]
+    fn a_hosted_importer_of_a_freestanding_module_stays_hosted() {
+        let temp = TempDir::new();
+        let entry = temp.write(
+            "main.lby",
+            "import nrlib\n\nfn main -> i64\n    double(21)\n",
+        );
+        temp.write(
+            "nrlib.lby",
+            "no-runtime\n\npub fn double n i64 -> i64\n    n * 2\n",
+        );
+
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        assert!(
+            !loaded.program.is_no_runtime,
+            "a build containing a hosted module is not wholesale freestanding"
+        );
+        assert!(
+            loaded.program.origins.is_freestanding("double"),
+            "the freestanding library's own declaration stays in the tier"
+        );
+        assert!(
+            !loaded.program.origins.is_freestanding("main"),
+            "the hosted importer must NOT be pulled into the tier"
+        );
+    }
+
+    /// The tier does travel **down**: everything a `no-runtime` module imports is
+    /// compiled into the freestanding unit and is therefore gated too.
+    #[test]
+    fn a_freestanding_module_pulls_its_imports_into_the_tier() {
+        let temp = TempDir::new();
+        let entry = temp.write(
+            "main.lby",
+            "no-runtime\nimport helper\n\nfn main -> i64\n    twice(21)\n",
+        );
+        temp.write("helper.lby", "pub fn twice n i64 -> i64\n    n * 2\n");
+
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        assert!(
+            loaded.program.origins.is_freestanding("twice"),
+            "a helper imported by a `no-runtime` module is compiled into the \
+             freestanding unit and must face the same gate"
+        );
+        assert!(loaded.program.origins.is_freestanding("main"));
+    }
+
+    /// A build in which every module carries the directive is wholesale
+    /// freestanding, exactly as a single `no-runtime` file is.
+    #[test]
+    fn an_all_freestanding_build_is_wholesale_no_runtime() {
+        let temp = TempDir::new();
+        let entry = temp.write(
+            "main.lby",
+            "no-runtime\nimport nrlib\n\nfn main -> i64\n    double(21)\n",
+        );
+        temp.write(
+            "nrlib.lby",
+            "no-runtime\n\npub fn double n i64 -> i64\n    n * 2\n",
+        );
+
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        assert!(loaded.program.is_no_runtime);
+    }
+
+    /// A module reachable from both tiers lands in the stricter one.
+    #[test]
+    fn a_module_shared_between_tiers_is_marked_freestanding() {
+        let temp = TempDir::new();
+        let entry = temp.write(
+            "main.lby",
+            "import driver\nimport shared\n\nfn main -> i64\n    drive() + twice(1)\n",
+        );
+        temp.write(
+            "driver.lby",
+            "no-runtime\nimport shared\n\npub fn drive -> i64\n    twice(21)\n",
+        );
+        temp.write("shared.lby", "pub fn twice n i64 -> i64\n    n * 2\n");
+
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        assert!(
+            loaded.program.origins.is_freestanding("twice"),
+            "default-deny: a helper one freestanding importer can reach is gated"
+        );
+        assert!(!loaded.program.origins.is_freestanding("main"));
+    }
+
+    /// Every declaration carries the path of the file that declares it, so a
+    /// diagnostic raised against a merged program can name the right file.
+    #[test]
+    fn each_declaration_is_attributed_to_its_own_file() {
+        let temp = TempDir::new();
+        let entry = temp.write(
+            "main.lby",
+            "import math\n\nfn main -> i64\n    return square(3)\n",
+        );
+        temp.write("math.lby", "pub fn square x i64 -> i64\n    return x * x\n");
+
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        // Attribution reads the `report` namespace: it is keyed by the display
+        // name a diagnostic carries.
+        assert!(
+            loaded
+                .program
+                .origins
+                .path_for(&report_origin_key("square"))
+                .expect("square attributed")
+                .ends_with("math.lby")
+        );
+        assert!(
+            loaded
+                .program
+                .origins
+                .path_for(&report_origin_key("main"))
+                .expect("main attributed")
+                .ends_with("main.lby")
+        );
+    }
+
+    /// A single-file program was merged from nothing, so it carries no origin
+    /// table at all and every consumer keeps its existing behavior.
+    #[test]
+    fn a_single_file_program_has_no_origin_table() {
+        let temp = TempDir::new();
+        let entry = temp.write("main.lby", "no-runtime\n\nfn main -> i64\n    7\n");
+        let loaded = load_program_in_project(&entry, &[]).expect("load ok");
+        assert!(loaded.program.is_no_runtime);
+        assert!(
+            !loaded.program.origins.is_empty(),
+            "the loader always attributes what it loaded, even a lone module"
+        );
+        assert!(loaded.program.origins.is_freestanding("main"));
     }
 
     #[test]

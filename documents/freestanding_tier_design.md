@@ -124,6 +124,76 @@ fn clear_screen
   they are separable so you can, e.g., unit-test a `no-runtime` driver's pure logic
   in a hosted harness.
 
+### 1.0.1 The tier across `import` — per-module, not per-build
+
+**DELIVERED (2026-07-28).** The directive sets the tier for the module that
+*carries* it. The multi-file loader merges every module into one flat program
+before semantics runs, so it carries a per-declaration origin/tier table across
+that merge (`Program::origins`) and `L0441` gates each declaration by its **own
+origin module**. The rule, in one line:
+
+> A module is in the freestanding tier when it carries `no-runtime` itself, **or**
+> when a freestanding module transitively imports it.
+
+The tier travels **down** the import edges and never **up**:
+
+| Shape | Tier of the importer | Tier of the imported module |
+| :-- | :-- | :-- |
+| hosted module imports a `no-runtime` library | hosted — full safe tier, `string`/`list`/`rc` all legal | freestanding (unchanged) |
+| `no-runtime` module imports a hosted helper | freestanding | **freestanding** — the helper is gated, and a heap allocation in its body is `L0441` |
+| every module carries the directive | freestanding | freestanding |
+
+Both directions are load-bearing:
+
+- **Down.** A helper a freestanding module calls is compiled *into* the
+  freestanding binary. If that helper allocates, it is precisely the hidden
+  allocation hard rule #1 forbids — invisible at the call site, and invisible to
+  the type-based gate whenever the helper returns a scalar. So the import edge
+  carries the tier, and `L0441` fires against the helper's own file.
+- **Not up.** Forcing the tier onto every importer contradicted this section's own
+  reason for keeping the directive separable from `--freestanding`: unit-testing a
+  `no-runtime` driver's pure logic from a hosted harness. It also produced a false
+  diagnostic — the hosted file was told it was "a `no-runtime` module" when it
+  contained no such directive and offered no path to the real cause. (This was the
+  behavior before 2026-07-28, described then as a conservative default-deny with
+  per-module granularity deferred. It is not deferred any more.)
+
+**The ambiguous case is decided conservatively.** A module reachable from *both* a
+hosted and a freestanding module in one build lands in the freestanding tier: one
+module cannot be compiled two ways, and the safe answer when a module may end up
+linked into a freestanding image is the stricter one. The fix for an author who
+hits this is to split the helper. Pinned by
+`suite15.rs::a_module_shared_between_tiers_is_gated_conservatively` and
+`loader.rs::a_module_shared_between_tiers_is_marked_freestanding`.
+
+**Diagnostic attribution follows the same table.** A `Span` is only a
+`(line, column)` pair, so before the origin table existed every semantic
+diagnostic in a merged program was attributed to the *entry* file — a rejection in
+an imported module named the wrong file at a line number belonging to a different
+one. The CLI now names the declaration's own file and renders that file's source
+line under the caret, resolving it through two channels in order:
+
+1. **`SemanticDiagnostic::module`** — the origin module recorded by the reporting
+   pass. `L0441` records it (the gate walks `Function::module` anyway), so
+   freestanding-tier rejections are attributed **exactly**, including when the
+   declaration's name is shared.
+2. **The declaration's display name**, resolved through `Program::origins`.
+
+**This is not yet total, and the gap is deliberate rather than hidden.** Channel 2
+is a *display* name, so it cannot answer in two cases, and the report then falls
+back to the entry file with the old wrong-file behavior:
+
+- a name two modules both claim — two impls on different types may each declare
+  `label`, and naming either file would be a guess;
+- a diagnostic that names no declaration at all, e.g. a `const NAME string` type
+  error or an alias target in an imported module.
+
+Closing the remainder means giving every reporting site the same `module` channel
+`L0441` uses, which is a change across the whole checker rather than part of this
+one. IR-lowering and runtime diagnostics have the same shape and are likewise
+still entry-attributed (the runtime case additionally has no origin data at all on
+the pre-compiled `.lbc` path).
+
 ### 1.1 What is *unavailable* in `no-runtime`
 
 A `no-runtime` module **cannot name or lower to** any construct that implies the
@@ -1433,10 +1503,13 @@ The tier gate and its enforcement are implemented and test-locked. What shipped:
 - **Parser & AST.** The parser (`crates/lullaby_parser/src/lib.rs`) accepts the
   directive only as the first non-comment line (before any `import`/declaration);
   a later occurrence is an `L0201` misplacement. The flag rides on
-  `Program::is_no_runtime` (serde-defaulted, so existing artifacts stay valid), the
-  formatter re-emits it, and the module loader marks the merged unit `no-runtime`
-  if **any** module opts in (conservative default-deny; per-module granularity in
-  mixed-tier projects is a later stage).
+  `Program::is_no_runtime` (serde-defaulted, so existing artifacts stay valid) and
+  the formatter re-emits it. For a merged multi-file program `is_no_runtime` means
+  *every* module carries the directive; a **mixed-tier** build is attributed per
+  declaration through `Program::origins`, which the loader fills in at merge time —
+  see §1.0.1. (Until 2026-07-28 the loader instead marked the whole merged unit
+  `no-runtime` if **any** module opted in, which wrongly rejected a hosted program
+  for merely importing a freestanding library.)
 - **Enforcement.** `crates/lullaby_semantics/src/semantics_no_runtime.rs` runs after
   the main checker (so it can consult the recorded per-expression types) and, only
   for a `no-runtime` module, emits `L0441` for: a heap/runtime **type** anywhere in

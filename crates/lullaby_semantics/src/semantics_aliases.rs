@@ -70,6 +70,9 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
             is_async: function.is_async,
             is_extern: function.is_extern,
             is_export: function.is_export,
+            // Alias resolution rewrites type spellings only; it never moves a
+            // declaration between files, so its origin carries over.
+            module: function.module.clone(),
         })
         .collect();
 
@@ -182,6 +185,7 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                             is_async: function.is_async,
                             is_extern: function.is_extern,
                             is_export: function.is_export,
+                            module: function.module.clone(),
                         })
                         .collect(),
                     span: decl.span,
@@ -266,6 +270,11 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
             // The freestanding-tier directive is a whole-module property; alias
             // resolution preserves it so the tier gate still fires downstream.
             is_no_runtime: program.is_no_runtime,
+            // Alias resolution rewrites type spellings only — it neither renames
+            // nor moves a declaration — so the per-declaration origin/tier table
+            // carries over verbatim. Dropping it here would silently disable the
+            // per-module tier gate and cross-module diagnostic attribution.
+            origins: program.origins.clone(),
         },
         diagnostics,
     )

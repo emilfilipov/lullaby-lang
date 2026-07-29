@@ -1,0 +1,5 @@
+no-runtime
+import shared_text
+
+pub fn drive -> i64
+    digits(1234)

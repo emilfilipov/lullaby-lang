@@ -74,6 +74,18 @@ pub struct DiagnosticReport {
     pub message: String,
     pub source_path: Option<String>,
     pub span: Option<Span>,
+    /// The single source line `span` points at, carried on the report itself
+    /// because it does not come from the source text the renderer was handed.
+    ///
+    /// A multi-file build is merged into one flat program before semantic
+    /// analysis, and a [`Span`] is only a `(line, column)` pair — so a diagnostic
+    /// raised inside an imported module has a line number that belongs to a
+    /// *different* file than the entry source the CLI renders against. Whoever
+    /// knows the origin file (the CLI, via the loader's per-declaration origin
+    /// table) attaches the correct line here, and [`render_verbose`] prefers it
+    /// over the primary source. `None` for the ordinary case where `span` does
+    /// index the rendered source.
+    pub source_line: Option<String>,
     pub function: Option<String>,
     pub explanation: Option<String>,
     pub root_cause: Option<String>,
@@ -95,6 +107,7 @@ impl DiagnosticReport {
             message: message.into(),
             source_path: None,
             span: None,
+            source_line: None,
             function: None,
             explanation: None,
             root_cause: None,
@@ -113,6 +126,14 @@ impl DiagnosticReport {
 
     pub fn with_span(mut self, span: Span) -> Self {
         self.span = Some(span);
+        self
+    }
+
+    /// Attach the source line `span` points at, for a report whose file is not
+    /// the source text the renderer will be handed. See
+    /// [`DiagnosticReport::source_line`].
+    pub fn with_source_line(mut self, line: impl Into<String>) -> Self {
+        self.source_line = Some(line.into());
         self
     }
 
@@ -738,9 +759,17 @@ pub fn render_concise(report: &DiagnosticReport) -> String {
 
 pub fn render_verbose(report: &DiagnosticReport, source: Option<&str>) -> String {
     let mut output = render_concise(report);
-    if let (Some(source), Some(span)) = (source, report.span)
-        && let Some(line) = source.lines().nth(span.line.saturating_sub(1))
-    {
+    // A report that carries its own line came from a different file than
+    // `source` (an imported module in a merged multi-file program), so its span
+    // does not index `source` at all — prefer the line the report brought with
+    // it, or the caret would point at unrelated text in the entry file.
+    let excerpt = match &report.source_line {
+        Some(line) => Some(line.as_str()),
+        None => source
+            .zip(report.span)
+            .and_then(|(source, span)| source.lines().nth(span.line.saturating_sub(1))),
+    };
+    if let (Some(line), Some(span)) = (excerpt, report.span) {
         output.push_str("\n\nSource:");
         output.push_str(&format!("\n{:>4} | {}", span.line, line));
         let caret_column = span.column.saturating_sub(1);

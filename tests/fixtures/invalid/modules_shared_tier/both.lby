@@ -1,0 +1,11 @@
+# The genuinely ambiguous case: `shared_text` is reachable from a hosted module
+# (this one) AND from a freestanding one (`nr_driver`). One module cannot be
+# compiled two ways, so the tier gate decides it conservatively — the stricter
+# tier wins and `shared_text` is checked as freestanding, producing `L0441`.
+# Splitting the helper in two is the fix; being silently allowed into a
+# freestanding binary is not.
+import nr_driver
+import shared_text
+
+fn main -> i64
+    drive() + digits(7)

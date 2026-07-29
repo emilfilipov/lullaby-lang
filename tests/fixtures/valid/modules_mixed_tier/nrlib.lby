@@ -1,0 +1,7 @@
+# A freestanding (`no-runtime`) library module. It stays inside the allowed
+# subset — scalars and arithmetic only — so it is legal in its own tier, and
+# importing it must not drag its importer into that tier.
+no-runtime
+
+pub fn double n i64 -> i64
+    n * 2
