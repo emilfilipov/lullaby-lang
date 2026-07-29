@@ -484,6 +484,16 @@ fn render_function(emitter: &mut Emitter, function: &Function, block_next: usize
     if function.is_export {
         header.push_str("export ");
     }
+    // The freestanding-tier function kinds. Each is exclusive with every modifier
+    // above (parser `L0201`), so at most one of these ever renders — but they are
+    // written as independent `if`s so the formatter never *loses* a modifier if a
+    // future rule admits a combination.
+    if function.is_interrupt {
+        header.push_str("interrupt ");
+    }
+    if function.is_naked {
+        header.push_str("naked ");
+    }
     header.push_str(&format!("fn {}", function.name));
     header.push_str(&render_type_params(&function.type_params));
     header.push_str(&render_params(&function.params));

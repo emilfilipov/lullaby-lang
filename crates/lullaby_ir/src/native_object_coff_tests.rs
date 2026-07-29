@@ -54,6 +54,8 @@ fn emits_stack_backed_i64_locals_and_addition() {
         extern_functions: Vec::new(),
         extern_signatures: Vec::new(),
         export_functions: Vec::new(),
+        interrupt_functions: Vec::new(),
+        naked_functions: Vec::new(),
         closures: Vec::new(),
         functions: vec![BytecodeFunction {
             name: "main".to_string(),
@@ -113,6 +115,8 @@ fn emits_i64_local_assignments() {
         extern_functions: Vec::new(),
         extern_signatures: Vec::new(),
         export_functions: Vec::new(),
+        interrupt_functions: Vec::new(),
+        naked_functions: Vec::new(),
         closures: Vec::new(),
         functions: vec![BytecodeFunction {
             name: "main".to_string(),
@@ -177,6 +181,8 @@ fn literal_return_module(return_type: &str, kind: BytecodeExprKind) -> BytecodeM
         extern_functions: Vec::new(),
         extern_signatures: Vec::new(),
         export_functions: Vec::new(),
+        interrupt_functions: Vec::new(),
+        naked_functions: Vec::new(),
         closures: Vec::new(),
         functions: vec![BytecodeFunction {
             name: "main".to_string(),

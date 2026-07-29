@@ -92,6 +92,13 @@ pub(crate) const KEYWORDS: &[&str] = &[
     "extern",
     "export",
     "asm",
+    // The freestanding-tier function-kind prefixes
+    // (`documents/freestanding_tier_design.md` §6). Offered like any other
+    // keyword: they are only *valid* in a `no-runtime` module (`L0441`
+    // otherwise), but completion has no tier context and the diagnostic is
+    // immediate and explanatory.
+    "interrupt",
+    "naked",
 ];
 
 /// Build the completion items for a document's `text`, with `line` being the

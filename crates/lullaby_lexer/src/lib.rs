@@ -110,6 +110,23 @@ pub enum Keyword {
     /// future in a `list<Future<T>>` to resolve and yields a `Selected<T>`
     /// (`index i64`, `value T`); lowest input index wins a tie (actor stage 5).
     Select,
+    /// `interrupt` — the prefix keyword of an **interrupt-service-routine**
+    /// declaration `interrupt fn NAME frame ptr<T>` — optionally with a second
+    /// `error_code u64` parameter, space-separated like any other
+    /// (freestanding tier, `documents/freestanding_tier_design.md` §6). The
+    /// compiler emits the platform ISR calling convention for such a function
+    /// (save the full register set, realign the stack, terminate with `iretq`)
+    /// instead of the ordinary call ABI, so the CPU can vector to it directly
+    /// from an IDT entry.
+    Interrupt,
+    /// `naked` — the prefix keyword of a **naked function** declaration
+    /// `naked fn NAME` (freestanding tier,
+    /// `documents/freestanding_tier_design.md` §6). The compiler emits **no**
+    /// prologue, epilogue, or implicit `ret` for such a function: its body is
+    /// inline `asm` only and the author writes every instruction, including the
+    /// return. Used for the earliest boot entry, context switches, and
+    /// trampolines.
+    Naked,
     /// `no-runtime` — the module-level freestanding-tier directive. When it is the
     /// first non-comment line of a `.lby` file, the module is compiled in the
     /// freestanding (`no-runtime`) tier: the compiler rejects any construct that
@@ -608,6 +625,8 @@ fn keyword(text: &str) -> Option<Keyword> {
         "extern" => Keyword::Extern,
         "export" => Keyword::Export,
         "asm" => Keyword::Asm,
+        "interrupt" => Keyword::Interrupt,
+        "naked" => Keyword::Naked,
         "actor" => Keyword::Actor,
         "tell" => Keyword::Tell,
         "try_tell" => Keyword::TryTell,
@@ -788,6 +807,40 @@ mod tests {
                 .iter()
                 .any(|token| token.kind == TokenKind::Keyword(Keyword::NoRuntime)),
             "spaced `no - runtime` must not lex as the NoRuntime keyword: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn lexes_interrupt_and_naked_prefix_keywords() {
+        // The two freestanding-tier function-kind prefixes lex as keywords, so the
+        // parser sees `interrupt`/`naked` before `fn` rather than an identifier that
+        // would be mis-parsed as a stray expression statement.
+        let tokens = lex(concat!(
+            "no-runtime\n",
+            "interrupt fn isr frame ptr<i64>\n",
+            "    return\n",
+            "naked fn boot\n",
+            "    unsafe\n",
+            "        asm 244\n",
+        ))
+        .expect("lex");
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Interrupt)),
+            "expected an Interrupt keyword token, got {tokens:?}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::Keyword(Keyword::Naked)),
+            "expected a Naked keyword token, got {tokens:?}"
+        );
+        assert!(
+            !tokens.iter().any(|token| token.kind
+                == TokenKind::Identifier("interrupt".to_string())
+                || token.kind == TokenKind::Identifier("naked".to_string())),
+            "`interrupt`/`naked` must not also lex as identifiers: {tokens:?}"
         );
     }
 

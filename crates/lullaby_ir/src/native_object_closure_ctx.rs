@@ -46,6 +46,11 @@ impl<'a> NativeCtx<'a> {
         Self {
             locals,
             frame_size,
+            // A synthesized closure body is an ordinary `.text` function entered by
+            // an indirect `call` and left by `ret`; the hardware-entry conventions
+            // never apply to one (a closure literal is `L0441` in the freestanding
+            // tier, where `interrupt`/`naked` live).
+            fn_kind: NativeFnKind::Ordinary,
             callable,
             extern_sigs,
             relocations: Vec::new(),

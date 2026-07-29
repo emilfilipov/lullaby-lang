@@ -119,6 +119,8 @@ impl Inliner {
             extern_functions: module.extern_functions.clone(),
             extern_signatures: module.extern_signatures.clone(),
             export_functions: module.export_functions.clone(),
+            interrupt_functions: module.interrupt_functions.clone(),
+            naked_functions: module.naked_functions.clone(),
             closures: module.closures.clone(),
             functions: module
                 .functions

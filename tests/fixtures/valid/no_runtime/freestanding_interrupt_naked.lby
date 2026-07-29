@@ -1,0 +1,61 @@
+# Freestanding interrupt handlers and naked functions
+# (documents/freestanding_tier_design.md §6): the two prefix keywords that declare
+# a function the HARDWARE enters rather than a caller.
+#
+# COMPILE-ONLY FOR THE TWO HARDWARE ENTRY POINTS, and deliberately never entered.
+# An `interrupt fn` is reached by the CPU from an IDT entry and leaves with
+# `iretq`; a `naked fn` has no compiler-generated prologue, epilogue, or `ret` at
+# all. Neither can be invoked from a hosted process — installing an IDT entry
+# needs ring 0, and calling either from Lullaby is refused at compile time with
+# `L0446` precisely because the ordinary call ABI does not apply. The tests assert
+# that this file COMPILES under `lullaby native --freestanding` and pin the
+# emitted ISR prologue/epilogue bytes; the ISR and naked bodies never run.
+#
+# `main` IS ordinary and runs on every tier, returning 21 — which is what makes
+# this a four-tier fixture: the mere PRESENCE of an `interrupt fn` / `naked fn`
+# must not disturb the rest of the program on the interpreters.
+no-runtime
+
+# A timer interrupt: the frame parameter addresses the CPU-pushed interrupt frame
+# in place. No `->` clause — an ISR always returns `void`, because its return is
+# `iretq`, which pops the interrupted context rather than a caller's frame.
+interrupt fn timer_isr frame ptr<i64>
+    unsafe
+        let saved_ip i64 = ptr_read(frame)
+        ptr_write(frame, saved_ip)
+
+# A page fault: an exception whose vector pushes an ERROR CODE below the frame.
+# The optional second `error_code u64` parameter is how §6 selects that vector
+# convention — it shifts the frame pointer by one word and makes the epilogue
+# discard the code before `iretq`.
+interrupt fn page_fault frame ptr<i64> error_code u64
+    unsafe
+        ptr_write(frame, to_i64(error_code))
+
+# An ISR body is ORDINARY Lullaby, not assembly — that is the whole point of the
+# construct (§6's "arena-safe ISR" advantage): only the hardware pokes need to be
+# `unsafe`. This one runs a bounded loop of safe arithmetic before writing once.
+interrupt fn accumulate_isr frame ptr<i64>
+    let total i64 = 0
+    for i from 1 to 5
+        total = total + i * i
+    unsafe
+        ptr_write(frame, total)
+
+# The earliest boot entry: NO compiler prologue, epilogue, or `ret`. The body is
+# inline `asm` only, and the author writes every instruction — here `cli` (0xFA)
+# to mask interrupts followed by `hlt` (0xF4), the canonical park sequence.
+naked fn boot_entry
+    unsafe
+        asm 250, 244
+
+# A second naked function, split across two `asm` statements, pinning that the
+# bodies concatenate with nothing inserted between them: `xor eax, eax` (31 C0)
+# then `ret` (C3), the return written by hand.
+naked fn zero_and_return
+    unsafe
+        asm 49, 192
+        asm 195
+
+fn main -> i64
+    21

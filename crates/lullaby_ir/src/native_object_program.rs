@@ -299,8 +299,17 @@ pub fn emit_native_program_for_target(
         // provably stay local, so they route through a function-scoped arena
         // (reclaimed by rewinding the bump pointer on every return edge). Default-
         // deny; every other function keeps its unchanged RC / free-list codegen.
-        let arena_names =
+        let mut arena_names =
             arena_eligible_functions(module, &eligible_names, &signatures, &closure_layouts);
+        // A hardware entry point never routes through the arena-first heap path.
+        // The arena prologue/epilogue save and restore the GLOBAL bump pointer
+        // `__lullaby_heap_next`, and an interrupt can arrive while a completely
+        // different function is mid-region — so an ISR that rewound that pointer
+        // would reclaim memory the interrupted function still owns. A `naked fn`
+        // has no prologue to put it in at all. Stated here (rather than left to the
+        // fact that a `no-runtime` module allocates nothing) so the exclusion does
+        // not depend on the tier gate; `lower_native_function` re-checks it.
+        arena_names.retain(|name| NativeFnKind::for_function(module, name).allows_arena());
 
         for name in &eligible_names {
             let function = module
@@ -322,6 +331,7 @@ pub fn emit_native_program_for_target(
                 arena_names.contains(name.as_str()),
                 &closure_layouts,
                 &hof_index,
+                NativeFnKind::for_function(module, name),
             ) {
                 Ok(l) => lowered.push(l),
                 Err(reason) => {

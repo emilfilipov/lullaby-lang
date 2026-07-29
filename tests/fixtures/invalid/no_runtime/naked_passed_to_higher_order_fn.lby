@@ -1,0 +1,22 @@
+# L0446: a `naked fn` cannot be handed to a higher-order function.
+#
+# The second alias route around the not-callable rule, and the `naked` half of
+# the pair with `interrupt_as_fn_value.lby`. The name never appears in call
+# position here — it is an ARGUMENT — so a check that only inspects direct calls
+# sees nothing, and the callee then invokes it through an ordinary `call` against
+# a function that has no prologue, no epilogue, and no compiler-emitted `ret`.
+#
+# Rejecting the value covers this and every other sink (a returned callable, a
+# stored one) with one rule, rather than enumerating call shapes.
+no-runtime
+
+naked fn boot_entry
+    unsafe
+        asm 250, 244
+
+fn invoke g fn() -> void
+    g()
+
+fn main -> i64
+    invoke(boot_entry)
+    0

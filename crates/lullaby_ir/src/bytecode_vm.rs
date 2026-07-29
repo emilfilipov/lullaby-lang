@@ -869,6 +869,29 @@ impl<'a> Lowerer<'a> {
             .filter(|function| function.is_export)
             .map(|function| function.name.clone())
             .collect();
+        // Record every `interrupt fn` with whether its vector pushes an error code
+        // (spelled as the optional second `error_code u64` parameter), and every
+        // `naked fn`, so the native backend can select each one's calling
+        // convention. Both are lowered like ordinary functions here — the
+        // difference is entirely in the prologue/epilogue the emitter wraps the
+        // body in (or, for `naked`, does not).
+        let interrupt_functions = self
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.is_interrupt)
+            .map(|function| crate::IrInterruptFunction {
+                name: function.name.clone(),
+                has_error_code: function.params.len() == 2,
+            })
+            .collect();
+        let naked_functions = self
+            .program
+            .functions
+            .iter()
+            .filter(|function| function.is_naked)
+            .map(|function| function.name.clone())
+            .collect();
         // Every closure body lowered above (across functions and impl methods) was
         // collected into the accumulator; sort by id for a deterministic module.
         let mut closures = self.closures.borrow().clone();
@@ -883,6 +906,8 @@ impl<'a> Lowerer<'a> {
             extern_functions,
             extern_signatures,
             export_functions,
+            interrupt_functions,
+            naked_functions,
             closures,
         })
     }

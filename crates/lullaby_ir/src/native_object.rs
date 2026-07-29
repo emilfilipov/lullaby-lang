@@ -287,6 +287,13 @@ pub(crate) struct NativeCtx<'a> {
     /// function uses these to materialize by-pointer arguments and allocate the
     /// hidden return destination.
     signatures: &'a HashMap<String, NativeSignature>,
+    /// The calling convention this function is lowered with: the ordinary
+    /// `push rbp` … `ret` shape, a hardware ISR (`interrupt fn`), or a naked
+    /// function. It selects the prologue, every return edge's epilogue, and — via
+    /// [`NativeFnKind::promotes_registers`] / [`NativeFnKind::allows_arena`] — the
+    /// two invariants a hardware entry point depends on. See
+    /// `native_object_isr.rs`.
+    fn_kind: NativeFnKind,
     /// Scalar `i64` locals kept in callee-saved registers (slot -> register) for a
     /// purely-scalar function. Empty for every other function. Loads/stores of a
     /// promoted slot go to the register instead of `[rbp - slot]`.
@@ -436,6 +443,7 @@ impl<'a> NativeCtx<'a> {
         is_arena: bool,
         closure_layouts: &'a HashMap<usize, ClosureLayout>,
         hof_index: &HashMap<String, Vec<HofParam>>,
+        fn_kind: NativeFnKind,
     ) -> Result<Self, String> {
         let mut locals: HashMap<String, NativeLocal> = HashMap::new();
         let mut closure_locals: HashMap<String, usize> = HashMap::new();
@@ -636,7 +644,16 @@ impl<'a> NativeCtx<'a> {
         // call-returned callable local is excluded identically — `lower_closure_call`
         // reads the block pointer from the local's frame slot, so it must not be
         // promoted into a register.
-        let (promoted, saved_regs) = if closure_locals.is_empty()
+        // A hardware-entry function (`interrupt fn` / `naked fn`) is NEVER register
+        // promoted. Promotion spills the caller's `rbx`/`rsi` in the ordinary
+        // prologue and restores them in the ordinary epilogue — neither of which an
+        // ISR runs — so a promoted ISR would hand the interrupted context a
+        // callee-saved register holding a Lullaby local. The ISR prologue's
+        // `push rbx` happens to cover that today, but only as an accident of push
+        // order; the exclusion is stated here so the invariant does not depend on
+        // it. See `native_object_isr.rs`.
+        let (promoted, saved_regs) = if fn_kind.promotes_registers()
+            && closure_locals.is_empty()
             && fn_param_callables.is_empty()
             && call_returned_callables.is_empty()
         {
@@ -759,6 +776,7 @@ impl<'a> NativeCtx<'a> {
         Ok(Self {
             locals,
             frame_size,
+            fn_kind,
             callable,
             extern_sigs,
             relocations: Vec::new(),
@@ -1024,6 +1042,10 @@ pub(crate) use portio::*;
 #[path = "native_object_arena.rs"]
 mod arena;
 pub(crate) use arena::*;
+
+#[path = "native_object_isr.rs"]
+mod isr;
+pub(crate) use isr::*;
 
 #[path = "native_object_closure.rs"]
 mod closure;

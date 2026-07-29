@@ -1,0 +1,8 @@
+# The freestanding half of the mixed-tier pair. Its presence is the point: it
+# makes the merged program contain freestanding declarations, so a tier gate that
+# asked "is this program freestanding?" instead of "is this DECLARATION's module
+# freestanding?" could be fooled into accepting `main.lby`'s hosted ISR.
+no-runtime
+
+pub fn kernel_answer -> i64
+    21

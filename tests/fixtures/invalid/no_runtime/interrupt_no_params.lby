@@ -1,0 +1,15 @@
+# L0446: an `interrupt fn` must declare the CPU-pushed interrupt frame parameter.
+#
+# The frame (`rip`/`cs`/`rflags`/`rsp`/`ss`) is the only thing the CPU hands a
+# handler, and reading it is how a handler learns where it was interrupted. A
+# zero-parameter ISR would compile to a prologue that computes a frame address
+# and then throws it away, which is a declaration that silently means less than
+# it looks like — so the parameter is required rather than optional.
+no-runtime
+
+interrupt fn no_frame
+    unsafe
+        asm 144
+
+fn main -> i64
+    0

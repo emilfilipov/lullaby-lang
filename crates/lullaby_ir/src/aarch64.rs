@@ -1105,6 +1105,27 @@ pub fn emit_aarch64_program(
     let mut skipped: Vec<NativeSkippedFunction> = Vec::new();
     let mut eligible: Vec<String> = Vec::new();
     for function in &module.functions {
+        // `interrupt fn` / `naked fn` are specified for x86-64 only
+        // (`documents/freestanding_tier_design.md` §6 and §12.8): AArch64 takes
+        // exceptions through a vector table with `eret`, not `iretq`, and its
+        // save-all set is a different register file. Emitting either here as an
+        // ordinary AArch64 function would produce a symbol that is not the calling
+        // convention it claims, so both are skipped until the AArch64 backend
+        // grows its own exception-entry increment.
+        let is_hardware_entry = module
+            .interrupt_functions
+            .iter()
+            .any(|isr| isr.name == function.name)
+            || module.naked_functions.contains(&function.name);
+        if is_hardware_entry {
+            skipped.push(NativeSkippedFunction {
+                name: function.name.clone(),
+                reason: "an `interrupt fn` / `naked fn` uses the x86-64 hardware calling \
+                         convention and is not supported by the AArch64 backend"
+                    .to_string(),
+            });
+            continue;
+        }
         match signature_eligible(function) {
             Ok(()) => eligible.push(function.name.clone()),
             Err(reason) => skipped.push(NativeSkippedFunction {
@@ -1332,6 +1353,8 @@ mod tests {
             extern_functions: Vec::new(),
             extern_signatures: Vec::new(),
             export_functions: Vec::new(),
+            interrupt_functions: Vec::new(),
+            naked_functions: Vec::new(),
             closures: Vec::new(),
         }
     }
@@ -1414,6 +1437,8 @@ mod tests {
             extern_functions: Vec::new(),
             extern_signatures: Vec::new(),
             export_functions: Vec::new(),
+            interrupt_functions: Vec::new(),
+            naked_functions: Vec::new(),
             closures: Vec::new(),
         };
         let target = native_target_for_triple("aarch64-unknown-linux-gnu").unwrap();

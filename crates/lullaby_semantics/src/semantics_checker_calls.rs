@@ -1829,6 +1829,27 @@ impl<'a> Checker<'a> {
                     return None;
                 };
 
+                // A hardware entry point is not callable from Lullaby
+                // (`documents/freestanding_tier_design.md` §6). An `interrupt fn`
+                // ends in `iretq`, which pops `rip`/`cs`/`rflags` off the stack —
+                // reached by a `call`, it would consume three words of the
+                // *caller's* frame and jump to whatever happened to be there. A
+                // `naked fn` has no compiler-generated `ret` at all. Neither
+                // failure is diagnosable at runtime (there is only a wild jump), so
+                // the call is refused here. This is also why neither kind may carry
+                // `pub`/`export`, which advertise a function as callable (parser
+                // `L0201`).
+                if let Some(diagnostic) = crate::semantics_isr::entry_misuse_diagnostic(
+                    &signature,
+                    name,
+                    crate::semantics_isr::EntryMisuse::Called,
+                    &function.name,
+                    call_span,
+                ) {
+                    self.diagnostics.push(diagnostic);
+                    return None;
+                }
+
                 if signature.params.len() != args.len() {
                     self.diagnostics.push(SemanticDiagnostic::at(
                         "L0312",

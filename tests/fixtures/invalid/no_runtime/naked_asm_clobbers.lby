@@ -1,0 +1,19 @@
+# L0446: an `asm` inside a `naked fn` may declare no `clobber`s.
+#
+# A clobber's whole effect is to make the marshaller SAVE the named callee-saved
+# register into a frame scratch word before the body and restore it after. With
+# no frame there is nowhere to save it, and silently ignoring the clause would
+# turn a preservation request into a no-op — the author would believe the
+# register was protected when it was not.
+#
+# In a naked function the author already owns the entire register state, so the
+# save and restore are written explicitly (`push`/`pop`).
+no-runtime
+
+naked fn declares_a_clobber
+    unsafe
+        asm 72, 199, 195, 222, 0, 0, 0
+            clobber rbx
+
+fn main -> i64
+    0

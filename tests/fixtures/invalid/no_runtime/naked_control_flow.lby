@@ -1,0 +1,17 @@
+# L0446: a `naked fn` body may contain only `asm` — not control flow.
+#
+# The companion to naked_non_asm_body.lby, covering the statements that are not
+# storage but still cannot be compiled here. A `return` would emit the ordinary
+# epilogue (`add rsp, N; pop rbp; ret`) against a frame that was never
+# established, unwinding the stack of whoever the CPU or bootloader entered this
+# function from. A `loop` needs a lowered body and a backward branch the emitter
+# only builds inside a planned frame.
+no-runtime
+
+naked fn returns_early
+    unsafe
+        asm 244
+        return
+
+fn main -> i64
+    0

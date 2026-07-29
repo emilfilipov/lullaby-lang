@@ -1,0 +1,23 @@
+# L0441: an `interrupt fn` declared in a HOSTED module of a mixed-tier build.
+#
+# This file carries no `no-runtime` directive, so `hosted_isr` is a safe-tier
+# declaration and the hardware calling convention is unavailable to it — even
+# though the program it belongs to *does* contain a freestanding module
+# (`kernel.lby`), which it imports.
+#
+# The tier is a **module** property, and a multi-file build is merged into one
+# flat program before semantic analysis runs. A gate that consulted only the
+# merged program's whole-unit `is_no_runtime` flag would get this wrong in both
+# directions — and did, transiently, when this feature was rebased onto the
+# per-module tier attribution work. See the valid counterpart,
+# `tests/fixtures/valid/modules_freestanding_isr/`, which pins the other
+# direction: a legitimate ISR in a freestanding module of a program whose entry
+# file is hosted must still be ACCEPTED.
+import kernel
+
+interrupt fn hosted_isr frame ptr<i64>
+    unsafe
+        ptr_write(frame, 1)
+
+fn main -> i64
+    kernel_answer()

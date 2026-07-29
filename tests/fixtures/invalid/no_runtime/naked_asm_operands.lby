@@ -1,0 +1,24 @@
+# L0446: an `asm` inside a `naked fn` may bind no `in`/`out` operands.
+#
+# Operand marshalling is frame-relative by construction: `lower_native_asm`
+# stages each input into a scratch word at `[rbp - slot]` before loading it into
+# its register, and writes each output back to `[rbp - slot]` afterwards. A naked
+# function has no frame, so `rbp` is not its own — the staging store would
+# corrupt the caller's or the interrupted context's stack.
+#
+# This is §6's own rule ("referencing Lullaby locals is unavailable because there
+# is no frame") applied to the delivered operand form. Put the value into the
+# register with an explicit instruction instead.
+#
+# The bound value here is a LITERAL, deliberately: a `let` would be rejected
+# first as a non-`asm` statement (naked_non_asm_body.lby covers that), which
+# would leave this rule untested.
+no-runtime
+
+naked fn binds_an_operand
+    unsafe
+        asm 72, 137, 200
+            in rcx = 5
+
+fn main -> i64
+    0

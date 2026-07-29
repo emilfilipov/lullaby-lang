@@ -458,6 +458,32 @@ pub struct Function {
     /// existing single-file artifacts and AST snapshots stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// True when the function is declared `interrupt fn` — a hardware
+    /// interrupt-service routine the CPU vectors to directly from an IDT entry
+    /// (freestanding tier, `documents/freestanding_tier_design.md` §6). The native
+    /// backend emits the ISR calling convention for it — save the full register
+    /// set, realign the stack, terminate with `iretq` instead of `ret` — so it
+    /// must never be reached by an ordinary `call` (`L0446`). Its signature is
+    /// `frame ptr<T>` plus an optional second `error_code u64` selecting the
+    /// error-code-pushing vector convention. `interrupt` is meaningful only to
+    /// native codegen: the interpreters treat the body as an ordinary function
+    /// body, which is unobservable because the function is reachable by no route
+    /// — neither a direct call nor a first-class `fn(...)` value is admitted
+    /// (`L0446`). Serde-defaulted to `false` so existing artifacts and AST
+    /// snapshots stay valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_interrupt: bool,
+    /// True when the function is declared `naked fn` — a function for which the
+    /// compiler emits **no** prologue, epilogue, or implicit `ret`
+    /// (`documents/freestanding_tier_design.md` §6). Its body is inline `asm`
+    /// only; the author writes every instruction including the return, which is
+    /// what makes it usable as a boot entry, a context switch, or a trampoline.
+    /// Because there is no frame, it takes no parameters, returns `void`, and its
+    /// `asm` statements may bind no operands or clobbers (`L0446`).
+    /// Serde-defaulted to `false` so existing artifacts and AST snapshots stay
+    /// valid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_naked: bool,
 }
 
 /// serde `skip_serializing_if` predicate for the `is_public` visibility flag.

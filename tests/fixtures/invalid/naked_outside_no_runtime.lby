@@ -1,0 +1,11 @@
+# L0441: a `naked fn` outside a `no-runtime` module.
+#
+# The safe-tier counterpart of `interrupt_outside_no_runtime.lby`. A naked
+# function emits no prologue, epilogue, or `ret`, so it is only reachable from a
+# bootloader or hand-written `asm` — neither of which exists in the safe tier.
+naked fn boot_entry
+    unsafe
+        asm 244
+
+fn main -> i64
+    0

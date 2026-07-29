@@ -14,6 +14,7 @@ mod semantics_arena;
 mod semantics_array_extent;
 mod semantics_consts;
 mod semantics_generics;
+mod semantics_isr;
 mod semantics_lifetime_alias;
 mod semantics_no_runtime;
 mod semantics_port_io;
@@ -165,6 +166,16 @@ pub fn validate(program: &Program) -> Result<CheckedProgram, Vec<SemanticDiagnos
         &checker.expression_types,
         &mut checker.diagnostics,
     );
+    // Freestanding-tier stage 8: the `interrupt fn` / `naked fn` tier gate
+    // (`L0441` outside a `no-runtime` module) and their signature/body constraints
+    // (`L0446`). Runs alongside the tier gate above, and after the main pass so a
+    // function declared without `-> T` is judged by its inferred return type.
+    // A no-op for a program with neither kind.
+    semantics_isr::enforce(
+        &resolved,
+        &checker.resolved_returns,
+        &mut checker.diagnostics,
+    );
     if !checker.diagnostics.is_empty() {
         return Err(std::mem::take(&mut checker.diagnostics));
     }
@@ -179,10 +190,23 @@ pub fn validate(program: &Program) -> Result<CheckedProgram, Vec<SemanticDiagnos
     // sentinel. A function with an explicit `-> T` is left untouched.
     for function in &mut resolved.functions {
         if function.return_type.name == INFERRED_RETURN {
-            function.return_type = resolved_returns
+            let inferred = resolved_returns
                 .get(&function.name)
                 .cloned()
                 .unwrap_or_else(|| TypeRef::new("void"));
+            // The inference can resolve back TO the sentinel: a body whose final
+            // statement is an inline `asm` satisfies the final-value requirement by
+            // echoing `function.return_type` (the `asm` is trusted to leave the
+            // result in `rax`), which for an un-annotated function is the sentinel
+            // itself. Such a body produced no value type of its own, so the honest
+            // answer is `void` — leaking `<infer>` into IR would give the backends a
+            // type name that resolves to nothing. This is the shape a `naked fn`
+            // always has (its body is `asm` only, and it is required to be `void`).
+            function.return_type = if inferred.name == INFERRED_RETURN {
+                TypeRef::new("void")
+            } else {
+                inferred
+            };
         }
     }
 
@@ -809,6 +833,8 @@ impl<'a> Checker<'a> {
             is_async: false,
             is_extern: false,
             is_export: false,
+            is_interrupt: false,
+            is_naked: false,
             // A synthesized function belongs to no module. The freestanding gate
             // never looks one up: it rejects an `actor` declaration wholesale and
             // does not walk handler bodies, and its lookups always carry a real
@@ -2137,6 +2163,8 @@ impl<'a> Checker<'a> {
                         .collect(),
                     is_async: function.is_async,
                     is_extern: function.is_extern,
+                    is_interrupt: function.is_interrupt,
+                    is_naked: function.is_naked,
                 },
             );
         }
@@ -3128,11 +3156,24 @@ impl<'a> Checker<'a> {
                             ));
                             None
                         }
-                    } else if let Some(signature) = self.signatures.get(name) {
+                    } else if let Some(signature) = self.signatures.get(name).cloned() {
                         // A bare name that is not a local but is a declared
                         // top-level function evaluates to a function value of
-                        // type `fn(params) -> ret`.
-                        Some(function_type(&signature.params, &signature.return_type))
+                        // type `fn(params) -> ret` — unless it is a hardware entry
+                        // point, which is not usable as a value at all. See
+                        // `semantics_isr::function_value_type`.
+                        match semantics_isr::function_value_type(
+                            &signature,
+                            name,
+                            &function.name,
+                            expr.span,
+                        ) {
+                            Ok(ty) => Some(ty),
+                            Err(diagnostic) => {
+                                self.diagnostics.push(diagnostic);
+                                return None;
+                            }
+                        }
                     } else if let Some(const_type) = self.consts.get(name) {
                         // A reference to a named constant. Cleanly-evaluated
                         // constants were already folded to literals, so this only
@@ -4193,6 +4234,16 @@ pub struct Signature {
     /// caller materializes a NUL-terminated copy across the FFI boundary); no
     /// other call path admits `string` where a `cstr` is declared.
     pub is_extern: bool,
+    /// True when the function is declared `interrupt fn` — a hardware
+    /// interrupt-service routine (`documents/freestanding_tier_design.md` §6).
+    /// Consulted at call sites, which refuse it (`L0446`): an ISR returns with
+    /// `iretq`, not `ret`, so a `call` to one pops three words of the caller's
+    /// stack as `rip`/`cs`/`rflags` and jumps into nothing.
+    pub is_interrupt: bool,
+    /// True when the function is declared `naked fn` — no compiler-generated
+    /// prologue, epilogue, or `ret`. Also refused at call sites (`L0446`): its
+    /// return, if any, is whatever its `asm` writes.
+    pub is_naked: bool,
 }
 
 /// The resolved signature of an inherent (`impl Type<T>`) method, kept with its
