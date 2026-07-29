@@ -225,11 +225,11 @@ Four passes drop it (`walk_lifetimes`, both `semantics_array_extent` walkers,
 | # | Sev | Finding | Root cause | Status |
 |---|---|---|---|---|
 | 1 | **HIGH** | `--optimize full` returns a **wrong value** (99 vs 1) on ir+bytecode: a call in an assign-target index never clears copyprop's aliases, so a read is rewritten to a stale source. CSE has the byte-identical shape (latent). | `ir_optimizer_copyprop.rs:88`, `ir_optimizer_cse.rs:113` | fix lane dispatched |
-| 2 | **HIGH** | **`L0392` cross-package privacy evaded** — a private cross-package fn called from an assign-target index compiles (`check` ok) and really executes. | `loader.rs:637` | queued behind loader-branch merge (file collision) |
+| 2 | **HIGH** | **`L0392` cross-package privacy evaded** — a private cross-package fn called from an assign-target index compiles (`check` ok) and really executes. | `loader.rs:637` | **fixed** (in review) — but see the second blind spot below |
 | 3 | MED-HIGH | **`L0350` UAF not detected** through an assign-path index (the hoisted-variable form IS caught). | `semantics/lib.rs:2821` | fix lane dispatched |
 | 4 | MED | **`L0463` skipped + real AST-vs-all divergence**: `a[len([0; n])] = 99` → AST runs and prints 99; ir/bytecode/native/wasm hit `L0501`. Also falsifies the "not reached in practice" comment at `bytecode_vm.rs:1868`. | `semantics_array_extent.rs:618` | fix lane dispatched |
-| 5 | MED-LOW | Type alias never resolved in a **closure parameter** — valid program falsely rejected (`L0327`/`L0301`). `semantics_array_extent.rs:437` descends for exactly this reason; the two passes disagree. | `semantics_aliases.rs:316` | queued behind loader-branch merge |
-| 6 | MED-LOW | Alias resolution reaches a `match` only in `Stmt::Expr` position; as a `let` RHS the same code is rejected `L0303`. | `semantics_aliases.rs:414` | queued behind loader-branch merge |
+| 5 | MED-LOW | Type alias never resolved in a **closure parameter** — valid program falsely rejected (`L0327`/`L0301`). `semantics_array_extent.rs:437` descends for exactly this reason; the two passes disagree. | `semantics_aliases.rs:316` | **fixed** (in review) |
+| 6 | MED-LOW | Alias resolution reaches a `match` only in `Stmt::Expr` position; as a `let` RHS the same code is rejected `L0303`. | `semantics_aliases.rs:414` | **fixed** (in review) |
 
 **Swept clean:** all 13 `Stmt::Asm` operand walkers (no regression of sweep #2), IR-optimizer
 `IrStmt` *variant* coverage (exhaustive, no wildcards), `native_object_confine.rs`
@@ -271,6 +271,32 @@ expected to be wrong — were already correct everywhere. **Axis 3 is where the 
 productive and only partly audited. The generative question that found #1 and #2: *what else
 is assigned or keyed per-file and then merged?* — closure ids were the answer; verify actor
 ids, region ids, generic instantiation ids, and `$mth$` names.
+
+## A recurring, load-bearing pattern: "the class is closed" has been disproved THREE times
+
+Each time by a reviewer *exploiting* the claim rather than reading the code:
+1. The assignment-path class was declared closed; `loader.rs:637` was still open (private
+   cross-module fn executing at `check` exit 0).
+2. The per-module tier attribution was declared to make attribution general; a
+   `(function, span)` key still collided, putting a `to_string` inside a `--freestanding`
+   no-CRT binary.
+3. `L0392` was declared to find references "anywhere an expression can appear"; it never
+   scans `impls`/`consts`/`actors` at all (below).
+**Rule going forward: a completeness claim in a doc or comment must be accompanied by the
+experiment that establishes it, or scoped to exactly what was measured.** The three fixes
+were each correct; only the claims about them were wrong — which is the more dangerous
+failure, because it retires attention from a live hole.
+
+## Queued: `L0392`'s second, orthogonal blind spot (pre-existing, proven exploitable)
+
+Not *which position within a statement* — that is now closed — but **which declaration
+kinds are scanned at all.** `check_visibility` never walks `program.impls`,
+`program.consts` or `program.actors`, and `collect_expr_references` skips
+`ExprKind::Variable`. So a private cross-package **`const`** (read by name, or in another
+`const`'s initializer) and any private cross-package call from a **trait `impl` method
+body** are freely usable and **execute** — `check` exit 0 in all four shapes. Same severity
+shape as the defect just fixed. Repros preserved in the session scratchpad
+(`rev392/{h_const_init,k_impl_method,n_impl_assign_index,r_read_root_const}`).
 
 ## Found in passing by the optimizer review (2026-07-29) — NOT that branch's defect
 
