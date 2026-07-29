@@ -1,0 +1,15 @@
+# L0446: a `naked fn` body may contain only `asm` statements.
+#
+# A `let` binding is stored at an `rbp`-relative displacement, and a naked
+# function never executes `push rbp; mov rbp, rsp` — so `rbp` still holds
+# whatever the bootloader or the interrupted context left in it, and the store
+# would land at an arbitrary address in someone else's stack.
+no-runtime
+
+naked fn writes_a_local
+    let scratch i64 = 7
+    unsafe
+        asm 244
+
+fn main -> i64
+    0

@@ -866,8 +866,10 @@ shared across calls needs `static`, a later increment that pairs naturally with 
   **per-CPU pools** motivation invites an author to write, so it is rejected rather
   than left to corrupt data — separate pools need separate buffers. This section proposed `L0445` for exactly this, and the
   registry confirmed it free. **`L0446`–`L0449` were deliberately avoided** even
-  though unassigned: this document proposes them for other, undelivered sections
-  (`naked fn` §6, `repr`/`align` §7, `panic fn` §8, `section` §9).
+  though unassigned: this document proposes them for other sections
+  (`interrupt`/`naked fn` §6, `repr`/`align` §7, `panic fn` §8, `section` §9).
+  `L0446` has since been **assigned and registered** by §6's delivery (2026-07-28);
+  `L0447`–`L0449` remain reserved for the three still-undelivered sections.
 
 **Overflow: `ud2`, and the §8 seam.** A bump that would leave the buffer **traps
 with `ud2`** — the same instruction and reasoning as the delivered native bounds
@@ -1075,13 +1077,16 @@ escaping values that would be copied are `L0441`-rejected in this tier).
 
 ## 6. Interrupt handlers & naked functions
 
+✅ **DELIVERED (2026-07-28)** — Option A, as recommended below. The as-built record,
+including the four places the design's own text or examples were wrong, is §6.1.
+
 A kernel must declare functions the CPU calls directly on an interrupt/exception —
 these need a **different prologue/epilogue** (save *all* registers, end with `iret`
 not `ret`, and on some vectors consume an error code) — and sometimes a **`naked`**
 function with *no* compiler-generated prologue at all (the author writes the entire
 body in `asm`, e.g. the very first boot entry or a context switch).
 
-**OWNER DECISION NEEDED — ISR declaration form.**
+**OWNER DECISION — ISR declaration form. Decided: Option A.**
 
 | Option | Shape | Trade-offs |
 | :-- | :-- | :-- |
@@ -1089,58 +1094,248 @@ body in `asm`, e.g. the very first boot entry or a context switch).
 | B. An attribute/decorator line above the `fn` | `@interrupt` / `@naked` on the preceding line | Groups with the `repr`/section attributes (§7/§9) if those also use `@`. But `#` is the comment char so an attribute sigil must be chosen (`@`), and a decorator line is a second way to modify a declaration alongside the existing prefix keywords — two mechanisms for one job. |
 | C. Convention-only (a normal `fn` whose ABI is set by how the IDT entry is built) | no language marker; the author writes a `naked`-style trampoline by hand | Zero new surface, but the compiler can't generate the register-save prologue, so *every* ISR is hand-written asm — throwing away the "arena-safe kernel" advantage exactly where interrupts (a huge fraction of kernel code) live. |
 
-**Recommendation: Option A** — `interrupt fn` and `naked fn` prefix keywords,
-matching the delivered `export`/`extern` prefixes.
+**Decision: Option A** — `interrupt fn` and `naked fn` prefix keywords, matching
+the delivered `export`/`extern` prefixes.
 
 ```lby
 no-runtime
 
-struct IntFrame
-    repr c                 # C layout so the CPU-pushed frame matches (see §7)
-    ip   u64
-    cs   u64
-    flags u64
-    sp   u64
-    ss   u64
-
-# A hardware interrupt handler. The compiler emits the ISR prologue (push all GPRs,
-# align stack), runs the body, then the ISR epilogue (restore GPRs, `iret`).
-interrupt fn timer_isr frame ptr<IntFrame>
+# A hardware interrupt handler. The compiler emits the ISR prologue (save every
+# register, realign the stack), runs the body, then the ISR epilogue (restore, then
+# `iretq`).
+interrupt fn timer_isr frame ptr<i64>
     unsafe
         tick()
-        port_out8(0x20, 0x20b)          # EOI to the PIC
-    # no `ret`/`iret` written by hand — the epilogue supplies `iret`
+        port_out8(0x20u16, 0x20u8)      # EOI to the PIC
+    # no `ret`/`iret` written by hand — the epilogue supplies `iretq`
 
-# An exception that carries a CPU error code (a distinct convention).
-interrupt fn page_fault frame ptr<IntFrame>, error_code u64
+# An exception that carries a CPU error code (a distinct convention). Parameters
+# are space-separated; a comma would group two names under ONE type.
+interrupt fn page_fault frame ptr<i64> error_code u64
     unsafe
-        handle_fault(read_cr(2), error_code)   # CR2 = faulting address
+        handle_fault(to_i64(error_code))
 
 # A naked function: NO compiler prologue/epilogue; the whole body is asm.
-naked fn _boot
+naked fn boot_entry
     unsafe
-        asm "mov rsp, {stack_top}"
-            in stack_top = ptr_to_int(addr_of(boot_stack_top))
-        asm "call kmain"
-        asm "hlt"
+        asm 250, 244          # cli; hlt
 ```
 
 - **`interrupt fn`** — the compiler generates the platform ISR calling convention:
   save/restore the full register set, correct stack alignment, and terminate with
-  `iret` (x86-64) instead of `ret`. The handler receives a pointer to the CPU-pushed
-  interrupt frame (a `repr c` struct the author defines, §7); a second `error_code`
-  parameter selects the error-code-pushing vector convention. Body is ordinary
+  `iretq` (x86-64) instead of `ret`. The handler receives a pointer to the CPU-pushed
+  interrupt frame; a second `error_code u64` parameter selects the
+  error-code-pushing vector convention. Body is ordinary
   Lullaby (it can be *entirely safe* arena/value code — only the device pokes are
   `unsafe`), which is the arena-safe-ISR advantage.
 - **`naked fn`** — the compiler emits **no** prologue/epilogue and no implicit
-  `ret`. The body must be `asm`/`asm_bytes` only (referencing Lullaby locals is
+  `ret`. The body must be `asm` only (referencing Lullaby locals is
   unavailable because there is no frame); a `naked fn` with non-`asm` statements is
-  proposed **`L0446`**. Used for the earliest boot entry, context switches, and
+  **`L0446`**. Used for the earliest boot entry, context switches, and
   trampolines.
 - Both are `no-runtime`-tier constructs; using them in a non-`no-runtime` module is
   `L0441`. Native lowering adds two prologue/epilogue variants to the emitter; on the
   interpreters an `interrupt fn` body runs as an ordinary function (its ABI is a
   native-only concern) and a `naked fn` (asm-only) is native-only like any `asm`.
+
+### 6.1 As-built record (2026-07-28)
+
+The surface is exactly Option A. What follows is what the implementation had to
+decide that the text above did not, and the four places the text above was wrong.
+
+**Where the design was silent, and what was chosen.**
+
+- **Modifier exclusivity.** `interrupt` and `naked` are *function kinds*, not
+  visibility/ABI adjectives, so each is exclusive with the other **and with every
+  delivered modifier** — `pub`, `async`, `extern`, `export` — as parser `L0201`,
+  alongside the existing `export`/`extern`/`async` pairwise rules. The reasoning is
+  uniform: `pub` and `export` advertise a function as *callable* (it is not, see
+  below); `async` needs the runtime this tier removes; `extern` is a body-less
+  import rather than a definition. Each rejection has a test.
+- **Neither kind is callable from Lullaby (`L0446`).** §6 says the CPU enters an
+  ISR, but does not say what happens if a Lullaby `call` reaches one. It must be
+  refused: an `interrupt fn` ends in `iretq`, which pops **three** words as
+  `rip`/`cs`/`rflags` — the return address the `call` pushed, plus two words of the
+  caller's own frame — so execution resumes at whatever integer sat in the caller's
+  locals. There is no diagnosable runtime failure, only a wild jump, so it is a
+  compile error. (This is also *why* `pub`/`export` are excluded.)
+
+  **The rule is about the function VALUE, not the call syntax** — and getting that
+  wrong is the one real defect this section's implementation shipped and had to
+  fix. The first version guarded only the *direct named call*, which left an alias
+  route straight around it: a bare `interrupt fn` name also resolves to a
+  first-class `fn(...)` value, so
+
+  ```lby
+  let f fn(ptr<i64>) -> void = timer_isr
+  f(addr_of(cell))
+  ```
+
+  type-checked cleanly and **ran the ISR body**, returning 7 on all three
+  interpreters; `apply(timer_isr, p)` did the same through a higher-order
+  parameter. Native declined, but only because a fn-typed local that is not a
+  closure literal or a factory call is outside its subset — an accident, not a
+  guarantee, and one that would stop protecting anything the moment native gains
+  first-class function values, at which point this becomes a real `call` into a
+  body ending in `iretq`. Refusing to *produce the value* closes every sink at
+  once (a local, a higher-order argument, a returned callable, a stored one)
+  rather than enumerating call shapes. Both routes now funnel through one helper,
+  `semantics_isr::entry_misuse_diagnostic`, so they cannot drift apart in wording
+  or — the thing that actually went wrong — in coverage.
+- **Neither kind is generic (`L0446`).** A generic function is monomorphized per
+  instantiation; a hardware entry point is named once, by an IDT entry or a
+  bootloader, and there is no call site to infer a type argument from.
+- **An `interrupt fn` must declare its frame parameter.** §6 shows one but does not
+  say it is mandatory. It is: a zero-parameter ISR would compute the frame address
+  in the prologue and discard it, which is a declaration that silently means less
+  than it looks like.
+- **A `naked fn` takes no parameters and returns `void`.** Neither can be honored
+  without a frame. §6 states this for locals; it follows identically for both.
+
+**Four corrections to §6's own text.**
+
+1. **`iretq`, not `iret`.** In long mode the return must carry `REX.W` (`48 CF`).
+   The un-prefixed `CF` is `iretd` and pops 32-bit values, corrupting the resumed
+   context. §6 says "`iret`" throughout; the emitter emits `iretq`.
+2. **Parameters are space-separated.** §6's `interrupt fn page_fault frame
+   ptr<IntFrame>, error_code u64` is not valid Lullaby: a comma in a parameter list
+   *groups names under one type* (`fn f x, y i64`), so that line is a parse error
+   (`L0204`). The spelling is `frame ptr<i64> error_code u64`.
+3. **A `naked fn`'s `asm` may bind no operands or clobbers (`L0446`).** §6's own
+   prose gives the reason — "referencing Lullaby locals is unavailable because
+   there is no frame" — but its example does exactly that (`in stack_top = …`).
+   Operand marshalling stages inputs, and saves clobbered callee-saved registers,
+   in **`rbp`-relative frame slots** (`native_object_asm.rs`); with no frame, `rbp`
+   still belongs to the bootloader or the interrupted context, so the staging store
+   would corrupt someone else's stack. Silently ignoring a `clobber` would be worse
+   than refusing it: the author would believe a register was preserved when it was
+   not. The example above is corrected to the raw-byte form.
+4. **The example's `asm "mov rsp, {stack_top}"` string-template form does not
+   exist.** §3's template surface is undelivered; the delivered `asm` takes raw
+   bytes (`asm 250, 244`) plus optional operand/clobber clauses. The examples here
+   now use the delivered form.
+
+**The ISR prologue/epilogue as emitted** (x86-64;
+`crates/lullaby_ir/src/native_object_isr.rs`):
+
+```text
+push rax … push r15          ; 14 GPRs — everything but rsp (iretq restores it)
+sub  rsp, 256                ;                       and rbp (pushed by the link)
+movups [rsp + 16*i], xmm(i)  ; i = 0..15
+push rbp ; mov rbp, rsp ; sub rsp, frame_size
+and  rsp, -16                ; force ABI alignment
+cld                          ; DF = 0
+lea  <frame>,      [rbp + 376 (+8 on an error-code vector)]
+mov  <error_code>, [rbp + 376]        ; error-code vectors only
+… body …
+mov rsp, rbp ; pop rbp
+movups xmm(i), [rsp + 16*i] ; add rsp, 256
+pop r15 … pop rax
+add rsp, 8                   ; discard the error code — error-code vectors only
+iretq
+```
+
+Three pieces are not obvious and each is load-bearing:
+
+- **All 16 XMM registers are saved**, not just the ones an `f64` body would touch.
+  The emitter uses SSE for the integer reduction/vectorization paths
+  (`native_object_simd.rs`, `native_object_reduce.rs`) too, so even an all-integer
+  ISR body — or anything it calls — can clobber them. Saving only the used set is a
+  post-1.0 refinement; saving all of them is correct regardless of the body.
+  `movups` (unaligned) because the save area inherits the interrupted context's
+  `rsp` alignment.
+- **`and rsp, -16`.** An ordinary function gets 16-byte alignment at a `call` for
+  free (entry `rsp ≡ 8`, `push rbp` makes it 0, `frame_size` is a multiple of 16).
+  An ISR's entry alignment depends on whether the vector pushed an error code — 5
+  CPU-pushed words for most vectors, 6 for the error-code ones — so it differs *by
+  variant*. Forcing it is variant-independent and provably safe: `and` only lowers
+  `rsp`, and every local is `rbp`-relative. It is also why the epilogue restores
+  with `mov rsp, rbp` rather than `add rsp, frame_size`.
+- **`cld`.** The shared aggregate-copy helpers use `rep movsb`, which reads DF.
+  Both ABIs require DF = 0 at a *call* boundary, but an interrupt is not a call
+  boundary — it can land inside a `std`/`cld` window. `iretq` restores the
+  interrupted `RFLAGS`, so clearing DF here cannot leak.
+
+**Two invariants made explicit — as defence-in-depth over a currently-closed
+path, not as live protection.** State the scope precisely, because an earlier
+revision of this section claimed "both were reachable" and that was wrong.
+**Neither invariant can be violated from Lullaby source today.** They are guarded
+anyway, so that each stops depending on an *unrelated* rule that could change
+without anyone thinking about interrupt handlers:
+
+1. **No register promotion.** `NativeCtx::plan` is told the function kind and
+   refuses to promote any local for an ISR. Promotion spills `rbx`/`rsi` in the
+   *ordinary* prologue and restores them in the *ordinary* epilogue — neither of
+   which an ISR runs — so a promoted ISR would hand the interrupted context a
+   callee-saved register holding a Lullaby local. *Why it is unreachable today:*
+   `plan_register_promotion` (`native_object_regalloc.rs`) returns nothing unless
+   the return type is `i64` and every parameter is `i64`, while `L0446` requires
+   an `interrupt fn` to return `void` and take a `ptr<T>` — so no source-level ISR
+   is a promotion candidate at all. `lower_native_function` additionally refuses
+   (demoting the function) if a promoted plan ever arrives; that check likewise
+   cannot fire today and is kept because the guarantee it relies on lives in
+   another file.
+2. **No arena prologue.** The arena-first path saves and restores the *global* heap
+   bump pointer `__lullaby_heap_next`. An interrupt can arrive while a completely
+   different function is mid-region, so an ISR that rewound that pointer would
+   reclaim memory the interrupted function still owns. *Why it is unreachable
+   today:* the arena set only ever admits heap-using functions, and a `no-runtime`
+   module — the only tier in which these keywords are legal — allocates nothing.
+   Both kinds are dropped from the arena-eligible set in the program driver, and
+   `lower_native_function` re-checks rather than trusting it.
+
+Because neither is reachable, a test written over ordinary Lullaby source cannot
+fail no matter what the guards do — and the first revision of these tests was
+exactly that, vacuous. Both are now pinned by reaching **past** the frontend to
+build the shape the frontend cannot produce (an `i64`-returning, `i64`-parameter
+function with a hot loop; a function lowered with `is_arena` set) and lowering it
+*both* ways, with the ordinary arm as a control proving the shape is genuinely
+affected. Reverting either guard fails its test; leaving the control out would
+have made them assertions about the body rather than about the guard.
+
+**Backend coverage.** Native x86-64 only, by construction. The WASM and AArch64
+backends **skip** both kinds with an explicit reason rather than emitting them as
+ordinary functions — WASM has neither a register file nor an interrupt vector, and
+AArch64 takes exceptions through a vector table with `eret` over a different
+register file (§12.8: x86-64 leads, AArch64 freestanding follows). On the three
+interpreters the declarations are accepted and the rest of the module runs
+normally; because neither kind is callable, that acceptance is the entire
+observable content of "an `interrupt fn` body runs as an ordinary function".
+
+**What could not be executed, and why.** Neither kind can be *entered* in a hosted
+test process: installing an IDT entry is a ring-0 operation, and calling either
+from Lullaby is `L0446`. The convention is therefore pinned **byte-exactly**
+(`crates/lullaby_ir/src/native_object_isr_tests.rs`) rather than by an exit code —
+the same split as port I/O (§4), whose `in`/`out` fault at CPL 3. What *is*
+executed: `tests/fixtures/valid/no_runtime/freestanding_interrupt_naked.lby` runs
+on all three interpreters and, compiled with `lullaby native --freestanding`, as a
+real direct-PE exe — all four returning **21** — proving the two kinds compile into
+the image (they are asserted not to appear in the skip list) without disturbing the
+rest of the module.
+
+**One thing §10.1 asked for that was deliberately not done.** §10.1 says
+"`formal_grammar.md` gains the new productions". It did not: that document
+deliberately covers a narrow core subset whose `function_decl` carries **no**
+prefix modifiers at all — not `pub`, not `export`, not `extern`, none of the
+delivered ones — so adding `interrupt`/`naked` alone would make it describe a
+grammar that exists nowhere. The surface is documented in
+[language_surface.md](language_surface.md) instead, where the other modifiers are.
+Widening `formal_grammar.md` to the full declaration grammar is its own change.
+
+**Tests.** `crates/lullaby_ir/src/native_object_isr_tests.rs` (13 codegen pins),
+`crates/lullaby_cli/tests/cli/suite28.rs` (14 end-to-end: the `L0441` tier gate,
+every `L0446` constraint, the not-callable rule in **both** its forms, `L0201`
+exclusivity, four-tier acceptance, and the formatter round-trip), one valid
+fixture and **15** invalid fixtures under `tests/fixtures/` — 13 in
+`invalid/no_runtime/` plus the two `*_outside_no_runtime.lby` at the level above
+(they carry no `no-runtime` directive, which is the point of them).
+
+**Still undelivered in this section:** nothing for `interrupt`/`naked`. The
+sibling prefix keywords §6 mentions in passing — `entry fn` (§9.1) and `panic fn`
+(§8) — remain **open owner decisions in their own sections** and are deliberately
+not implemented here; `L0447`/`L0448` stay reserved for them. Post-1.0 refinements
+for this section: saving only the XMM registers a given ISR body actually touches,
+and an AArch64 exception-entry convention.
 
 ---
 
@@ -1478,9 +1673,13 @@ increment.**
 7. **MMIO / port I/O / privileged intrinsics.** `port_*`, `read_cr`/`write_cr`/
    `read_msr`/`write_msr`/`cli`/`sti`/`hlt`/`invlpg`; `L0444` on the interpreters and
    on AArch64 for port I/O. Native lowering + structural encoding tests.
-8. **ISR / naked functions.** `interrupt fn` (prologue/epilogue + `iret`, error-code
-   variant) and `naked fn` (`L0446`); native-only lowering; interpreter runs
-   `interrupt fn` bodies as ordinary functions.
+8. **ISR / naked functions.** ✅ **DELIVERED (2026-07-28)** — `interrupt fn`
+   (save-all prologue/epilogue + `iretq`, error-code variant) and `naked fn`
+   (`L0446`); native x86-64-only lowering, skipped with an explicit reason on WASM
+   and AArch64; the interpreters accept the declarations and run the rest of the
+   module unchanged (an `interrupt fn` body is *not* reachable on them, because
+   neither kind is callable — `L0446`). See §6.1 for the as-built record, including
+   the two invariants made explicit and four corrections to §6's own text.
 9. **Freestanding output control.** `entry fn`/`--entry`, `section "…"` (`L0449`),
    the direct-ELF-executable writer, the flat-binary writer, `--format elf-exec|flat`,
    `--load-addr`. Structural writer tests (parse the image back), and — where a runner
@@ -1870,6 +2069,12 @@ port I/O as real `in`/`out`. The privileged set (`read_cr`/`write_cr`,
 `read_msr`/`write_msr`, `halt`/`cli`/`sti`, `invlpg`) is the remainder of §4 and
 is best done *after* the `asm` template (§3), which most of it would lower
 through anyway.
+
+Of the ordered list that follows, (1) **static-buffer arenas** (§5) landed
+2026-07-16 and (3) **interrupt/naked functions** (§6) landed 2026-07-28, leaving
+(2) the **panic fn** (§8) and (4) **direct-ELF/flat-binary output** (§9.3) as the
+open ones. Both are still owner decisions in their own sections. The original
+ordering, kept for its reasoning:
 
 The highest-value next increments are, in order: (1) **static-buffer arenas**
 (§5) — the biggest remaining one, and the feature that makes "most of a kernel

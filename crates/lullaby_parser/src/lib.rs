@@ -3,6 +3,7 @@ use lullaby_lexer::{Diagnostic, Keyword, Span, Token, TokenKind};
 pub mod asm_register;
 mod ast;
 mod expr_parser;
+mod fn_modifiers;
 mod format;
 mod number_literal;
 mod origins;
@@ -15,6 +16,7 @@ pub use origins::{
 };
 
 use expr_parser::ExprParser;
+use fn_modifiers::FnModifiers;
 use number_literal::normalize_number_literal;
 
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
@@ -128,65 +130,34 @@ impl<'a> Parser<'a> {
         }
 
         while !self.at(TokenKindRef::Eof) {
-            // An optional `pub` modifier prefixes an exported top-level
-            // declaration. It only applies to `fn`/`struct`/`enum`/`alias`.
-            let is_public = self.eat_keyword(Keyword::Pub).is_some();
-            // An optional `async` modifier prefixes a `fn` declaration. `async`
-            // only applies to functions; `async fn` and `pub async fn` are both
-            // valid, but `async` before anything other than `fn` is an error.
-            let is_async = self.eat_keyword(Keyword::Async).is_some();
-            // An optional `extern` modifier prefixes a body-less `fn` declaration
-            // of a C-ABI function imported at link time. `extern` only applies to
-            // functions and is mutually exclusive with `async`.
-            let is_extern = self.eat_keyword(Keyword::Extern).is_some();
-            // An optional `export` modifier prefixes a normal (bodied) `fn`
-            // declaration and exposes it under its plain C name as an externally
-            // visible native symbol so C can call into it. `export` only applies
-            // to functions and is mutually exclusive with `extern` (which imports
-            // a body-less C symbol) and `async`.
-            let is_export = self.eat_keyword(Keyword::Export).is_some();
-            if is_extern && is_async {
-                let token = self.peek();
-                self.error(
-                    "L0201",
-                    "`extern` and `async` cannot be combined on a `fn` declaration",
-                    token.span,
-                );
-            }
-            if is_export && is_extern {
-                let token = self.peek();
-                self.error(
-                    "L0201",
-                    "`export` and `extern` cannot be combined on a `fn` declaration",
-                    token.span,
-                );
-            }
-            if is_export && is_async {
-                let token = self.peek();
-                self.error(
-                    "L0201",
-                    "`export` and `async` cannot be combined on a `fn` declaration",
-                    token.span,
-                );
+            // The prefix keywords that may precede this declaration, gathered in
+            // source order, plus every `L0201` pairing rejection between them. The
+            // matrix and its reasoning live in `fn_modifiers.rs`.
+            let modifiers = FnModifiers {
+                is_public: self.eat_keyword(Keyword::Pub).is_some(),
+                is_async: self.eat_keyword(Keyword::Async).is_some(),
+                is_extern: self.eat_keyword(Keyword::Extern).is_some(),
+                is_export: self.eat_keyword(Keyword::Export).is_some(),
+                is_interrupt: self.eat_keyword(Keyword::Interrupt).is_some(),
+                is_naked: self.eat_keyword(Keyword::Naked).is_some(),
+            };
+            let is_public = modifiers.is_public;
+            let is_extern = modifiers.is_extern;
+            for conflict in modifiers.conflicts(self.peek().span) {
+                self.error("L0201", conflict.message, conflict.span);
             }
             if self.eat_keyword(Keyword::Fn).is_some() {
                 let function = if is_extern {
                     self.parse_extern_function(is_public)
                 } else {
-                    self.parse_function(is_public, is_async, is_export)
+                    self.parse_function(modifiers)
                 };
                 if let Some(function) = function {
                     functions.push(function);
                 }
-            } else if is_async || is_extern || is_export {
+            } else if modifiers.requires_fn() {
                 let token = self.peek();
-                let modifier = if is_extern {
-                    "extern"
-                } else if is_export {
-                    "export"
-                } else {
-                    "async"
-                };
+                let modifier = modifiers.offending_modifier();
                 self.error(
                     "L0201",
                     format!("`{modifier}` must prefix a `fn` declaration"),
@@ -629,6 +600,8 @@ impl<'a> Parser<'a> {
             is_async: false,
             is_extern: false,
             is_export: false,
+            is_interrupt: false,
+            is_naked: false,
             module: None,
         })
     }
@@ -748,12 +721,7 @@ impl<'a> Parser<'a> {
         Some(params)
     }
 
-    fn parse_function(
-        &mut self,
-        is_public: bool,
-        is_async: bool,
-        is_export: bool,
-    ) -> Option<Function> {
+    fn parse_function(&mut self, modifiers: FnModifiers) -> Option<Function> {
         let fn_span = self.previous().span;
         let name = self.expect_identifier("expected function name after `fn`")?;
         let type_params = self.parse_type_params(fn_span)?;
@@ -779,10 +747,12 @@ impl<'a> Parser<'a> {
             return_type,
             body,
             span: fn_span,
-            is_public,
-            is_async,
+            is_public: modifiers.is_public,
+            is_async: modifiers.is_async,
             is_extern: false,
-            is_export,
+            is_export: modifiers.is_export,
+            is_interrupt: modifiers.is_interrupt,
+            is_naked: modifiers.is_naked,
             // A single parsed file was merged from nothing; only the module
             // loader stamps an origin.
             module: None,
@@ -819,6 +789,8 @@ impl<'a> Parser<'a> {
             is_async: false,
             is_extern: true,
             is_export: false,
+            is_interrupt: false,
+            is_naked: false,
             module: None,
         })
     }

@@ -1022,6 +1022,8 @@ fn bytecode_artifact_rejects_parameterized_entrypoint() {
         extern_functions: Vec::new(),
         extern_signatures: Vec::new(),
         export_functions: Vec::new(),
+        interrupt_functions: Vec::new(),
+        naked_functions: Vec::new(),
         closures: Vec::new(),
         functions: vec![BytecodeFunction {
             name: "main".to_string(),
@@ -1060,6 +1062,8 @@ fn bytecode_artifact_rejects_break_outside_loop_instruction() {
         extern_functions: Vec::new(),
         extern_signatures: Vec::new(),
         export_functions: Vec::new(),
+        interrupt_functions: Vec::new(),
+        naked_functions: Vec::new(),
         closures: Vec::new(),
         functions: vec![BytecodeFunction {
             name: "main".to_string(),

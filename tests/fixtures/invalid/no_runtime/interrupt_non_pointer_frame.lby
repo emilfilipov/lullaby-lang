@@ -1,0 +1,15 @@
+# L0446: an `interrupt fn`'s first parameter must be a raw pointer `ptr<T>`.
+#
+# The parameter addresses the CPU-pushed frame IN PLACE — the prologue computes
+# `lea <param>, [rbp + <saved-register-bytes>]`, an address into the interrupted
+# context's stack. Declaring it `i64` would type that address as an integer, so a
+# handler reading `frame` would get a number it cannot dereference, and the whole
+# point of the parameter (walking the frame) would be unavailable.
+no-runtime
+
+interrupt fn bad_frame frame i64
+    unsafe
+        asm 144
+
+fn main -> i64
+    0

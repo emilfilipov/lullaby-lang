@@ -1,0 +1,25 @@
+# L0446: an `interrupt fn` cannot be used as a first-class function VALUE.
+#
+# This is the alias route around the not-callable rule, and it is the sharper of
+# the two forms. Guarding only the direct `timer_isr(p)` call left this open: the
+# bare name typed as `fn(ptr<i64>) -> void`, bound to a local, and invoked through
+# that local — which type-checked and **ran the ISR body**, returning 7 on all
+# three interpreters, while the native backend happened to decline for a wholly
+# unrelated reason (a fn-typed local that is not a closure literal or a factory
+# call is outside the native subset).
+#
+# So the rule has to be about the VALUE, not the call syntax: a `fn(...)` value
+# exists to be invoked, and every consumer of one reaches it through the ordinary
+# call ABI — which is exactly what `iretq` does not honor.
+no-runtime
+
+interrupt fn timer_isr frame ptr<i64>
+    unsafe
+        ptr_write(frame, 7)
+
+fn main -> i64
+    let cell i64 = 0
+    let f fn(ptr<i64>) -> void = timer_isr
+    unsafe
+        f(addr_of(cell))
+    cell

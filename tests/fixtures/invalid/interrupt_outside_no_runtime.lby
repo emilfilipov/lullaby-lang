@@ -1,0 +1,14 @@
+# L0441: `interrupt fn` / `naked fn` are freestanding-tier constructs.
+#
+# This module has no `no-runtime` directive, so it is compiled in the SAFE tier,
+# which has a runtime: a host allocator, reference counting, an actor scheduler.
+# A hardware entry point is meaningless there — the CPU's IDT does not vector into
+# a hosted process, and the handler would run with none of the tier's invariants
+# (it can interrupt the allocator mid-update, it cannot allocate, and it must not
+# be entered by a `call`). §6 makes both kinds `L0441` outside the tier.
+interrupt fn timer_isr frame ptr<i64>
+    unsafe
+        ptr_write(frame, 1)
+
+fn main -> i64
+    0

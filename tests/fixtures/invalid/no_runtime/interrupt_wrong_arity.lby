@@ -1,0 +1,15 @@
+# L0446: an `interrupt fn` takes one or two parameters, not three.
+#
+# The CPU passes an ISR nothing in registers. The emitter materializes exactly
+# two things from the stack: the address of the CPU-pushed interrupt frame, and —
+# on the vectors that push one — the error code below it. A third parameter names
+# a value that does not exist, and there is no register or stack word to seat it
+# from.
+no-runtime
+
+interrupt fn too_many frame ptr<i64> error_code u64 extra i64
+    unsafe
+        ptr_write(frame, to_i64(error_code) + extra)
+
+fn main -> i64
+    0

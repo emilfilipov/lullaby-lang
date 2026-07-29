@@ -1,0 +1,14 @@
+# L0446: a `naked fn` takes no parameters.
+#
+# There is no prologue, so there is no frame: nothing seats an incoming argument
+# register into a slot, and no slot exists to seat it into. A parameter here
+# would be a name the body could never resolve — and the body is `asm` only, so
+# it could not refer to it in the first place.
+no-runtime
+
+naked fn takes_an_argument value i64
+    unsafe
+        asm 244
+
+fn main -> i64
+    0

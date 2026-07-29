@@ -95,6 +95,27 @@ pub struct IrModule {
     /// Serde-defaulted so existing artifacts and snapshots stay valid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub export_functions: Vec<String>,
+    /// The `interrupt fn` hardware interrupt-service routines
+    /// (`documents/freestanding_tier_design.md` §6), each with whether its vector
+    /// pushes an error code. The native backend gives these the ISR calling
+    /// convention (save the full register set, realign, `iretq`) instead of the
+    /// ordinary call ABI. Purely a native-codegen concern: the interpreters treat
+    /// the body as an ordinary function body, which is unobservable because an
+    /// `interrupt fn` can be reached by no route — neither a direct call nor a
+    /// first-class `fn(...)` value is admitted (`L0446`, both enforced through
+    /// `semantics_isr::entry_misuse_diagnostic`; the value route is *not*
+    /// redundant — while it was open, the ISR body genuinely ran on all three
+    /// interpreters). Serde-defaulted so existing artifacts and snapshots stay
+    /// valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupt_functions: Vec<IrInterruptFunction>,
+    /// Names of `naked fn` functions — no compiler-generated prologue, epilogue,
+    /// or `ret`; the body's inline `asm` is emitted verbatim and nothing else.
+    /// Native-only (a `naked fn` body is `asm`, which every interpreter rejects
+    /// with `L0425`), and likewise never called. Serde-defaulted so existing
+    /// artifacts and snapshots stay valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub naked_functions: Vec<String>,
     /// Lowered closure bodies, keyed by the parse-order `id` an
     /// [`IrExprKind::Closure`] node carries. Each entry pairs the closure's
     /// parameter names with its lowered single-expression body, so the
@@ -233,6 +254,24 @@ pub struct IrExternSignature {
     pub name: String,
     pub params: Vec<TypeRef>,
     pub return_type: TypeRef,
+}
+
+/// An `interrupt fn` hardware interrupt-service routine
+/// (`documents/freestanding_tier_design.md` §6), carried alongside the lowered
+/// function so the native backend can select its calling convention.
+///
+/// `has_error_code` distinguishes the two x86-64 ISR conventions and is the one
+/// piece of information the emitter cannot recover from the body: on the vectors
+/// that push an error code (`#DF`, `#TS`, `#NP`, `#SS`, `#GP`, `#PF`, `#AC`,
+/// `#SX`) the CPU pushes one extra word *below* the interrupt frame, which shifts
+/// the frame pointer by 8 bytes and must be discarded before `iretq`. It is `true`
+/// exactly when the declaration carries the second `error_code u64` parameter,
+/// which is how §6 selects the convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrInterruptFunction {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_error_code: bool,
 }
 
 /// A resolved architectural register for inline-`asm` operand marshalling. The
@@ -1483,6 +1522,16 @@ pub struct BytecodeModule {
     /// Serde-defaulted for compatibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub export_functions: Vec<String>,
+    /// The `interrupt fn` ISRs, carried through so the native backend emits the
+    /// ISR prologue/epilogue and `iretq` for each. Serde-defaulted for
+    /// compatibility. Mirrors [`IrModule::interrupt_functions`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupt_functions: Vec<IrInterruptFunction>,
+    /// Names of `naked fn` functions, carried through so the native backend emits
+    /// their `asm` body with no prologue, epilogue, or `ret`. Serde-defaulted for
+    /// compatibility. Mirrors [`IrModule::naked_functions`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub naked_functions: Vec<String>,
     /// Lowered closure bodies, keyed by the parse-order id a
     /// [`BytecodeExprKind::Closure`] node carries. Round-tripped through the IR so
     /// the VM (which runs on the IR interpreter) can invoke a closure value.
@@ -2225,6 +2274,8 @@ pub fn lower_to_bytecode(module: &IrModule) -> BytecodeModule {
         extern_functions: module.extern_functions.clone(),
         extern_signatures: module.extern_signatures.clone(),
         export_functions: module.export_functions.clone(),
+        interrupt_functions: module.interrupt_functions.clone(),
+        naked_functions: module.naked_functions.clone(),
         closures: module
             .closures
             .iter()
@@ -2271,6 +2322,8 @@ pub fn run_bytecode_main_with_args(
         extern_functions: module.extern_functions.clone(),
         extern_signatures: module.extern_signatures.clone(),
         export_functions: module.export_functions.clone(),
+        interrupt_functions: module.interrupt_functions.clone(),
+        naked_functions: module.naked_functions.clone(),
         closures: module
             .closures
             .iter()

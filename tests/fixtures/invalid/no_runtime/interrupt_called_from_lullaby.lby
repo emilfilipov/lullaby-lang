@@ -1,0 +1,22 @@
+# L0446: an `interrupt fn` cannot be CALLED.
+#
+# The failure this prevents has no runtime diagnostic — only a wild jump. A
+# `call timer_isr` pushes a return address and enters the ISR, whose epilogue
+# ends in `iretq`. `iretq` pops THREE words as `rip`/`cs`/`rflags`: the return
+# address the `call` pushed, plus two words of the caller's own frame. Execution
+# resumes at whatever integer happened to sit in the caller's locals, with the
+# next one loaded into `cs`.
+#
+# This is why neither `interrupt` nor `naked` may also carry `pub` or `export`
+# (parser `L0201`): both of those advertise a function as callable.
+no-runtime
+
+interrupt fn timer_isr frame ptr<i64>
+    unsafe
+        ptr_write(frame, 1)
+
+fn main -> i64
+    let cell i64 = 0
+    unsafe
+        timer_isr(addr_of(cell))
+    cell

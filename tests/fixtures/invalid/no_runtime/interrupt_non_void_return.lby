@@ -1,0 +1,15 @@
+# L0446: an `interrupt fn` must return `void`.
+#
+# Its return instruction is `iretq`, which pops `rip`/`cs`/`rflags` (and
+# `rsp`/`ss`) and RESUMES the interrupted code. There is no caller waiting on a
+# register, so a declared result would be computed into `rax` and then discarded
+# by the epilogue's register restore — a value the author wrote that provably
+# nothing can ever read.
+no-runtime
+
+interrupt fn returns_something frame ptr<i64> -> i64
+    unsafe
+        ptr_read(frame)
+
+fn main -> i64
+    0

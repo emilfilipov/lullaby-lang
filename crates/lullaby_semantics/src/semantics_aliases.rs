@@ -70,6 +70,8 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
             is_async: function.is_async,
             is_extern: function.is_extern,
             is_export: function.is_export,
+            is_interrupt: function.is_interrupt,
+            is_naked: function.is_naked,
             // Alias resolution rewrites type spellings only; it never moves a
             // declaration between files, so its origin carries over.
             module: function.module.clone(),
@@ -185,6 +187,8 @@ pub(crate) fn resolve_program_aliases(program: &Program) -> (Program, Vec<Semant
                             is_async: function.is_async,
                             is_extern: function.is_extern,
                             is_export: function.is_export,
+                            is_interrupt: function.is_interrupt,
+                            is_naked: function.is_naked,
                             module: function.module.clone(),
                         })
                         .collect(),

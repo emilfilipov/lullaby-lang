@@ -1,0 +1,15 @@
+# L0446: an `interrupt fn`'s second parameter must be declared `u64`.
+#
+# It is the CPU-pushed error code — a raw 64-bit unsigned stack word whose bits
+# are a bitfield (external/IDT/table-index selectors on `#GP`, present/write/user
+# flags on `#PF`). Declaring it `i64` would type those bits as signed, so a code
+# with the top bit set would compare as negative; Lullaby has no implicit integer
+# coercion, so the width and signedness are stated rather than inferred.
+no-runtime
+
+interrupt fn bad_code frame ptr<i64> error_code i64
+    unsafe
+        ptr_write(frame, error_code)
+
+fn main -> i64
+    0

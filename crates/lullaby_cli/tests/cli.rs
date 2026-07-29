@@ -1632,6 +1632,15 @@ mod suite26;
 #[path = "cli/suite27.rs"]
 mod suite27;
 
+// The freestanding tier's hardware entry points (`interrupt fn` / `naked fn`,
+// §6 of `documents/freestanding_tier_design.md`): the `L0441` tier gate, every
+// `L0446` signature/body constraint, the not-callable rule, `L0201` modifier
+// exclusivity, four-tier acceptance of the valid fixture, and the formatter
+// round-trip. The emitted ISR prologue/epilogue bytes are pinned in
+// `crates/lullaby_ir/src/native_object_isr_tests.rs`.
+#[path = "cli/suite28.rs"]
+mod suite28;
+
 /// Whether `ucrt.lib` (the C runtime import library, providing `llabs`) is
 /// reachable via the `LIB` environment variable, like `kernel32_available`.
 pub(crate) fn ucrt_available() -> bool {

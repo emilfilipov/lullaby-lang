@@ -1494,6 +1494,15 @@ mod native_object_portio_tests;
 #[path = "native_object_asm_tests.rs"]
 mod native_object_asm_tests;
 
+// The two hardware-entry calling conventions (`interrupt fn` / `naked fn`, §6 of
+// `documents/freestanding_tier_design.md`). Own file for the size-cap reason.
+// These assert the emitted BYTES because neither convention can be executed in a
+// hosted process — an ISR is entered by the CPU from an IDT entry (ring 0), and a
+// naked function's control flow is whatever its `asm` writes.
+#[cfg(test)]
+#[path = "native_object_isr_tests.rs"]
+mod native_object_isr_tests;
+
 // The interim heap-box builtins (`alloc`/`dealloc`): the one-cell lowering, the
 // clean skips (including `dealloc`'s deliberate one), the `alloc`-box pointer
 // identity/arithmetic gate, and the arena exclusion. Own file for the size-cap

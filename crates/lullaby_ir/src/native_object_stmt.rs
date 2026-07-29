@@ -49,7 +49,14 @@ pub(crate) fn lower_native_function(
     is_arena: bool,
     closure_layouts: &HashMap<usize, ClosureLayout>,
     hof_index: &HashMap<String, Vec<HofParam>>,
+    fn_kind: NativeFnKind,
 ) -> Result<LoweredNativeFunction, String> {
+    // The two hardware-entry conventions the frame planner does not model: a
+    // `naked fn` is emitted entirely here and returns, and an ISR handed the
+    // arena path is demoted. See `native_object_isr.rs`.
+    if let Some(lowered) = hardware_entry_preflight(function, fn_kind, is_arena)? {
+        return Ok(lowered);
+    }
     // Give any binding that shadows an enclosing same-named binding its own slot by
     // alpha-renaming it apart, before the flat-map frame planner keys locals by
     // name. A function without cross-scope shadowing is returned unchanged, so its
@@ -68,21 +75,16 @@ pub(crate) fn lower_native_function(
         is_arena,
         closure_layouts,
         hof_index,
+        fn_kind,
     )?;
     ctx.fast_math = fast_math;
     let mut code = Vec::new();
 
-    // Prologue: push rbp; mov rbp, rsp; sub rsp, frame_size.
-    code.extend_from_slice(&[0x55, 0x48, 0x89, 0xE5]);
-    emit_sub_rsp(&mut code, ctx.frame_size);
-
-    // Preserve the callee-saved registers used to hold promoted locals, spilling
-    // each caller value into its reserved frame slot (restored in the epilogue).
-    // Done before parameters are seated so a promoted parameter can overwrite its
-    // register next.
-    for (reg, slot) in &ctx.saved_reg_slots {
-        reg.spill_to_slot(&mut code, *slot);
-    }
+    // Emit the prologue this function's calling convention calls for, and report
+    // whether the ordinary Win64 register-argument seating below still applies. An
+    // ISR receives nothing in registers, so it seats its own parameters from the
+    // stack and answers `false`. See `native_object_isr.rs`.
+    let seats_register_params = emit_prologue_for(&ctx, function, fn_kind, &mut code)?;
 
     // Register argument order: `mov [rbp - slot], reg`. When the function returns
     // an aggregate, the hidden result pointer consumes the first register (rcx),
@@ -101,15 +103,18 @@ pub(crate) fn lower_native_function(
         &[0x4C, 0x89, 0xC8], // mov rax, r9
     ];
 
-    // The hidden return pointer (if any) is register 0; parameters follow.
+    // The hidden return pointer (if any) is register 0; parameters follow. An ISR
+    // has already seated its parameters from the stack above (nothing arrives in a
+    // register), so `seats_register_params` is false for it and this loop is
+    // skipped entirely; it returns `void`, so it also has no hidden result pointer.
     let mut reg = 0usize;
-    if let Some(sret_slot) = ctx.sret_slot {
+    if let Some(sret_slot) = ctx.sret_slot.filter(|_| seats_register_params) {
         // Spill the caller-provided result pointer into its frame slot.
         code.extend_from_slice(PARAM_STORE[reg]);
         code.extend_from_slice(&(-sret_slot).to_le_bytes());
         reg += 1;
     }
-    for param in &function.params {
+    for param in function.params.iter().filter(|_| seats_register_params) {
         let local = ctx.local(&param.name)?.clone();
         // Arguments 5, 6, … (register slots 4, 5, … already consumed) arrive on the
         // stack above the caller's 32-byte shadow space. On entry the callee sees
@@ -317,7 +322,7 @@ pub(crate) fn lower_native_function(
         // never has one (`returns_promotable_closure` excludes a tail `asm`), so a
         // plain rewind (`None`) is correct here.
         emit_arena_reset(&mut ctx, &mut code, None)?;
-        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
+        emit_epilogue_for(&ctx, &mut code);
     } else if tail_is_value_expr {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
@@ -331,7 +336,7 @@ pub(crate) fn lower_native_function(
         // returned closure literal / literal-bound local) sizes and relocates the
         // survivor; a non-factory arena function ignores it and plain-rewinds.
         emit_arena_reset(&mut ctx, &mut code, Some(expr))?;
-        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
+        emit_epilogue_for(&ctx, &mut code);
     } else if tail_is_value_match {
         let (head, tail) = instructions.split_at(instructions.len() - 1);
         lower_native_stmts(&mut ctx, head, &mut code, &mut loops)?;
@@ -345,7 +350,7 @@ pub(crate) fn lower_native_function(
         // reset with no single survivor expression; a promoting factory never has this
         // tail (`returns_promotable_closure` excludes it), so `None` (plain rewind).
         emit_arena_reset(&mut ctx, &mut code, None)?;
-        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
+        emit_epilogue_for(&ctx, &mut code);
     } else if tail_is_value_if {
         // The tail `if` lowers in value position: each branch routes the function's
         // value to the return convention and jumps to the convergence point right
@@ -364,7 +369,7 @@ pub(crate) fn lower_native_function(
         // A value tail `if` likewise routes each branch's value through one
         // post-convergence reset; excluded from promoting factories, so `None`.
         emit_arena_reset(&mut ctx, &mut code, None)?;
-        emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
+        emit_epilogue_for(&ctx, &mut code);
     } else {
         lower_native_stmts(&mut ctx, instructions, &mut code, &mut loops)?;
     }
@@ -380,7 +385,7 @@ pub(crate) fn lower_native_function(
     // register is harmless under Win64 and keeping one shared exit avoids
     // branching the emitter on a distinction that has no correctness content.
     code.extend_from_slice(&[0x48, 0x31, 0xC0]); // xor rax, rax
-    emit_native_epilogue(&mut code, ctx.frame_size, &ctx.saved_reg_slots);
+    emit_epilogue_for(&ctx, &mut code);
 
     Ok(LoweredNativeFunction {
         name: function.name.clone(),
@@ -403,9 +408,15 @@ pub(crate) fn emit_sub_rsp(code: &mut Vec<u8>, amount: i32) {
     }
 }
 
-/// Emit the function epilogue: restore any promoted callee-saved registers from
-/// their spill slots (rbp-relative, still valid), then `add rsp, imm; pop rbp;
-/// ret`. `saved_reg_slots` is empty for functions without register promotion.
+/// Emit the function epilogue for the ORDINARY calling convention: restore any
+/// promoted callee-saved registers from their spill slots (rbp-relative, still
+/// valid), then `add rsp, imm; pop rbp; ret`. `saved_reg_slots` is empty for
+/// functions without register promotion.
+///
+/// Every return edge routes through [`emit_epilogue_for`] rather than calling this
+/// directly, so an `interrupt fn` gets its `iretq` epilogue on *all* of its exits
+/// (the tail, and each explicit `return`) instead of only the one the driver
+/// emits.
 pub(crate) fn emit_native_epilogue(
     code: &mut Vec<u8>,
     frame_size: i32,
@@ -1067,7 +1078,7 @@ pub(crate) fn lower_native_stmt(
             // may return different-arity closures); a non-factory arena function
             // ignores it and plain-rewinds.
             emit_arena_reset(ctx, code, Some(expr))?;
-            emit_native_epilogue(code, ctx.frame_size, &ctx.saved_reg_slots);
+            emit_epilogue_for(ctx, code);
             Ok(())
         }
         BytecodeInstruction::Return(None) => {
@@ -1091,7 +1102,7 @@ pub(crate) fn lower_native_stmt(
             // A bare `return` is only legal in a VOID function, which never promotes a
             // closure return; a plain rewind (`None`) is correct.
             emit_arena_reset(ctx, code, None)?;
-            emit_native_epilogue(code, ctx.frame_size, &ctx.saved_reg_slots);
+            emit_epilogue_for(ctx, code);
             Ok(())
         }
         BytecodeInstruction::Expr(expr) => {

@@ -910,6 +910,28 @@ fn emit_wasm_module_expanded(module: &IrModule) -> Result<WasmArtifact, WasmErro
     let mut eligible: Vec<&IrFunction> = Vec::new();
 
     for function in &module.functions {
+        // The two hardware-entry conventions (`documents/freestanding_tier_design.md`
+        // §6) are x86-64 machine-level constructs: an `interrupt fn` is defined by
+        // its register-saving prologue and `iretq`, and a `naked fn` is defined by
+        // the absence of any compiler-emitted code. WASM has neither a register file
+        // nor an interrupt vector, so emitting either as an ordinary WASM function
+        // would produce a body that silently is not what it claims. (A `naked fn`
+        // would also be rejected below for its `asm`; an `interrupt fn` would not,
+        // which is exactly why this skip is explicit rather than incidental.)
+        let is_hardware_entry = module
+            .interrupt_functions
+            .iter()
+            .any(|isr| isr.name == function.name)
+            || module.naked_functions.contains(&function.name);
+        if is_hardware_entry {
+            skipped.push(SkippedFunction {
+                name: function.name.clone(),
+                reason: "an `interrupt fn` / `naked fn` is a native-only hardware calling \
+                         convention and is not supported by the WASM backend"
+                    .to_string(),
+            });
+            continue;
+        }
         match eligibility(function, &structs, &enums) {
             Ok(()) => {
                 // Imports occupy the low indices, so internal functions are
