@@ -272,6 +272,22 @@ productive and only partly audited. The generative question that found #1 and #2
 is assigned or keyed per-file and then merged?* — closure ids were the answer; verify actor
 ids, region ids, generic instantiation ids, and `$mth$` names.
 
+## Found in passing by the optimizer review (2026-07-29) — NOT that branch's defect
+
+- **HIGH — native shadow name-resolution crashes.** A module function called *textually
+  before* a same-named `fn`-typed local is declared produces an **access violation
+  (`0xC0000005`)** in `lullaby native` output. With a non-inlinable callee — the optimizer
+  entirely uninvolved — **main and the fixed branch crash identically**; both interpreters
+  return 82 correctly. Main only appeared to "work" on the inlinable variant because the
+  shadowing bug replaced both calls with arithmetic, yielding a *wrong* value (440) instead
+  of a crash — i.e. one defect was masking another. A no-shadow control compiles and returns
+  82, so this is specific to native's shadow name-resolution, not to shadowing generally.
+  **Wrong-value-or-crash in shipped native output; needs its own increment.**
+- **The pre-existing `assert_parity` WASM exec cases were blind to optimizer miscompiles** —
+  proven: with an inliner substitution bug injected, 39 exec tests passed while only the new
+  `assert_parity_after_inlining` case failed (63 vs 42). Any future WASM value-semantics
+  test should go through the optimizer-aware helper.
+
 ## Phase 1 — queued residual (found by review, proven pre-existing)
 
 - **Closure-loop reclamation is NARROWED, NOT CLOSED** (Phase-0 reviewer, 2026-07-23).
